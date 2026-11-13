@@ -1,0 +1,347 @@
+/*
+ * utilities.css — the `@utility` layer.
+ *
+ * Everything that behaves like a utility lives here, so it can take `md:` / `hover:` /
+ * `dark:` like any other utility. Nothing in this file may declare a colour literal.
+ *
+ * Two composition rules keep this layer predictable:
+ * - A recipe that callers need to re-parameterise exposes custom properties and declares no
+ *   settled size or colour. `label-caps` is the example: the variants set the parameters, and
+ *   the recipe resolves them on the element, so `label-caps-sans text-meta text-muted`
+ *   resolves by intent instead of by Tailwind's internal utility order.
+ * - Anything print-specific is a no-op on screen.
+ */
+
+/* --------------------------------------------------------------- stacking order */
+
+/* Tailwind v4 has no `--z-*` theme namespace, so the stack ships as six named utilities.
+   The numbering itself lives once, in base.css. */
+@utility z-node {
+  z-index: var(--z-node);
+}
+
+@utility z-header {
+  z-index: var(--z-header);
+}
+
+@utility z-nav {
+  z-index: var(--z-nav);
+}
+
+@utility z-overlay {
+  z-index: var(--z-overlay);
+}
+
+@utility z-modal {
+  z-index: var(--z-modal);
+}
+
+/* ------------------------------------------------------------------- skip link */
+
+/* One skip link, used by both shells. The reveal clears the link by its own height, so a
+   two-line label at a narrow width cannot peek under the header. */
+@utility skip-link {
+  position: absolute;
+  z-index: var(--z-skip);
+  inset-block-start: calc(var(--spacing) * 2);
+  inset-inline-start: calc(var(--spacing) * 2);
+  translate: 0 calc(-100% - var(--spacing) * 2);
+  border-radius: var(--radius-sm);
+  background: var(--color-primary);
+  padding: calc(var(--spacing) * 2) calc(var(--spacing) * 3);
+  font-size: var(--text-meta);
+  font-weight: 600;
+  color: var(--color-primary-foreground);
+
+  &:focus-visible {
+    translate: 0;
+  }
+}
+
+/* -------------------------------------------------------------- caps label recipes */
+
+/*
+ * Machine metadata: identifiers, paths, counts. Mono, caps, wide tracking. Every caps label
+ * in the product is one of the two roles below, and both read their parameters from custom
+ * properties, so a caller can re-parameterise without a cascade fight.
+ */
+@utility label-caps {
+  font-family: var(--label-caps-font, var(--font-mono));
+  font-size: var(--label-caps-size, var(--text-micro));
+  font-weight: var(--label-caps-weight, 500);
+  line-height: 1.2;
+  letter-spacing: var(--label-caps-tracking, 0.14em);
+  text-transform: var(--label-caps-transform, uppercase);
+}
+
+/*
+ * Field labels, column headers and metric labels: sans, caps, tighter tracking.
+ *
+ * Each variant is self-contained rather than converging on `label-caps` through `@apply`,
+ * and each reads the same three parameters, so a call site can still re-size or re-space a
+ * label with `--label-caps-size` / `--label-caps-tracking` and win. Crucially, no variant
+ * declares `font-size` or `color`: `label-caps-sans text-meta text-muted` resolves by
+ * intent, not by Tailwind's internal utility order.
+ */
+@utility label-caps-sans {
+  font-family: var(--label-caps-font, var(--font-sans));
+  font-size: var(--label-caps-size, var(--text-micro));
+  font-weight: var(--label-caps-weight, 600);
+  line-height: 1.2;
+  letter-spacing: var(--label-caps-tracking, 0.08em);
+  text-transform: var(--label-caps-transform, uppercase);
+}
+
+/* A chip that renders an identifier verbatim: mono, but not shouted. */
+@utility label-caps-code {
+  font-family: var(--label-caps-font, var(--font-mono));
+  font-size: var(--label-caps-size, var(--text-micro));
+  font-weight: var(--label-caps-weight, 500);
+  line-height: 1.2;
+  letter-spacing: var(--label-caps-tracking, 0.02em);
+  text-transform: var(--label-caps-transform, none);
+}
+
+/* -------------------------------------------------------------- numeric alignment */
+
+/* Columns of numbers. Applied by `table` and mono text in base.css; opt in elsewhere. */
+@utility num-tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------------------------ instrument grid */
+
+/* One grid recipe for both scales: the body's 32px work surface and the 8px hairline grid
+   inside the workflow canvas. The line colour flips with the theme, which the two previous
+   hard-coded ink literals did not. */
+@utility grid-lines {
+  background-image:
+    linear-gradient(to right, var(--color-grid-line-strong) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--color-grid-line-strong) 1px, transparent 1px);
+  background-size: var(--grid-cell, calc(var(--spacing) * 8))
+    var(--grid-cell, calc(var(--spacing) * 8));
+}
+
+/* ---------------------------------------------------------------- ink surfaces */
+
+/* The dark chrome. Never inverted: an always-dark pane on either paper. */
+@utility ink-grid {
+  background-color: var(--color-ink);
+  background-image:
+    radial-gradient(
+      120% 140% at 8% 0%,
+      color-mix(in oklab, var(--color-primary-on-ink) 22%, transparent) 0%,
+      transparent 55%
+    ),
+    linear-gradient(to right, rgb(255 255 255 / 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(255 255 255 / 0.05) 1px, transparent 1px);
+  background-size:
+    auto,
+    calc(var(--spacing) * 7) calc(var(--spacing) * 7),
+    calc(var(--spacing) * 7) calc(var(--spacing) * 7);
+}
+
+/*
+ * The flat twin of `ink-grid`: the same never-inverting surface, with neither the brand wash
+ * nor the 28px grid.
+ *
+ * The console's chrome band is one strip built from two elements — the sidebar masthead and
+ * the content header — and both must look like a single surface. `ink-grid` cannot be reused
+ * for that: its wash is an 8%-anchored radial and its grid is 28px from each element's own
+ * origin, so two adjacent copies would put two glows side by side and cut the grid at the
+ * seam. Flat is the only fill that is continuous across a boundary the element cannot see.
+ */
+@utility ink-flat {
+  background-color: var(--color-ink);
+}
+
+/* A definition row with a dotted leader between the term and its value. */
+@utility leader-row {
+  display: flex;
+  align-items: baseline;
+  gap: calc(var(--spacing) * 2);
+
+  &::after {
+    content: '';
+    flex: 1;
+    border-bottom: 1px dotted var(--color-line-strong);
+    transform: translateY(calc(var(--spacing) * -0.75));
+  }
+}
+
+/* The ink log pane: one mono step, one ink surface, text coloured by `--color-log-*`. */
+@utility log-surface {
+  font-family: var(--font-mono);
+  font-size: var(--text-meta);
+  line-height: 1.55;
+  background: var(--color-ink);
+  color: var(--color-log-text);
+}
+
+/* ------------------------------------------------------------------- scroll panes */
+
+/*
+ * Every scroll pane in the product used the Firefox-only `scrollbar-width`, so Chrome and
+ * Edge — where the console is operated — drew the platform scrollbar over the data. One rule
+ * now covers both engines.
+ *
+ * Chaining is deliberately not part of this utility: `overflow-x: auto` forces `overflow-y`
+ * to `auto` as well, so a horizontally-scrolling pane is *also* a vertical scroll container
+ * with nothing to scroll, and `overscroll-behavior: contain` would then stop the wheel there
+ * instead of chaining it to the page. Chaining is a per-pane choice (`overscroll-contain`,
+ * `overscroll-x-contain`).
+ *
+ * A scrollbar gutter is also deliberately not part of it: reserving one on a horizontal strip
+ * costs ~10px of dead width on every table. Vertical panes add `scroll-pane` when the layout
+ * behind them must not shift.
+ */
+@utility scroll-slim {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line-strong) transparent;
+
+  &::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  &::-webkit-scrollbar-track,
+  &::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    border: 2px solid transparent;
+    border-radius: var(--radius-full);
+    background-color: var(--color-line-strong);
+    background-clip: content-box;
+  }
+
+  /*
+   * The hover state is a sibling rule, not `&:hover` nested inside the thumb block: a nested `&`
+   * cannot stand for a pseudo-element, so that form compiled to `:is(::…-thumb):hover`, which
+   * browsers drop — the thumb had no hover colour at all.
+   */
+  &::-webkit-scrollbar-thumb:hover {
+    background-color: var(--color-control-border-strong);
+  }
+}
+
+/* For a pane whose own scrollbar appearing must not reflow the content beside it. */
+@utility scroll-pane {
+  scrollbar-gutter: stable;
+}
+
+/*
+ * The horizontal "there is more" cue for a table wider than its pane.
+ *
+ * On a touch device the platform scrollbar is an overlay: it appears only once the finger has
+ * already moved, so a clipped column looks like the end of the table. Two surface-coloured
+ * covers travel with the content (`background-attachment: local`) and sit on top of two edge
+ * shadows pinned to the pane (`scroll`). At rest the covers hide the shadows; scrolling the
+ * pane moves the cover on that side away and reveals it, so the cue appears exactly where
+ * content actually continues.
+ *
+ * The covers must be the surface the table sits on — `--color-panel`, because every
+ * `DataTable` is rendered inside a `Panel`. A table on `paper` would need its own cover.
+ */
+@utility edge-fade-x {
+  background-image:
+    linear-gradient(var(--color-panel), var(--color-panel)),
+    linear-gradient(var(--color-panel), var(--color-panel)),
+    radial-gradient(
+      farthest-side at 0 50%,
+      color-mix(in oklab, var(--color-ink) 20%, transparent),
+      transparent
+    ),
+    radial-gradient(
+      farthest-side at 100% 50%,
+      color-mix(in oklab, var(--color-ink) 20%, transparent),
+      transparent
+    );
+  background-repeat: no-repeat;
+  background-position:
+    left center,
+    right center,
+    left center,
+    right center;
+  background-size:
+    24px 100%,
+    24px 100%,
+    12px 100%,
+    12px 100%;
+  background-attachment: local, local, scroll, scroll;
+}
+
+/* ---------------------------------------------------------------- pointer targets */
+
+/*
+ * Icon-only controls are 20–32px, which §9.4 accepts on a mouse and rejects on a finger.
+ * This keeps the visual size and grows only the hit area, and only for coarse pointers.
+ *
+ * The growth is capped: an invisible 44px square centred on a 20px icon reaches 12px into
+ * each neighbour, and in a dense toolbar the top-most overlay then swallows a click meant
+ * for the control beside it. `min(--tap-target, 100% + 2 × --tap-target-grow)` bounds that
+ * reach while keeping every target at or above 24px (WCAG 2.5.8).
+ *
+ * The cap is only half the contract. `--tap-target-grow` is 8px, so a row of these controls
+ * must be spaced with at least `gap-2` (8px) — at that spacing two overlays touch and never
+ * overlap. The rows that host them (stepper, pagination, filter chips) are spaced to match;
+ * a row that needs the full 44px on a sub-24px control raises the growth *and* its gap.
+ */
+@utility tap-target {
+  position: relative;
+  isolation: isolate;
+
+  @media (pointer: coarse) {
+    &::after {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: min(var(--tap-target), calc(100% + var(--tap-target-grow) * 2));
+      height: min(var(--tap-target), calc(100% + var(--tap-target-grow) * 2));
+      translate: -50% -50%;
+    }
+  }
+}
+
+/* ------------------------------------------------------------------- focus ring */
+
+/*
+ * The ring itself is the global `:focus-visible` rule in base.css; that is the single
+ * declaration every control inherits, and the per-component `focus-visible:outline-2`
+ * restatements are gone. Only the inset variant is a utility: an outset ring is clipped by
+ * an `overflow: hidden` pane, a table cell or a dialog edge.
+ */
+@utility focus-ring-inset {
+  &:focus-visible {
+    outline-offset: calc(var(--focus-ring-offset) * -1);
+  }
+}
+
+/* ----------------------------------------------------------------------- print */
+
+/* Screen no-ops; the print sheet in adaptations.css depends on these hooks, so it never has
+   to guess intent from a utility name such as `max-h-` or `rounded-md`. */
+
+/*
+ * The three hooks are plain rules rather than `@utility` recipes: they only ever apply on
+ * paper, so they never need a variant, and one `@media` block is cheaper than three
+ * utilities that each have to re-declare their own media query. Being unlayered in that
+ * media query, they beat the utilities they are meant to undo.
+ */
+@media print {
+  .print-block {
+    break-inside: avoid;
+  }
+
+  .print-unclip {
+    max-height: none;
+    overflow: visible;
+    scrollbar-gutter: auto;
+  }
+
+  .no-print {
+    display: none;
+  }
+}

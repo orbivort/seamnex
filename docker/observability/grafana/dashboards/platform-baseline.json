@@ -1,0 +1,84 @@
+{
+  "uid": "seamnex-platform-baseline",
+  "title": "Platform baseline",
+  "tags": ["seamnex", "phase-1"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-3h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Role up",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "targets": [{ "refId": "A", "expr": "seamnex_role_up" }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Dependencies up",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "targets": [{ "refId": "A", "expr": "seamnex_dependency_up" }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Request rate by route",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "targets": [
+        { "refId": "A", "expr": "sum by (route) (rate(seamnex_http_requests_total[5m]))" }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Request latency p95",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, route) (rate(seamnex_http_request_duration_seconds_bucket[5m])))"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Job queue depth",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 12 },
+      "targets": [{ "refId": "A", "expr": "seamnex_queue_depth" }]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Audit appends and failures",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 12 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(seamnex_audit_append_seconds_count{outcome=\"success\"}[5m]))"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(seamnex_audit_append_seconds_count{outcome=\"failure\"}[5m]))"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Disk free on /",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 12 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "node_filesystem_avail_bytes{mountpoint=\"/\"} / node_filesystem_size_bytes{mountpoint=\"/\"}"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "name": "@seamnex/config",
+  "version": "0.0.0",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "exports": {
+    "./tsconfig/base.json": "./tsconfig/base.json",
+    "./tsconfig/react-app.json": "./tsconfig/react-app.json",
+    "./tsconfig/library.json": "./tsconfig/library.json",
+    "./tsconfig/library-node.json": "./tsconfig/library-node.json",
+    "./tsconfig/node.json": "./tsconfig/node.json",
+    "./eslint/base": "./eslint/base.mjs",
+    "./eslint/react": "./eslint/react.mjs",
+    "./eslint/node": "./eslint/node.mjs",
+    "./module-boundaries": {
+      "types": "./module-boundaries.d.mts",
+      "import": "./module-boundaries.mjs"
+    },
+    "./module-boundaries.json": "./module-boundaries.json",
+    "./stylelint": "./stylelint.config.mjs",
+    "./prettier": "./prettier.config.mjs",
+    "./vitest/helpers": {
+      "types": "./vitest/helpers.ts",
+      "import": "./vitest/helpers.ts"
+    },
+    "./vitest/base": {
+      "types": "./vitest/base.ts",
+      "import": "./vitest/base.ts"
+    },
+    "./vite/app": {
+      "types": "./vite/app.ts",
+      "import": "./vite/app.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint --max-warnings=0 ."
+  },
+  "devDependencies": {
+    "@eslint/js": "catalog:",
+    "@types/node": "catalog:",
+    "eslint": "catalog:",
+    "eslint-plugin-jsx-a11y": "catalog:",
+    "eslint-plugin-n": "catalog:",
+    "eslint-plugin-react-hooks": "catalog:",
+    "eslint-plugin-security": "catalog:",
+    "globals": "catalog:",
+    "stylelint-config-standard": "catalog:",
+    "typescript": "catalog:",
+    "typescript-eslint": "catalog:",
+    "vite": "catalog:",
+    "vitest": "catalog:"
+  }
+}

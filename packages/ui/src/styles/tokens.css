@@ -1,0 +1,278 @@
+/*
+ * tokens.css — the token layer.
+ *
+ * This is the only file in the product allowed to contain a colour literal, and the only
+ * file allowed to decide what a colour *is*. Components consume semantic tokens; they never
+ * name a ramp stop, and they never name a literal.
+ *
+ * Two rules make the layer closed:
+ *
+ * 1. `--color-*: initial` clears Tailwind's default palette. A stop that is not declared
+ *    here does not exist, so `bg-teal-400` produces no CSS instead of silently resolving to
+ *    Tailwind's own bright cyan next to this product's muted brand teal. The same applies to
+ *    `slate`, which the product no longer uses at all: neutral chrome now reads
+ *    `--color-neutral-fill` / `--color-control-border-strong`.
+ * 2. There is no raw ramp at all. Brand colour is expressed only through `primary-*`, so
+ *    there is no second spelling of the brand for a component to reach for, and no value
+ *    that behaves one way in a component and another way in a theme. Theme awareness lives
+ *    exclusively on semantic tokens, each written as one `light-dark()` pair — which is why
+ *    the high-contrast overrides in `adaptations.css` cannot silently overwrite a dark
+ *    value: a value is declared exactly once, here.
+ *
+ * `--color-ink*`, `--color-line-ink` and `--color-log-*` are deliberately single values —
+ * they are always-dark chrome on both themes and must not invert.
+ *
+ * A token that nothing reads is deleted rather than kept "for later": with
+ * `--color-*: initial`, an undeclared name fails visibly, so re-adding one is a deliberate
+ * act. `--color-teal-*`, `--color-white`/`--color-black` and the unused neutral splays were
+ * removed on exactly that basis.
+ */
+@theme {
+  /* ------------------------------------------------------------------ namespace */
+
+  /* Clear the default palette. Every colour below is the product's own. */
+  --color-*: initial;
+
+  /* ------------------------------------------------------------------ surfaces */
+  --color-paper: light-dark(#f6f5f1, #0b1412);
+  --color-paper-deep: light-dark(#efede6, #101b18);
+  --color-panel: light-dark(#fffefb, #12211d);
+  --color-panel-soft: light-dark(#fbfaf7, #0e1a17);
+
+  /* ---------------------------------------------------------------------- text */
+
+  /* Three steps, each AA on every paper surface: light 15.9:1 / 6.6:1 / 5.2:1,
+     dark 14.6:1 / 8.4:1 / 6.0:1. */
+  --color-text: light-dark(#101a16, #e9f1ed);
+  --color-muted: light-dark(#4e5a54, #a9bdb6);
+  --color-faint: light-dark(#5f6961, #8a9d96);
+
+  /* ----------------------------------------------------------------- hairlines */
+  --color-line: light-dark(#dedbd2, #22332e);
+  --color-line-strong: light-dark(#c6c2b6, #33463f);
+
+  /* Fixed: this hairline only ever sits on the dark chrome. */
+  --color-line-ink: #24352f;
+
+  /* A control boundary is information (WCAG 1.4.11) and needs 3:1, unlike a divider.
+     3.32:1 on `panel`, 3.26:1 on `panel-soft`. */
+  --color-control-border: light-dark(#948c7f, #6d7d77);
+  --color-control-border-strong: light-dark(#6f6a5f, #93a49d);
+  --color-control-thumb: light-dark(#fff, #cfdcd6);
+
+  /* --------------------------------------------- instrument grid and overlays */
+
+  /* The faint work-surface grid, declared once for the body and for `grid-lines`. */
+  --color-grid-line: light-dark(rgb(16 26 22 / 0.035), rgb(255 255 255 / 0.045));
+  --color-grid-line-strong: light-dark(rgb(16 26 22 / 0.04), rgb(255 255 255 / 0.05));
+  --color-overlay: rgb(11 20 18 / 0.45);
+
+  /* ------------------------------------------------------------------ ink chrome */
+
+  /* One dark surface, four readable steps, one set of tokens. Contrast on ink:
+     14.6:1 / 8.4:1 / 6.0:1. Never inverted — a dark pane stays dark in both themes. */
+  --color-ink: #0b1412;
+  --color-ink-raised: #12211d;
+  --color-ink-hover: #132722;
+  --color-ink-active: #17332d;
+  --color-ink-text: #e9f1ed;
+  --color-ink-text-muted: #9db3aa;
+  --color-ink-text-faint: #7f978f;
+
+  /* --------------------------------------------------------------- log surface */
+  --color-log-text: #cfe0d9;
+  --color-log-stderr: #f2b8b0;
+  --color-log-system: #8fd3c3;
+
+  /* -------------------------------------------------------------------- brand */
+
+  /* The brand tier. A fill, the text that sits on it, and the quiet surface pair. */
+  --color-primary: light-dark(#0f5f55, #7fb3a8);
+  --color-primary-hover: light-dark(#14776a, #a8d5c9);
+  --color-primary-active: light-dark(#0b3f39, #cfe0d9);
+  --color-primary-foreground: light-dark(#fff, #062723);
+  --color-primary-soft: light-dark(#eef5f3, #10231f);
+  --color-primary-soft-foreground: light-dark(#0b3f39, #a8d5c9);
+  --color-primary-border: light-dark(#0b3f39, #3f8f80);
+
+  /* Links and active-navigation text; one step deeper than a fill so it reads as text. */
+  --color-link: light-dark(#0b3f39, #a8d5c9);
+
+  /* Brand marks sitting on the dark chrome. The chip needs fixed values: `primary` and
+     `primary-border` are `light-dark()` pairs, but the ink strip never inverts, so a chip built
+     from them turned mint on a dark-mode machine while the strip stayed #0b1412 — and the 6px
+     accent, the same pale teal, disappeared into the fill. Fixed, the mark is identical in both
+     themes and its edge clears 3:1 against the strip it sits on. */
+  --color-primary-on-ink: #7fb3a8;
+  --color-mark-ink-fill: #0f5f55;
+  --color-mark-ink-edge: #3f8f80;
+
+  /* ------------------------------------------------------------------- status */
+
+  /* Every tone is a quadruple: the readable foreground, a stronger variant for dense
+     text, the wash it sits on, and the boundary. Components read these; the `tone.ts`
+     recipes no longer hand-tune alphas. Foreground contrast on its own wash:
+     success 4.6:1, warning 6.3:1, danger 7.5:1, info 5.9:1 in light, all above 6:1 in
+     dark. */
+  --color-success: light-dark(#1e7a4b, #63c08d);
+  --color-success-strong: light-dark(#145c37, #8fd8ac);
+  --color-success-soft: light-dark(#e3f0e7, #10281d);
+  --color-success-border: light-dark(#a9cdb8, #2a6b4a);
+  --color-warning: light-dark(#b26a00, #e0a75a);
+  --color-warning-strong: light-dark(#7d4a00, #f0c68c);
+  --color-warning-soft: light-dark(#f8ecd7, #2e2314);
+  --color-warning-border: light-dark(#d9b478, #7a5a29);
+  --color-danger: light-dark(#b4342a, #ef8b80);
+  --color-danger-foreground: light-dark(#fff, #33110d);
+  --color-danger-strong: light-dark(#7f221a, #f7b8b0);
+  --color-danger-soft: light-dark(#f8e3e0, #331714);
+  --color-danger-border: light-dark(#dfa8a2, #8a3a31);
+  --color-info: light-dark(#2a5c8a, #8bb8e0);
+  --color-info-strong: light-dark(#1d4368, #b6d4f0);
+  --color-info-soft: light-dark(#e2edf6, #12242f);
+  --color-info-border: light-dark(#a5c3dd, #2f5a7a);
+
+  /* Neutral fills for de-emphasised chrome (meter segments, scrollbar thumbs). These are
+     not status colours and never carry meaning. */
+  --color-neutral-fill: light-dark(#5a6470, #8a9d96);
+
+  /* A full-row wash: the only place an alpha is composed, so the four tones cannot drift
+     apart the way five hand-tuned `/30`, `/35` and `/60` values once did. */
+  --color-success-wash: color-mix(in oklab, var(--color-success-soft) 35%, transparent);
+  --color-warning-wash: color-mix(in oklab, var(--color-warning-soft) 35%, transparent);
+  --color-danger-wash: color-mix(in oklab, var(--color-danger-soft) 35%, transparent);
+  --color-info-wash: color-mix(in oklab, var(--color-info-soft) 35%, transparent);
+
+  /* ------------------------------------------------------------------- selection */
+  --color-selection-bg: light-dark(#cbe0da, #1b453e);
+  --color-selection-fg: light-dark(#062723, #e9f1ed);
+
+  /* ---------------------------------------------------------------------- focus */
+
+  /* A focus ring must follow the brand; `--color-focus` is the only focus colour a
+     component is allowed to name. On ink, the ring has its own readable value. */
+  --color-focus: light-dark(#0f5f55, #7fb3a8);
+  --color-focus-on-ink: #7fb3a8;
+
+  /* ---------------------------------------------------------------------- print */
+
+  /* Fixed paper colours, so the print sheet never depends on the active theme. */
+  --color-print-bg: #fff;
+  --color-print-text: #111;
+
+  /* Log lines keep their meaning on paper, at print contrast. The print sheet re-points
+     `--color-log-*` at these, because the on-screen values are light-on-dark. */
+  --color-print-log-text: #1f2724;
+  --color-print-log-stderr: #7f221a;
+  --color-print-log-system: #0b3f39;
+
+  /* ---------------------------------------------------------------------- fonts */
+
+  /* `*-Fallback` families are metric-adjusted `local()` faces declared in base.css: they
+     keep the first paint on the same lines as the webfont, which `font-display: swap`
+     would otherwise break. No new font files are introduced. */
+  --font-display: 'Barlow Semi Condensed', 'Barlow Semi Condensed Fallback', 'Segoe UI', sans-serif;
+  --font-sans: 'Source Sans 3', 'Source Sans 3 Fallback', 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', 'JetBrains Mono Fallback', 'Cascadia Mono', 'Consolas', monospace;
+
+  /* ----------------------------------------------------------------- type scale */
+
+  /*
+   * Seven roles, not the eleven ad-hoc sizes (9, 9.5, 10, 10.5, 11 …) that accumulated
+   * first, and not the eleven-role scale that replaced them either: 13/14/15/16px are
+   * below the perceptual threshold, so four of those roles never functioned as distinct
+   * steps. Adjacent ratios are now 1.17 / 1.14 / 1.25 / 1.30 / 1.23; micro→meta stays a
+   * deliberate 1.09 label/caption pair.
+   *
+   * A role names the job it does. Leading travels with the four large roles; body-scale
+   * leading stays with the layout (`leading-*`), where it belongs.
+   */
+  --text-micro: 0.6875rem; /* 11 — caps labels, badges, table headers */
+  --text-meta: 0.75rem; /* 12 — helper text, captions, inline mono values */
+  --text-body: 0.875rem; /* 14 — default UI text, table cells, form controls */
+  --text-heading: 1rem; /* 16 — section headings, panel titles */
+  --text-title: 1.25rem; /* 20 — dialog, card and entity titles */
+  --text-metric: clamp(1.5rem, 1.25rem + 0.9vw, 1.875rem); /* 24 → 30 — KPI values */
+  --text-display: clamp(1.75rem, 1.35rem + 1.6vw, 2.25rem); /* 28 → 36 — page titles */
+  --text-heading--line-height: 1.3;
+  --text-title--line-height: 1.25;
+  --text-metric--line-height: 1.15;
+  --text-display--line-height: 1.1;
+
+  /*
+   * The four retired roles (`label`, `body-lg`, `lead`, `title-sm`) are gone, together with
+   * every call site, `cn.ts`'s conflict list and the docs that named them. Do not reintroduce
+   * an alias: a role that does not exist is a compile-time no-op, not a fallback.
+   */
+
+  /* --------------------------------------------------------------------- radius */
+
+  /* Closed set: `--radius-*: initial` drops xl/2xl/3xl, which had no role here and were
+     reachable by accident. */
+  --radius-*: initial;
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --radius-full: 9999px;
+
+  /* ------------------------------------------------------------------ elevation */
+
+  /* Also closed: an arbitrary inset highlight used to be re-typed in four components.
+     Elevation is carried by opacity and its colour follows the theme through `light-dark()`. */
+  --shadow-*: initial;
+  --shadow-panel:
+    0 1px 0 light-dark(rgb(16 26 22 / 0.04), rgb(0 0 0 / 0.3)),
+    0 8px 24px -18px light-dark(rgb(11 20 18 / 0.3), rgb(0 0 0 / 0.6));
+  --shadow-lift: 0 18px 40px -28px light-dark(rgb(11 20 18 / 0.45), rgb(0 0 0 / 0.7));
+  --shadow-overlay: 0 18px 44px -28px light-dark(rgb(16 26 22 / 0.35), rgb(0 0 0 / 0.7));
+  --shadow-inset-top: inset 0 1px 0 light-dark(rgb(255 255 255 / 0.14), rgb(255 255 255 / 0.08));
+  --shadow-inset-top-soft: inset 0 1px 0 light-dark(rgb(16 26 22 / 0.03), rgb(0 0 0 / 0.25));
+  --shadow-thumb: 0 1px 2px light-dark(rgb(11 20 18 / 0.25), rgb(0 0 0 / 0.5));
+  --shadow-kbd: 0 1px 0 var(--color-line-strong);
+  --shadow-nav-active: inset 2px 0 0 var(--color-primary);
+  --shadow-focus-halo: 0 0 0 3px color-mix(in oklab, var(--color-primary) 14%, transparent);
+
+  /* --------------------------------------------------------------------- motion */
+
+  /* Keyframes live inside `@theme` so they are emitted together with the `--animate-*`
+     that references them, and only when that animation is used. */
+  --animate-rise: rise 220ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+  --animate-fade: fade 160ms ease-out both;
+  --animate-pulse-dot: pulse-dot 2.4s ease-in-out infinite;
+
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes fade {
+    from {
+      opacity: 0;
+    }
+
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes pulse-dot {
+    0%,
+    100% {
+      opacity: 1;
+      transform: scale(1);
+    }
+
+    50% {
+      opacity: 0.45;
+      transform: scale(0.82);
+    }
+  }
+}

@@ -1,0 +1,89 @@
+{
+  "realm": "seamnex",
+  "enabled": true,
+  "users": [
+    {
+      "username": "service-account-seamnex-platform-admin",
+      "enabled": true,
+      "serviceAccountClientId": "seamnex-platform-admin",
+      "clientRoles": {
+        "realm-management": [
+          "view-users",
+          "query-users",
+          "query-groups",
+          "view-clients",
+          "manage-clients",
+          "manage-users"
+        ]
+      }
+    },
+    {
+      "username": "dev-admin",
+      "email": "dev-admin@seamnex.local",
+      "firstName": "Platform",
+      "lastName": "Administrator",
+      "enabled": true,
+      "emailVerified": true,
+      "groups": ["/seamnex-admins"],
+      "realmRoles": ["R1"],
+      "requiredActions": [],
+      "credentials": [{ "type": "password", "value": "dev-admin", "temporary": false }]
+    },
+    {
+      "username": "dev-auditor",
+      "email": "dev-auditor@seamnex.local",
+      "firstName": "Platform",
+      "lastName": "Auditor",
+      "enabled": true,
+      "emailVerified": true,
+      "groups": ["/seamnex-auditors"],
+      "realmRoles": ["R2"],
+      "requiredActions": [],
+      "credentials": [{ "type": "password", "value": "dev-auditor", "temporary": false }]
+    },
+    {
+      "username": "dev-owner",
+      "email": "dev-owner@seamnex.local",
+      "firstName": "Revenue",
+      "lastName": "Owner",
+      "enabled": true,
+      "emailVerified": true,
+      "groups": ["/seamnex-domain-owners", "/seamnex-domains/revenue-customer"],
+      "realmRoles": ["R3"],
+      "credentials": [{ "type": "password", "value": "dev-owner", "temporary": false }]
+    },
+    {
+      "username": "dev-product",
+      "email": "dev-product@seamnex.local",
+      "firstName": "CRM",
+      "lastName": "Administrator",
+      "enabled": true,
+      "emailVerified": true,
+      "groups": ["/seamnex-product-admins", "/seamnex-instances/core-crm"],
+      "realmRoles": ["R4"],
+      "credentials": [{ "type": "password", "value": "dev-product", "temporary": false }]
+    },
+    {
+      "username": "dev-user",
+      "email": "dev-user@seamnex.local",
+      "firstName": "Platform",
+      "lastName": "Member",
+      "enabled": true,
+      "emailVerified": true,
+      "groups": ["/seamnex-users"],
+      "realmRoles": ["R5"],
+      "credentials": [{ "type": "password", "value": "dev-user", "temporary": false }]
+    },
+    {
+      "username": "dev-guest",
+      "email": "dev-guest@seamnex.local",
+      "firstName": "Invited",
+      "lastName": "Guest",
+      "enabled": true,
+      "emailVerified": true,
+      "groups": ["/seamnex-guests", "/seamnex-instances/finance-suite"],
+      "realmRoles": ["R6"],
+      "credentials": [{ "type": "password", "value": "dev-guest", "temporary": false }]
+    }
+  ]
+}

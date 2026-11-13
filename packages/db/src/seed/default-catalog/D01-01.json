@@ -1,0 +1,115 @@
+{
+  "key": "D01-01",
+  "domain": "CRM & Sales Pipeline",
+  "cluster": "Revenue & Customer",
+  "product": "EspoCRM",
+  "description": "Clean, fast CRM with no-code custom entities, quotes and pipeline forecasting for a 5-100 person sales team.",
+  "repoUrl": "https://github.com/espocrm/espocrm",
+  "licenseId": "AGPL-3.0",
+  "stack": "PHP / MySQL",
+  "imageRef": "espocrm/espocrm:10.0.11",
+  "imageDigest": "sha256:8e1c7e97e0a1a08953a86af89c3808cb95410b6a5eb487d1e3475d2c7289357d",
+  "upstream": {
+    "currentVersion": "10.0.11",
+    "latestVersion": "10.0.11",
+    "advisory": null,
+    "releaseUrl": "https://github.com/espocrm/espocrm/releases",
+    "checkedAt": "2026-11-01T01:00:00Z"
+  },
+  "guaranteeClass": "native",
+  "authMethod": "OIDC (authorization code + PKCE)",
+  "packaging": "compose",
+  "packagingSource": "upstream compose example (espocrm/espocrm-docker) @ 10.0.11",
+  "primaryInstanceId": null,
+  "sharedWith": [],
+  "httpPort": 80,
+  "resources": {
+    "cpu": 1,
+    "memoryMb": 2048,
+    "diskMb": 20480
+  },
+  "dependencies": ["database", "worker"],
+  "volumes": [
+    {
+      "name": "espocrm-data",
+      "mountPath": "/var/www/html/data",
+      "quotaMb": 8192
+    },
+    {
+      "name": "espocrm-custom",
+      "mountPath": "/var/www/html/custom",
+      "quotaMb": 2048
+    },
+    {
+      "name": "espocrm-client-custom",
+      "mountPath": "/var/www/html/client/custom",
+      "quotaMb": 1024
+    },
+    {
+      "name": "espocrm-db",
+      "mountPath": "/var/lib/mysql",
+      "quotaMb": 8192
+    }
+  ],
+  "integration": {
+    "apiBaseUrl": "https://espocrm.seamnex.local/api/v1",
+    "authMethod": "OIDC (authorization code + PKCE)",
+    "guaranteeClassVerified": "native",
+    "operationInventory": [
+      {
+        "id": "contacts.read",
+        "label": "Read contacts",
+        "mode": "read",
+        "description": "List and fetch accounts, contacts and consent history.",
+        "path": "/api/v1/Contact",
+        "method": "GET"
+      },
+      {
+        "id": "contacts.write",
+        "label": "Create or update contact",
+        "mode": "write",
+        "description": "Upsert a contact with account linkage.",
+        "path": "/api/v1/Contact",
+        "method": "POST"
+      },
+      {
+        "id": "opportunities.read",
+        "label": "Read opportunities",
+        "mode": "read",
+        "description": "Pipeline stages, amounts and expected close dates.",
+        "path": "/api/v1/Opportunity",
+        "method": "GET"
+      },
+      {
+        "id": "opportunities.write",
+        "label": "Update opportunity stage",
+        "mode": "write",
+        "description": "Advance a deal and record the activity entry."
+      }
+    ],
+    "eventModes": [
+      {
+        "mode": "webhook",
+        "label": "opportunity.won"
+      },
+      {
+        "mode": "poll",
+        "label": "Poll for new leads",
+        "minimumIntervalMinutes": 15
+      }
+    ],
+    "credentialGranularity": "scoped",
+    "sessionMaxMinutes": 480,
+    "sloSupported": true,
+    "verifiedBy": "Platform Administrator",
+    "verifiedAt": "2026-11-01T01:00:00Z",
+    "nextReviewAt": "2027-01-31T01:00:00Z",
+    "stale": false
+  },
+  "owner": {
+    "name": "Platform Administrator",
+    "team": "Platform Operations"
+  },
+  "notes": "No-code custom entities absorb SMB variance without forking. SMTP relay verified during onboarding.",
+  "verifiedAt": "2026-11-01T01:00:00Z"
+}

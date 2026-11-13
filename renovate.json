@@ -1,0 +1,34 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", ":dependencyDashboard", "helpers:pinGitHubActionDigests"],
+  "rangeStrategy": "pin",
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 5am on monday"]
+  },
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "description": "An advisory is not a routine bump: it is raised on its own, labelled, and not held back by the release-age delay that protects ordinary updates.",
+    "enabled": true,
+    "labels": ["security"],
+    "minimumReleaseAge": null
+  },
+  "packageRules": [
+    {
+      "description": "The workspace catalog pins every external version exactly; a bump is one line in pnpm-workspace.yaml, so review them together rather than as a stream of pull requests.",
+      "matchManagers": ["npm"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "workspace catalog (minor and patch)"
+    },
+    {
+      "description": "Compose services and Dockerfiles move as a set: a base image and its pinned tag are one decision.",
+      "matchDatasources": ["docker"],
+      "groupName": "container images"
+    },
+    {
+      "description": "A tag is mutable; a digest is the bytes that actually ran. The image build is the one artifact whose base cannot be re-verified from the lockfile, so it is pinned by digest like everything else.",
+      "matchDatasources": ["docker"],
+      "pinDigests": true
+    }
+  ]
+}

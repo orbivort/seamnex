@@ -1,0 +1,132 @@
+# Vendored render set — D02-01 Mautic 7.2.2
+#
+# The platform resolves a source in this order: this vendored tree, then a `git clone` of the
+# repository named in the catalog. The tree exists because a deployment host may have no route to
+# the git server, and "the network is down" is not an acceptable reason to be unable to deploy a
+# pinned revision.
+#
+# Provenance: the application repository `mautic/mautic` ships neither a Compose file nor a
+# Dockerfile — it ships a Symfony application that expects a configured installation. The image used
+# here is the official `mautic/mautic` Docker distribution (`mautic/docker-mautic`), pinned to
+# `7.2.2-apache`, plus the MariaDB service the installer writes its schema to.
+#
+# Four deliberate deviations, each recorded rather than hidden (README.md has the longer version):
+#   1. the application image is a thin layer over the pinned upstream image (`Dockerfile`), because
+#      the upstream image starts Apache with an *uninstalled* product and only a CLI install can
+#      make a deployment usable without a browser. That layer is built **on the deployment host**
+#      (`docker build -t seamnex/mautic:7.2.2 platform/upstream/D02-01`) and referenced by tag here: a
+#      `build:` section cannot work from the executor, because the BuildKit session needs an
+#      endpoint the scoped socket proxy refuses (`unable to upgrade to tcp, received 403`), and the
+#      apply failed with exactly that line the first time this file carried one;
+#   2. the database service is added here — the catalog entry has always declared `database` as a
+#      dependency, and without it the product reached its own error page and nothing else;
+#   3. the cron container is kept: Mautic sends campaigns and segments from scheduled commands, so a
+#      web container alone renders a product that never sends a mail;
+#   4. `ports:` is written as `expose:` because the platform never publishes a host port — the edge
+#      reaches the container on the instance network at the catalog `httpPort`.
+name: mautic
+
+services:
+  mautic-db:
+    image: mariadb:11.4
+    environment:
+      # No well-known fallback on purpose: `${...:-root}` is how every instance of every product ends
+      # up sharing a superuser password. The catalog entry declares this variable required.
+      MARIADB_ROOT_PASSWORD: ${MAUTIC_DATABASE_ROOT_PASSWORD:?MAUTIC_DATABASE_ROOT_PASSWORD must be supplied}
+      # The installer creates its own tables but not the schema or the account, so the database
+      # container creates both. Empty database, application account, no extra privileges.
+      MARIADB_DATABASE: ${MAUTIC_DB_NAME:-mautic}
+      MARIADB_USER: ${MAUTIC_DB_USER:-mautic}
+      MARIADB_PASSWORD: ${MAUTIC_DB_PASSWORD:?MAUTIC_DB_PASSWORD must be supplied}
+    volumes:
+      - mautic-db:/var/lib/mysql
+    healthcheck:
+      # `--connect` proves the socket answers; `--innodb_initialized` proves the data directory is
+      # usable. Probing only the first is what makes a dependent container start too early.
+      test: ['CMD', 'healthcheck.sh', '--connect', '--innodb_initialized']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+  mautic-web:
+    # Built on the host from this tree's `Dockerfile` before release; see the note at the top of the
+    # file. Referencing the tag (instead of a `build:` block) is what makes the apply work through
+    # the socket proxy, and it keeps the deployed bytes identical to the reviewed ones.
+    image: seamnex/mautic:7.2.2
+    environment:
+      # The image dispatches on this variable and refuses to start without it.
+      DOCKER_MAUTIC_ROLE: mautic_web
+      MAUTIC_DB_HOST: ${MAUTIC_DB_HOST:-mautic-db}
+      MAUTIC_DB_PORT: ${MAUTIC_DB_PORT:-3306}
+      MAUTIC_DB_NAME: ${MAUTIC_DB_NAME:-mautic}
+      MAUTIC_DB_USER: ${MAUTIC_DB_USER:-mautic}
+      MAUTIC_DB_PASSWORD: ${MAUTIC_DB_PASSWORD:?MAUTIC_DB_PASSWORD must be supplied}
+      # `${VAR-}` and not `${VAR:-}`: the declared default is the *empty* prefix, and `:-` treats an
+      # empty value as unset — it fell back to `mautic_`, which the 7.2.2 installer records in
+      # `local.php` while creating the schema unprefixed, so the migration right after the install
+      # died on `Table 'mautic.mautic_email_stats' doesn't exist`.
+      MAUTIC_DB_TABLE_PREFIX: ${MAUTIC_DB_TABLE_PREFIX-}
+      MAUTIC_SITE_URL: ${MAUTIC_SITE_URL:?MAUTIC_SITE_URL must be supplied}
+      MAUTIC_ADMIN_USERNAME: ${MAUTIC_ADMIN_USERNAME:-admin}
+      MAUTIC_ADMIN_EMAIL: ${MAUTIC_ADMIN_EMAIL:?MAUTIC_ADMIN_EMAIL must be supplied}
+      MAUTIC_ADMIN_PASSWORD: ${MAUTIC_ADMIN_PASSWORD:?MAUTIC_ADMIN_PASSWORD must be supplied}
+      MAUTIC_ADMIN_FIRSTNAME: ${MAUTIC_ADMIN_FIRSTNAME:-Mautic}
+      MAUTIC_ADMIN_LASTNAME: ${MAUTIC_ADMIN_LASTNAME:-Admin}
+    depends_on:
+      mautic-db:
+        condition: service_healthy
+    # The product's own port, inside the container. The platform rewrites a `ports:` mapping into
+    # this form and asserts zero published ports immediately before apply; writing it directly keeps
+    # the reviewed file and the applied document identical.
+    expose: ['80']
+    volumes:
+      # The three directories the image documents as state: the installation itself (`local.php`),
+      # the assets campaigns reference, and the log directory. `/var/www/html/var` is deliberately
+      # not mounted as a whole — its `cache/prod` tree ships pre-built in the image and an empty
+      # volume would shadow it.
+      - mautic-config:/var/www/html/config
+      - mautic-media:/var/www/html/docroot/media
+      - mautic-logs:/var/www/html/var/logs
+    healthcheck:
+      # A socket check, not an HTTP check: while the first-boot install runs, `/` answers with a
+      # redirect or an error page and would be declared healthy before the product exists. The
+      # platform's own readiness probe is the one that insists on an HTTP answer below 500.
+      test: ['CMD', 'php', '-r', 'exit(@fsockopen("127.0.0.1", 80) ? 0 : 1);']
+      interval: 20s
+      timeout: 10s
+      retries: 30
+      # The install migrates roughly a hundred tables on a fresh schema; two minutes was enough on a
+      # laptop and too little on a shared host, so the grace window is ten minutes and the interval
+      # after it stays at twenty seconds.
+      start_period: 600s
+    restart: unless-stopped
+
+  mautic-cron:
+    image: seamnex/mautic:7.2.2
+    environment:
+      DOCKER_MAUTIC_ROLE: mautic_cron
+      MAUTIC_DB_HOST: ${MAUTIC_DB_HOST:-mautic-db}
+      MAUTIC_DB_PORT: ${MAUTIC_DB_PORT:-3306}
+      MAUTIC_DB_NAME: ${MAUTIC_DB_NAME:-mautic}
+      MAUTIC_DB_USER: ${MAUTIC_DB_USER:-mautic}
+      MAUTIC_DB_PASSWORD: ${MAUTIC_DB_PASSWORD:?MAUTIC_DB_PASSWORD must be supplied}
+      MAUTIC_DB_TABLE_PREFIX: ${MAUTIC_DB_TABLE_PREFIX-}
+      MAUTIC_SITE_URL: ${MAUTIC_SITE_URL:?MAUTIC_SITE_URL must be supplied}
+    depends_on:
+      mautic-db:
+        condition: service_healthy
+    volumes:
+      # The cron processes run against the same installation, so they share the three state
+      # directories — never the application tree.
+      - mautic-config:/var/www/html/config
+      - mautic-media:/var/www/html/docroot/media
+      - mautic-logs:/var/www/html/var/logs
+    restart: unless-stopped
+
+volumes:
+  mautic-db:
+  mautic-config:
+  mautic-media:
+  mautic-logs:

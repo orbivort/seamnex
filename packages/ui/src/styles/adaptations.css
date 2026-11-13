@@ -1,0 +1,173 @@
+/*
+ * adaptations.css — the unlayered tail of the cascade.
+ *
+ * Everything here must win over a utility: reduced motion, higher contrast, Windows high
+ * contrast, and the print sheet. Unlayered normal declarations beat every cascade layer
+ * (`theme → base → components → utilities`), so none of this needs `!important`, and the
+ * file is free of it by lint rule.
+ *
+ * These blocks also read the token layer only. The old `prefers-contrast` block overrode
+ * `:root` variables *after* the dark theme had set them, at equal specificity, so a
+ * high-contrast + dark user silently got light-theme text on dark paper. Every override
+ * here is a `light-dark()` pair, so there is no second value to fall out of sync.
+ */
+
+/* Reduced motion: the intent is unchanged, the `!important` is not. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms;
+    animation-iteration-count: 1;
+    transition-duration: 1ms;
+    scroll-behavior: auto;
+  }
+}
+
+/* Higher contrast on request: strengthen the text hierarchy, the hairlines and the
+   control boundaries, in both schemes. */
+@media (prefers-contrast: more) {
+  :root {
+    --color-muted: light-dark(#303934, #c3d4ce);
+    --color-faint: light-dark(#414b45, #a9bdb6);
+    --color-line: light-dark(#b9b4a7, #3d514a);
+    --color-line-strong: light-dark(#8a8477, #526861);
+    --color-control-border: light-dark(#6f6a5f, #a3b3ad);
+    --color-control-border-strong: light-dark(#4f4a40, #c3d4ce);
+  }
+}
+
+/* Windows high contrast: system colours replace the brand palette, and every control keeps
+   a boundary. A ghost button is `border: 1px solid transparent` plus a hover wash; forced
+   colours drop the wash and leave the transparent border transparent, so without this the
+   control is invisible. */
+@media (forced-colors: active) {
+  :root {
+    --color-focus: Highlight;
+    --color-focus-on-ink: Highlight;
+    --color-control-border: CanvasText;
+    --color-control-border-strong: CanvasText;
+  }
+
+  button,
+  select,
+  input,
+  textarea {
+    border-color: ButtonBorder;
+  }
+
+  ::selection {
+    background: Highlight;
+    color: HighlightText;
+  }
+}
+
+/*
+ * Print: an operator prints an inventory or an audit finding, not the chrome. Navigation is
+ * dropped, panes stop clipping their content, blocks avoid breaking mid-finding, and a long
+ * table repeats its header on every page.
+ *
+ * The sheet works from three hooks — `.no-print`, `.print-unclip`, `.print-block` — instead
+ * of guessing intent from a utility name. It used to key off `[class*='max-h-']`,
+ * `[class*='overflow-auto']` and `.rounded-md`, which missed `overflow-y-auto` panes
+ * entirely and made every large button unbreakable because `Button` size `lg` is rounded.
+ */
+@media print {
+  @page {
+    margin: 16mm;
+  }
+
+  /*
+   * The OS may be dark, and a person may have chosen dark; paper is not either of those.
+   *
+   * Every selector here is one element heavier than the rule it has to beat, and that is the
+   * whole point. `theme-dark.css` declares `.dark` at `(0,1,0)` — level with a bare `:root`, so
+   * it would win on source order alone — and the pre-paint block in each `index.html` declares
+   * `:root.dark` at `(0,2,0)`, which a plain `:root` rule loses to outright. Together, `html:root`
+   * `(0,1,1)` and `html:root.dark` `(0,2,1)` clear both, so a dark-mode user prints light paper
+   * without an `!important`.
+   */
+  html:root,
+  html:root.dark,
+  html:root.light {
+    color-scheme: light;
+  }
+
+  :root {
+    /* Decoration and overlays have no meaning on paper. */
+    --color-grid-line: transparent;
+    --color-grid-line-strong: transparent;
+    --color-overlay: transparent;
+    --color-line-ink: var(--color-line);
+
+    /* Log lines keep their meaning, at print contrast. */
+    --color-log-text: var(--color-print-log-text);
+    --color-log-stderr: var(--color-print-log-stderr);
+    --color-log-system: var(--color-print-log-system);
+  }
+
+  html,
+  body {
+    background: var(--color-print-bg);
+    color: var(--color-print-text);
+  }
+
+  body {
+    background-image: none;
+    font-size: 10.5pt;
+  }
+
+  aside,
+  footer,
+  body > header,
+  header.sticky,
+  .skip-link,
+  .no-print {
+    display: none;
+  }
+
+  main {
+    max-width: none;
+    padding: 0;
+  }
+
+  .shell-content {
+    padding-inline-start: 0;
+  }
+
+  .shell-header {
+    height: auto;
+  }
+
+  /*
+   * Ink and log surfaces invert to paper. Their background is not printed by default, so
+   * without this the log text kept its light-on-dark colour and printed near-white on white.
+   */
+  .ink-grid,
+  .ink-flat,
+  .log-surface {
+    background: var(--color-print-bg);
+    color: var(--color-print-text);
+  }
+
+  /* Every scroll pane prints in full — the panes are how a printed inventory used to lose
+     its last columns and rows. */
+  .scroll-slim,
+  .print-unclip {
+    max-height: none;
+    overflow: visible;
+    scrollbar-gutter: auto;
+  }
+
+  tr {
+    break-inside: avoid;
+  }
+
+  thead {
+    display: table-header-group;
+  }
+
+  tbody {
+    break-inside: auto;
+  }
+}

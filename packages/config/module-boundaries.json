@@ -1,0 +1,328 @@
+{
+  "$comment": "Single source of truth for design §6.1/§6.2 module boundaries. Consumed by packages/config/eslint/node.mjs (static enforcement) and by the boundary test in apps/api (table ownership). Every §7.2 table appears in exactly one module's `owns` list, or in `shared`. A module directory missing from `modules[]` is invisible to moduleOfPath, so its edges are allowed by default: `m25-workflow-egress` is in that state (see ADR-BE-18, deferred work). Registering a module is a deliberate edit, never a silent default.",
+  "root": "apps/api/src/modules",
+  "crossCutting": ["M15", "M17"],
+  "shared": {
+    "$comment": "Tables with more than one legitimate writer. Only the named repository may write them; the boundary test still checks that no module defines its own DDL-owning repository for these.",
+    "outbox": "M17",
+    "settings": "M09"
+  },
+  "runtime": [
+    {
+      "$comment": "Directories under apps/api/src that are platform machinery rather than a product domain, yet still name tables. They were a hard-coded map inside the boundary test; declaring them here means a new directory cannot avoid the rule by being new, and the test stops special-casing TypeScript. `audit` and `secrets` are absent because they are now `modules/m17-audit` and `modules/m15-secrets`, where their contracts already were.",
+      "dir": "bootstrap",
+      "owns": [],
+      "reads": []
+    },
+    { "dir": "common", "owns": [], "reads": [] },
+    { "dir": "config", "owns": [], "reads": [] },
+    { "dir": "contract", "owns": [], "reads": [] },
+    { "dir": "database", "owns": [], "reads": [] },
+    { "dir": "health", "owns": [], "reads": [] },
+    {
+      "$comment": "The job surface owns the queue tables in practice (M05 declares them because a deployment is what fills them); `instance` and `idp_user` are read for the labels the job screen shows.",
+      "dir": "jobs",
+      "owns": ["deployment_job", "job_step", "job_log", "instance", "idp_user"],
+      "reads": []
+    },
+    { "dir": "redis", "owns": [], "reads": [] },
+    { "dir": "roles", "owns": [], "reads": [] }
+  ],
+  "modules": [
+    {
+      "id": "M01",
+      "name": "Catalog",
+      "dir": "m01-catalog",
+      "owns": [
+        "catalog_entry",
+        "catalog_entry_revision",
+        "deployment_definition",
+        "integration_metadata"
+      ],
+      "mayImport": ["M22"],
+      "reads": ["instance"]
+    },
+    {
+      "id": "M02",
+      "name": "Source Resolver",
+      "dir": "m02-source-resolver",
+      "owns": ["source_resolution", "source_file", "compose_policy", "scaffold_artefact"],
+      "mayImport": ["M01", "M22"],
+      "reads": ["catalog_entry", "deployment_definition", "policy_exception"]
+    },
+    {
+      "id": "M03",
+      "name": "Renderer",
+      "dir": "m03-renderer",
+      "owns": [
+        "render_set",
+        "render_file",
+        "instance_env_value",
+        "env_schema_var",
+        "env_schema_revision",
+        "env_profile",
+        "env_profile_value"
+      ],
+      "mayImport": ["M01", "M15"],
+      "reads": ["catalog_entry", "instance"]
+    },
+    {
+      "id": "M04",
+      "name": "Planner",
+      "dir": "m04-planner",
+      "owns": ["deployment_plan"],
+      "mayImport": ["M02", "M03", "M19"],
+      "reads": ["instance", "render_set"]
+    },
+    {
+      "id": "M05",
+      "name": "Executor",
+      "dir": "m05-executor",
+      "owns": [
+        "instance",
+        "instance_service",
+        "instance_volume",
+        "deployment_job",
+        "job_step",
+        "job_log"
+      ],
+      "mayImport": ["M02", "M03", "M04", "M07", "M15", "M19"],
+      "reads": [
+        "deployment_plan",
+        "render_set",
+        "image_artefact",
+        "instance_param",
+        "instance_status",
+        "drift_record",
+        "catalog_entry",
+        "source_resolution",
+        "instance_route",
+        "scaffold_artefact",
+        "instance_env_value"
+      ]
+    },
+    {
+      "id": "M06",
+      "name": "Status and Health",
+      "dir": "m06-status-health",
+      "owns": ["instance_status", "container_status", "probe_result"],
+      "mayImport": ["M05"],
+      "reads": ["instance", "instance_service", "maintenance_window"]
+    },
+    {
+      "id": "M07",
+      "name": "Integration",
+      "dir": "m07-integration",
+      "owns": ["idp_client", "instance_route", "integration_check"],
+      "mayImport": ["M05", "M15", "M23"],
+      "reads": [
+        "instance",
+        "integration_metadata",
+        "catalog_entry",
+        "backup_schedule",
+        "trigger_endpoint"
+      ]
+    },
+    {
+      "id": "M08",
+      "name": "Identity Sync",
+      "dir": "m08-identity-sync",
+      "owns": [
+        "idp_user",
+        "idp_group",
+        "idp_group_member",
+        "group_mapping",
+        "sync_run",
+        "access_request"
+      ],
+      "mayImport": ["M07", "M09", "M10", "M24"],
+      "reads": ["entitlement", "role_binding", "instance", "catalog_entry", "instance_route"]
+    },
+    {
+      "id": "M09",
+      "name": "Access Control",
+      "dir": "m09-access-control",
+      "owns": ["role_binding", "policy_version", "settings", "machine_client"],
+      "mayImport": [],
+      "reads": ["group_mapping", "idp_user", "instance", "catalog_entry"]
+    },
+    {
+      "id": "M10",
+      "name": "Portal BFF",
+      "dir": "m10-portal-bff",
+      "owns": ["entitlement"],
+      "mayImport": ["M06", "M08", "M09", "M24"],
+      "reads": [
+        "instance",
+        "instance_status",
+        "instance_route",
+        "instance_service",
+        "catalog_entry",
+        "maintenance_window",
+        "notification",
+        "access_request",
+        "idp_user",
+        "integration_metadata",
+        "idp_client",
+        "integration_check"
+      ]
+    },
+    {
+      "id": "M11",
+      "name": "Forward-Auth Gateway",
+      "dir": "m11-forward-auth",
+      "owns": [],
+      "mayImport": ["M09", "M10"],
+      "reads": ["instance_route", "entitlement"]
+    },
+    {
+      "id": "M12",
+      "name": "Integration Registry",
+      "dir": "m12-integration-registry",
+      "owns": ["registry_snapshot"],
+      "mayImport": [],
+      "reads": ["instance", "integration_metadata", "instance_route", "idp_client", "catalog_entry"]
+    },
+    {
+      "id": "M13",
+      "name": "Workflow",
+      "dir": "m13-workflow",
+      "owns": [
+        "workflow",
+        "workflow_version",
+        "workflow_run",
+        "workflow_run_node",
+        "workflow_approval",
+        "field_snapshot"
+      ],
+      "mayImport": ["M12", "M14"],
+      "reads": ["instance", "credential_scope", "catalog_entry", "idp_user", "registry_snapshot"]
+    },
+    {
+      "id": "M14",
+      "name": "Credential Broker",
+      "dir": "m14-credential-broker",
+      "owns": ["credential_scope", "broker_policy"],
+      "mayImport": ["M15"],
+      "reads": ["integration_metadata", "instance", "catalog_entry", "workflow"]
+    },
+    {
+      "id": "M15",
+      "name": "Secrets",
+      "dir": "m15-secrets",
+      "owns": ["secret", "secret_version"],
+      "mayImport": [],
+      "reads": []
+    },
+    {
+      "id": "M16",
+      "name": "Backup and Restore",
+      "dir": "m16-backup-restore",
+      "owns": ["backup", "backup_schedule", "restore_run", "restore_drill", "image_artefact"],
+      "mayImport": ["M05", "M07", "M09", "M15", "M22"],
+      "reads": [
+        "instance",
+        "render_set",
+        "instance_param",
+        "deployment_job",
+        "idp_user",
+        "instance_env_value",
+        "instance_service",
+        "instance_volume",
+        "instance_route"
+      ]
+    },
+    {
+      "id": "M17",
+      "name": "Audit",
+      "dir": "m17-audit",
+      "owns": ["audit_event", "audit_anchor", "audit_chain", "outbox"],
+      "mayImport": [],
+      "reads": ["subject_ref"]
+    },
+    {
+      "id": "M18",
+      "name": "Governance",
+      "dir": "m18-governance",
+      "owns": [
+        "license_record",
+        "patch_record",
+        "break_glass_session",
+        "policy_exception",
+        "maintenance_window",
+        "dsar_request",
+        "personal_data_map",
+        "subject_ref"
+      ],
+      "mayImport": ["M08", "M09", "M10", "M17"],
+      "reads": [
+        "instance",
+        "integration_metadata",
+        "deployment_plan",
+        "audit_event",
+        "restore_drill",
+        "catalog_entry",
+        "instance_status",
+        "render_set",
+        "idp_user",
+        "product_account"
+      ]
+    },
+    {
+      "id": "M19",
+      "name": "Capacity",
+      "dir": "m19-capacity",
+      "owns": ["capacity_snapshot", "capacity_reservation"],
+      "mayImport": [],
+      "reads": ["instance", "instance_status", "catalog_entry"]
+    },
+    {
+      "id": "M20",
+      "name": "Notification",
+      "dir": "m20-notification",
+      "owns": ["alert_channel", "notification"],
+      "mayImport": [],
+      "reads": ["maintenance_window", "break_glass_session", "instance", "instance_status"]
+    },
+    {
+      "id": "M21",
+      "name": "Observability Fabric",
+      "dir": "m21-observability",
+      "owns": ["observability_profile"],
+      "mayImport": ["M01"],
+      "reads": ["catalog_entry"]
+    },
+    {
+      "id": "M22",
+      "name": "Catalogue Repository Adapter",
+      "dir": "m22-catalog-repository",
+      "owns": ["catalog_commit", "drift_record", "instance_param"],
+      "mayImport": ["M01"],
+      "reads": ["instance", "scaffold_artefact", "instance_env_value"]
+    },
+    {
+      "id": "M23",
+      "name": "Trigger Ingress",
+      "dir": "m23-trigger-ingress",
+      "owns": ["trigger_endpoint", "trigger_delivery"],
+      "mayImport": ["M13", "M15"],
+      "reads": ["workflow", "workflow_run"]
+    },
+    {
+      "id": "M24",
+      "name": "Sign-In Relay",
+      "dir": "m24-sign-in-relay",
+      "owns": ["product_account", "relay_retry_window"],
+      "mayImport": ["M03", "M07"],
+      "reads": [
+        "instance",
+        "instance_route",
+        "entitlement",
+        "idp_user",
+        "catalog_entry",
+        "integration_metadata",
+        "integration_check"
+      ]
+    }
+  ]
+}

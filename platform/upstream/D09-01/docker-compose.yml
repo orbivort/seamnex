@@ -1,0 +1,72 @@
+# Vendored upstream tree — D09-01 OpenProject 17.9.6
+#
+# The platform resolves a source in this order: this vendored tree, then a `git clone` of the
+# repository named in the catalog. The tree exists because `opf/openproject` ships a **build**
+# Dockerfile (`docker/prod/Dockerfile`, a multi-stage Ruby 4 + Node + PostgreSQL compile that takes
+# tens of minutes and needs a BuildKit session the deploy-worker's scoped socket proxy refuses) and
+# no Compose file at all. Resolving that repository directly therefore reached `apply` and died
+# there. The release the platform actually runs is the published all-in-one image
+# `openproject/openproject`, which is what this file pins.
+#
+# Provenance: the all-in-one image published by OpenProject
+# (`openproject/openproject:17.9.6`, GitHub release v17.9.6, 2026-10-30). The image bundles
+# PostgreSQL 17, memcached, Apache and the Rails/Puma application under supervisord, so the
+# definition is one service; the entry's declared `database`, `cache` and `worker` roles are served
+# inside it and must not be provisioned again.
+#
+# Deliberate choices, each recorded rather than hidden:
+#   1. the image is pinned to a full version — the platform refuses a floating tag before apply
+#      (compose policy `unpinned_image`);
+#   2. `ports: 8080:80` documents the canonical host-side example. The policy rewrites it to
+#      `expose: ['80']`; the catalogue `httpPort` is therefore **80** (the container port), not 8080.
+#      A catalogue entry that copies the host port fails `render` with `HTTP_PORT_NOT_EXPOSED`;
+#   3. only the two directories the image documents are mounted — `/var/openproject/pgdata` (the
+#      bundled cluster) and `/var/openproject/assets` (attachments, git/svn repositories). The
+#      application tree is never mounted, so the image owns `/app`;
+#   4. `SECRET_KEY_BASE` has no usable default upstream (`OVERWRITE_ME`) and is a required secret in
+#      the environment declaration; the platform injects it as an `environment` entry at apply time,
+#      which beats this file's interpolation and keeps the value out of the render set;
+#   5. the healthcheck asks the application, not the socket: `/health_checks/default` is OkComputer's
+#      own readiness check and stays red until migrations and the seed have finished, whereas a TCP
+#      probe would report the Apache listener as healthy during a first-boot install that is still
+#      running. `start_period: 900s` covers a first install on a 1 vCPU shape.
+name: openproject
+
+services:
+  openproject:
+    image: openproject/openproject:17.9.6
+    environment:
+      # Absolute URLs and the host Rails accepts; must equal the published route host.
+      OPENPROJECT_HOST__NAME: ${OPENPROJECT_HOST__NAME:-projects.localhost}
+      # The edge terminates plain HTTP on :8020 and forwards to this container over HTTP.
+      OPENPROJECT_HTTPS: ${OPENPROJECT_HTTPS:-false}
+      # Apache's ServerName (`docker/prod/proxy.conf.erb`); the vhost and the Rails host agree.
+      SERVER_NAME: ${SERVER_NAME:-projects.localhost}
+      # Rails refuses to boot a production app without this; there is no safe default.
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE:?SECRET_KEY_BASE is required — declare it in catalog/env/D09-01.json}
+    volumes:
+      - pgdata:/var/openproject/pgdata
+      - assets:/var/openproject/assets
+    ports:
+      # Rewritten to `expose: ['80']` by the platform: an instance never publishes a host port.
+      - '8080:80'
+    healthcheck:
+      # The Host header is not optional. Apache loads two vhosts: a `ServerName _default_` that serves
+      # the static placeholder from /var/www/html, and the real one (ServerName = SERVER_NAME) that
+      # proxies to Puma. A probe on 127.0.0.1 without a Host header matches the first, gets Apache's
+      # own 404 for /health_checks/default, and the container is declared unhealthy 15 minutes after
+      # a boot that worked — measured on the first deployment of this entry.
+      test:
+        - CMD-SHELL
+        - 'curl -fsS -H "Host: ${SERVER_NAME:-projects.localhost}" http://127.0.0.1:80/health_checks/default >/dev/null || exit 1'
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 900s
+    # PostgreSQL and Puma both want an orderly shutdown; the default 10 s truncates it.
+    stop_grace_period: 60s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  assets:

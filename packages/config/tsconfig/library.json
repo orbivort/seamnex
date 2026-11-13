@@ -1,0 +1,9 @@
+{
+  "$comment": "Browser-consumed library preset (React components, DOM-using utilities). `erasableSyntaxOnly` keeps these packages transpilable one file at a time by esbuild/Vite and by Node's type stripping.",
+  "extends": "./base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "erasableSyntaxOnly": true
+  }
+}

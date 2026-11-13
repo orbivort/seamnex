@@ -1,0 +1,117 @@
+# Build context for apps/api. The image ships sources plus production dependencies, nothing else.
+**/node_modules
+**/dist
+**/dist-demo
+**/build
+**/.turbo
+**/coverage
+**/*.map
+**/*.tsbuildinfo
+
+# Development state. `temp` used to be written as a bare pattern, which Docker matches only at the
+# context root — so `apps/api/temp/seamnex-root-key` was copied into the image while the file claimed the
+# root key is "mounted, never baked in".
+**/temp
+.env
+.env.*
+**/.env
+**/.env.*
+**/*.local
+
+# Keys and bundles are never baked into an image. The age identity and the root key already live
+# under `temp/` (excluded above), so this is the belt to that rule's braces: `.gitignore` refuses
+# the same patterns for the same reason, and the build context is the one place a stray key would
+# survive a `git clean` by being copied into a layer.
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.jks
+
+# Tests never run in the image, and they carry fixture secrets.
+**/test
+**/*.test.ts
+
+**/*.md
+# The image conveys the licence and the third-party notices alongside the object code it ships
+# (`apps/api/Dockerfile` COPYs both), so the notices file has to survive the rule above. `LICENSE`
+# carries no extension and is unaffected.
+!THIRD-PARTY-NOTICES.md
+.git
+.github
+.svn
+.vscode
+.idea
+
+# Agent workspaces. No COPY line in `apps/api/Dockerfile` names one, and their plans and session
+# transcripts are per-machine text; sending them only inflates the context tar. `**/*.md` above
+# already covers the agent instruction files (AGENTS.md, CLAUDE.md, …), so only directories here.
+.codex
+.claude
+.cursor
+.windsurf
+.continue
+.gemini
+.roo
+.kiro
+.openhands
+.specstory
+.codebuddy
+.trae
+.qoder
+
+# OS and editor junk a checkout carries whether or not git is watching.
+desktop.ini
+ehthumbs.db
+Thumbs.db
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+$RECYCLE.BIN
+.history
+.fleet
+*.iml
+*.swp
+*.swo
+*~
+
+# Temporary files a tool leaves behind mid-write.
+**/*.tmp
+**/*.temp
+**/*.bak
+**/*.orig
+**/*.rej
+
+# Applications and packages the image does not contain. `apps/api`'s only workspace dependencies are
+# `@seamnex/config`, `@seamnex/db` and `@seamnex/domain`, and no COPY line in `apps/api/Dockerfile` names any of
+# these trees, so a context that still carries them only makes every build tar and send files that
+# cannot reach the image. `apps/portal` and `apps/console` were already excluded for the same reason.
+apps/portal
+apps/console
+packages/api-client
+packages/mocks
+packages/shell
+packages/ui
+packages/utils
+
+# Host-provided configuration. `platform/upstream` and `platform/realm` are bind mounts in
+# `docker/compose.dev.yml`, and the Traefik/observability files are read by the Docker CLI on the
+# host — a bind mount is resolved from the host filesystem, so excluding them from the *build
+# context* cannot remove them from a running container.
+platform
+docker
+
+# Tool output a development checkout holds. All of it is reproducible and none of it is read at
+# build or run time, but without these patterns `docker build .` transfers it on every build.
+**/*.log
+**/logs
+**/.eslintcache
+**/.stylelintcache
+**/.vitest
+**/playwright-report
+**/test-results
+**/.pnpm-store
+
+# docs/adr is prose; docs/openapi.json is COPY'd, so it has to survive the `**/*.md` and docs rules.
+docs/adr

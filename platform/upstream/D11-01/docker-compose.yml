@@ -1,0 +1,110 @@
+# Vendored upstream tree — D11-01 Metabase 0.65.2
+#
+# The platform resolves a source in this order: this vendored tree, then a `git clone` of the
+# repository named in the catalog. The tree exists because `metabase/metabase` ships a **build**
+# Dockerfile (a multi-stage Clojure/Java + Yarn compile of the whole application, tens of minutes)
+# and no Compose file at all. Resolving that repository directly therefore takes the `dockerfile`
+# path, and the executor's `docker buildx build` needs a BuildKit session the deploy-worker's scoped
+# socket proxy refuses (403) — the job reaches `apply` and dies there. The artefact the project
+# actually publishes for production is the image `metabase/metabase`, which is what this file pins.
+#
+# Provenance: `metabase/metabase:v0.65.2` (GitHub release v0.65.2, 2026-10-30, marked "Latest" on
+# the releases page; v0.65.0-beta is a pre-release and is deliberately not used).
+#
+# Deliberate choices, each recorded rather than hidden:
+#   1. the image is pinned to a full version — the platform refuses a floating tag before apply
+#      (compose policy `unpinned_image`);
+#   2. `ports: 3000:3000` documents the image's own listening port. The policy rewrites it to
+#      `expose: ['3000']` and the catalogue `httpPort` is therefore **3000**, the container port;
+#   3. the application database is the pinned PostgreSQL sidecar, not the image's embedded H2 file.
+#      Upstream restricts H2 to evaluation: it corrupts under the concurrent access a BI tool
+#      generates and there is no repair path. `db` is a real service, so the entry's `database`
+#      dependency is satisfied inside this definition and must not be provisioned again;
+#   4. one secret, two consumers. `MB_DB_PASS` is declared once in `catalog/env/D11-01.json` and both
+#      the application (`MB_DB_PASS`) and the sidecar (`POSTGRES_PASSWORD`) are interpolated from
+#      it, so a password can never disagree with itself;
+#   5. `MB_ENCRYPTION_SECRET_KEY` has no safe default. Without it Metabase stores the credentials of
+#      every connected data source in plaintext inside its own database, and the admin panel reports
+#      the instance as unencrypted. It is a required secret in the environment declaration;
+#   6. the healthcheck asks the application, not the socket. `/api/health` answers `200` only once
+#      Jetty has the application wired; a TCP probe on 3000 reports healthy while the first-boot
+#      migrations are still running. `start_period: 300s` covers a first boot on a 1 vCPU shape.
+name: metabase
+
+services:
+  metabase:
+    image: metabase/metabase:v0.65.2
+    environment:
+      # Absolute URLs for every link the product generates; must equal the published route.
+      MB_SITE_URL: ${MB_SITE_URL:-http://insights.localhost:8020}
+      # PostgreSQL, never the embedded H2 (see note 3 above).
+      MB_DB_TYPE: postgres
+      MB_DB_HOST: ${MB_DB_HOST:-db}
+      MB_DB_PORT: ${MB_DB_PORT:-5432}
+      MB_DB_DBNAME: ${MB_DB_DBNAME:-metabase}
+      MB_DB_USER: ${MB_DB_USER:-metabase}
+      # No safe default: the application would silently fall back to H2 without it.
+      MB_DB_PASS: ${MB_DB_PASS:?MB_DB_PASS is required — declare it in catalog/env/D11-01.json}
+      # Encrypts the data-source credentials stored in the application database.
+      MB_ENCRYPTION_SECRET_KEY: ${MB_ENCRYPTION_SECRET_KEY:?MB_ENCRYPTION_SECRET_KEY is required — declare it in catalog/env/D11-01.json}
+      # Signs the session keys stored in the application database. Measured on the first deployment:
+      # without it the instance boots and warns, in its own words, that "anyone with access to the
+      # application database can forge a session and impersonate any user". The warning is a page of
+      # log, not a refusal — which is why the value is required here rather than left optional.
+      MB_SESSION_SECRET_KEY: ${MB_SESSION_SECRET_KEY:?MB_SESSION_SECRET_KEY is required — declare it in catalog/env/D11-01.json}
+      # The free edition pings upstream unless it is switched off.
+      MB_ANON_TRACKING_ENABLED: ${MB_ANON_TRACKING_ENABLED:-false}
+      # Sample content is a demo artefact: it creates an "Examples" database and ~40 saved questions
+      # in a product whose dashboards are supposed to be real. Read at first boot only.
+      MB_LOAD_SAMPLE_CONTENT: ${MB_LOAD_SAMPLE_CONTENT:-false}
+      # The image's own listening port; `expose` below must agree with it and with `httpPort`.
+      MB_JETTY_PORT: '3000'
+    ports:
+      # Rewritten to `expose: ['3000']` by the platform: an instance never publishes a host port.
+      - '3000:3000'
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      # The image ships curl and no HEALTHCHECK of its own. `/api/health` is the application's own
+      # readiness endpoint: it fails while the schema is being migrated, which is exactly the window
+      # a socket probe would report as healthy.
+      test:
+        - CMD-SHELL
+        - 'curl -fsS http://127.0.0.1:3000/api/health >/dev/null || exit 1'
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 300s
+    # The JVM wants an orderly shutdown; the default 10 s truncates it mid-flush.
+    stop_grace_period: 60s
+    restart: unless-stopped
+
+  db:
+    # PostgreSQL 18 ships one data directory per major version, so the volume is mounted at the
+    # image's declared VOLUME (`/var/lib/postgresql`) rather than at the older
+    # `/var/lib/postgresql/data` path: the latter would leave the real cluster outside the mount and
+    # every redeploy would start an empty database.
+    image: postgres:18-alpine
+    environment:
+      # Derived from the same declarations the application uses (see note 4 above).
+      POSTGRES_DB: ${MB_DB_DBNAME:-metabase}
+      POSTGRES_USER: ${MB_DB_USER:-metabase}
+      POSTGRES_PASSWORD: ${MB_DB_PASS:?MB_DB_PASS is required — declare it in catalog/env/D11-01.json}
+    volumes:
+      - mb-pgdata:/var/lib/postgresql
+    healthcheck:
+      # `-h 127.0.0.1` matters: during initdb the entrypoint runs a temporary server on a unix
+      # socket only, and a socket-based probe would report the cluster ready before it accepts
+      # connections from the application.
+      test:
+        - CMD-SHELL
+        - 'pg_isready -h 127.0.0.1 -U ${MB_DB_USER:-metabase} -d ${MB_DB_DBNAME:-metabase}'
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    restart: unless-stopped
+
+volumes:
+  mb-pgdata:

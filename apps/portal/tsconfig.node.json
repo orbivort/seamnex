@@ -1,0 +1,5 @@
+{
+  "$comment": "Tooling program: vite/vitest configs run on Node, not in the browser bundle, so they get the Node preset (ES2025 lib, node globals) and none of the application's DOM or vite/client types.",
+  "extends": "@seamnex/config/tsconfig/node.json",
+  "include": ["vite.config.ts", "vitest.config.ts"]
+}

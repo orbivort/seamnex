@@ -1,0 +1,235 @@
+name: version-bump
+
+# The maintainer-facing half of a release: it turns the version named in the Actions UI into a
+# reviewable pull request that carries that version in every manifest, in `CONTRACT_DOCUMENT_VERSION`
+# (and so in the committed `docs/openapi.json`) and in `CHANGELOG.md`.
+#
+# It never tags and never publishes. `release-dispatch.yml` and `release.yml` still cut the release
+# from a commit; this workflow only removes the hand edit that used to happen before them, and puts
+# it behind review. A version that is already tagged is refused, so this cannot rewrite a past
+# release — and the branch it pushes is a pull-request branch, not a protected one.
+#
+# The number writing itself lives in `scripts/bump-version.mjs`, not in this file: the same command
+# prepares a release by hand, and `pnpm check:version` is the gate that reads the result back.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version for the pull request: X.Y.Z or X.Y.Z-rc.N (a leading "v" is optional)'
+        required: true
+        type: string
+
+# Two bumps running together would race for the same branch name; the second should queue behind the
+# first rather than cancel a half-written tree.
+concurrency:
+  group: version-bump
+  cancel-in-progress: false
+
+env:
+  # No Node version here: `actions/setup-node` reads `node-version-file: .nvmrc`, the same pin
+  # `engines.node`/`devEngines` in package.json state and `engineStrict` enforces on install.
+  TURBO_TELEMETRY_DISABLED: '1'
+
+# Least privilege at the workflow level. `bump` escalates once, to exactly what pushing a branch and
+# opening a pull request need — no `contents: write` on the fetch that precedes it.
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  bump:
+    name: bump, verify and open the pull request
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: checkout
+        uses: actions/checkout@v7
+        with:
+          # The branch is pushed back and the diff is read locally, so the clone needs both history
+          # and the branch ref rather than the default detached commit.
+          fetch-depth: 0
+      # `inputs.version` arrives through the environment rather than as an inline `${{ }}`
+      # substitution: a substituted value is pasted into the script before bash parses it, which is
+      # how a dispatch input becomes shell. Quoted and read from the environment, it cannot.
+      - name: validate the requested version
+        id: version
+        env:
+          RAW_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="${RAW_VERSION#v}"
+          # The same strict SemVer core `release-dispatch.yml` accepts, so any version this workflow
+          # writes can be tagged by that workflow afterwards without a second opinion.
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo "::error::'$RAW_VERSION' is not a version (expected X.Y.Z or X.Y.Z-<pre>)."
+            exit 1
+          fi
+          if [[ "$version" == '0.0.0' ]]; then
+            echo "::error::0.0.0 is the placeholder this workflow exists to replace."
+            exit 1
+          fi
+          # Both checks are remote: a local answer only describes the clone, and the clone is
+          # minutes old at best.
+          if [[ "${GITHUB_REF_TYPE}" != 'branch' ]]; then
+            echo "::error::run this workflow from a branch, not from ${GITHUB_REF_TYPE} ${GITHUB_REF_NAME}."
+            exit 1
+          fi
+          branch="release/v${version}"
+          if git ls-remote --heads origin "refs/heads/$branch" | grep -q .; then
+            echo "::error::$branch already exists; close the pull request it belongs to, or pick another version."
+            exit 1
+          fi
+          if git ls-remote --tags origin "refs/tags/v$version" | grep -q .; then
+            echo "::error::tag v$version already exists; a released version is never bumped again."
+            exit 1
+          fi
+          {
+            echo "version=$version"
+            echo "branch=$branch"
+            echo "date=$(date -u +%F)"
+          } >> "$GITHUB_OUTPUT"
+          echo "Preparing $version for review from ${GITHUB_REF_NAME}@${GITHUB_SHA:0:7}."
+      - name: install pnpm (version from packageManager)
+        uses: pnpm/action-setup@v6
+      - name: install node (.nvmrc)
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: bump the manifests, the contract constant and the changelog
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          DATE: ${{ steps.version.outputs.date }}
+        run: node scripts/bump-version.mjs "$VERSION" --date "$DATE"
+      # The document is generated, never hand-edited (ADR-BE-01), and its `info.version` comes from
+      # the constant the previous step rewrote. Regenerating is the only way the committed file stays
+      # byte-identical to what the API serves — the assertion `contract parity` makes.
+      - name: regenerate the committed OpenAPI document
+        run: pnpm --filter @seamnex/api openapi:generate
+      # The bump is verified by the gate that will judge the pull request, not by a second opinion
+      # written here. Staging happens in the same step so the diff that was checked is the diff that
+      # is committed.
+      - name: verify the bump is consistent and complete
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          DATE: ${{ steps.version.outputs.date }}
+        run: |
+          set -euo pipefail
+          pnpm check:version
+          git add -A
+          changed=$(git diff --cached --name-only)
+          if [[ -z "$changed" ]]; then
+            echo "::error::nothing changed; the tree already carries $VERSION."
+            exit 1
+          fi
+          # Anything outside the version surface is an edit the bump had no business making, and a
+          # reviewer would have to find it. The allowlist is the whole footprint of the script.
+          unexpected=$(printf '%s\n' "$changed" | grep -Ev '^(package\.json|(apps|packages)/[^/]+/package\.json|CHANGELOG\.md|docs\/openapi\.json|packages/domain/src/contract\.ts)$' || true)
+          if [[ -n "$unexpected" ]]; then
+            echo "::error::the bump touched files outside the version surface:"
+            printf '%s\n' "$unexpected"
+            exit 1
+          fi
+          grep -Fq "\"version\": \"$VERSION\"" docs/openapi.json || {
+            echo "::error::docs/openapi.json does not carry $VERSION after regeneration."
+            exit 1
+          }
+          grep -Fq "## [$VERSION] - $DATE" CHANGELOG.md || {
+            echo "::error::CHANGELOG.md has no '## [$VERSION] - $DATE' section."
+            exit 1
+          }
+          printf 'Changed by the bump:\n%s\n' "$changed"
+          git diff --cached --stat
+      - name: commit and push the branch
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BRANCH: ${{ steps.version.outputs.branch }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch --create "$BRANCH"
+          git commit -m "chore(release): v$VERSION"
+          git push origin "refs/heads/$BRANCH"
+          echo "Pushed $BRANCH at $(git rev-parse --short HEAD)."
+      # A pull request is the deliverable, so its body says what a reviewer has to check and what
+      # happens after the merge. `--body-file` keeps the Markdown out of the YAML.
+      - name: open the pull request
+        id: pull-request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          BRANCH: ${{ steps.version.outputs.branch }}
+          DATE: ${{ steps.version.outputs.date }}
+        run: |
+          set -euo pipefail
+          body="$RUNNER_TEMP/version-bump.md"
+          {
+            echo "## Release preparation: \`v$VERSION\`"
+            echo
+            echo "Generated by \`.github/workflows/version-bump.yml\` from \`${GITHUB_REF_NAME}@${GITHUB_SHA:0:7}\`. Merging this pull request is what makes \`v$VERSION\` the version the repository states about itself."
+            echo
+            echo "| File | Result |"
+            echo "| --- | --- |"
+            for file in $(git show --name-only --pretty=format: HEAD); do
+              case "$file" in
+                CHANGELOG.md)
+                  result="\`## Unreleased\` -> \`## [$VERSION] - $DATE\`, with a fresh \`## Unreleased\` section above it"
+                  ;;
+                packages/domain/src/contract.ts)
+                  result="\`CONTRACT_DOCUMENT_VERSION\` -> \`$VERSION\`"
+                  ;;
+                docs/openapi.json)
+                  result="regenerated from that constant, so \`info.version\` is \`$VERSION\`"
+                  ;;
+                *)
+                  result="\`version\` -> \`$VERSION\`"
+                  ;;
+              esac
+              echo "| \`$file\` | $result |"
+            done
+            echo
+            echo "### What to review"
+            echo
+            echo "- Every manifest carries the same number, and \`pnpm check:version\` is green in this run."
+            echo "- The changelog entries under \`## Unreleased\` are the ones meant for \`v$VERSION\`; nothing was reworded, only the heading moved."
+            echo "- \`docs/openapi.json\` differs only in \`info.version\`."
+            echo
+            echo "### After merge"
+            echo
+            echo "Tag the merge commit with \`release-dispatch.yml\` (input \`$VERSION\`) or by pushing \`v$VERSION\` yourself. That workflow re-runs the full CI definition before it tags, and it refuses a version whose manifests disagree with the released identity."
+            echo
+            echo "### CI on this pull request"
+            echo
+            echo "A pull request opened with \`GITHUB_TOKEN\` does not start \`pull_request\` workflows, so \`ci.yml\` has not run against this branch yet. Close and reopen this pull request once to start it, or push a trivial commit from a maintainer account."
+          } > "$body"
+          url=$(gh pr create --base "$GITHUB_REF_NAME" --head "$BRANCH" --title "chore(release): v$VERSION" --body-file "$body")
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Opened $url."
+      - name: summarise the request
+        if: always()
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BRANCH: ${{ steps.version.outputs.branch }}
+          DATE: ${{ steps.version.outputs.date }}
+          URL: ${{ steps.pull-request.outputs.url }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Version bump: \`v$VERSION\`"
+            echo
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Version | \`$VERSION\` |"
+            echo "| Changelog heading | \`## [$VERSION] - $DATE\` |"
+            echo "| Branch | \`$BRANCH\` |"
+            echo "| Pull request | ${URL:-not opened} |"
+          } >> "$GITHUB_STEP_SUMMARY"

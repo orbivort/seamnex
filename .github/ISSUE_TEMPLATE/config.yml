@@ -1,0 +1,12 @@
+# The two forms in this directory are the supported entry points: a blank issue bypasses the fields
+# a maintainer needs to reproduce a defect or evaluate a proposal. Both contact links route to the
+# repository's private advisory form, which is the only confidential channel this project has: there
+# is no security or conduct mailbox, so a `mailto:` link would be dead.
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/orbivort/seamnex/security/advisories/new
+    about: Do not open a public issue for a vulnerability. SECURITY.md describes the private channel, the response targets and the disclosure policy.
+  - name: Code of conduct concern
+    url: https://github.com/orbivort/seamnex/security/advisories/new
+    about: Report harassment or other unacceptable behaviour privately; start the title with "conduct:". CODE_OF_CONDUCT.md describes the channels, the enforcement guidelines and the appeal route.

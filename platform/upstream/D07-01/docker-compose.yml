@@ -1,0 +1,57 @@
+# Vendored render set — D07-01 OrangeHRM 5.9
+#
+# OrangeHRM ships a Dockerfile and a Compose-less distribution, but it cannot run on its own: every
+# screen past the login form reads a MySQL schema. The catalog entry has always declared `database`
+# as a dependency; this file is what makes that dependency part of the render set instead of a
+# comment. Without it the deployment reached the product's *installer* and stopped there — no schema,
+# no login, nothing an employee can use — which is a deployment that reports ready without deploying.
+#
+# Deviations from the upstream distribution, each recorded rather than hidden (README.md has the
+# longer version):
+#   1. the application image is built from this tree's `Dockerfile` — upstream publishes no image —
+#      and pinned by tag, because a floating tag is refused by the platform's compose policy anyway;
+#   2. the database service is added here: `mariadb:11.4` with a named volume and a healthcheck. The
+#      installer creates the schema itself and *refuses* a pre-existing database, so this file
+#      deliberately does **not** set `MARIADB_DATABASE`;
+#   3. only `lib/confs` is mounted. Upstream declares `VOLUME ["/var/www/html"]`; mounting the whole
+#      application tree would shadow the installed product with an empty volume on every first run.
+name: orangehrm
+
+services:
+  orangehrm-db:
+    image: mariadb:11.4
+    environment:
+      # No fallback on purpose: `${...:-root}` is the kind of default that makes every instance of
+      # every product share a superuser password. The catalog entry declares this variable required.
+      MARIADB_ROOT_PASSWORD: ${ORANGEHRM_DATABASE_ROOT_PASSWORD:?ORANGEHRM_DATABASE_ROOT_PASSWORD must be supplied}
+    volumes:
+      - orangehrm-db:/var/lib/mysql
+    healthcheck:
+      test: ['CMD', 'healthcheck.sh', '--connect', '--innodb_initialized']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  orangehrm:
+    image: orangehrm/orangehrm:5.9
+    depends_on:
+      orangehrm-db:
+        condition: service_healthy
+    # The application's own port. The platform rewrites `ports:` into `expose:` and asserts zero
+    # published ports immediately before apply, so the route never depends on a host binding.
+    expose: ['80']
+    volumes:
+      - orangehrm-conf:/var/www/html/lib/confs
+    healthcheck:
+      # A socket check, not an HTTP check: while the first-boot install runs, `/` answers with a
+      # redirect to the installer and would be declared healthy before the product exists.
+      test: ['CMD', 'php', '-r', "exit(@fsockopen('127.0.0.1', 80) ? 0 : 1);"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 240s
+
+volumes:
+  orangehrm-conf:
+  orangehrm-db:

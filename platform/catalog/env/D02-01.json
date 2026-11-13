@@ -1,0 +1,152 @@
+{
+  "format": "env-schema/v1",
+  "entryKey": "D02-01",
+  "appliesTo": {
+    "imageRef": "seamnex/mautic:7.2.2"
+  },
+  "variables": [
+    {
+      "name": "MAUTIC_SITE_URL",
+      "purpose": "Public URL the product is reached at, written into `local.php` by the first-boot installer. It is the base of every absolute URL Mautic puts in an e-mail — unsubscribe links, tracked links, landing pages — so it must be the published route including the edge port (`http://marketing.localhost:8020` on the development edge), not the container name. Installation-only: changing the route of a running instance has to be changed inside the product as well.",
+      "type": "url",
+      "required": true,
+      "defaultValue": "http://mautic.localhost:8020",
+      "constraint": "Absolute URL, no trailing slash; must match the published route (`<slug>.<ingress domain>:<edge port>`)",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "MAUTIC_DB_HOST",
+      "purpose": "Host of the MySQL server the installer creates its tables on. The render set ships that server as the `mautic-db` service, so the default is the service name; override it only to install against a database the platform does not manage.",
+      "type": "string",
+      "required": true,
+      "defaultValue": "mautic-db",
+      "constraint": "Hostname or IP address reachable from the application container",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "none"
+    },
+    {
+      "name": "MAUTIC_DB_PORT",
+      "purpose": "Port of that server. 3306 is what the installer expects and what the MariaDB container listens on.",
+      "type": "integer",
+      "required": false,
+      "defaultValue": "3306",
+      "constraint": "1–65535",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "none"
+    },
+    {
+      "name": "MAUTIC_DB_NAME",
+      "purpose": "Schema the installer writes its tables into. The database container creates it empty on first start; the installer refuses a schema whose tables already exist, so resetting a failed installation means removing the `mautic-db` volume, not re-running against the old one.",
+      "type": "string",
+      "required": true,
+      "defaultValue": "mautic",
+      "constraint": "MySQL identifier: letters, digits and underscores",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "none"
+    },
+    {
+      "name": "MAUTIC_DB_USER",
+      "purpose": "Application database account, created with grants on `MAUTIC_DB_NAME` only. A profile may change it; an instance may not, because the account is created once by the database container and the installer never re-creates it.",
+      "type": "string",
+      "required": true,
+      "defaultValue": "mautic",
+      "constraint": "MySQL account name; at most 32 characters",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_only"
+    },
+    {
+      "name": "MAUTIC_DB_PASSWORD",
+      "purpose": "Password of that account. Injected into both the application and the database container, so the two cannot disagree; stored in the platform secret store and resolved at apply time, never rendered into the compose project.",
+      "type": "secret",
+      "required": true,
+      "defaultValue": null,
+      "constraint": "At least 16 characters",
+      "conditional": null,
+      "secret": true,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "MAUTIC_DB_TABLE_PREFIX",
+      "purpose": "Prefix of every table the installation writes, and it must be empty. Mautic 7.2.2's installer records the prefix in `local.php` but creates the schema **unprefixed**: with `mautic_` the install reports 'Install complete' and the migration that runs immediately afterwards fails with `Table 'mautic.mautic_email_stats' doesn't exist`, leaving a product that answers but cannot save a campaign. The ceiling allows a profile and an instance value only so an instance that already stored the old `mautic_` default can be converged back to empty; do not set any other value. Installation-only either way.",
+      "type": "string",
+      "required": false,
+      "defaultValue": "",
+      "constraint": "Empty; a non-empty prefix is not supported by the 7.2.2 install path",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "MAUTIC_DATABASE_ROOT_PASSWORD",
+      "purpose": "MariaDB superuser password, read by `MARIADB_ROOT_PASSWORD` in the vendored render set. Declared and required because the database container has no fallback: an unset value leaves the container refusing to start and the installer with nothing to connect to. Independent of `MAUTIC_DB_PASSWORD`, which only holds schema rights.",
+      "type": "secret",
+      "required": true,
+      "defaultValue": null,
+      "constraint": "At least 16 characters; must differ from MAUTIC_DB_PASSWORD",
+      "conditional": null,
+      "secret": true,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "MAUTIC_ADMIN_USERNAME",
+      "purpose": "Login of the initial administrator account, read once by the installer. Mautic keeps its own accounts (the entry is gate-only), so every later user and role is managed inside the product.",
+      "type": "string",
+      "required": true,
+      "defaultValue": "admin",
+      "constraint": "At least 3 characters; letters, digits and the characters Mautic accepts in a username",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "MAUTIC_ADMIN_PASSWORD",
+      "purpose": "Password of that administrator, used by the install only. Nothing on the platform signs in with it, so it is the account an operator uses for the first login and for break-glass access.",
+      "type": "secret",
+      "required": true,
+      "defaultValue": null,
+      "constraint": "At least 12 characters",
+      "conditional": null,
+      "secret": true,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "MAUTIC_ADMIN_EMAIL",
+      "purpose": "Address of that administrator and the mailbox Mautic uses for its own system messages (failed sends, cron errors). It must be a monitored address: Mautic writes to it when a campaign cannot send.",
+      "type": "string",
+      "required": true,
+      "defaultValue": null,
+      "constraint": "Valid e-mail address",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "MAUTIC_ADMIN_FIRSTNAME",
+      "purpose": "First name on the administrator's contact record. Read once by the installer.",
+      "type": "string",
+      "required": false,
+      "defaultValue": "Mautic",
+      "constraint": "At most 64 characters",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "MAUTIC_ADMIN_LASTNAME",
+      "purpose": "Last name on the administrator's contact record. Read once by the installer.",
+      "type": "string",
+      "required": false,
+      "defaultValue": "Admin",
+      "constraint": "At most 64 characters",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    }
+  ]
+}

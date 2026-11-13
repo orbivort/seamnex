@@ -1,0 +1,238 @@
+name: release
+
+# A release is cut from a version tag, never from a branch. The tag is the version, so
+# nothing has to be bumped in a manifest before publishing (the workspace versions are
+# placeholders and stay that way) and a re-run of this workflow for the same tag
+# addresses the same version. The tag is expected on the merge commit of a reviewed pull
+# request, i.e. a commit `ci.yml` has already gated through `push` to `main`.
+on:
+  push:
+    tags:
+      # v1.2.3 and v1.2.3-rc.1: the second pattern is the pre-release form. These are
+      # GitHub filter patterns, not shell globs — `+` means "one or more of the
+      # preceding element" there, which is what makes every segment numeric.
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+
+# Publishing is not idempotent: a cancelled run can leave a release carrying half of its
+# assets. The group is per tag, so two pushes to the same tag queue rather than race, and
+# a run for a newer tag never cancels an older release that is still uploading.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # No Node version here: `actions/setup-node` reads `node-version-file: .nvmrc`, the same pin
+  # `engines.node`/`devEngines` in package.json state and `engineStrict` enforces on install.
+  # Restating a major would be the one number able to disagree with that file.
+  TURBO_TELEMETRY_DISABLED: '1'
+
+# Actions are referenced by major version only (`@v7`, `@v8`), matching `ci.yml`; the note there
+# explains the convention and its one exception.
+
+# Least privilege at the workflow level. `publish` is the single job that escalates, and
+# only to `contents: write` — the one permission `gh release create` needs. The optional
+# turbo remote-cache pair is forwarded to CI, never echoed: an absent secret leaves
+# turbo on its local cache instead of failing the run.
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # The gate is the CI workflow itself, called on the tagged commit. Restating install,
+  # lint, test and build here would create a second definition of "green" that can drift
+  # from the one protecting `main`. If any gate inside it fails, `needs: ci` on the jobs
+  # below keeps the tag unpublished.
+  ci:
+    name: CI (all gates) on the tagged commit
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+    secrets:
+      TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
+      TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
+
+  package:
+    name: build and package
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
+      TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - name: checkout
+        uses: actions/checkout@v7
+        with:
+          # Generated notes walk the commits since the previous tag, so the history and
+          # the tags themselves have to be present — a shallow clone has neither.
+          fetch-depth: 0
+      - name: install pnpm (version from packageManager)
+        uses: pnpm/action-setup@v6
+      - name: install node (.nvmrc)
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: restore turbo cache
+        uses: actions/cache@v6
+        with:
+          path: .turbo
+          key: turbo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: turbo-${{ runner.os }}-${{ github.job }}-
+      # The trigger already filters tags, and this repeats the rule at runtime so that a
+      # future change to the trigger cannot publish a tag that is not a version. The
+      # pre-release marker is derived once here and carried to `publish` as an output.
+      - name: resolve the version from the tag
+        id: version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::'$tag' is not a version tag (expected vX.Y.Z or vX.Y.Z-<pre>)."
+            exit 1
+          fi
+          version="${tag#v}"
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "prerelease=$([[ "$version" == *-* ]] && echo true || echo false)"
+          } >> "$GITHUB_OUTPUT"
+          echo "Packaging $tag as version $version."
+      - name: install dependencies
+        run: pnpm install --frozen-lockfile
+      # The manifests stay placeholders at every release; the tag is the version. This asserts that
+      # the resolved tag and the identity the image would report are the same release, and that the
+      # committed contract document has not grown a number of its own.
+      - name: version gate
+        env:
+          SEAMNEX_BUILD_VERSION: ${{ steps.version.outputs.version }}
+        run: pnpm check:version
+      # The production build, not the demo build: it typechecks first and refuses to emit
+      # a bundle that still contains the mock service worker, which is the difference
+      # between an artefact that can be hosted and one that only looks like it can.
+      - name: build production bundles
+        run: pnpm build
+      # An empty tarball is worse than a red run: a missing output would otherwise be
+      # published as a successful release of nothing.
+      - name: verify the build produced both SPAs
+        run: |
+          set -euo pipefail
+          for app in portal console; do
+            if [[ ! -f "apps/$app/dist/index.html" ]]; then
+              echo "::error::apps/$app/dist/index.html is missing — the bundle was not built."
+              exit 1
+            fi
+          done
+      # GPL-3.0 §4 and §5: a conveyed copy carries the licence, and §6 makes the corresponding
+      # source part of the same distribution. A tarball of `dist/` alone satisfies neither, so the
+      # two files are staged next to the bundle instead of staying behind in the repository.
+      - name: package each app as a versioned tarball
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          mkdir -p release
+          for app in portal console; do
+            stage="temp/release-$app"
+            rm -rf "$stage"
+            mkdir -p "$stage"
+            cp -R "apps/$app/dist" "$stage/dist"
+            cp LICENSE THIRD-PARTY-NOTICES.md "$stage/"
+            tar -czf "release/seamnex-$app-${version}.tar.gz" \
+              -C "$stage" dist LICENSE THIRD-PARTY-NOTICES.md
+          done
+          ls -l release
+      # An archive that silently lost its licence is a licence violation rather than a packaging
+      # detail, and it is invisible in the release notes.
+      - name: verify every tarball carries its licence
+        run: |
+          set -euo pipefail
+          for archive in release/*.tar.gz; do
+            listing="$(tar -tzf "$archive")"
+            for required in LICENSE THIRD-PARTY-NOTICES.md dist/index.html; do
+              if ! grep -qx "$required" <<< "$listing"; then
+                echo "::error::$archive does not contain $required — a GPL-3.0 distribution must carry both files."
+                exit 1
+              fi
+            done
+          done
+          echo "every archive carries LICENSE, THIRD-PARTY-NOTICES.md and its bundle."
+      # A published asset nobody can verify is only half an asset: the consumer needs a
+      # digest to check the download against, from the same run that produced it.
+      - name: write checksums
+        run: |
+          set -euo pipefail
+          cd release
+          sha256sum ./*.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: upload packaged artefacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-assets
+          path: release/*
+          retention-days: 7
+          # The publish job would otherwise create a release with no assets.
+          if-no-files-found: error
+
+  publish:
+    name: publish GitHub release
+    needs: [ci, package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The one write in the whole workflow, scoped to the job that needs it.
+    permissions:
+      contents: write
+    steps:
+      - name: checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: download packaged artefacts
+        uses: actions/download-artifact@v8
+        with:
+          name: release-assets
+          path: release
+      # `--verify-tag` is the guard that the tag exists on the remote, `--generate-notes`
+      # derives the body from the commits and merged pull requests since the previous tag
+      # instead of a hand-maintained changelog, and `gh` ships on the runner — no
+      # third-party action to pin for the one step that holds a write token.
+      - name: create the versioned release
+        env:
+          # The workflow's own token, not a personal access token: it expires with the
+          # job and its scope is the `permissions` block above.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.package.outputs.tag }}
+          VERSION: ${{ needs.package.outputs.version }}
+          PRERELEASE: ${{ needs.package.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          args=(--verify-tag --title "$VERSION" --generate-notes)
+          if [[ "$PRERELEASE" == 'true' ]]; then
+            args+=(--prerelease)
+          else
+            args+=(--latest)
+          fi
+          gh release create "$TAG" release/* "${args[@]}"
+      - name: summarise the published release
+        env:
+          TAG: ${{ needs.package.outputs.tag }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Released $TAG"
+            echo
+            echo "| Asset | Bytes |"
+            echo "| --- | --- |"
+            for f in release/*; do
+              printf '| %s | %s |\n' "$(basename "$f")" "$(stat -c%s "$f")"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,8 @@
+{
+  "$comment": "Test program: vitest runs these files on Node with a jsdom DOM. `contract.test.ts` reads the repository from disk (node:fs, node:path, process), which is exactly why Node globals must not be visible to the app program.",
+  "extends": "@seamnex/config/tsconfig/react-app.json",
+  "compilerOptions": {
+    "types": ["vite/client", "node"]
+  },
+  "include": ["test", "src/**/*.d.ts"]
+}

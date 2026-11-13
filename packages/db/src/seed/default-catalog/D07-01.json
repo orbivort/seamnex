@@ -1,0 +1,92 @@
+{
+  "key": "D07-01",
+  "domain": "HR & People Operations",
+  "cluster": "Core Operations",
+  "product": "OrangeHRM",
+  "description": "Employee records, leave and attendance, recruitment and self-service for a single-site SMB.",
+  "repoUrl": "https://github.com/orangehrm/orangehrm",
+  "licenseId": "GPL-3.0",
+  "stack": "PHP / MySQL",
+  "imageRef": "orangehrm/orangehrm:5.9",
+  "imageDigest": "sha256:bd76663f62bc203770dee8170ede981045ee8e7d782f228d13c87e40e8527a75",
+  "upstream": {
+    "currentVersion": "5.9",
+    "latestVersion": "5.9",
+    "advisory": null,
+    "releaseUrl": "https://github.com/orangehrm/orangehrm/releases",
+    "checkedAt": "2026-11-01T01:00:00Z"
+  },
+  "guaranteeClass": "fa_gate",
+  "authMethod": "Proxy gate only — OrangeHRM keeps its own login (no header trust, no OIDC/SAML)",
+  "packaging": "compose",
+  "packagingSource": "vendored render set @ v5.9 (upstream root Dockerfile on php:8.3-apache-bookworm, release archive from SourceForge, plus the MariaDB service the installer needs)",
+  "primaryInstanceId": null,
+  "sharedWith": [],
+  "httpPort": 80,
+  "resources": {
+    "cpu": 2,
+    "memoryMb": 3072,
+    "diskMb": 12288
+  },
+  "dependencies": ["database"],
+  "volumes": [
+    {
+      "name": "orangehrm-conf",
+      "mountPath": "/var/www/html/lib/confs",
+      "quotaMb": 1024
+    },
+    {
+      "name": "orangehrm-db",
+      "mountPath": "/var/lib/mysql",
+      "quotaMb": 8192
+    }
+  ],
+  "integration": {
+    "apiBaseUrl": "https://orangehrm.seamnex.local/web/index.php/api/v2",
+    "authMethod": "Proxy gate only — OrangeHRM keeps its own login (no header trust, no OIDC/SAML)",
+    "guaranteeClassVerified": "fa_gate",
+    "operationInventory": [
+      {
+        "id": "employees.read",
+        "label": "Read employees",
+        "mode": "read",
+        "description": "Employee master data, job titles and reporting lines.",
+        "path": "/web/index.php/api/v2/pim/employees",
+        "method": "GET"
+      },
+      {
+        "id": "leave.read",
+        "label": "Read leave balances",
+        "mode": "read",
+        "description": "Entitlement, taken and remaining leave per employee."
+      },
+      {
+        "id": "leave.write",
+        "label": "Record leave request",
+        "mode": "write",
+        "description": "Create a leave request for approval inside the product."
+      }
+    ],
+    "eventModes": [
+      {
+        "mode": "poll",
+        "label": "Poll approved leave",
+        "minimumIntervalMinutes": 30
+      }
+    ],
+    "credentialGranularity": "account",
+    "sessionMaxMinutes": 120,
+    "sloSupported": false,
+    "verifiedBy": "Platform Administrator",
+    "verifiedAt": "2026-11-01T01:00:00Z",
+    "nextReviewAt": "2027-01-31T01:00:00Z",
+    "stale": false
+  },
+  "owner": {
+    "name": "Platform Administrator",
+    "team": "Platform Operations"
+  },
+  "notes": "Payroll is out of scope: jurisdiction-specific and explicitly not portable. Leave and attendance are the MVP surface. The render set is a vendored Compose project — the application plus the MariaDB service the installer needs — and the application image is built from that tree's Dockerfile (php:8.3-apache-bookworm, release archive from SourceForge with its MD5 verified at build time), because upstream publishes no image. Nothing about the install is left to a browser: the entrypoint waits for the database, installs once with the values this catalog declares, and hands lib/confs, src/cache, src/log and src/config back to www-data. `lib/confs/Conf.php` is the marker, so a restart never reinstalls. Two volumes are worth backing up: orangehrm-conf (Conf.php, and the data-encryption key when enabled) and orangehrm-db (/var/lib/mysql, the schema itself). OrangeHRM Starter has no OIDC or SAML and reads no identity headers, so identity is gate-only: the edge protects the route and the product keeps its own login, which an operator provisions outside the platform. Its REST API is served under /web/index.php/api/v2/<module>; /api is not an OrangeHRM path. The silent installer stores neither a default language nor a timezone, so the product's own defaults apply until an administrator changes them in the UI — which is why those two variables are not offered.",
+  "deviation": "Upstream ships a Dockerfile, no Compose file and no image at all, so the render set is vendored: docker-compose.yml with the application and a mariadb:11.4 service, plus a Dockerfile that reproduces upstream's build and adds the first-boot install. Four deliberate changes to upstream, recorded in platform/upstream/D7/README.md as well: (1) the database service is added — the installer cannot run without one, and it *refuses* a database that already exists, which is why MARIADB_DATABASE is not set; (2) upstream's `VOLUME [\"/var/www/html\"]` is removed, because it would shadow the installed tree with an empty anonymous volume on first run and present an uninstalled product after every restart; (3) the image is built once on the deployment host (`docker build -t orangehrm/orangehrm:5.9 platform/upstream/D7`) because there is no published image to pin — the render set pins the tag and the platform records the digest; (4) the install runs at boot instead of in a browser, through the deprecated `installer/cli_install.php`, because its replacement (`installer/console install:on-new-database`) refuses to run without a TTY.",
+  "verifiedAt": "2026-11-01T01:00:00Z"
+}

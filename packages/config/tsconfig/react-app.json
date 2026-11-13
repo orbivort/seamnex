@@ -1,0 +1,7 @@
+{
+  "$comment": "Vite browser application preset. `types` is exactly `vite/client`: TypeScript 6 defaults `types` to [] instead of pulling in every @types package, and vite/client is load-bearing twice over — it declares `import.meta.env` and, because `noUncheckedSideEffectImports` now defaults to true, the `*.css` wildcard that makes `import './index.css'` type-check. Node globals are NOT added here; the app's tooling and tests get them from their own programs (tsconfig.node.json / tsconfig.test.json).",
+  "extends": "./library.json",
+  "compilerOptions": {
+    "types": ["vite/client"]
+  }
+}

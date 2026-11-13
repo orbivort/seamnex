@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: seamnex-platform
+    orgId: 1
+    folder: 'Seamnex — self-hosted FOSS domain platform'
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards

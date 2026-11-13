@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS sync_run;
+DROP TABLE IF EXISTS access_request;
+DROP TABLE IF EXISTS entitlement;
+DROP TABLE IF EXISTS role_binding;
+DROP TABLE IF EXISTS group_mapping;
+DROP TABLE IF EXISTS idp_group;
+DROP TABLE IF EXISTS idp_user;
+DROP TABLE IF EXISTS integration_metadata;
+DROP TABLE IF EXISTS instance_route;
+DROP TABLE IF EXISTS idp_client;

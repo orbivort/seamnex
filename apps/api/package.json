@@ -1,0 +1,55 @@
+{
+  "name": "@seamnex/api",
+  "version": "0.0.0",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "engines": {
+    "node": ">=24.15.0 <25"
+  },
+  "description": "Seamnex control plane: one image, nine process roles over one module graph",
+  "scripts": {
+    "dev": "tsx watch src/main-api.ts",
+    "start": "tsx src/main-api.ts",
+    "start:role": "tsx src/roles/start.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint --max-warnings=0 .",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "openapi:generate": "tsx scripts/generate-openapi.ts",
+    "check:route-policy": "tsx scripts/check-route-policy.ts",
+    "catalog:project": "tsx scripts/project-catalog.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "catalog:",
+    "@seamnex/config": "workspace:*",
+    "@seamnex/db": "workspace:*",
+    "@seamnex/domain": "workspace:*",
+    "@nestjs/common": "catalog:",
+    "@nestjs/core": "catalog:",
+    "@nestjs/platform-fastify": "catalog:",
+    "bullmq": "catalog:",
+    "dockerode": "catalog:",
+    "fastify": "catalog:",
+    "ioredis": "catalog:",
+    "pg": "catalog:",
+    "pino": "catalog:",
+    "prom-client": "catalog:",
+    "reflect-metadata": "catalog:",
+    "rxjs": "catalog:",
+    "tsx": "catalog:",
+    "yaml": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/dockerode": "catalog:",
+    "@types/node": "catalog:",
+    "@types/pg": "catalog:",
+    "@vitest/coverage-v8": "catalog:",
+    "eslint": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vitest": "catalog:"
+  }
+}

@@ -1,0 +1,107 @@
+# Vendored upstream tree — D01-01 EspoCRM 10.0.11
+#
+# The platform resolves a source in this order: this vendored tree, then a `git clone` of the
+# repository named in the catalog. The tree exists because a deployment host may have no route to
+# the git server (air-gapped SMB, filtered corporate network, frozen audit baseline) and "the
+# network is down" is not an acceptable reason to be unable to deploy a pinned revision.
+#
+# Provenance: the production Compose example published by the official EspoCRM Docker distribution
+# (`espocrm/espocrm-docker`, image `espocrm/espocrm`), pinned to the 10.0.11 release. The application
+# repository `espocrm/espocrm` ships no Compose file and tags releases without a `v` prefix.
+# Three deliberate deviations, each recorded rather than hidden:
+#   1. every image is pinned to a full version — the platform refuses a floating tag before apply
+#      (compose policy `unpinned_image`), and a floating tag makes "it worked yesterday" moot;
+#   2. `volumes_from` is replaced by explicit named volumes — the construct is compose-v1 legacy and
+#      the Compose v2+ CLI the platform drives does not implement it;
+#   3. the websocket container is omitted: the platform never publishes a host port, so a
+#      `ws://` endpoint would have no route until the edge learns to proxy websockets. Nothing else
+#      depends on it, and EspoCRM runs its core features without realtime push.
+#   4. the whole application tree is **not** mounted. EspoCRM 10 detects that mount and refuses to
+#      do anything: `isLegacy()` in the image's `entrypoint-utils.sh` matches a mount whose target is
+#      exactly `/var/www/html`, and the entrypoint then returns before `actionInstall()` and before
+#      `applyConfigEnv()`. A deployment with the old layout answered `302 → install/` forever, ignored
+#      every `ESPOCRM_CONFIG_*` variable and printed "LEGACY INSTALLATION METHOD DETECTED". Only the
+#      three directories the image documents are mounted, so the image owns `/var/www/html` and the
+#      install runs; the platform's environment variables are applied on start as a result.
+#
+# `container_name` is kept verbatim from upstream on purpose: the platform's compose policy strips it
+# (two instances of the same product would otherwise collide) and records the removal as a patch, so
+# the normalisation is visible in the render set rather than assumed.
+name: espocrm
+
+services:
+  espocrm-db:
+    image: mariadb:11.4
+    container_name: espocrm-db
+    environment:
+      MARIADB_ROOT_PASSWORD: ${ESPOCRM_DATABASE_ROOT_PASSWORD:-mariadb_root}
+      MARIADB_DATABASE: espocrm
+      MARIADB_USER: espocrm
+      MARIADB_PASSWORD: ${ESPOCRM_DATABASE_PASSWORD:-espocrm_db_password}
+    volumes:
+      - espocrm-db:/var/lib/mysql
+    healthcheck:
+      # `--connect` proves the socket answers; `--innodb_initialized` proves the data directory is
+      # usable. Probing only the first is what makes a dependent container start too early.
+      test: ['CMD', 'healthcheck.sh', '--connect', '--innodb_initialized']
+      interval: 20s
+      start_period: 30s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
+  espocrm:
+    image: espocrm/espocrm:10.0.11
+    container_name: espocrm
+    environment:
+      ESPOCRM_DATABASE_HOST: espocrm-db
+      ESPOCRM_DATABASE_USER: espocrm
+      ESPOCRM_DATABASE_NAME: espocrm
+      ESPOCRM_DATABASE_PASSWORD: ${ESPOCRM_DATABASE_PASSWORD:-espocrm_db_password}
+      ESPOCRM_ADMIN_USERNAME: ${ESPOCRM_ADMIN_USERNAME:-admin}
+      ESPOCRM_ADMIN_PASSWORD: ${ESPOCRM_ADMIN_PASSWORD:-espocrm_admin_password}
+      ESPOCRM_SITE_URL: ${ESPOCRM_SITE_URL:-http://localhost}
+    volumes:
+      # The three directories the 10.x image asks for (see deviation 4). The application itself is
+      # copied by the image into its own `/var/www/html`, which is what makes `isLegacy()` false.
+      - espocrm-data:/var/www/html/data
+      - espocrm-custom:/var/www/html/custom
+      - espocrm-client-custom:/var/www/html/client/custom
+    depends_on:
+      espocrm-db:
+        condition: service_healthy
+    healthcheck:
+      # `app-check` is what the 10.x entrypoint itself uses, and it reports a real installation state
+      # instead of "something answered on port 80". The previous probe was `curl -fsS /`, which
+      # succeeds on a `302 → install/` and therefore declared an *uninstalled* instance healthy.
+      test: ['CMD-SHELL', 'bin/command app-check >/dev/null 2>&1 || exit 1']
+      start_period: 120s
+      interval: 20s
+      timeout: 10s
+      retries: 15
+    ports:
+      # Rewritten to `expose: ['80']` by the platform: the instance never publishes a host port,
+      # Traefik reaches it over the instance network on the container port.
+      - '8080:80'
+    restart: unless-stopped
+
+  espocrm-daemon:
+    image: espocrm/espocrm:10.0.11
+    container_name: espocrm-daemon
+    volumes:
+      # The daemon runs `cron.php` and the job queue against the same installation, so it shares the
+      # three data directories — never the application tree (see deviation 4).
+      - espocrm-data:/var/www/html/data
+      - espocrm-custom:/var/www/html/custom
+      - espocrm-client-custom:/var/www/html/client/custom
+    entrypoint: docker-daemon.sh
+    depends_on:
+      espocrm:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  espocrm-db:
+  espocrm-data:
+  espocrm-custom:
+  espocrm-client-custom:

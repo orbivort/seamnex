@@ -1,0 +1,365 @@
+{
+  "format": "env-schema/v1",
+  "entryKey": "D01-01",
+  "appliesTo": { "imageRef": "espocrm/espocrm:10.0.11" },
+  "variables": [
+    {
+      "name": "ESPOCRM_SITE_URL",
+      "purpose": "Public URL the product is reached at. It is also the base of the OIDC redirect URI (`<siteUrl>/oauth-callback.php`), so it must match both the registered client and the published route. The platform derives it from the instance's own route at deploy time — the value below is only what the entry screen shows before an instance exists — so an instance under another slug or domain gets its own URL without an override. Override it only when the product is deliberately reached at a different address than its route; a value that disagrees with the route makes Keycloak refuse the authorization request with `invalid_redirect_uri`. Applied at first install only — the image writes `siteUrl` once, so changing the route of a running instance needs the value set inside the product as well.",
+      "type": "url",
+      "required": true,
+      "defaultValue": "http://espocrm.localhost:8020",
+      "constraint": "Absolute URL, no trailing slash; must match the registered redirect URI",
+      "rule": {
+        "pattern": "^https?://[^/]+$",
+        "patternDescription": "an absolute URL with no trailing slash and no path"
+      },
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ESPOCRM_ADMIN_USERNAME",
+      "purpose": "Initial administrator account. Only read on the first install.",
+      "type": "string",
+      "required": true,
+      "defaultValue": "admin",
+      "constraint": null,
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ESPOCRM_ADMIN_PASSWORD",
+      "purpose": "Initial administrator password. Read on the first install, and kept as the break-glass credential: while `ESPOCRM_CONFIG_OIDC_ALLOW_ADMIN_USER` is on, this password still signs an administrator in when the identity provider is unavailable, so it is a production credential and not a value for a demo instance.",
+      "type": "secret",
+      "required": true,
+      "defaultValue": null,
+      "constraint": "At least 12 characters",
+      "rule": {
+        "minLength": 12
+      },
+      "conditional": null,
+      "secret": true,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ESPOCRM_DATABASE_PLATFORM",
+      "purpose": "Database flavour the installer targets. The bundled MariaDB is addressed through `Mysql`; `Postgresql` is only correct together with a replaced compose file. Installation-only.",
+      "type": "enum",
+      "required": true,
+      "defaultValue": "Mysql",
+      "constraint": null,
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "none",
+      "options": ["Mysql", "Postgresql"]
+    },
+    {
+      "name": "ESPOCRM_DATABASE_HOST",
+      "purpose": "Compose service name of the database. Fixed by the vendored upstream file; installation-only.",
+      "type": "string",
+      "required": true,
+      "defaultValue": "espocrm-db",
+      "constraint": null,
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "none"
+    },
+    {
+      "name": "ESPOCRM_DATABASE_NAME",
+      "purpose": "Database created by the database container on first start.",
+      "type": "string",
+      "required": true,
+      "defaultValue": "espocrm",
+      "constraint": null,
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "none"
+    },
+    {
+      "name": "ESPOCRM_DATABASE_USER",
+      "purpose": "Application database user. A profile may change it; an instance may not.",
+      "type": "string",
+      "required": true,
+      "defaultValue": "espocrm",
+      "constraint": null,
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_only"
+    },
+    {
+      "name": "ESPOCRM_DATABASE_PASSWORD",
+      "purpose": "Application database password. Injected into both the application and the database container, so the two cannot disagree.",
+      "type": "secret",
+      "required": true,
+      "defaultValue": null,
+      "constraint": "At least 16 characters",
+      "conditional": null,
+      "secret": true,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ESPOCRM_DATABASE_ROOT_PASSWORD",
+      "purpose": "MariaDB superuser password, read by `MARIADB_ROOT_PASSWORD` in the vendored upstream file. Without a declared value the container falls back to the well-known `mariadb_root` and every database in the instance is open to anyone on the instance network.",
+      "type": "secret",
+      "required": true,
+      "defaultValue": null,
+      "constraint": "At least 16 characters; independent of ESPOCRM_DATABASE_PASSWORD",
+      "conditional": null,
+      "secret": true,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ESPOCRM_LANGUAGE",
+      "purpose": "Interface language written at install. Installation-only: a later change belongs in the product's own settings, not in this environment.",
+      "type": "string",
+      "required": false,
+      "defaultValue": "en_US",
+      "constraint": "Locale code, e.g. en_US or de_DE",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ESPOCRM_CONFIG_TIME_ZONE",
+      "purpose": "Product time zone (`timeZone`), used by cron, scheduled jobs and displayed timestamps. Applied on every start, unlike the installation-only `ESPOCRM_TIME_ZONE`; the container's own `TZ` is not read by the application.",
+      "type": "string",
+      "required": false,
+      "defaultValue": "UTC",
+      "constraint": "IANA zone, e.g. Europe/Berlin",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_only"
+    },
+    {
+      "name": "ESPOCRM_CONFIG_AUTH_TOKEN_LIFETIME",
+      "purpose": "Absolute lifetime of a sign-in session, in hours. The product's default is `0`, which `AuthTokenControl` reads as *no absolute expiry at all* — a session is then bounded only by inactivity, so a user who keeps working is never signed out. This is the number the platform's residual-session statement (`integration.sessionMaxMinutes`) claims to know, and the entry declares 480 minutes; declaring it here is what makes that claim true instead of an estimate. Pruned by the product's scheduled job.",
+      "type": "integer",
+      "required": false,
+      "defaultValue": "8",
+      "constraint": "Whole hours; 0 disables the absolute limit, which makes the declared session maximum unenforceable",
+      "rule": {
+        "pattern": "^[0-9]+$",
+        "patternDescription": "a whole number of hours"
+      },
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ESPOCRM_CONFIG_AUTH_TOKEN_MAX_IDLE_TIME",
+      "purpose": "Inactivity limit of a sign-in session, in hours. The product's default is 48, six times the 8 hours the entry declares, so without this the platform would report a residual session as \"up to 8 h\" while the product would still accept it after two days. Kept at or below `ESPOCRM_CONFIG_AUTH_TOKEN_LIFETIME`, since a longer idle window than the absolute one is unreachable. Pruned by the product's scheduled job.",
+      "type": "integer",
+      "required": false,
+      "defaultValue": "8",
+      "constraint": "Whole hours; not larger than ESPOCRM_CONFIG_AUTH_TOKEN_LIFETIME",
+      "rule": {
+        "pattern": "^[0-9]+$",
+        "patternDescription": "a whole number of hours"
+      },
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ESPOCRM_CONFIG_AUTHENTICATION_METHOD",
+      "purpose": "Sign-in method (`authenticationMethod`). `Oidc` sends users through the platform identity provider; `Espo` restores the local form and is the rollback when the provider is unreachable. The other values are API credential methods.",
+      "type": "enum",
+      "required": false,
+      "defaultValue": "Oidc",
+      "constraint": null,
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance",
+      "options": ["Espo", "ApiKey", "Hmac", "Oidc"]
+    },
+    {
+      "name": "ESPOCRM_CONFIG_OIDC_CLIENT_ID",
+      "purpose": "Client id Keycloak issued for this instance. The platform derives it from the instance slug (`seamnex-<slug>`) and registers the client under that name, so the value below only matters before an instance exists; an override that disagrees with the slug points the product at a client whose redirect URIs belong to another instance, and Keycloak answers `invalid_client`. `oidcScopes` is a list and therefore cannot be expressed here — it is set inside the product, where the `profile` and `email` claims come from.",
+      "type": "string",
+      "required": false,
+      "defaultValue": "seamnex-espocrm",
+      "constraint": "`seamnex-<instance slug>`",
+      "rule": {
+        "pattern": "^seamnex-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$",
+        "patternDescription": "seamnex- followed by the instance slug"
+      },
+      "conditional": "Required when ESPOCRM_CONFIG_AUTHENTICATION_METHOD is Oidc.",
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ESPOCRM_CONFIG_OIDC_CLIENT_SECRET",
+      "purpose": "Client secret for the instance client. Stored in the platform secret store and injected at apply time, never rendered into the compose project. Mandatory for `Oidc` in the sense that the product cannot complete a login without it, but the operator does not have to type one: left empty, the platform generates a value (64 hexadecimal characters), registers it at the identity provider and writes it back here, so the secret that was registered is the secret that is applied. Supplying one keeps the credential under the operator's control, subject to the shape in `constraint`. A digits-only value is refused, not for weakness but for transport: the image entrypoint applies every `ESPOCRM_CONFIG_*` variable through `bin/command config:set --type=auto`, which reads a numeric-looking value as a float. EspoCRM would then exchange the code with `1.2345678901212345E+23` while Keycloak holds the digits, and every login fails at the token exchange with `invalid_client_credentials` long after the platform reported `sso_login` success.",
+      "type": "secret",
+      "required": true,
+      "defaultValue": null,
+      "constraint": "24-128 characters from A-Z a-z 0-9 . _ ~ -, containing at least one letter and at least one digit; hex, base64url or UUID shapes all qualify. No whitespace, quotes, `$`, `+`, `/` or `=`, and never a value that reads as a number.",
+      "rule": {
+        "minLength": 24,
+        "maxLength": 128,
+        "pattern": "^(?=.*[A-Za-z])(?=.*[0-9])[A-Za-z0-9._~-]+$",
+        "patternDescription": "24-128 characters from A-Z a-z 0-9 . _ ~ -, containing at least one letter and at least one digit (for example `openssl rand -hex 32`)",
+        "notNumeric": true
+      },
+      "conditional": "Required by the product when ESPOCRM_CONFIG_AUTHENTICATION_METHOD is Oidc; generated when left empty.",
+      "secret": true,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ESPOCRM_CONFIG_OIDC_AUTHORIZATION_ENDPOINT",
+      "purpose": "Keycloak authorization endpoint of the platform realm. The browser is sent here, so it must be the public issuer host — not the container alias the server-side calls use.",
+      "type": "url",
+      "required": false,
+      "defaultValue": "http://localhost:8082/realms/seamnex/protocol/openid-connect/auth",
+      "constraint": "Absolute URL",
+      "conditional": "Required when ESPOCRM_CONFIG_AUTHENTICATION_METHOD is Oidc.",
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ESPOCRM_CONFIG_OIDC_TOKEN_ENDPOINT",
+      "purpose": "Keycloak token endpoint of the platform realm. The product calls it from its own network, so the default uses the identity-provider alias the platform attaches to every instance network (`keycloak:8080`), not the public issuer host.",
+      "type": "url",
+      "required": false,
+      "defaultValue": "http://keycloak:8080/realms/seamnex/protocol/openid-connect/token",
+      "constraint": "Absolute URL",
+      "conditional": "Required when ESPOCRM_CONFIG_AUTHENTICATION_METHOD is Oidc.",
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ESPOCRM_CONFIG_OIDC_JWKS_ENDPOINT",
+      "purpose": "Keycloak certificate endpoint, used to verify the id_token signature. Read by the product container, so the default uses the identity-provider alias on the instance network.",
+      "type": "url",
+      "required": false,
+      "defaultValue": "http://keycloak:8080/realms/seamnex/protocol/openid-connect/certs",
+      "constraint": "Absolute URL",
+      "conditional": "Required when ESPOCRM_CONFIG_AUTHENTICATION_METHOD is Oidc.",
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ESPOCRM_CONFIG_OIDC_USER_INFO_ENDPOINT",
+      "purpose": "Keycloak userinfo endpoint, read when the id_token carries no group claim. Read by the product container, so the default uses the identity-provider alias on the instance network.",
+      "type": "url",
+      "required": false,
+      "defaultValue": "http://keycloak:8080/realms/seamnex/protocol/openid-connect/userinfo",
+      "constraint": "Absolute URL",
+      "conditional": "Required when ESPOCRM_CONFIG_AUTHENTICATION_METHOD is Oidc.",
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ESPOCRM_CONFIG_OIDC_USERNAME_CLAIM",
+      "purpose": "Claim matched against the product user name.",
+      "type": "string",
+      "required": false,
+      "defaultValue": "preferred_username",
+      "constraint": null,
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ESPOCRM_CONFIG_OIDC_GROUP_CLAIM",
+      "purpose": "Claim carrying group paths. Setting it makes the product request that claim as *essential* in the id_token, so an id_token without it sends the product to the userinfo endpoint instead; the platform registers the client scope that mints it at the identity provider, which is why the scope does not have to be declared here. The claim only *acts* when `oidcSyncTeams` is on; the team mapping lists (`oidcTeamsIds`, `oidcTeamsColumns`) are arrays and must be written inside the product — environment values are scalars only. Removing this value stops both the request and the team mapping.",
+      "type": "string",
+      "required": false,
+      "defaultValue": "groups",
+      "constraint": null,
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ESPOCRM_CONFIG_OIDC_SYNC_TEAMS",
+      "purpose": "Sync group-claim paths to product teams on sign-in. Off upstream by default; switch it on only once the team mapping exists in the product, otherwise groups resolve to nothing.",
+      "type": "boolean",
+      "required": false,
+      "defaultValue": "false",
+      "constraint": "true or false",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ESPOCRM_CONFIG_OIDC_CREATE_USER",
+      "purpose": "Create a product user on first sign-in (JIT). Off means the account must pre-exist.",
+      "type": "boolean",
+      "required": false,
+      "defaultValue": "true",
+      "constraint": "true or false",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ESPOCRM_CONFIG_OIDC_FALLBACK",
+      "purpose": "Master switch for the local password form when the provider is unavailable. It only enables the form; who may actually use it is decided by the two flags below.",
+      "type": "boolean",
+      "required": false,
+      "defaultValue": "true",
+      "constraint": "true or false",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ESPOCRM_CONFIG_OIDC_ALLOW_ADMIN_USER",
+      "purpose": "Let administrator accounts use the local password form while `Oidc` is active. This is the break-glass path: without it, an identity-provider outage locks every administrator out.",
+      "type": "boolean",
+      "required": false,
+      "defaultValue": "true",
+      "constraint": "true or false",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ESPOCRM_CONFIG_OIDC_ALLOW_REGULAR_USER_FALLBACK",
+      "purpose": "Let non-administrator users use the local password form. Off keeps single sign-on mandatory for the team, which is the point of the deployment.",
+      "type": "boolean",
+      "required": false,
+      "defaultValue": "false",
+      "constraint": "true or false",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ESPOCRM_CONFIG_OIDC_AUTHORIZATION_PKCE",
+      "purpose": "Send a PKCE `code_challenge` (S256) with the authorization request. The product's image default is already true, so declaring it changes nothing today — it pins the contract the platform's probe and client registration assume, and a deployment that silently lost it would be discoverable here instead of in a security review.",
+      "type": "boolean",
+      "required": false,
+      "defaultValue": "true",
+      "constraint": "true or false",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ESPOCRM_CONFIG_OIDC_AUTHORIZATION_PROMPT",
+      "purpose": "Empty is the seamless choice and is *not* the same as omitting the variable: the product always appends `prompt=`, and Keycloak treats an empty value as no requirement — an existing provider session is reused without a screen, and the sign-in form appears when there is none. Omitting the value entirely falls back to the product's own default, `consent`. `login` forces credentials even for an existing session, `select_account` forces the account picker, and `none` must not be used for a launchable product: with no provider session Keycloak answers `login_required`, and the product reports that as a site-URL problem on its callback page instead of asking for a password.",
+      "type": "string",
+      "required": false,
+      "defaultValue": "",
+      "constraint": "empty, login, consent or select_account — `none` only where a missing provider session is acceptable",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ESPOCRM_CONFIG_OIDC_LOGOUT_URL",
+      "purpose": "Optional front-channel logout URL, so signing out of the *product* also ends the provider session. Empty is the correct default: single logout is already provided by the back-channel endpoint the platform registers on this entry's client, and that path needs no variable. A value only works once the identity provider holds a matching post-logout redirect URI for the instance client — it does not today, so `post_logout_redirect_uri={siteUrl}` would be answered with \"Invalid redirect uri\" at sign-out.",
+      "type": "url",
+      "required": false,
+      "defaultValue": null,
+      "constraint": "Absolute URL; may contain {clientId} and {siteUrl}; needs a registered post-logout redirect URI at the provider",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    }
+  ]
+}

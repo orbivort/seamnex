@@ -1,0 +1,133 @@
+{
+  "format": "env-schema/v1",
+  "entryKey": "D11-01",
+  "appliesTo": {
+    "imageRef": "metabase/metabase:v0.65.2"
+  },
+  "variables": [
+    {
+      "name": "MB_SITE_URL",
+      "purpose": "Absolute base URL Metabase uses for every link it generates: password-reset mails, dashboard subscriptions, alert links and the OAuth/redirect material. The image's fallback is the value of the incoming `Host` header, so behind an edge that forwards `Host: <slug>` the generated links point at a host the browser cannot reach on this deployment. Set it to the published route — `<scheme>://<slug>.<SEAMNEX_INGRESS_DOMAIN>:<SEAMNEX_PRODUCT_URL_PORT>`. A wrong value does not stop the sign-in page from loading; it surfaces later as a reset link that fails, which is why it is declared rather than left to the image default.",
+      "type": "url",
+      "required": true,
+      "defaultValue": "http://metabase.localhost:8020",
+      "constraint": "Absolute URL with scheme and host, no trailing slash; must equal the published route",
+      "conditional": "change it together with the route slug — the edge rewrites the host, the application does not",
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "MB_DB_HOST",
+      "purpose": "Host of the PostgreSQL application database. `db` is the service name in the vendored definition (platform/upstream/D11/docker-compose.yml), which resolves on the instance network created for the deployment. Capped at `none` because no operator choice is meaningful here: pointing the application at another host would not create it, and the deployment would fail during first-boot migration.",
+      "type": "string",
+      "required": true,
+      "defaultValue": "db",
+      "constraint": "Service name `db`; changing it requires a different vendored definition",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "none"
+    },
+    {
+      "name": "MB_DB_PORT",
+      "purpose": "Port the PostgreSQL sidecar listens on inside the instance network. `5432` is the image default and the value the sidecar actually binds; it is declared so the pair (host, port) is visible together rather than half of it being implicit.",
+      "type": "integer",
+      "required": true,
+      "defaultValue": "5432",
+      "constraint": "5432 (the sidecar's listening port)",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "none"
+    },
+    {
+      "name": "MB_DB_DBNAME",
+      "purpose": "Name of the application database Metabase creates its schema in. The sidecar creates it on first boot from `POSTGRES_DB`, which the vendored definition sets from this same value, so the two cannot drift.",
+      "type": "string",
+      "required": true,
+      "defaultValue": "metabase",
+      "constraint": "Lower-case identifier; must match POSTGRES_DB, which the definition derives from this value",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "none"
+    },
+    {
+      "name": "MB_DB_USER",
+      "purpose": "Role Metabase connects as. The sidecar creates it on first boot from `POSTGRES_USER`, derived from this value. Read **once**: the sidecar's entrypoint only creates the role while the data directory is empty, so changing it later produces an authentication failure rather than a rename.",
+      "type": "string",
+      "required": true,
+      "defaultValue": "metabase",
+      "constraint": "Lower-case identifier; must match POSTGRES_USER",
+      "conditional": "first boot only — ignored by later reconfigures",
+      "secret": false,
+      "overrideCeiling": "none"
+    },
+    {
+      "name": "MB_DB_PASS",
+      "purpose": "Password of the `MB_DB_USER` role, and of the sidecar's superuser (the definition derives `POSTGRES_PASSWORD` from the same value, so one secret serves both and they cannot disagree). Without it Metabase falls back to the embedded H2 file database, which upstream documents as unsuitable for production and which has no recovery path on this platform. Stored in the platform secret store and injected as an `environment` entry at apply time, so it never enters the render set.",
+      "type": "secret",
+      "required": true,
+      "defaultValue": null,
+      "constraint": "At least 24 characters from [A-Za-z0-9_-]; must not be `metabase` or `postgres`",
+      "rule": {
+        "minLength": 24,
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "patternDescription": "characters from [A-Za-z0-9_-]",
+        "disallow": ["metabase", "postgres"]
+      },
+      "conditional": "read once by the sidecar's entrypoint on first boot; rotating it requires a matching `ALTER ROLE`",
+      "secret": true,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "MB_ENCRYPTION_SECRET_KEY",
+      "purpose": "Key Metabase encrypts the data-source credentials it stores in its own application database with. With no value the credentials are stored in plaintext and the admin panel reports the instance as unconfigured for encryption. It must be stable for the life of the instance: changing it makes every stored credential undecryptable, and Metabase fails the read rather than silently returning garbage. Stored in the platform secret store and injected at apply time.",
+      "type": "secret",
+      "required": true,
+      "defaultValue": null,
+      "constraint": "64 hexadecimal characters (`openssl rand -hex 32`); never rotate on a live instance",
+      "rule": {
+        "minLength": 16,
+        "pattern": "^[0-9a-fA-F]{64}$",
+        "patternDescription": "64 hexadecimal characters (openssl rand -hex 32)"
+      },
+      "conditional": null,
+      "secret": true,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "MB_SESSION_SECRET_KEY",
+      "purpose": "Key Metabase signs the session keys it stores in its application database with. Measured on the first deployment of this entry: with no value the instance boots and logs a warning in its own words — `MB_SESSION_SECRET_KEY is not set; session keys are stored without a signature. Anyone with access to the application database can forge a session and impersonate any user.` Nothing refuses the start, so the gap is invisible unless the log is read. Stored in the platform secret store and injected at apply time. Setting or changing it invalidates every active session, which is acceptable on a first deployment and is why it is supplied before the operator ever signs in.",
+      "type": "secret",
+      "required": true,
+      "defaultValue": null,
+      "constraint": "At least 32 characters (`openssl rand -hex 32`); never rotate on a live instance without accepting a global sign-out",
+      "rule": {
+        "minLength": 32
+      },
+      "conditional": null,
+      "secret": true,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "MB_ANON_TRACKING_ENABLED",
+      "purpose": "Whether the instance sends usage statistics to Metabase. `false` is the only defensible default on a platform that records a privacy posture for each product: the free edition enables the ping unless it is switched off, and it carries deployment identifiers out of the estate. Turn it on only with a recorded decision.",
+      "type": "boolean",
+      "required": false,
+      "defaultValue": "false",
+      "constraint": "true | false",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "MB_LOAD_SAMPLE_CONTENT",
+      "purpose": "Whether first boot installs Metabase's demo content: an `Examples` database plus the ~40 saved questions and sample dashboards that go with it. Measured on the first deployment of this entry: the image default loaded 39 cards and a sample database into an otherwise empty instance, which a reporting team then has to tell apart from its own work — and which points a live instance at a demo dataset. Read **once**, while the instance is being created; turning it off later neither removes nor hides content that already exists.",
+      "type": "boolean",
+      "required": false,
+      "defaultValue": "false",
+      "constraint": "true | false",
+      "conditional": "first boot only — ignored by later reconfigures",
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    }
+  ]
+}

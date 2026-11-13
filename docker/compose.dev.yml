@@ -1,0 +1,897 @@
+# Development topology (deliverable 1.8).
+#
+# It reproduces the production *shape* — one edge, one control plane, stateful engines on an
+# internal network — without pretending to reproduce production hardening. Phase 6 owns the
+# production compose file, digest pinning and resource limits.
+#
+#   pnpm dev:stack                                  (scripts/compose.mjs passes --env-file .env)
+#   pnpm dev:stack --profile observability
+#
+# Invoking `docker compose` directly means passing `--env-file ../.env` yourself: compose would
+# otherwise look for `docker/.env` and silently ignore every override in the root file.
+#
+# Every port is published on localhost only.
+#
+# Every image is pinned to a full version, never a bare major and never `latest`: a floating tag
+# makes "it worked yesterday" unreproducible, and NFR-4.15 rejects unpinned tags in anything the
+# platform runs. Bumping a pin is a reviewed diff, and `pnpm check:images` proves every reference
+# resolves before the diff is merged (it asks each registry for the manifest and prints the digest).
+#
+# Pins below were verified against their registries on 2026-10-23. Two of them are paired: Keycloak
+# and keycloak-config-cli must stay on the same Keycloak patch, because the CLI is compiled against
+# one and refuses a mismatch at start-up. Bump them in the same commit, never one alone.
+
+name: seamnex-dev
+
+# Containers log to json-file by default, which grows without limit on a developer machine and
+# silently fills the disk during a long debugging session. Bound it once, for every service.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: '10m'
+    max-file: '3'
+
+# One control plane, several roles. These anchors hold the environment and mounts every API-role
+# service needs, so `api`, `deploy-worker` and `status-sampler` cannot drift apart. YAML merges are
+# shallow, so a service that needs a different value overrides exactly that key (`SEAMNEX_ROLE`).
+x-api-environment: &api-environment
+  NODE_ENV: development
+  PORT: '8080'
+  DATABASE_URL: postgres://${POSTGRES_USER:-seamnex}:${POSTGRES_PASSWORD:-seamnex_dev_password}@postgres:5432/${POSTGRES_DB:-seamnex_dev}
+  REDIS_URL: redis://redis:6379
+  SEAMNEX_ROOT_KEY_FILE: /run/seamnex/seamnex-root-key
+  # A bind mount on Docker Desktop reports 0777 for a file that is 0600 on disk, so the ownership
+  # check would refuse a key that is actually correct. Off here, on everywhere else.
+  SEAMNEX_ROOT_KEY_STRICT_MODE: '0'
+  # The dev stack signs in against the realm it ships (4D). `stub` remains available for a laptop
+  # with no Keycloak: set AUTH_PROVIDER=stub in the root .env and restart the API role.
+  AUTH_PROVIDER: ${AUTH_PROVIDER:-oidc}
+  # Two addresses, one realm. The browser is sent to the issuer; this container reaches the same
+  # realm at `keycloak:8080`, because `KC_HOSTNAME` below pins `iss` to the public host. Without the
+  # split every token fails with "Invalid token issuer" from inside the network.
+  AUTH_ISSUER_URL: ${AUTH_ISSUER_URL:-http://localhost:8082/realms/seamnex}
+  AUTH_INTERNAL_URL: ${AUTH_INTERNAL_URL:-http://keycloak:8080/realms/seamnex}
+  AUTH_CLIENT_ID: ${AUTH_CLIENT_ID:-seamnex-platform-ui}
+  AUTH_SCOPES: ${AUTH_SCOPES:-openid profile email groups}
+  APP_ORIGINS: http://localhost:5173,http://localhost:5174,http://localhost:8080
+  SESSION_COOKIE_SECURE: '0'
+  # Traefik is the only way into these containers on the dev network, so the edge is a trusted
+  # proxy and `request.ip` is the client's address (which is what the sign-in rate limit keys on).
+  # Never `1` on a host where the API port is reachable directly: a client would then choose its
+  # own bucket by sending X-Forwarded-For (ADR-BE-13).
+  TRUST_PROXY: '1'
+  # No SESSION_COOKIE_DOMAIN here on purpose. Products publish on `<slug>.localhost`, and Chromium
+  # stores a `Domain=localhost` cookie for the host `localhost` only — it is never sent to
+  # `shop.localhost`. The launch ticket (`<product>/__seamnex/session`) plants the session cookie on each
+  # product's own host instead, which works for any hostname scheme. Set the variable only where
+  # portal and products already share a registrable parent.
+  LOG_LEVEL: info
+  # Phase 4 adapters (ADR-BE-12).
+  SEAMNEX_ADAPTERS_MODE: real
+  DOCKER_HOST: tcp://docker-socket-proxy:2375
+  SEAMNEX_DOCKER_HOST: tcp://docker-socket-proxy:2375
+  # How long `verify` waits for containers *and* an HTTP answer. The 300 s default fits a product
+  # that starts in seconds; a first ERPNext install migrates a few hundred doctypes and does not.
+  # Global until the catalog can carry a per-entry override (docs/catalog-and-deployment-operations.md
+  # §8.2 O9), so it is a deployment-wide setting, not a per-product one.
+  SEAMNEX_VERIFY_TIMEOUT_MS: ${SEAMNEX_VERIFY_TIMEOUT_MS:-300000}
+  SEAMNEX_INSTANCE_DATA_DIR: /var/lib/seamnex/instances
+  # `localhost` is the only suffix a browser resolves to loopback without a hosts entry
+  # (`<slug>.localhost`, RFC 6761), so a fresh checkout reaches a deployed product with no setup step.
+  SEAMNEX_INGRESS_DOMAIN: ${SEAMNEX_INGRESS_DOMAIN:-localhost}
+  # The dev edge terminates plain HTTP on 127.0.0.1:8020 — there is no ACME certificate on a
+  # laptop — so the launch links the portal renders have to say exactly that. A hardcoded
+  # `https://<host>` pointed the browser at 443, where nothing is listening.
+  SEAMNEX_PRODUCT_URL_SCHEME: ${SEAMNEX_PRODUCT_URL_SCHEME:-http}
+  SEAMNEX_PRODUCT_URL_PORT: ${SEAMNEX_PRODUCT_URL_PORT:-8020}
+  SEAMNEX_TRAEFIK_DYNAMIC_DIR: /etc/traefik/dynamic
+  # The edge joins each instance network when a route is published, so `http://<slug>:<port>` in the
+  # router resolves. The name is the compose container name, which is stable for this file.
+  SEAMNEX_EDGE_CONTAINER: ${SEAMNEX_EDGE_CONTAINER:-seamnex-dev-traefik-1}
+  # ADR-BE-22. Where Traefik sends `/__seamnex/session`. Pointing it at the relay role is the whole
+  # wiring change; set it back to `http://auth-gateway:8090` to run the stack without the relay, and
+  # the launch hop behaves exactly as it did before.
+  #
+  # The fallbacks below apply only when a name is absent. The root `.env` — written from
+  # `.env.example` on first run — carries all three, and Compose interpolates it, so the example is
+  # the effective value and this file must not disagree with it (a relay meant to be off that the
+  # example leaves on, or the reverse, is silent: launchers just get the product's login page).
+  SEAMNEX_BOOTSTRAP_URL: ${SEAMNEX_BOOTSTRAP_URL:-http://relay:8091}
+  SEAMNEX_RELAY_ENABLED: ${SEAMNEX_RELAY_ENABLED:-true}
+  SEAMNEX_RELAY_PORT: ${SEAMNEX_RELAY_PORT:-8091}
+  # The allow-list and its tuning knobs. They have to be forwarded: an entry named in `.env` that never
+  # reaches the process is indistinguishable from "no relay", and that is how a configured product
+  # silently kept its own login form (2026-11-09).
+  SEAMNEX_RELAY_ENTRY_KEYS: ${SEAMNEX_RELAY_ENTRY_KEYS:-D09-01}
+  SEAMNEX_RELAY_HTTP_TIMEOUT_MS: ${SEAMNEX_RELAY_HTTP_TIMEOUT_MS:-8000}
+  SEAMNEX_RELAY_LOCK_SECONDS: ${SEAMNEX_RELAY_LOCK_SECONDS:-60}
+  SEAMNEX_RELAY_SESSION_TTL_SECONDS: ${SEAMNEX_RELAY_SESSION_TTL_SECONDS:-1800}
+  SEAMNEX_RELAY_ROTATION_DAYS: ${SEAMNEX_RELAY_ROTATION_DAYS:-30}
+  SEAMNEX_RELAY_SWEEP_INTERVAL_MS: ${SEAMNEX_RELAY_SWEEP_INTERVAL_MS:-300000}
+  SEAMNEX_RELAY_ADMIN_SECRET_NAME: ${SEAMNEX_RELAY_ADMIN_SECRET_NAME:-product_api_token}
+  # A role joins *itself* to each instance network before its first product call — the relay for
+  # sign-in, the scheduler for provisioning — because one fixed name can only be right for one of them.
+  # The product is reachable as `http://<slug>:<port>` on that network only, and a bare-IP request
+  # reaches Apache's placeholder vhost, which answers 200. Set this only where a sidecar makes the
+  # calls; empty means "the caller joins itself".
+  SEAMNEX_RELAY_CONTAINER: ${SEAMNEX_RELAY_CONTAINER:-}
+  # Egress (4E.4, AD-10). Compiled nodes call the broker by its service name, because that is the one
+  # address both sides can resolve: n8n is on this network, and the product's alias only exists on the
+  # instance network. The port is shared so a moved listener also moves the value the compiler writes.
+  SEAMNEX_BROKER_URL: ${SEAMNEX_BROKER_URL:-http://broker-proxy:8092}
+  SEAMNEX_BROKER_PORT: ${SEAMNEX_BROKER_PORT:-8092}
+  # The IdP joins each instance network when a client is registered: the product makes the token,
+  # JWKS and userinfo calls from its own network, where a control-network-only Keycloak is not
+  # resolvable. The name is the compose container name, stable for this file.
+  SEAMNEX_IDP_CONTAINER: ${SEAMNEX_IDP_CONTAINER:-seamnex-dev-keycloak-1}
+  # A container joined to a second network is resolvable there by its container name only, not by
+  # its compose service name. The product is configured with `keycloak:8080`, so the join carries
+  # that name as an alias.
+  SEAMNEX_IDP_ALIAS: ${SEAMNEX_IDP_ALIAS:-keycloak}
+  SEAMNEX_CATALOG_REPO_PATH: /var/lib/seamnex/catalog-repo
+  # Vendored upstream trees. An entry with `<SEAMNEX_SOURCE_MIRROR_DIR>/<entryKey>/` deploys without a
+  # clone, which is the only way a host with no route to the git server can deploy at all.
+  #
+  # Literal, not `${SEAMNEX_SOURCE_MIRROR_DIR}`: the root `.env` carries the *host* path
+  # (`./platform/upstream`) for `pnpm dev`, and that path does not exist inside this container.
+  SEAMNEX_SOURCE_MIRROR_DIR: /var/lib/seamnex/upstream
+  SEAMNEX_KEYCLOAK_ADMIN_URL: http://keycloak:8080
+  # `${SEAMNEX_…}` and not the bare name: this is what `.env.example` documents and what the seed
+  # and `pnpm kc:admin` read, so one spelling reaches the container *and* the host scripts.
+  SEAMNEX_KEYCLOAK_REALM: ${SEAMNEX_KEYCLOAK_REALM:-seamnex}
+  # The platform's own admin client (4D.1), provisioned by `pnpm kc:admin`. A file path, never an
+  # inline value: the secret is generated once into `temp/` and mounted read-only.
+  SEAMNEX_KEYCLOAK_ADMIN_CLIENT_SECRET_FILE: /run/seamnex/kc-admin-client-secret
+  # 4D.5 — the SSO check signs in as this realm test identity so it exercises the product's real
+  # login instead of merely proving the realm answers. Empty means the check stops after the
+  # authorization request and says so in its detail line.
+  SEAMNEX_SSO_PROBE_USERNAME: ${SEAMNEX_SSO_PROBE_USERNAME:-dev-user}
+  SEAMNEX_SSO_PROBE_PASSWORD_FILE: /run/seamnex/sso-probe-password
+  SEAMNEX_N8N_URL: http://n8n:5678
+  SEAMNEX_N8N_API_KEY: ${SEAMNEX_N8N_API_KEY:-}
+  # Literal, not `${SEAMNEX_MAILPIT_URL}`: the root `.env` carries the *host* address
+  # (`localhost:8025`) for `pnpm dev`, and inside this container that address is the API itself, so
+  # every alert mail would be sent to a closed port and the send would fail.
+  SEAMNEX_MAILPIT_URL: http://mailpit:8025
+  S3_ENDPOINT: http://s3:9000
+  S3_ACCESS_KEY: ${S3_ACCESS_KEY:-seamnex_s3}
+  S3_SECRET_KEY: ${S3_SECRET_KEY:-seamnex_s3_dev_password}
+  S3_BUCKET: ${S3_BUCKET:-seamnex-backups}
+  S3_REGION: ${S3_REGION:-us-east-1}
+  SEAMNEX_BACKUP_TMP_DIR: /var/lib/seamnex/backups
+  SEAMNEX_AGE_RECIPIENT: ${SEAMNEX_AGE_RECIPIENT:-}
+  SEAMNEX_AGE_IDENTITY_FILE: /var/lib/seamnex/age/identity
+
+x-api-volumes: &api-volumes
+  - ../temp/seamnex-root-key:/run/seamnex/seamnex-root-key:ro
+  # Both files are created by `scripts/lib/kc-admin.mjs` before `up`: a bind mount of a missing file
+  # is created as a directory by Docker, which is how the root key once failed to load.
+  - ../temp/kc-admin-client-secret:/run/seamnex/kc-admin-client-secret:ro
+  - ../temp/sso-probe-password:/run/seamnex/sso-probe-password:ro
+  - ../temp/instances:/var/lib/seamnex/instances
+  - ../temp/backups:/var/lib/seamnex/backups
+  - ../temp/age:/var/lib/seamnex/age
+  # Read-write: 4A.8 commits `instances/<slug>/instance.yaml` here before a job may apply. The
+  # container runs as `node` (uid 1000) while the mount root is owned by the host, so the
+  # `instances/` subdirectory is created by `scripts/dev.mjs` and `scripts/compose.mjs`
+  # (`scripts/lib/runtime-dirs.mjs`) — creating it from inside the container fails with EACCES and
+  # the deployment is refused with REPOSITORY_UNAVAILABLE. The same preparation covers `instances`,
+  # `backups`, `age` and `traefik/dynamic`, which the deploy job and the route projection write to.
+  - ../temp/catalog-repo:/var/lib/seamnex/catalog-repo
+  # Vendored upstream trees are reviewed content, so they are mounted read-only: the resolver copies
+  # from them and never writes to them.
+  - ../platform/upstream:/var/lib/seamnex/upstream:ro
+  # Read-write: the route projection is the only writer of generated router files (4D.2).
+  - ./traefik/dynamic:/etc/traefik/dynamic
+
+networks:
+  seamnex-control:
+    name: seamnex-control
+    driver: bridge
+  seamnex-obs:
+    name: seamnex-obs
+    driver: bridge
+
+volumes:
+  pgdata:
+  redisdata:
+  s3data:
+  grafanadata:
+  lokidata:
+  promdata:
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-seamnex}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-seamnex_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-seamnex_dev}
+      # The three databases live in one cluster with separate roles (design §4.2).
+      # No POSTGRES_INITDB_ARGS: PG 18 enables data checksums in initdb by default, so
+      # --data-checksums would only restate the default.
+    ports:
+      # The host port is overridable because a native PostgreSQL install already holding 5432 is
+      # a common developer-machine collision. Keep DATABASE_URL in step (see .env.example).
+      - '127.0.0.1:${SEAMNEX_PG_HOST_PORT:-5432}:5432'
+    volumes:
+      # postgres:18 keeps PGDATA in a major-version subdirectory, so the mount is the parent
+      # (/var/lib/postgresql); mounting /var/lib/postgresql/data makes the entrypoint refuse to start.
+      - pgdata:/var/lib/postgresql
+      - ./postgres/init-dev.sql:/docker-entrypoint-initdb.d/10-init-dev.sql:ro
+    networks: [seamnex-control]
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-seamnex} -d ${POSTGRES_DB:-seamnex_dev}']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    # A checkpoint needs time to finish; the default 10 s SIGKILL loses the tail of the WAL.
+    stop_grace_period: 30s
+    security_opt: [no-new-privileges:true]
+    logging: *default-logging
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ['redis-server', '--appendonly', 'yes', '--maxmemory-policy', 'noeviction']
+    ports:
+      - '127.0.0.1:6379:6379'
+    volumes:
+      - redisdata:/data
+    networks: [seamnex-control]
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    # AOF fsync on shutdown: give it room rather than risk a truncated append-only file.
+    stop_grace_period: 20s
+    security_opt: [no-new-privileges:true]
+    logging: *default-logging
+    restart: unless-stopped
+
+  keycloak:
+    # 26.0.5, matched to the CLI tag below. Realm-as-code is applied by keycloak-config-cli
+    # (deliverable 3.1); `--import-realm` is deliberately not used, because it imports once and then
+    # silently ignores later edits. The CLI is compiled against one Keycloak version and checks it at
+    # start-up, so these two pins move together or not at all.
+    #
+    # The realm import now exits 0. Two defects were fixed together (ADR-BE-14):
+    #   - sub-flow references carried `flowAlias` without `authenticatorFlow: true`, which is not
+    #     the export format the CLI parses, so `seamnex-browser` silently lost its OTP sub-flows — the
+    #     administrator and auditor roles were signing in with a password alone;
+    #   - `realm-dev-users.json` sorted *before* `realm.json`, so users referencing `/seamnex-admins`
+    #     were applied before the group existed and the whole import aborted. The users file is now
+    #     `users-dev.json`, which sorts after the realm.
+    image: quay.io/keycloak/keycloak:26.0.5
+    command: ['start-dev', '--http-port=8080']
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/seamnex_keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-keycloak_dev_password}
+      KC_HEALTH_ENABLED: 'true'
+      # One issuer, whatever host the request arrives on. The browser reaches Keycloak at
+      # localhost:8082 while a product reaches it at keycloak:8080 from its own network; without a
+      # fixed hostname Keycloak stamps the *request* host into `iss`, and the product's userinfo call
+      # is refused with "Invalid token issuer. Expected 'http://keycloak:8080/realms/seamnex'".
+      KC_HOSTNAME: http://localhost:8082
+    ports:
+      - '127.0.0.1:8082:8080'
+    networks: [seamnex-control]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # 26.x serves health and metrics on the *management* port (9000), not the HTTP port. Probing
+      # 8080 only proves the socket is bound: it answered while the schema was still migrating, so
+      # keycloak-config-cli started against a half-built server. The management port does not answer
+      # until the server can actually serve. The image ships bash, so /dev/tcp is the cheapest probe.
+      test: ['CMD-SHELL', 'exec 3<>/dev/tcp/127.0.0.1/9000']
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      # Liquibase migrations on a cold database are the slow part; wait before counting failures.
+      start_period: 60s
+    stop_grace_period: 30s
+    security_opt: [no-new-privileges:true]
+    logging: *default-logging
+    restart: unless-stopped
+
+  keycloak-config-cli:
+    # Applies platform/realm/*.json on every `compose up`, so a realm change is a reviewed diff
+    # rather than a click in the admin console (deliverable 3.1).
+    # Tag grammar is <cli version>-<full Keycloak version>, and the suffix must be a Keycloak version
+    # the CLI was actually built against: 6.4.0 shipped 26.0.5 and 26.1.0 only, so `-26.0.0` (the
+    # previous reference) never resolved. 26.0.5 matches the server above exactly.
+    image: adorsys/keycloak-config-cli:6.4.0-26.0.5
+    environment:
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_USER: ${KEYCLOAK_ADMIN:-admin}
+      KEYCLOAK_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KEYCLOAK_AVAILABILITYCHECK_ENABLED: 'true'
+      KEYCLOAK_AVAILABILITYCHECK_TIMEOUT: 120s
+      IMPORT_FILES_LOCATIONS: '/config/*'
+      IMPORT_VARSUBSTITUTION_ENABLED: 'false'
+    volumes:
+      - ../platform/realm:/config:ro
+    networks: [seamnex-control]
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    security_opt: [no-new-privileges:true]
+    logging: *default-logging
+    # One-shot job: a retry loop would hide a realm that fails to apply.
+    restart: 'no'
+
+  traefik:
+    image: traefik:v3.3
+    command:
+      - --configFile=/etc/traefik/traefik.yml
+    ports:
+      - '127.0.0.1:8020:80'
+      - '127.0.0.1:8081:8080'
+    volumes:
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik/dynamic:/etc/traefik/dynamic:ro
+    networks: [seamnex-control]
+    healthcheck:
+      # `traefik healthcheck` asks the API for /ping, so the router tree is proven to be loaded;
+      # the static config enables `ping` on the traefik entrypoint (8080).
+      test: ['CMD', 'traefik', 'healthcheck', '--ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 20s
+    security_opt: [no-new-privileges:true]
+    logging: *default-logging
+    restart: unless-stopped
+
+  n8n:
+    # A bare `1` is not a published tag: n8n ships full versions plus `latest`/`next`/`beta`, so
+    # `n8nio/n8n:1` failed the pull outright. 1.x is still receiving releases, and the design
+    # baseline names n8n 1.x, so this stays on the 1 line rather than jumping to 2.x — that is a
+    # migration decision (workflow format, queue mode), not a tag bump.
+    image: n8nio/n8n:1.123.87
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: '5432'
+      DB_POSTGRESDB_DATABASE: seamnex_n8n
+      DB_POSTGRESDB_USER: n8n
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD:-n8n_dev_password}
+      # Queue mode (4E.4): the main process serves the API and the editor, the workers execute.
+      # Queue mode without Redis silently falls back to regular execution, which hides a
+      # misconfiguration; the worker service below is what proves the broker path is real.
+      EXECUTIONS_MODE: queue
+      QUEUE_BULL_REDIS_HOST: redis
+      QUEUE_BULL_REDIS_PORT: '6379'
+      QUEUE_HEALTH_CHECK_ACTIVE: 'true'
+      N8N_ENCRYPTION_KEY: dev-only-not-a-production-key
+      N8N_DIAGNOSTICS_ENABLED: 'false'
+      N8N_USER_MANAGEMENT_DISABLED: 'true'
+      # The platform's compiler owns workflow definitions; the editor is not an authoring surface.
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: 'true'
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: 'false'
+    ports:
+      - '127.0.0.1:5678:5678'
+    networks: [seamnex-control]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # /healthz answers 200 only once the DB migration and the task runner are up.
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:5678/healthz >/dev/null 2>&1 || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      # A cold start migrates its own schema; that is measured in tens of seconds, not seconds.
+      start_period: 60s
+    stop_grace_period: 30s
+    security_opt: [no-new-privileges:true]
+    logging: *default-logging
+    restart: unless-stopped
+
+  n8n-worker:
+    # Two workers, matching design §6.3's execution concurrency budget. Same image and env as the
+    # main process, different command: a worker never serves HTTP and never runs a migration.
+    image: n8nio/n8n:1.123.87
+    command: ['worker', '--concurrency=2']
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: '5432'
+      DB_POSTGRESDB_DATABASE: seamnex_n8n
+      DB_POSTGRESDB_USER: n8n
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD:-n8n_dev_password}
+      EXECUTIONS_MODE: queue
+      QUEUE_BULL_REDIS_HOST: redis
+      QUEUE_BULL_REDIS_PORT: '6379'
+      QUEUE_HEALTH_CHECK_ACTIVE: 'true'
+      N8N_ENCRYPTION_KEY: dev-only-not-a-production-key
+      N8N_DIAGNOSTICS_ENABLED: 'false'
+      N8N_USER_MANAGEMENT_DISABLED: 'true'
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: 'true'
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: 'false'
+    networks: [seamnex-control]
+    depends_on:
+      n8n:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    stop_grace_period: 30s
+    security_opt: [no-new-privileges:true]
+    logging: *default-logging
+    restart: unless-stopped
+
+  s3:
+    # Dev-only stand-in for the off-host backup target (design AD-16, DQ-1: S3-compatible first).
+    # VersityGW replaces MinIO because minio/minio was withdrawn from Docker Hub: every tag,
+    # `latest` included, answers `not found`, and the Quay mirror answers 401. No pin could fix
+    # that, so the engine changed instead. See ADR-BE-11.
+    #
+    # Credentials come from the environment, not a mounted config file, so there is one source of
+    # truth for them (.env.example) and none of the drift a second config file invites. The gateway
+    # rejects anonymous requests: a public backup bucket is not a dev convenience worth having.
+    image: versity/versitygw:v1.10.0
+    # POSIX backend on the named volume; the endpoint keeps MinIO's port so host tooling, the
+    # README and any future `S3_ENDPOINT` value did not have to move.
+    command: ['--port', ':9000', 'posix', '/data']
+    environment:
+      ROOT_ACCESS_KEY: ${S3_ACCESS_KEY:-seamnex_s3}
+      ROOT_SECRET_KEY: ${S3_SECRET_KEY:-seamnex_s3_dev_password}
+    ports:
+      - '127.0.0.1:9000:9000'
+    volumes:
+      - s3data:/data
+    networks: [seamnex-control]
+    # Liveness only: the gateway exposes no unauthenticated health endpoint, so this proves the
+    # listener answers and nothing more. The S3 contract itself is asserted by `pnpm check:s3`,
+    # which is where a protocol-level claim belongs.
+    healthcheck:
+      test: ['CMD-SHELL', 'nc -z 127.0.0.1 9000']
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    stop_grace_period: 20s
+    security_opt: [no-new-privileges:true]
+    logging: *default-logging
+    restart: unless-stopped
+
+  mailpit:
+    # Versioned, not `latest`: a mail catcher that changes under the stack is a debugging variable
+    # nobody needs, and `/readyz` is version-dependent surface.
+    image: axllent/mailpit:v1.32.0
+    ports:
+      - '127.0.0.1:8025:8025'
+      - '127.0.0.1:1025:1025'
+    networks: [seamnex-control]
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:8025/readyz >/dev/null 2>&1 || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    security_opt: [no-new-privileges:true]
+    logging: *default-logging
+    restart: unless-stopped
+
+  docker-socket-proxy:
+    # The only container that sees the Docker socket (4A.1). The API talks to the Engine API through
+    # this allow-list: containers, images, networks and volumes, POST for mutation, EXEC off.
+    #
+    # `EXEC=0` is not a convenience: container logs are read from the logs endpoint, never by running
+    # a shell inside a product. `BUILD=1` is required because BuildKit is driven by the CLI, which
+    # reaches the daemon through the same proxy.
+    image: tecnativa/docker-socket-proxy:0.3.0
+    environment:
+      CONTAINERS: '1'
+      IMAGES: '1'
+      NETWORKS: '1'
+      VOLUMES: '1'
+      SERVICES: '0'
+      TASKS: '0'
+      EXEC: '0'
+      POST: '1'
+      BUILD: '1'
+      INFO: '1'
+      VERSION: '1'
+      PING: '1'
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [seamnex-control]
+    healthcheck:
+      # The proxy answers /_ping only once it can reach the daemon; probing the port alone would
+      # report healthy with a dead socket behind it.
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:2375/_ping >/dev/null 2>&1 || exit 1']
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    security_opt: [no-new-privileges:true]
+    logging: *default-logging
+    restart: unless-stopped
+
+  # The control plane runs as nine process roles over one module graph, so every role needs the same
+  # environment and the same mounts. Declaring that once here is what keeps `deploy-worker` and
+  # `status-sampler` from drifting away from `api`: an anchor is a single source, a copy is a bug
+  # waiting for the next change.
+  #
+  # They are separate *services*, not extra flags on `api`, because the roles own different lifecycles
+  # (the worker consumes the queue, the sampler runs a timer) and neither may be restarted whenever
+  # the HTTP surface is.
+  api:
+    image: seamnex-dev-api
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+      # The Alpine mirror is a property of the *build host*, so it travels as a build argument read
+      # from `.env` (see `.env.example`) and not as a service variable: the image must not carry a
+      # mirror into runtime config. Empty keeps the CDN, which is what CI uses.
+      args:
+        APK_MIRROR: ${APK_MIRROR:-}
+        NPM_REGISTRY: ${NPM_REGISTRY:-}
+    # The deploy engine applies compose projects and builds images through the CLI, so the binary
+    # resolves the daemon from the same variable the SDK uses.
+    environment:
+      <<: *api-environment
+      SEAMNEX_ROLE: api
+    volumes: *api-volumes
+    ports:
+      - '127.0.0.1:8080:8080'
+    networks: [seamnex-control]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      docker-socket-proxy:
+        condition: service_healthy
+    healthcheck:
+      test:
+        ['CMD-SHELL', 'wget -qO- http://127.0.0.1:8080/api/v1/healthz >/dev/null 2>&1 || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      # tsx compiles the TypeScript sources on the first import; `--wait` must not count that as a
+      # failing probe.
+      start_period: 30s
+    # Graceful shutdown drains in-flight requests; SIGKILL at 10 s cuts a job mid-step.
+    stop_grace_period: 30s
+    security_opt: [no-new-privileges:true]
+    logging: *default-logging
+    restart: unless-stopped
+
+  # `POST /instances` answers 202 and enqueues; nothing is deployed until this role consumes the job.
+  # Without it every deployment sits at "queued" in the job list and the console reports a job that
+  # never moves — which looks like a UI defect and is really a missing process.
+  deploy-worker:
+    image: seamnex-dev-api
+    # The image's default CMD is `main-api.ts`; a non-HTTP role enters through `roles/start.ts`,
+    # which resolves `SEAMNEX_ROLE` and starts only the work that role owns (ADR-BE-03). Without this
+    # override the "worker" was a second API that listened on a port and consumed nothing, and every
+    # deployment sat in `queued` forever.
+    command: ['node', '--import', 'tsx', 'src/roles/start.ts']
+    environment:
+      <<: *api-environment
+      SEAMNEX_ROLE: deploy-worker
+    volumes: *api-volumes
+    networks: [seamnex-control]
+    depends_on:
+      api:
+        condition: service_healthy
+      docker-socket-proxy:
+        condition: service_healthy
+    # No HTTP probe, and the image's built-in check is disabled rather than inherited: it exits 0 for
+    # every non-api role, so it would report "healthy" for a worker that consumes nothing. A green
+    # status that cannot fail is worse than none — the job list (a job stuck in `queued`) and
+    # `SEAMNEX_ROLE=deploy-worker` in the log stream are the honest signals.
+    healthcheck:
+      disable: true
+    stop_grace_period: 30s
+    security_opt: [no-new-privileges:true]
+    logging: *default-logging
+    restart: unless-stopped
+
+  # The only caller of `OutboxService.dispatchBatch` (AD-18). Without this role an event is written
+  # durably and never consumed: three `registry.rebuild` rows sat at `attempts = 0`, `registry_snapshot`
+  # stayed empty while six products were deployed, and `/registry` rendered "No registry entry
+  # matches" — a missing process that reads as an empty platform. Every future outbox consumer would
+  # be stranded the same way.
+  scheduler:
+    image: seamnex-dev-api
+    command: ['node', '--import', 'tsx', 'src/roles/start.ts']
+    environment:
+      <<: *api-environment
+      SEAMNEX_ROLE: scheduler
+    volumes: *api-volumes
+    networks: [seamnex-control]
+    depends_on:
+      api:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+    stop_grace_period: 30s
+    security_opt: [no-new-privileges:true]
+    logging: *default-logging
+    restart: unless-stopped
+
+  # Samples container state and readiness every 30 s and records the capacity snapshot. Without it an
+  # instance's derived state never leaves its last writer, and `GET /capacity` has no history.
+  status-sampler:
+    image: seamnex-dev-api
+    command: ['node', '--import', 'tsx', 'src/roles/start.ts']
+    environment:
+      <<: *api-environment
+      SEAMNEX_ROLE: status-sampler
+    healthcheck:
+      disable: true
+    volumes: *api-volumes
+    networks: [seamnex-control]
+    depends_on:
+      api:
+        condition: service_healthy
+      docker-socket-proxy:
+        condition: service_healthy
+    stop_grace_period: 20s
+    security_opt: [no-new-privileges:true]
+    logging: *default-logging
+    restart: unless-stopped
+
+  # Materialises entitlements from directory groups (3.6). Without this role, a deployment creates
+  # containers and a route but no membership: the portal launcher can only show the seeded
+  # stand-ins, which are by definition not running — the reported symptom of an "Unavailable"
+  # product next to a healthy container. The cycle is idempotent and its interval is
+  # `SEAMNEX_SYNC_INTERVAL_MS`, so a deployment becomes visible within one cycle of being ready.
+  sync-worker:
+    image: seamnex-dev-api
+    command: ['node', '--import', 'tsx', 'src/roles/start.ts']
+    environment:
+      <<: *api-environment
+      SEAMNEX_ROLE: sync-worker
+    healthcheck:
+      # No HTTP surface, and the image's built-in probe exits 0 for every non-api role.
+      disable: true
+    volumes: *api-volumes
+    networks: [seamnex-control]
+    depends_on:
+      api:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    stop_grace_period: 20s
+    security_opt: [no-new-privileges:true]
+    logging: *default-logging
+    restart: unless-stopped
+
+  # The edge's forward-auth listener (4D.4). `instance_route.auth_mode` projects
+  # `http://auth-gateway:8090/verify` into every `fa_*` router, and this service is that name: with
+  # no container behind it, Traefik cannot resolve the middleware target and answers 500 — which
+  # reads as a platform outage rather than "not signed in". The role itself is `main-auth-gateway.ts`;
+  # it is a listener, never an `/api/v1` surface.
+  auth-gateway:
+    image: seamnex-dev-api
+    command: ['node', '--import', 'tsx', 'src/roles/start.ts']
+    environment:
+      <<: *api-environment
+      SEAMNEX_ROLE: auth-gateway
+    volumes: *api-volumes
+    networks: [seamnex-control]
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:8090/healthz >/dev/null 2>&1 || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    security_opt: [no-new-privileges:true]
+    logging: *default-logging
+    restart: unless-stopped
+
+  # The sign-in relay (ADR-BE-22). It answers the same `/__seamnex/session` the gateway answers,
+  # with one extra step: it signs the browser in to OpenProject's own form using a per-user account
+  # the platform provisioned, then plants both cookies. `SEAMNEX_BOOTSTRAP_URL` above is what makes
+  # the edge choose this listener instead of the gateway.
+  #
+  # It is a separate process, not a branch in the gateway, because it holds credentials and makes
+  # outbound calls — and because the gateway answers every gated request on the fleet, which is not
+  # a place to put a form login.
+  relay:
+    image: seamnex-dev-api
+    command: ['node', '--import', 'tsx', 'src/roles/start.ts']
+    environment:
+      <<: *api-environment
+      SEAMNEX_ROLE: relay
+    volumes: *api-volumes
+    networks: [seamnex-control]
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      # The port comes from the same variable the listener reads, so moving the relay off 8091 does
+      # not leave a probe pointed at a closed socket (which reads as a dead role, not a moved one).
+      test:
+        [
+          'CMD-SHELL',
+          'wget -qO- http://127.0.0.1:${SEAMNEX_RELAY_PORT:-8091}/healthz >/dev/null 2>&1 || exit 1',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    security_opt: [no-new-privileges:true]
+    logging: *default-logging
+    restart: unless-stopped
+
+  # The broker's outbound hop (4E.4, AD-10). Every compiled node addresses this listener, never a
+  # product: n8n sits on `seamnex-control` and cannot resolve a product's alias, and the credential a
+  # call needs is held here rather than in the workflow definition. It joins the instance network on
+  # first use (the relay's `ensureInstanceJoined`), so it must be able to reach the Docker API.
+  broker-proxy:
+    image: seamnex-dev-api
+    command: ['node', '--import', 'tsx', 'src/roles/start.ts']
+    environment:
+      <<: *api-environment
+      SEAMNEX_ROLE: broker-proxy
+      # The role joins itself; the relay's variable is not reused, because a sidecar that only serves
+      # sign-in would leave this listener dialling a product from a network it never joined.
+      SEAMNEX_RELAY_CONTAINER: ''
+    volumes: *api-volumes
+    networks: [seamnex-control]
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'wget -qO- http://127.0.0.1:${SEAMNEX_BROKER_PORT:-8092}/healthz >/dev/null 2>&1 || exit 1',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    security_opt: [no-new-privileges:true]
+    logging: *default-logging
+    restart: unless-stopped
+
+  # --- Observability (opt-in: --profile observability) -----------------------------------
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    profiles: [observability]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+    ports:
+      - '127.0.0.1:9090:9090'
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - promdata:/prometheus
+    networks: [seamnex-control, seamnex-obs]
+    healthcheck:
+      test: ['CMD-SHELL', 'wget --spider -q http://127.0.0.1:9090/-/healthy || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    stop_grace_period: 30s
+    security_opt: [no-new-privileges:true]
+    logging: *default-logging
+    restart: unless-stopped
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    profiles: [observability]
+    command:
+      - --path.rootfs=/host
+    pid: host
+    volumes:
+      - /:/host:ro,rslave
+    networks: [seamnex-obs]
+    security_opt: [no-new-privileges:true]
+    logging: *default-logging
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.0
+    profiles: [observability]
+    command: ['--config.file=/etc/alertmanager/alertmanager.yml']
+    ports:
+      - '127.0.0.1:9093:9093'
+    volumes:
+      - ./observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    networks: [seamnex-obs]
+    healthcheck:
+      test: ['CMD-SHELL', 'wget --spider -q http://127.0.0.1:9093/-/healthy || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    security_opt: [no-new-privileges:true]
+    logging: *default-logging
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.4.2
+    profiles: [observability]
+    command: ['-config.file=/etc/loki/loki-config.yml']
+    ports:
+      - '127.0.0.1:3100:3100'
+    volumes:
+      - ./observability/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - lokidata:/loki
+    networks: [seamnex-obs]
+    healthcheck:
+      # /ready stays 503 until the ingester ring is up, so this is a real readiness gate for Alloy.
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3100/ready >/dev/null 2>&1 || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    stop_grace_period: 30s
+    security_opt: [no-new-privileges:true]
+    logging: *default-logging
+    restart: unless-stopped
+
+  alloy:
+    image: grafana/alloy:v1.6.1
+    profiles: [observability]
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --server.http.listen-addr=0.0.0.0:12345
+    volumes:
+      - ./observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [seamnex-obs]
+    depends_on:
+      loki:
+        # Start only once Loki can accept pushes; a collector that boots first logs a burst of
+        # failed sends that look like a platform fault.
+        condition: service_healthy
+    security_opt: [no-new-privileges:true]
+    logging: *default-logging
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    profiles: [observability]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+      GF_AUTH_ANONYMOUS_ENABLED: 'false'
+    ports:
+      - '127.0.0.1:3000:3000'
+    volumes:
+      - grafanadata:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks: [seamnex-obs]
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/api/health >/dev/null 2>&1 || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    stop_grace_period: 20s
+    security_opt: [no-new-privileges:true]
+    logging: *default-logging
+    restart: unless-stopped

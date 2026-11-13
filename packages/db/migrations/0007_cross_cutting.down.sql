@@ -1,0 +1,13 @@
+DROP TABLE IF EXISTS settings;
+DROP TABLE IF EXISTS notification;
+DROP TABLE IF EXISTS alert_channel;
+DROP TABLE IF EXISTS catalog_commit;
+DROP TABLE IF EXISTS observability_profile;
+DROP TABLE IF EXISTS capacity_reservation;
+DROP TABLE IF EXISTS render_file;
+DROP TABLE IF EXISTS source_file;
+DROP TABLE IF EXISTS integration_check;
+DROP TABLE IF EXISTS probe_result;
+DROP TABLE IF EXISTS registry_snapshot;
+DROP TABLE IF EXISTS policy_version;
+DROP TABLE IF EXISTS outbox;

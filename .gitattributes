@@ -1,0 +1,11 @@
+# Line endings are normalised to LF in the repository, whatever platform commits
+# them. `.prettierrc` pins `endOfLine: "lf"`, so without this rule a Windows
+# checkout stores CRLF and `pnpm format:check` reports every file as unformatted
+# — the gate would be unusable on exactly the machines that need it most.
+#
+# `text=auto` lets git keep detecting binary content on its own; the font entries
+# below are stated explicitly because they are the only binary assets in the tree
+# and a misdetection there would corrupt the payloads.
+* text=auto eol=lf
+
+*.woff2 binary

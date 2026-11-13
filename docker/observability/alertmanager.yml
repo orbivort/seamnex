@@ -1,0 +1,15 @@
+# Dev routes alerts to Mailpit, so the delivery path is exercised without a real mailbox.
+route:
+  receiver: mailpit
+  group_by: ['alertname']
+  group_wait: 10s
+  group_interval: 1m
+  repeat_interval: 4h
+
+receivers:
+  - name: mailpit
+    email_configs:
+      - to: 'platform@seamnex.local'
+        from: 'alertmanager@seamnex.local'
+        smarthost: 'mailpit:1025'
+        require_tls: false

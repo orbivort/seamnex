@@ -1,0 +1,148 @@
+# =============================================================================
+# repository ignore rules
+#
+# One rule decides what belongs here: a path is ignored only when the working
+# tree can regenerate it, or when it must never leave the machine that wrote it.
+# A file git already tracks stays authoritative even where a pattern below
+# matches it: docs/openapi.json is generated but reviewed, and `git rm --cached`
+# is the only way to change that. The MSW worker further down is generated and
+# never committed, so there the pattern below is the only authority.
+#
+# Read the "Runtime state" section before deleting anything that matches it.
+# =============================================================================
+
+# --- Dependencies ------------------------------------------------------------
+
+# Every workspace package links its own tree, so the pattern must not be anchored.
+node_modules/
+
+# pnpm's store, when it is kept beside the checkout instead of in the global cache.
+.pnpm-store/
+
+# --- Build output ------------------------------------------------------------
+
+dist/
+dist-demo/
+build/
+*.tsbuildinfo
+
+# `pnpm mocks:init` writes this into each app's `public/`, never hand-edited. The pattern is
+# recursive on purpose: a bare `public/mockServiceWorker.js` is anchored to the repository root and
+# matches neither `apps/console/public/` nor `apps/portal/public/`. No copy is committed: the file
+# exists only after `pnpm mocks:init`, in each app, and must stay out of git.
+**/public/mockServiceWorker.js
+
+# The Traefik route projection is generated state, not source. The static routes.yml stays.
+docker/traefik/dynamic/instance-*.yml
+docker/traefik/dynamic/restore-gate.yml
+
+# --- Tests, coverage and reports ---------------------------------------------
+
+coverage/
+
+# Vitest 5 keeps blob reports, attachments and the html/json/junit artifacts under one directory.
+.vitest/
+
+# Browser-lane artifacts. The Playwright harness is not in the tree yet (docs/phase-3-verification-strategy.md,
+# gap 15), but `scripts/clean.mjs` already treats these two names as output, so they are ignored here too.
+playwright-report/
+test-results/
+
+# --- Logs --------------------------------------------------------------------
+
+*.log
+logs/
+
+# --- Caches ------------------------------------------------------------------
+
+# Turbo's local cache — one per package as well as at the root.
+.turbo/
+
+# Written at the workspace root by `pnpm lint` and `pnpm stylelint`.
+.eslintcache
+.stylelintcache
+
+# --- Environment files and secrets -------------------------------------------
+
+# Every env file is local; only the templates are versioned, in each package that has one.
+.env
+.env.*
+!**/.env.example
+
+# Local overrides of any other config file.
+*.local
+
+# Keys and bundles. No such file is tracked today; the rule exists so that the first one generated
+# is never the one committed.
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+
+# --- Runtime state (NOT build output) ----------------------------------------
+
+# `pnpm dev` and `scripts/lib/runtime-dirs.mjs` create these on the host and compose bind-mounts
+# them into the API: instances, backups, the age identity, the root key, the Keycloak admin client
+# secret, the catalog working tree and the route projection. No rebuild reproduces it and `pnpm
+# clean` refuses to touch it, so neither should `git clean`.
+temp/
+
+# --- Editors and IDEs --------------------------------------------------------
+
+# Editor state is personal except the extension list, which is what makes a fresh clone usable
+# without a setup step. `git status` stays quiet about everything else in `.vscode/`.
+.vscode/*
+!.vscode/extensions.json
+
+.idea/
+*.iml
+.fleet/
+*.swp
+*.swo
+*~
+.history/
+
+# --- Operating system --------------------------------------------------------
+
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# --- Temporary files and local tooling ---------------------------------------
+
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+
+# AI coding-agent workspaces. Each tool writes plans, session transcripts and per-machine settings
+# into a dot-directory at the repository root; none of it is project source. Whole directories are ignored
+.codex/
+.claude/
+.cursor/
+.windsurf/
+.continue/
+.gemini/
+.roo/
+.kiro/
+.openhands/
+.specstory/
+.codebuddy/
+.trae/
+.qoder/
+
+# Aider keeps its transcripts and its tag index beside the checkout; the config (`aider.conf.yml`,
+# `.aiderignore`) is versioned on purpose, so only the generated files are listed here.
+.aider.chat.history.md
+.aider.input.history
+.aider.tags.cache.v*/
+
+# Legacy Subversion metadata still present in some checkouts of this tree.
+.svn/

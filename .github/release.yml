@@ -1,0 +1,82 @@
+# Release-note structure for `gh release create --generate-notes`.
+#
+# This file is repository configuration, not a workflow: no trigger, nothing executed. GitHub reads
+# it whenever release notes are generated — the `generate-notes` API, the "Generate release notes"
+# button, and both of this repository's release workflows, which pass `--generate-notes`. The same
+# content under `.github/workflows/` would be rejected there as an invalid workflow; the location is
+# what makes this configuration.
+#
+# Only documented keys are honoured: `changelog.exclude.labels`, `changelog.exclude.authors`, and
+# `changelog.categories[*]` with `title`, `labels` and `exclude`. An unknown or misspelt key is
+# ignored without an error, and that failure is quiet — the notes degrade to one ungrouped
+# "What's Changed" list with no exclusions. `pnpm format:check` parses this file with Prettier, so
+# invalid YAML goes red in review; a key GitHub does not know still would not.
+#
+# GitHub builds the body from the pull requests between two tags and groups them by label — not by
+# the Conventional Commits type, which lives in the commit subject. The categories below are the
+# labels this project's pull requests actually carry; anything unlabelled falls into "Other changes"
+# rather than disappearing, so the notes stay a complete account of the range. `labels: '*'` is what
+# creates that catch-all; without it, unmatched pull requests are listed nowhere at all.
+#
+# Categories are evaluated in order and `*` collects only what no earlier category matched, so this
+# order is the reading order: what an operator must act on comes first. A pull request carrying two
+# explicit labels can appear under both, which is why the template asks for one dominant "Type of
+# change" and maintainers apply a single type label.
+#
+# Dependency bots are excluded on purpose: the catalog is pinned exactly and a Renovate group is one
+# line of `pnpm-workspace.yaml`, so it is a review event rather than something an operator upgrading
+# a release needs to read. A dependency change that matters is recorded by a human pull request,
+# which does appear here.
+#
+# `renovate.json` labels security advisories `security` — the same label as the Security category
+# below. The author exclusion is what keeps a bot bump out of it: a bumped transitive dependency is
+# not a fix this project made, and listing it as one would misstate the release. If those author
+# exclusions are ever dropped, that label has to leave the Renovate rules first.
+#
+# This file shapes the GitHub release body only. `CHANGELOG.md` is the human document, edited by a
+# maintainer when cutting the tag; the exclusions below mirror the ones stated there, and the two
+# must not drift.
+changelog:
+  exclude:
+    # Label exclusion is the deterministic one — a label matches on every pull request. The bot
+    # handles are listed in both spellings because GitHub documents this field as "user or bot login
+    # handles" without saying which form a bot takes (`renovate` or `renovate[bot]`); an entry that
+    # matches nothing is ignored, so listing both costs nothing and survives either rule.
+    labels:
+      - skip-changelog
+    authors:
+      - dependabot
+      - 'dependabot[bot]'
+      - renovate
+      - 'renovate[bot]'
+  categories:
+    - title: Breaking changes
+      labels:
+        - breaking change
+        - breaking-change
+        - breaking
+    - title: Security
+      labels:
+        - security
+    - title: Features
+      labels:
+        - feature
+        - enhancement
+    - title: Fixes
+      labels:
+        - bug
+        - fix
+        - regression
+    - title: Performance
+      labels:
+        - performance
+    - title: Dependencies
+      labels:
+        - dependencies
+        - dependency
+    - title: Documentation
+      labels:
+        - documentation
+    - title: Other changes
+      labels:
+        - '*'

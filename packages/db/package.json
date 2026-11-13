@@ -1,0 +1,55 @@
+{
+  "name": "@seamnex/db",
+  "version": "0.0.0",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "description": "Seamnex — self-hosted FOSS domain platform: schema v1, migration runner and thin typed query layer",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    },
+    "./env": {
+      "types": "./src/env.ts",
+      "import": "./src/env.ts"
+    },
+    "./migrate": {
+      "types": "./src/migrate.ts",
+      "import": "./src/migrate.ts"
+    },
+    "./ownership": {
+      "types": "./src/ownership.ts",
+      "import": "./src/ownership.ts"
+    },
+    "./testing": {
+      "types": "./src/testing.ts",
+      "import": "./src/testing.ts"
+    }
+  },
+  "scripts": {
+    "migrate:up": "tsx src/cli.ts up",
+    "migrate:down": "tsx src/cli.ts down",
+    "migrate:status": "tsx src/cli.ts status",
+    "seed": "tsx src/seed/dev-seed.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint --max-warnings=0 .",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@seamnex/domain": "workspace:*",
+    "pg": "catalog:",
+    "tsx": "catalog:"
+  },
+  "devDependencies": {
+    "@seamnex/config": "workspace:*",
+    "@types/node": "catalog:",
+    "@types/pg": "catalog:",
+    "@vitest/coverage-v8": "catalog:",
+    "eslint": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vitest": "catalog:"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "$comment": "Application program. `test` is outside `src`, so it is excluded by construction rather than by glob; `tsconfig.test.json` is the program that admits it.",
+  "extends": "@seamnex/config/tsconfig/react-app.json",
+  "include": ["src"],
+  "exclude": ["test"]
+}

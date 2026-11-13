@@ -1,0 +1,4 @@
+{
+  "extends": "@seamnex/config/tsconfig/library.json",
+  "include": ["src", "test"]
+}

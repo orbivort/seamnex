@@ -1,0 +1,10 @@
+@import 'tailwindcss';
+@import '@seamnex/ui/styles.css';
+
+/* The workspace scan list (`packages/ui/src`, `packages/shell/src`) lives once, in the
+ * shared entry, with paths relative to that file. Duplicating it here is how `@seamnex/shell`
+ * was dropped once and its utilities were silently never generated.
+ *
+ * Tests assert on roles and text, not on classes; keeping them out of the scan keeps
+ * assertion strings from generating utilities that ship and never render. */
+@source not './**/*.test.{ts,tsx}';

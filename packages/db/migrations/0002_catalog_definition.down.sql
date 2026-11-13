@@ -1,0 +1,9 @@
+DROP TABLE IF EXISTS instance_param;
+DROP TABLE IF EXISTS scaffold_artefact;
+DROP TABLE IF EXISTS compose_policy;
+DROP TABLE IF EXISTS env_profile_value;
+DROP TABLE IF EXISTS env_profile;
+DROP TABLE IF EXISTS env_schema_var;
+DROP TABLE IF EXISTS deployment_definition;
+DROP TABLE IF EXISTS catalog_entry_revision;
+DROP TABLE IF EXISTS catalog_entry;

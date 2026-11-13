@@ -1,0 +1,21 @@
+{
+  "$comment": "TypeScript 6 baseline: type-check only (noEmit), bundler/runner-consumed ESM. `module: preserve` derives per-file format from package.json `type` and never models CJS interop transforms the bundler does not perform; `verbatimModuleSyntax` makes import elision explicit. Options that TypeScript 6 already defaults to (strict, esModuleInterop, forceConsistentCasingInFileNames, useDefineForClassFields for ES2022+, allowJs, noUncheckedSideEffectImports) are deliberately not repeated. `lib` and `jsx` belong to the environment presets: this file stays environment-neutral.",
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  }
+}

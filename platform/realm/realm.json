@@ -1,0 +1,265 @@
+{
+  "realm": "seamnex",
+  "displayName": "Seamnex — self-hosted FOSS domain platform",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": true,
+  "failureFactor": 5,
+  "waitIncrementSeconds": 60,
+  "maxFailureWaitSeconds": 900,
+  "minimumQuickLoginWaitSeconds": 60,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 43200,
+  "accessTokenLifespan": 300,
+  "revokeRefreshToken": true,
+  "refreshTokenMaxReuse": 0,
+  "otpPolicyType": "totp",
+  "otpPolicyAlgorithm": "HmacSHA1",
+  "otpPolicyDigits": 6,
+  "otpPolicyPeriod": 30,
+  "otpPolicyLookAheadWindow": 1,
+  "browserFlow": "seamnex-browser",
+  "roles": {
+    "realm": [
+      { "name": "R1", "description": "Platform administrator" },
+      { "name": "R2", "description": "Auditor" },
+      { "name": "R3", "description": "Domain owner" },
+      { "name": "R4", "description": "Product administrator" },
+      { "name": "R5", "description": "Member" },
+      { "name": "R6", "description": "Guest" }
+    ]
+  },
+  "groups": [
+    { "name": "seamnex-admins" },
+    { "name": "seamnex-auditors" },
+    { "name": "seamnex-domain-owners" },
+    { "name": "seamnex-product-admins" },
+    { "name": "seamnex-users" },
+    { "name": "seamnex-guests" },
+    {
+      "name": "seamnex-domains",
+      "subGroups": [
+        { "name": "revenue-customer" },
+        { "name": "core-operations" },
+        { "name": "enabling-platform" }
+      ]
+    },
+    {
+      "name": "seamnex-instances",
+      "subGroups": [{ "name": "core-crm" }, { "name": "finance-suite" }]
+    }
+  ],
+  "clientScopes": [
+    {
+      "name": "groups",
+      "description": "Group membership, sent as a full path so the platform can map it.",
+      "protocol": "openid-connect",
+      "attributes": { "include.in.token.scope": "true", "display.on.consent.screen": "false" },
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "config": {
+            "claim.name": "groups",
+            "full.path": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "platform-claims",
+      "description": "What the platform reads from the ID token: its roles and how the user authenticated.",
+      "protocol": "openid-connect",
+      "attributes": { "include.in.token.scope": "true", "display.on.consent.screen": "false" },
+      "protocolMappers": [
+        {
+          "name": "realm-roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "config": {
+            "claim.name": "realm_access.roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "authentication-methods",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-amr-mapper",
+          "config": {
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "seamnex-platform-ui",
+      "name": "Platform UI (portal and console)",
+      "description": "One relying party for every browser surface. The API redeems the code, so the token audience is the platform, not the tab.",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "protocol": "openid-connect",
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:5173/*##http://localhost:5174/*##http://localhost:8080/*",
+        "require.pushed.authorization.requests": "false"
+      },
+      "redirectUris": [
+        "http://localhost:5173/sign-in",
+        "http://localhost:5174/sign-in",
+        "http://localhost:8080/sign-in"
+      ],
+      "webOrigins": ["http://localhost:5173", "http://localhost:5174", "http://localhost:8080"],
+      "defaultClientScopes": [
+        "profile",
+        "email",
+        "roles",
+        "groups",
+        "acr",
+        "platform-claims",
+        "web-origins"
+      ]
+    },
+    {
+      "clientId": "seamnex-platform-admin",
+      "name": "Platform admin (client provisioning)",
+      "enabled": true,
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "protocol": "openid-connect",
+      "attributes": { "access.token.lifespan": "300" },
+      "redirectUris": [],
+      "webOrigins": []
+    }
+  ],
+  "authenticatorConfig": [
+    { "alias": "seamnex-otp-r1-condition", "config": { "condUserRole": "R1" } },
+    { "alias": "seamnex-otp-r2-condition", "config": { "condUserRole": "R2" } }
+  ],
+  "authenticationFlows": [
+    {
+      "alias": "seamnex-browser",
+      "description": "Browser flow with a second factor for R1 and R2 (AC-46). The second factor is DISABLED in this realm for local development; re-enable per docs/realm-otp-local-development.md.",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "auth-cookie",
+          "requirement": "ALTERNATIVE",
+          "priority": 10,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticator": "identity-provider-redirector",
+          "requirement": "ALTERNATIVE",
+          "priority": 20,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticatorFlow": true,
+          "flowAlias": "seamnex-forms",
+          "requirement": "ALTERNATIVE",
+          "priority": 30,
+          "userSetupAllowed": false
+        }
+      ]
+    },
+    {
+      "alias": "seamnex-forms",
+      "description": "Username and password, followed by the role-conditional second factor (both OTP sub-flows DISABLED for local development; see docs/realm-otp-local-development.md).",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "auth-username-password-form",
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticatorFlow": true,
+          "flowAlias": "seamnex-otp-r1",
+          "requirement": "DISABLED",
+          "priority": 20,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticatorFlow": true,
+          "flowAlias": "seamnex-otp-r2",
+          "requirement": "DISABLED",
+          "priority": 30,
+          "userSetupAllowed": false
+        }
+      ]
+    },
+    {
+      "alias": "seamnex-otp-r1",
+      "description": "Second factor for the platform administrator role. Invoked as DISABLED from seamnex-forms for local development; set the seamnex-forms execution back to CONDITIONAL to re-enable (docs/realm-otp-local-development.md).",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "conditional-user-role",
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "authenticatorConfig": "seamnex-otp-r1-condition",
+          "userSetupAllowed": false
+        },
+        {
+          "authenticator": "auth-otp-form",
+          "requirement": "REQUIRED",
+          "priority": 20,
+          "userSetupAllowed": false
+        }
+      ]
+    },
+    {
+      "alias": "seamnex-otp-r2",
+      "description": "Second factor for the auditor role. Invoked as DISABLED from seamnex-forms for local development; set the seamnex-forms execution back to CONDITIONAL to re-enable (docs/realm-otp-local-development.md).",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "conditional-user-role",
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "authenticatorConfig": "seamnex-otp-r2-condition",
+          "userSetupAllowed": false
+        },
+        {
+          "authenticator": "auth-otp-form",
+          "requirement": "REQUIRED",
+          "priority": 20,
+          "userSetupAllowed": false
+        }
+      ]
+    }
+  ]
+}

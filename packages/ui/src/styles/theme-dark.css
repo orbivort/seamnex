@@ -1,0 +1,35 @@
+/*
+ * theme-dark.css — colour-scheme switching, and nothing else.
+ *
+ * The theme is not a second block of tokens: every semantic token in `tokens.css` is a
+ * single `light-dark()` pair, and this file decides which side of the pair resolves. The
+ * OS is authoritative by default; a `.dark` / `.light` class on the root overrides it and
+ * needs no token duplication, because `color-scheme` is the only thing being switched.
+ *
+ * Baseline: `light-dark()` is supported by Chrome 123+, Safari 17.5+ and Firefox 120+.
+ * The product targets current engines (it already relies on `@utility`, `text-wrap: pretty`
+ * and `color-mix()`), so no fallback block is shipped.
+ *
+ * Rules the rest of the system depends on:
+ * - The raw `teal` ramp never inverts. It is a value list; semantics live on `primary-*`.
+ * - `--color-ink*`, `--color-line-ink` and `--color-log-*` never invert. They are always-dark
+ *   chrome, readable on either paper.
+ * - `prefers-contrast: more` and `forced-colors: active` are handled in `adaptations.css` by
+ *   re-pairing the same tokens, so they can no longer overwrite a dark value by source order.
+ */
+
+:root {
+  color-scheme: light dark;
+}
+
+/* Explicit hooks for a future in-app switch. Setting `color-scheme` is the whole switch. */
+.dark {
+  color-scheme: dark;
+}
+
+.light {
+  color-scheme: light;
+}
+
+/* For the few cases a token cannot express. */
+@custom-variant dark (&:where(.dark, .dark *));

@@ -1,0 +1,38 @@
+# Generated or vendored: rewriting these is either destructive or unreadable in review.
+# `pnpm format` runs `prettier --write .`, so without this file it would rewrite the lockfile,
+# the generated OpenAPI document, the generated MSW worker and the upstream compose fixtures
+# that `platform/upstream/*/SOURCE_REVISION` pins.
+pnpm-lock.yaml
+docs/openapi.json
+**/public/mockServiceWorker.js
+platform/upstream
+
+# Tooling metadata, not project source. ESLint ignores these directories for the same reason
+# (`packages/config/eslint/base.mjs`): `pnpm format` must not rewrite plans, session transcripts or
+# skill scripts that another tool owns. One entry per agent workspace `.gitignore` lists, in the
+# same order, so the two files can be compared line by line.
+.codex
+.claude
+.cursor
+.windsurf
+.continue
+.gemini
+.roo
+.kiro
+.openhands
+.specstory
+.codebuddy
+.trae
+.qoder
+
+# Legacy Subversion metadata: `wc.db` and the pristine blobs are binary, and Prettier skips only
+# `.git` and `node_modules` by default, so without this every format run walks the working copy.
+.svn
+
+# Build and tooling output.
+**/dist
+**/dist-demo
+**/coverage
+**/.turbo
+temp
+node_modules

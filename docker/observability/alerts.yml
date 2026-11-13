@@ -1,0 +1,43 @@
+# The four platform alerts Phase 1 must ship (deliverable 1.10). The other four are Phase 6's.
+groups:
+  - name: seamnex-platform
+    rules:
+      - alert: ApiDown
+        expr: up{job="seamnex-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Platform API is not answering its scrape'
+          description: 'The api role has been unreachable for 2 minutes. Check `/api/v1/readyz` and the container log before restarting.'
+          runbook: 'Phase 6 runbook: incident-response'
+
+      - alert: WorkerQueueDepth
+        expr: seamnex_queue_depth{queue="seamnex-jobs"} > 25
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Job queue is backing up'
+          description: 'More than 25 jobs have been queued for 10 minutes. A worker may be stopped or a lane may be blocked by a stuck job.'
+          runbook: 'Phase 6 runbook: deploy'
+
+      - alert: AuditWriteFailure
+        expr: increase(seamnex_audit_append_seconds_count{outcome="failure"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Audit appends are failing'
+          description: 'A failed audit append refuses the state change (AD-20): the platform is failing closed and mutations are being rejected.'
+          runbook: 'Phase 6 runbook: incident-response'
+
+      - alert: DiskPressure
+        expr: node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"} < 0.15
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Less than 15% disk remaining on the host'
+          description: 'Backups, render sets and job logs all write to this filesystem. Free space or move the backup target before the next deployment.'
+          runbook: 'Phase 6 runbook: backup-restore'

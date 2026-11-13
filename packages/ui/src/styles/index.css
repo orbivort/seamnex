@@ -1,0 +1,39 @@
+/*
+ * @seamnex/ui — the shared stylesheet for the portal and the operator console.
+ *
+ * This entry owns the layer order and the scan scope; the decisions live in the five files
+ * it imports. Three concentric rings with a one-way dependency:
+ *
+ *   tokens.css       ← the only file allowed to contain a colour literal, and the only file
+ *                      allowed to decide what a colour is
+ *   theme-dark.css   ← which side of every `light-dark()` pair resolves
+ *   base.css         ← typefaces, layout tokens, element rebase, shells
+ *   utilities.css    ← `@utility` recipes (caps labels, scroll panes, targets, print hooks)
+ *   adaptations.css  ← unlayered overrides: reduced motion, contrast, forced colours, print
+ *
+ * Components may read tokens and utilities. They may never name a ramp stop or a literal —
+ * that rule is what makes the theme a token swap rather than a per-component `dark:` pass.
+ *
+ * Layer order is fixed by Tailwind: theme → base → components → utilities. Anything that
+ * must win over a utility is declared unlayered in `adaptations.css`.
+ */
+
+@import './tokens.css';
+@import './theme-dark.css';
+@import './base.css';
+@import './utilities.css';
+@import './adaptations.css';
+
+/*
+ * Tailwind only scans the consuming app plus the paths declared here, so every workspace
+ * package that carries className strings must be listed. The list used to be duplicated in
+ * both app entries and `@seamnex/shell` was missing from it, so the sign-in card silently lost
+ * its measure, padding and the button's white label. Paths are relative to this file, which
+ * makes the list identical for every consumer.
+ */
+@source '../../src';
+@source '../../../shell/src';
+
+/* Tests assert on roles and text, not on classes; keeping them out of the scan keeps
+ * assertion strings from generating utilities that ship and never render. */
+@source not '../../src/**/*.test.{ts,tsx}';

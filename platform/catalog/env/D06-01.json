@@ -1,0 +1,86 @@
+{
+  "format": "env-schema/v1",
+  "entryKey": "D06-01",
+  "appliesTo": {
+    "imageRef": "frappe/erpnext:v16.53.0"
+  },
+  "variables": [
+    {
+      "name": "ERPNEXT_SITE_NAME",
+      "purpose": "Name of the single ERPNext site, and the value the image's nginx pins `FRAPPE_SITE_NAME_HEADER` to (`server_name`, the `X-Frappe-Site-Name` upstream header and the `try_files /<site>/public/...` prefix all read it). Keep it equal to the route host — `<slug>.<SEAMNEX_INGRESS_DOMAIN>`, for example `erp.localhost` — because the product builds absolute URLs from `host_name`, which the first-boot bootstrap sets to `http://<ERPNEXT_SITE_NAME>`. A mismatch does not break the deployment, it produces links that point at a host the browser cannot resolve. A **bare host, with no scheme and no port**: the value is a Frappe *site name*, so it names the directory `sites/<name>`, the argument to `bench new-site`, nginx's `server_name` and the `try_files /<name>/public/` prefix. `http://erp.localhost:8020` is not a valid site name and fails the first boot at `bench new-site` instead of producing a site — the same URL-shaped mistake the D9 default carried, there rejected by Rails with `400 Invalid host_name configuration`.",
+      "type": "string",
+      "required": true,
+      "defaultValue": "erpnext.localhost",
+      "constraint": "Valid hostname (letters, digits, dots, dashes); no scheme, no port; created once on first start and not renamed afterwards",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ERPNEXT_DATABASE_HOST",
+      "purpose": "Host of the MariaDB server the site is created on. The vendored definition ships that server as the `erpnext-db` service, so the default is the service name; override it only to install against a database the platform does not manage.",
+      "type": "string",
+      "required": true,
+      "defaultValue": "erpnext-db",
+      "constraint": "Hostname or IP address reachable from the backend container",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ERPNEXT_DATABASE_PORT",
+      "purpose": "Port of that server. 3306 is what `bench new-site` expects for a MariaDB service and what the vendored database container listens on.",
+      "type": "integer",
+      "required": false,
+      "defaultValue": "3306",
+      "constraint": "1–65535",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ERPNEXT_REDIS_CACHE",
+      "purpose": "Redis URL used for the cache and the realtime (socket.io) channel. The vendored definition ships a dedicated `erpnext-redis-cache` service; a shared Redis works but then a cache flush also drops queued background jobs.",
+      "type": "url",
+      "required": true,
+      "defaultValue": "redis://erpnext-redis-cache:6379",
+      "constraint": "redis:// URL (or host:port)",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ERPNEXT_REDIS_QUEUE",
+      "purpose": "Redis URL used for the background job queue drained by the two workers. It is written into `common_site_config.json` on every start, so a change reaches a running instance without reinstalling the site.",
+      "type": "url",
+      "required": true,
+      "defaultValue": "redis://erpnext-redis-queue:6379",
+      "constraint": "redis:// URL (or host:port)",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ERPNEXT_DATABASE_ROOT_PASSWORD",
+      "purpose": "Password of the MariaDB privileged account `bench new-site` uses to create the site database and its own account. The image's entrypoint has no fallback for it, so an unset value leaves the database container refusing to start and the site never created. Stored in the platform secret store and injected at apply time; it never enters the render set.",
+      "type": "secret",
+      "required": true,
+      "defaultValue": null,
+      "constraint": "At least 16 characters; independent of the site's own database password, which `bench new-site` generates inside the product",
+      "conditional": null,
+      "secret": true,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ERPNEXT_ADMIN_PASSWORD",
+      "purpose": "Password of the `Administrator` account the first-boot bootstrap creates. Read once, on the first install; later accounts and their roles are managed inside the product. Sign-in beyond that first account is meant to go through the platform identity provider (the entry's `native` guarantee class).",
+      "type": "secret",
+      "required": true,
+      "defaultValue": null,
+      "constraint": "At least 12 characters",
+      "conditional": null,
+      "secret": true,
+      "overrideCeiling": "profile_and_instance"
+    }
+  ]
+}

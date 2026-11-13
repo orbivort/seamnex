@@ -1,0 +1,75 @@
+{
+  "format": "env-schema/v1",
+  "entryKey": "D09-01",
+  "appliesTo": {
+    "imageRef": "openproject/openproject:17.9.6"
+  },
+  "variables": [
+    {
+      "name": "OPENPROJECT_HOST__NAME",
+      "purpose": "Host name OpenProject uses to build absolute URLs and to accept requests (`host_name`). Set it to the published route host — `<slug>.<SEAMNEX_INGRESS_DOMAIN>`. The image's fallback is `localhost`, which produces links and a post-login redirect to a host the browser cannot reach through the edge, so a mismatch is a broken sign-in rather than a cosmetic defect. Change it together with `SERVER_NAME`, or the Apache vhost and Rails disagree. A **bare host, with no scheme and no port**: `config/environments/production.rb` copies this value verbatim into Rails' `config.hosts`, so `http://<slug>.<domain>:<port>` matches no incoming `Host` header and every request is answered `400 Invalid host_name configuration`. Measured on 2026-11-02 — the value was `http://openproject.localhost:8020` and the product answered that 400 on every path, including `/login`.",
+      "type": "string",
+      "required": true,
+      "defaultValue": "openproject.localhost",
+      "constraint": "Valid hostname (letters, digits, dots, dashes); no scheme, no path",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "SERVER_NAME",
+      "purpose": "Value Apache renders into `ServerName` for the default virtual host (`docker/prod/proxy.conf.erb`). The entrypoint also writes it into the placeholder page that Apache serves until the Rails app is up, so a mismatch shows up as a page telling the operator the instance expects another domain. Keep it equal to `OPENPROJECT_HOST__NAME` — a bare host, no scheme: the container healthcheck forwards this value as the `Host` header, and a scheme there fails the probe (`curl: (22) 400`) as well as the sign-in.",
+      "type": "string",
+      "required": true,
+      "defaultValue": "openproject.localhost",
+      "constraint": "Valid hostname; must equal OPENPROJECT_HOST__NAME",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "OPENPROJECT_HTTPS",
+      "purpose": "Tells Rails that the request arriving from the edge is already plain HTTP. The edge publishes `<slug>.<SEAMNEX_INGRESS_DOMAIN>:8020` without TLS on this host, so `true` would redirect every request to an `https://` URL nothing listens on. Set it to `true` only when the route is served over TLS.",
+      "type": "boolean",
+      "required": false,
+      "defaultValue": "false",
+      "constraint": "true | false",
+      "conditional": "false for a plain-HTTP route; true when SEAMNEX_PRODUCT_URL_SCHEME is https",
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "OPENPROJECT_SEED_ADMIN_USER_PASSWORD_RESET",
+      "purpose": "Whether the administrator the first-boot seeder creates must change its password on first sign-in (`Setting.seed_admin_user_password_reset`, default `true`). The platform mints the relay's provisioning token through that account's own session, which a forced change blocks, so this entry turns the change off (ADR-BE-22 §Credentials). The password is **not** rotated: it stays the value the deploy generated and stored as `OPENPROJECT_SEED__ADMIN__USER__PASSWORD`, so a person can still sign in as the product's administrator. Read once, at first boot: the flag lives on the created account, so changing this value later neither clears nor sets it — an instance seeded with `true` keeps owing the change until it is recreated.",
+      "type": "boolean",
+      "required": false,
+      "defaultValue": "false",
+      "constraint": "true | false",
+      "conditional": "false while the platform derives the provisioning token; true when a person owns the administrator account from the start (the relay then needs an operator-supplied token)",
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "SECRET_KEY_BASE",
+      "purpose": "Key Rails derives session and CSRF material from. The image ships `OVERWRITE_ME`, which boots but signs every session with a value published in the Dockerfile — inheriting it would make session cookies forgeable. Stored in the platform secret store and injected as an `environment` entry at apply time, so it never enters the render set. Rotating it signs every existing user out.",
+      "type": "secret",
+      "required": true,
+      "defaultValue": null,
+      "constraint": "At least 64 hexadecimal characters (the image's own setup uses `openssl rand -hex 64`); must not be `OVERWRITE_ME`",
+      "conditional": null,
+      "secret": true,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "OPENPROJECT_SEED__ADMIN__USER__PASSWORD",
+      "purpose": "Password of the `admin` account the first-boot seeder creates. The seeder reads it as `Setting.seed_admin_user_password`, which this variable maps to; with no value the documented default `admin` applies. Do not read the log line `On first installation, the default admin credentials are login: admin, password: admin` as evidence either way: the all-in-one image prints it unconditionally after the database setup (`docker/prod/supervisord`), so it appears with a supplied password too. Verified on the 2026-11-01 deployment: the seeded account existed, was active, accepted the supplied value (`User#check_password?` → true) and carried `force_password_change` (the seeder's `seed_admin_user_password_reset` default), so the value is read **once**, on the first boot — the seeder only runs while no administrator exists, and changing the value later neither rotates nor resets the account. Stored in the platform secret store.",
+      "type": "secret",
+      "required": true,
+      "defaultValue": null,
+      "constraint": "At least 10 characters with upper case, lower case, a digit and a special character (the product's own policy for this account); must not be `admin`",
+      "conditional": "first boot only — ignored by later reconfigures",
+      "secret": true,
+      "overrideCeiling": "profile_and_instance"
+    }
+  ]
+}

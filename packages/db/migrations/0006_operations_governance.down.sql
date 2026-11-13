@@ -1,0 +1,15 @@
+DROP TABLE IF EXISTS drift_record;
+DROP TABLE IF EXISTS capacity_snapshot;
+DROP TABLE IF EXISTS maintenance_window;
+DROP TABLE IF EXISTS policy_exception;
+DROP TABLE IF EXISTS break_glass_session;
+DROP TABLE IF EXISTS patch_record;
+DROP TABLE IF EXISTS license_record;
+DROP TABLE IF EXISTS audit_anchor;
+DROP TABLE IF EXISTS audit_event;
+DROP SEQUENCE IF EXISTS audit_event_seq;
+DROP TABLE IF EXISTS restore_drill;
+DROP TABLE IF EXISTS restore_run;
+DROP TABLE IF EXISTS backup;
+DROP TABLE IF EXISTS secret_version;
+DROP TABLE IF EXISTS secret;

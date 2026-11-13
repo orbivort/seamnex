@@ -1,0 +1,166 @@
+name: Feature request
+description: Propose a capability, a behaviour change or an improvement to the portal, console, API, packages or tooling.
+title: '[Feature]: '
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the proposal. A feature request is a design conversation, so the strongest
+        proposals describe the problem, the constraints and the acceptance criteria rather than only
+        the desired implementation.
+
+        - **Read `CONTRIBUTING.md` first.** Anything substantial needs this issue agreed before a
+          pull request.
+        - **Check the recorded scope decisions** in `docs/mvp-platform-exceptions.md`. A proposal
+          that changes them is a scope change; say so explicitly.
+        - **Do not report security issues here.** Use the private channels in `SECURITY.md`.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-flight checks
+      description: Confirm each of these before submitting.
+      options:
+        - label: I searched open and closed issues and pull requests for the same proposal.
+          required: true
+        - label: This is not a security vulnerability, which would go through SECURITY.md instead.
+          required: true
+        - label: This proposal does not restate an existing documented scope decision without saying it changes that decision.
+          required: true
+        - label: I read CONTRIBUTING.md and understand that a substantial change needs an agreed issue before a pull request.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: |
+        The user or operator problem in plain language — not the solution. Say who is affected,
+        in which role (R1–R6 or a guest), and how often it comes up.
+      placeholder: |
+        A domain owner (R3) has to approve every policy exception, but the console shows no queue
+        of exceptions awaiting a decision, so they are found by scanning the audit trail.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: The behaviour you want, including the happy path, the failure path and the empty state. Name the screen and route for a UI change.
+      placeholder: |
+        Add a "Pending decisions" section to the governance overview that lists exceptions awaiting
+        approval for the roles that can decide them. An empty queue renders a zero state with a link
+        to the full register.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches and why they were rejected, including doing nothing. "No alternative" is acceptable for a small change.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: components
+    attributes:
+      label: Affected components
+      description: Select every area the proposal touches. Scope creep is easier to see early than in review.
+      multiple: true
+      options:
+        - apps/portal
+        - apps/console
+        - apps/api
+        - packages/domain (contract, capability matrix, state machines)
+        - packages/db (schema or migration)
+        - packages/api-client
+        - packages/mocks (fixtures or scenarios)
+        - packages/ui or packages/shell
+        - docker/ or platform/ (deployment assets)
+        - scripts/ (development tooling)
+        - docs/
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: traceability
+    attributes:
+      label: Requirement traceability
+      description: |
+        The `FR-*`, `NFR-*` or `AC-*` ids from docs/mvp-platform-requirements.md that this proposal
+        serves, or the documented gap it closes. Write "none" if it is an improvement with no
+        requirement behind it.
+      placeholder: FR-4.11, AC-27 (break-glass approval queue)
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Testable statements that decide whether the work is done. Write them as observable outcomes, not as implementation steps.
+      placeholder: |
+        - The governance overview lists open policy exceptions for R3 only.
+        - A decision from that list updates the row without a full page reload.
+        - An empty queue renders a zero state with a link to the register.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: scope-risk
+    attributes:
+      label: Scope and risk
+      description: Does the proposal change a surface that other parts of the platform depend on?
+      multiple: true
+      options:
+        - Adds or changes an API contract operation (docs/openapi.json changes)
+        - Adds or changes a database migration or schema invariant
+        - Changes the capability matrix or authorisation model
+        - Changes a deployment default or an environment variable in .env.example
+        - Changes the mock fixtures or a demo scenario
+        - Documentation only
+        - None of the above
+    validations:
+      required: true
+
+  - type: dropdown
+    id: breaking
+    attributes:
+      label: Breaking change
+      description: Would an existing deployment or client have to change to keep working?
+      options:
+        - 'No'
+        - 'Yes — migration path described below'
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: migration
+    attributes:
+      label: Migration path
+      description: If this is a breaking change, how does an existing self-hosted deployment move to the new behaviour?
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Sketches, screenshots, prior art, related issues, or a note on the effort you expect.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I am willing to implement this and open a pull request.
+          required: false
+        - label: I can help test this on a live stack.
+          required: false

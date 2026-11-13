@@ -1,0 +1,13 @@
+DROP TABLE IF EXISTS container_status;
+DROP TABLE IF EXISTS instance_status;
+DROP TABLE IF EXISTS job_log;
+DROP SEQUENCE IF EXISTS job_log_id_seq;
+DROP TABLE IF EXISTS job_step;
+DROP TABLE IF EXISTS deployment_job;
+DROP TABLE IF EXISTS deployment_plan;
+DROP TABLE IF EXISTS render_set;
+DROP TABLE IF EXISTS source_resolution;
+DROP TABLE IF EXISTS instance_env_value;
+DROP TABLE IF EXISTS instance_volume;
+DROP TABLE IF EXISTS instance_service;
+DROP TABLE IF EXISTS instance;

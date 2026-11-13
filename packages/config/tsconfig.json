@@ -1,0 +1,8 @@
+{
+  "$comment": "The shared presets are configuration, but `vitest/helpers.ts`, `vitest/base.ts` and `vite/app.ts` are code the packages import from their test programs and configs. They get their own program so they are type-checked here as well, rather than only through whichever consumer happens to include them. `types: node` is for `vitest/base.ts`, which reads `process.env.CI`, and for `vite/app.ts`, which resolves paths.",
+  "extends": "./tsconfig/library.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["vitest", "vite"]
+}

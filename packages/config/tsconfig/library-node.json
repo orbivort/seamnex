@@ -1,0 +1,9 @@
+{
+  "$comment": "DOM-free library preset for packages that must run unchanged in Node and in the browser (@seamnex/domain). Same ES2023 floor as the browser libraries, but no DOM declarations, so a domain module cannot reach for `document`/`window` and still type-check. `types: [\"node\"]` is required because the package's own tests live under `test` and read the filesystem.",
+  "extends": "./base.json",
+  "compilerOptions": {
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "erasableSyntaxOnly": true
+  }
+}

@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- The product follows the OS (`color-scheme: light dark` in theme-dark.css); declaring only
+         `light` here made the pre-stylesheet frame use light scrollbars and form widgets inside an
+         already-dark splash. -->
+    <meta name="color-scheme" content="light dark" />
+    <!-- `theme-color` colours the browser's own chrome, which sits directly above the portal's ink
+         strip — a surface that never inverts — so the dark value is correct in both themes. -->
+    <meta name="theme-color" content="#0b1412" />
+    <!--
+      The stored choice has to be on <html> before the first paint. Without this, someone who picked
+      light on a dark-OS machine sees the dark splash and then a flash of light paper — the exact
+      handover this inline splash exists to make invisible. Runs ahead of the stylesheet on purpose;
+      the key and the accepted values mirror `packages/ui/src/theme/preference.ts`.
+    -->
+    <script>
+      (function () {
+        try {
+          var stored = window.localStorage.getItem('seamnex:theme');
+          if (stored === 'light' || stored === 'dark') {
+            document.documentElement.classList.add(stored);
+          }
+        } catch {
+          /* A blocked storage partition is not an error: the OS preference needs no script. */
+        }
+      })();
+    </script>
+    <meta
+      name="description"
+      content="Seamnex — self-hosted FOSS domain platform: one login, one place to reach every entitled business application."
+    />
+    <!-- Inline so the tab has an icon without a file the browser must fetch: a missing
+         `/favicon.ico` was the only failed request on an otherwise clean boot. The colours are the
+         brand chip tokens, shared verbatim with the console; `scripts/check-brand-icon.mjs` keeps
+         the two files from drifting apart again. -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='0.75' y='0.75' width='30.5' height='30.5' rx='6.25' fill='%230f5f55' stroke='%233f8f80' stroke-width='1.5'/%3E%3Ctext x='16' y='21' font-family='ui-monospace,Cascadia%20Mono,monospace' font-size='13' font-weight='700' text-anchor='middle' fill='%23e9f1ed'%3ESN%3C/text%3E%3C/svg%3E"
+    />
+    <title>Portal · Seamnex</title>
+    <!--
+      The boot splash is inline on purpose. In development the stylesheet is injected by the
+      module graph, so a class-based splash would paint unstyled until the bundle executes; in a
+      production build the stylesheet is a separate request. These rules use the same token values
+      as `@theme` (`packages/ui/src/styles/tokens.css`) so the handover to `Splash` is invisible.
+      React replaces this markup when the root commits.
+    -->
+    <style>
+      /*
+        `light-dark()` resolves against the element's `color-scheme`, so the splash declares the same
+        three rules the stylesheet makes — including the two class hooks, which is what lets a stored
+        choice paint the first frame. Values mirror `styles/tokens.css`.
+      */
+      :root {
+        color-scheme: light dark;
+      }
+      :root.dark {
+        color-scheme: dark;
+      }
+      :root.light {
+        color-scheme: light;
+      }
+      #root {
+        min-height: 100vh;
+      }
+      .boot {
+        display: grid;
+        min-height: 100vh;
+        place-items: center;
+        padding: 0 1.5rem;
+        background: light-dark(#f6f5f1, #0b1412);
+        color: light-dark(#101a16, #e9f1ed);
+        font-family: 'Segoe UI', system-ui, sans-serif;
+      }
+      .boot-stack {
+        display: flex;
+        width: 100%;
+        max-width: 20rem;
+        flex-direction: column;
+        align-items: center;
+        gap: 0.75rem;
+        text-align: center;
+      }
+      .boot-mark {
+        display: grid;
+        width: 2.5rem;
+        height: 2.5rem;
+        place-items: center;
+        border: 1px solid light-dark(#0f5f55, #3f8f80);
+        border-radius: 0.375rem;
+        background: #0b1412;
+        color: #e9f1ed;
+        font-family: ui-monospace, 'Cascadia Mono', monospace;
+        font-size: 1rem;
+        font-weight: 600;
+      }
+      .boot-title {
+        margin: 0;
+        font-size: 0.95rem;
+        font-weight: 600;
+      }
+      .boot-note {
+        margin: 0;
+        color: light-dark(#6b7a72, #8a9d96);
+        font-family: ui-monospace, 'Cascadia Mono', monospace;
+        font-size: 0.75rem;
+      }
+      .boot-bar {
+        display: block;
+        width: 6rem;
+        height: 3px;
+        overflow: hidden;
+        border-radius: 9999px;
+        background: light-dark(#e2ded3, #22332e);
+      }
+      .boot-bar > span {
+        display: block;
+        width: 33%;
+        height: 100%;
+        border-radius: 9999px;
+        background: light-dark(#0f5f55, #7fb3a8);
+        animation: boot-pulse 1.4s ease-in-out infinite;
+      }
+      @keyframes boot-pulse {
+        0%,
+        100% {
+          opacity: 0.45;
+        }
+        50% {
+          opacity: 1;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .boot-bar > span {
+          animation: none;
+        }
+      }
+      #boot-fallback[hidden] {
+        display: none;
+      }
+      /*
+        One pair, not a base value plus a dark override. The override that used to sit in a
+        `prefers-color-scheme` block was dead: this rule came later in source order at the same
+        specificity, so a dark-OS failure message printed light type on the dark splash.
+      */
+      #boot-fallback {
+        max-width: 34rem;
+        margin: 4rem auto;
+        padding: 0 1.5rem;
+        font-family: 'Segoe UI', system-ui, sans-serif;
+        color: light-dark(#101a16, #e9f1ed);
+      }
+      #boot-fallback h1 {
+        font-size: 1.25rem;
+        margin: 0 0 0.5rem;
+      }
+      #boot-fallback p {
+        margin: 0 0 0.5rem;
+        line-height: 1.5;
+      }
+      #boot-fallback code {
+        font-family: ui-monospace, 'Cascadia Mono', monospace;
+        font-size: 0.8125rem;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div class="boot">
+        <div class="boot-stack">
+          <span class="boot-mark" aria-hidden="true">SN</span>
+          <p class="boot-title">Customer portal</p>
+          <p class="boot-note" role="status">Loading the platform…</p>
+          <span class="boot-bar" aria-hidden="true"><span></span></span>
+        </div>
+      </div>
+    </div>
+    <!--
+      Revealed by `revealBootFailure` when the entry module cannot start at all. It lives outside
+      `#root` because React owns that node; the message is written with `textContent`.
+    -->
+    <div id="boot-fallback" hidden>
+      <h1>Portal failed to start</h1>
+      <p>The application bundle could not load, so no screen can be shown.</p>
+      <p>Check that the API is reachable, then reload the page.</p>
+      <p><code data-boot-detail></code></p>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

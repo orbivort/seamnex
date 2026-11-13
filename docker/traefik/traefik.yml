@@ -1,0 +1,24 @@
+# Edge (dev). Traefik is the only component that publishes host ports (design §4.4).
+# Forward-auth middleware is added in Phase 4D; the restore gate in 4C. Phase 1 only routes the API.
+
+api:
+  dashboard: true
+  insecure: true
+
+# Serves /ping on the `traefik` entrypoint (8080). The container healthcheck calls
+# `traefik healthcheck --ping`, which only passes once the router tree is loaded.
+ping: {}
+
+entryPoints:
+  web:
+    address: ':80'
+
+providers:
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+log:
+  level: INFO
+
+accessLog: {}

@@ -1,0 +1,12 @@
+{
+  "$comment": "Node 24 / NestJS preset. Target and lib are ES2025: Node 24 (V8 13.6) implements it, and keeping lib behind target denied ES2024 APIs such as Object.groupBy and Promise.withResolvers. Node globals come from `types`, which TypeScript 6 no longer adds implicitly. Resolution stays bundler-style (extensionless relative imports) because the backend is executed through tsx, not emitted: `build` means typecheck, so there is no dist to keep in sync. `isolatedModules` is inherited from the baseline: tsx transpiles one file at a time, which is exactly what that flag guards. `allowImportingTsExtensions` is for the Vite and Vitest configs in this program: Vite's `configLoader: 'native'` (the future default) cannot resolve `./vite.config` without the extension, so they must spell out `./vite.config.ts`. `emitDecoratorMetadata` is FALSE and must stay false: tsx transforms with esbuild, which does not emit `design:paramtypes`, so a constructor parameter without `@Inject()` resolves to `undefined` at runtime (ADR-BE-17). Declaring it true made the compiler believe metadata existed while the runtime had none. The `seamnex/explicit-inject` lint rule is what enforces the token instead.",
+  "extends": "./base.json",
+  "compilerOptions": {
+    "target": "ES2025",
+    "lib": ["ES2025"],
+    "types": ["node"],
+    "allowImportingTsExtensions": true,
+    "emitDecoratorMetadata": false,
+    "experimentalDecorators": true
+  }
+}

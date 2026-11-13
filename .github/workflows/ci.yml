@@ -1,0 +1,311 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # `release.yml` calls this workflow on a version tag, so a release can only publish a
+  # commit that passed exactly these gates: the release pipeline re-uses this definition
+  # instead of restating the checks, and the two cannot drift. Only the optional turbo
+  # remote-cache pair is a secret; the token used for publishing belongs to the caller.
+  workflow_call:
+    secrets:
+      TURBO_TOKEN:
+        required: false
+      TURBO_TEAM:
+        required: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # No Node version here: every job uses `node-version-file: .nvmrc`, the same pin
+  # `engines.node`/`devEngines` in package.json state and `engineStrict` enforces on
+  # install. A major written here would be the one number able to disagree with that file.
+  # The pnpm version is not repeated here either: pnpm/action-setup reads `packageManager`
+  # from the root package.json, so CI and a developer checkout cannot disagree.
+  TURBO_TELEMETRY_DISABLED: '1'
+  # Unset on forks and on a repository without the secret; turbo then stays on the local cache.
+  TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
+  TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
+
+# Actions are referenced by major version only (`@v7`, not `@v7.0.1`): every publisher used here
+# maintains that tag as a moving pointer across its minor and patch releases, so a major-only ref
+# still receives the Node 24 and security fixes the runtime requires, without a pin that has to be
+# chased on every patch. `aquasecurity/trivy-action` is the single exception, explained at its step:
+# it is pre-1.0 and publishes no `v0` tag.
+#
+# Least privilege: no job here writes to the repository, publishes a package or touches issues, so
+# the default (broad) token is unnecessary. A workflow that needs more must say so explicitly.
+permissions:
+  contents: read
+
+jobs:
+  # Fast gates first: a cross-module import or an unpaired migration should fail before a
+  # database is started.
+  quality:
+    name: quality gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # `--affected` diffs against the base branch; a shallow clone has no base to diff.
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - uses: actions/cache@v6
+        with:
+          path: .turbo
+          key: turbo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: turbo-${{ runner.os }}-${{ github.job }}-
+      - run: pnpm install --frozen-lockfile
+      # Advisories, not just criticals: a `high` in the production set is a live vulnerability, and
+      # the dev set runs inside the build (its code executes during `pnpm build`).
+      - name: dependency audit (production set)
+        run: pnpm audit --prod --audit-level high
+      - name: dependency audit (development set)
+        run: pnpm audit --dev --audit-level high
+      - name: migration pairs and numbering
+        run: pnpm check:migrations
+      # Full, not `--affected`: a change to eslint.config.mjs or packages/config is not a
+      # change to any package, so an affected filter would quietly skip the packages it governs.
+      - name: lint (module boundaries)
+        run: pnpm lint
+      - name: stylelint
+        run: pnpm stylelint
+      # The baseline was closed in one `pnpm format` commit (465 files), so formatting is now a
+      # gate rather than a debt: `.prettierignore` keeps generated files out of both.
+      - name: formatting (prettier)
+        run: pnpm format:check
+      # Type checking is the one gate worth scoping: a package that depends on a changed one
+      # stays in the set, so the graph — not the file list — decides.
+      - name: typecheck (affected packages)
+        run: pnpm exec turbo run typecheck --affected
+      # Phase 3 exit criteria 2 and 6: no operation without a policy key, no anonymous drift,
+      # and no resurrection of the development identity shim.
+      - name: route policy gate
+        run: pnpm check:route-policy
+      - name: development shim removal gate
+        run: pnpm check:no-shim
+      # The version is the tag, and the manifests, the contract constant and the committed OpenAPI
+      # document carry one copy of the last release. A copy that disagrees is drift no diff makes
+      # obvious after the fact.
+      - name: version invariants
+        run: pnpm check:version
+      # The licence is one value in fifteen declarations — twelve manifests and three documents —
+      # plus the image label and the release tarball, which are what a recipient actually receives.
+      # Nothing in the build reads any of them, so a partial edit would ship a work whose licence
+      # contradicts itself (ADR-BE-19).
+      - name: licence invariants
+        run: pnpm check:license
+      # A package with no `test` script is skipped by `turbo run test` without failing, which is
+      # how four source packages stayed outside the suite. The gate makes that visible.
+      - name: test-task gate
+        run: pnpm check:test-tasks
+      # Coverage is measured on every run so the trend is visible, and uploaded so a regression can
+      # be read without a rebuild. It is not a pass/fail threshold yet: a floor is only meaningful
+      # once it is derived from a green baseline (see the note in `packages/*/vitest.config.ts`).
+      - name: unit tests, coverage and the OpenAPI golden file
+        run: pnpm test:coverage
+      # `lcov.info` feeds a coverage service; `coverage-summary.json` is the readable one a review
+      # comment or a script diffs. Both are produced by every package's shared coverage config.
+      - name: coverage report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: |
+            **/coverage/lcov.info
+            **/coverage/coverage-summary.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # The developer machines are not all Linux, and every script in this workspace is plain
+  # Node for that reason — but only a run on each operating system proves it stayed true.
+  # There is no version axis: every job installs the patch `.nvmrc` pins, which is the
+  # pin `engines.node`/`devEngines` in package.json back up and `engineStrict` in
+  # pnpm-workspace.yaml enforces. A major typed into the matrix could only drift from
+  # that file, and a runner whose toolcache lagged behind the declared floor would then
+  # fail at `pnpm install` for a reason that says nothing about the code.
+  #
+  # `fail-fast: false` keeps one red combination from hiding the other two: on a matrix
+  # that is the difference between "Windows is broken" and "the run stopped early".
+  cross-platform:
+    name: verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: checkout
+        uses: actions/checkout@v7
+      - name: install pnpm (version from packageManager)
+        uses: pnpm/action-setup@v6
+      - name: install node (.nvmrc)
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          # The pnpm store, keyed by lockfile: an unchanged lockfile restores it whole.
+          cache: pnpm
+      - name: restore turbo cache
+        uses: actions/cache@v6
+        with:
+          path: .turbo
+          key: turbo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: turbo-${{ runner.os }}-${{ github.job }}-
+      # One explicit install per job: `--frozen-lockfile` fails on a lockfile that does not
+      # match the manifests, which is the only check that catches a hand-edited dependency.
+      - name: install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: lint
+        run: pnpm lint
+      - name: stylelint
+        run: pnpm stylelint
+      # No services here: the PostgreSQL and Redis suites belong to the `database` job,
+      # and they skip with an actionable reason when their URLs are unset. This job asks
+      # "does the suite pass on this OS", not "is the schema correct".
+      - name: test
+        run: pnpm test
+      # `pnpm build` runs typecheck first, then every production bundle: a type error or a
+      # bundle that would still contain the mock worker fails here rather than at publish.
+      - name: build
+        run: pnpm build
+
+  # The schema is the contract for persistence; these suites apply it for real.
+  database:
+    name: schema and audit
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: seamnex
+          POSTGRES_PASSWORD: seamnex_ci_password
+          POSTGRES_DB: seamnex_platform
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U seamnex -d seamnex_platform"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://seamnex:seamnex_ci_password@localhost:5432/seamnex_platform
+      SEAMNEX_TEST_DATABASE_URL: postgres://seamnex:seamnex_ci_password@localhost:5432/seamnex_platform
+      REDIS_URL: redis://localhost:6379
+      SEAMNEX_ROOT_KEY_FILE: ./temp/seamnex-root-key
+      AUTH_PROVIDER: stub
+      APP_ORIGINS: http://localhost:5173,http://localhost:5174
+      # A skipped suite is a failed suite: these are the exit criteria.
+      SEAMNEX_REQUIRE_DATABASE_TESTS: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: apply schema v1
+        run: pnpm db:migrate
+      # The datastore suites only: the unit project needs nothing this job provisions. Selecting
+      # it by project is what lets `pnpm test` stay fast and free of env-gated skips elsewhere.
+      - name: schema, invariants and audit chain
+        run: pnpm --filter @seamnex/db test -- --project db-schema
+      - name: write a development root key
+        run: node -e "const{randomBytes}=require('crypto');const fs=require('fs');fs.mkdirSync('temp',{recursive:true});fs.writeFileSync('temp/seamnex-root-key',randomBytes(32).toString('base64')+'\n',{mode:0o600})"
+      - name: API integration (audit fail-closed, jobs, secrets)
+        run: pnpm --filter @seamnex/api test -- --project api-integration
+      - name: migration rollback on an empty database
+        run: pnpm --filter @seamnex/db exec tsx src/cli.ts down 10
+
+  # The point of the golden file is that a wire change cannot pass review unnoticed.
+  contract:
+    name: contract parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - uses: actions/cache@v6
+        with:
+          path: .turbo
+          key: turbo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: turbo-${{ runner.os }}-${{ github.job }}-
+      - run: pnpm install --frozen-lockfile
+      - name: served document equals docs/openapi.json
+        run: pnpm --filter @seamnex/api test -- src/contract/openapi.controller.test.ts
+      - name: registry matches the golden file
+        run: pnpm --filter @seamnex/domain test
+      - name: production builds exclude the mock worker
+        run: pnpm build
+      # The budget is a gate, not a report: it only means something if CI reads it.
+      - name: first-load bundle budget
+        run: pnpm check:bundle
+
+  image:
+    name: image and vulnerabilities
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: dependency audit (production set)
+        run: pnpm audit --prod --audit-level critical
+      # A tag that the registry does not serve fails `compose up` with `manifest unknown`, which is
+      # invisible in review. Resolve every reference before building anything.
+      - name: image references resolve
+        run: pnpm check:images
+      # The version comes from the ref, never from a manifest: on a tag build the image must report
+      # the release it belongs to, and on a branch build the placeholder must say there is none.
+      - name: resolve build identity
+        id: build-version
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == 'tag' ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo 'version=0.0.0' >> "$GITHUB_OUTPUT"
+          fi
+      # Provenance: the OCI labels and the tag both name the commit the image was built from, so
+      # a deployed image can be traced back to a review.
+      - name: build the control-plane image
+        run: >
+          docker build
+          -f apps/api/Dockerfile
+          --build-arg GIT_SHA=${{ github.sha }}
+          --build-arg SEAMNEX_BUILD_VERSION=${{ steps.build-version.outputs.version }}
+          -t seamnex-api:sha-${{ github.sha }}
+          .
+      # Every other action here is referenced by its major version (`@vN`), because those projects
+      # publish and maintain a moving major tag. `trivy-action` does not: it is a pre-1.0 project
+      # with no `v0` tag, and its 0.x minors carry behaviour changes, so the ref stays a full
+      # version. Pinning a ref the registry does not serve would fail the job at resolve time.
+      - name: Trivy — fail on a critical vulnerability
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: seamnex-api:sha-${{ github.sha }}
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL

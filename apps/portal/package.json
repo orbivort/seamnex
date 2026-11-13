@@ -1,0 +1,55 @@
+{
+  "name": "@seamnex/portal",
+  "version": "0.0.0",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "build:demo": "vite build --mode demo --outDir dist-demo",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json && tsc --noEmit -p tsconfig.node.json",
+    "lint": "eslint --max-warnings=0 .",
+    "stylelint": "stylelint --allow-empty-input --cache --cache-location node_modules/.cache/stylelint/.stylelintcache \"src/**/*.css\"",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "mocks:init": "msw init public --save"
+  },
+  "dependencies": {
+    "@seamnex/api-client": "workspace:*",
+    "@seamnex/domain": "workspace:*",
+    "@seamnex/shell": "workspace:*",
+    "@seamnex/ui": "workspace:*",
+    "@seamnex/utils": "workspace:*",
+    "@tanstack/react-query": "catalog:",
+    "lucide-react": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:",
+    "react-router": "catalog:"
+  },
+  "devDependencies": {
+    "@seamnex/config": "workspace:*",
+    "@seamnex/mocks": "workspace:*",
+    "@tailwindcss/vite": "catalog:",
+    "@testing-library/react": "catalog:",
+    "@types/node": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@vitejs/plugin-react": "catalog:",
+    "@vitest/coverage-v8": "catalog:",
+    "eslint": "catalog:",
+    "jsdom": "catalog:",
+    "msw": "catalog:",
+    "stylelint": "catalog:",
+    "tailwindcss": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vitest": "catalog:"
+  },
+  "msw": {
+    "workerDirectory": [
+      "public"
+    ]
+  }
+}

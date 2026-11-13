@@ -1,0 +1,8 @@
+{
+  "$comment": "Test program: vitest runs these files on Node with a jsdom DOM, so both the Node and the DOM declarations are needed. Kept separate from tsconfig.json so Node globals never become visible to application code.",
+  "extends": "@seamnex/config/tsconfig/react-app.json",
+  "compilerOptions": {
+    "types": ["vite/client", "node"]
+  },
+  "include": ["test", "src/**/*.d.ts"]
+}

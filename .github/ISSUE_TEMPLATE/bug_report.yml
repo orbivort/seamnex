@@ -1,0 +1,197 @@
+name: Bug report
+description: Report a reproducible defect in the portal, console, API, a shared package or a deployment asset.
+title: '[Bug]: '
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a defect. A report that can be reproduced is worth ten
+        that cannot, so please fill in every required field.
+
+        - **Security vulnerabilities do not belong here.** Use the private channels described in
+          `SECURITY.md` at the repository root instead of a public issue.
+        - **Redact before you paste.** Remove secrets, tokens, session cookies, personal data and
+          customer records from logs, screenshots and recordings.
+        - **One defect per issue.** If two symptoms share a root cause, report them together;
+          otherwise open separate reports.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-flight checks
+      description: Confirm each of these before submitting.
+      options:
+        - label: I searched open and closed issues and pull requests for the same defect.
+          required: true
+        - label: This is not a security vulnerability, which would go through SECURITY.md instead.
+          required: true
+        - label: I reproduced this on the latest `main` or the latest release tag, not an older fork.
+          required: true
+        - label: I removed secrets, tokens, personal data and customer data from this report.
+          required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: The defect in one or two sentences, naming the affected component.
+      placeholder: The console instance header shows "ready" while both containers are stopped.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected component
+      description: Where the defect is observable. Choose the closest match; pick "Not sure" if you cannot tell.
+      options:
+        - apps/portal
+        - apps/console
+        - apps/api
+        - packages/domain
+        - packages/db
+        - packages/api-client
+        - packages/mocks
+        - packages/ui
+        - packages/shell
+        - packages/utils
+        - packages/config
+        - docker/ or platform/ (deployment assets)
+        - scripts/ (development tooling)
+        - docs/ (documentation)
+        - CI, release or repository configuration
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: The output of `git rev-parse --short HEAD`, or the release tag you tested.
+      placeholder: 96a84da (or v0.1.0-rc.1)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: api-mode
+    attributes:
+      label: API mode
+      description: The two platforms do not share fixtures, and many defects exist in only one of them.
+      options:
+        - mock (VITE_API_MODE=mock, the development default)
+        - live (VITE_API_MODE=live, against apps/api)
+        - Not applicable (tooling, docs, deployment assets)
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, browser, Node and pnpm versions, Docker version, and how the stack was started.
+      placeholder: |
+        OS: Windows 11 24H2
+        Browser: Chrome 141
+        Node: 24.22.1
+        pnpm: 11.21.0
+        Docker: Desktop 4.42 (Compose v2)
+        Started with: pnpm dev
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: |
+        The shortest reliable numbered sequence. Include the identity, role and any URL parameters
+        that change behaviour (`?role=`, `?scenario=`, `?latency=`), and any prerequisite state such
+        as a deployment in `degraded`.
+      placeholder: |
+        1. pnpm dev:web
+        2. Open http://localhost:5174/?role=R1&scenario=degraded
+        3. Open Instances → any instance with two containers
+        4. Stop the container outside the console and reload
+        5. Observe the status badge in the header
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What should happen, and where the requirement or design says so if you know.
+      placeholder: The header should read "degraded" while a container is stopped.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: What happens instead. Quote the exact message or status if there is one.
+      placeholder: The header reads "ready" and the readiness matrix shows no failure.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: reproducibility
+    attributes:
+      label: Reproducibility
+      options:
+        - Always (every attempt)
+        - Often (more than half the attempts)
+        - Sometimes (intermittent)
+        - Once (could not reproduce again)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Impact
+      description: Who is blocked, and how badly. This is what sets priority.
+      options:
+        - Blocking — data loss, an unusable deployment, or no workaround
+        - High — a core workflow is broken, but a workaround exists
+        - Medium — a workflow is degraded or an edge case fails
+        - Low — cosmetic, documentation, or a minor inconvenience
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs, screenshots or recordings
+      description: Paste the relevant error, stack trace or HTTP transcript, or drag an image in. Redact secrets and personal data.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Workaround
+      description: How you got past it, if you did. This often narrows the cause faster than the report itself.
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: |
+        Anything else that helps — a related issue, a change you suspect, a regression window, or a
+        pointer to the contract operation or migration involved.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I am willing to open a pull request that fixes this.
+          required: false

@@ -1,0 +1,174 @@
+{
+  "format": "env-schema/v1",
+  "entryKey": "D07-01",
+  "appliesTo": {
+    "imageRef": "orangehrm/orangehrm:5.9"
+  },
+  "variables": [
+    {
+      "name": "ORANGEHRM_DATABASE_HOST",
+      "purpose": "Host of the MySQL server the installer creates the schema on (`database.hostName`). The render set for this entry ships that server as the `orangehrm-db` service, so the default is the service name; override it only to install against a database the platform does not manage.",
+      "type": "string",
+      "required": false,
+      "defaultValue": "orangehrm-db",
+      "constraint": "Hostname or IP address reachable from the application container",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ORANGEHRM_DATABASE_PORT",
+      "purpose": "Port of that server (`database.hostPort`). 3306 is what the installer pre-fills and what its own validator expects; change it only for a database listening elsewhere.",
+      "type": "integer",
+      "required": false,
+      "defaultValue": "3306",
+      "constraint": "1–65535",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ORANGEHRM_DATABASE_NAME",
+      "purpose": "Schema the installer creates and the product then uses (`database.databaseName`). The installer refuses punctuation, refuses a name longer than 64 characters and refuses a schema that already exists — which is why the render set does not pre-create one — so this value must name an empty database rather than an existing one.",
+      "type": "string",
+      "required": true,
+      "defaultValue": "orangehrm",
+      "constraint": "At most 64 characters, letters and digits only",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "none"
+    },
+    {
+      "name": "ORANGEHRM_DATABASE_USER",
+      "purpose": "Application database account the installer creates when it is not told to reuse the privileged one (`database.orangehrmDatabaseUser`). A profile may change it; an instance may not, because the account and its grants are created once together with the schema.",
+      "type": "string",
+      "required": true,
+      "defaultValue": "orangehrm",
+      "constraint": "At most 32 characters",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_only"
+    },
+    {
+      "name": "ORANGEHRM_DATABASE_PASSWORD",
+      "purpose": "Password of that application account, written into `lib/confs/Conf.php` by the install. Stored in the platform secret store and injected at apply time; the installer keeps its only other copy in a plaintext YAML file that it deletes on success.",
+      "type": "secret",
+      "required": true,
+      "defaultValue": null,
+      "constraint": "At least 16 characters",
+      "conditional": null,
+      "secret": true,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ORANGEHRM_DATABASE_ROOT_PASSWORD",
+      "purpose": "Password of the privileged account the installer uses to create the schema and the application user (`database.privilegedDatabasePassword`). The installer has no fallback for it, so an unset value stops the install — and reusing the application password would give the runtime account schema rights it never needs.",
+      "type": "secret",
+      "required": true,
+      "defaultValue": null,
+      "constraint": "At least 16 characters; independent of ORANGEHRM_DATABASE_PASSWORD",
+      "conditional": null,
+      "secret": true,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ORANGEHRM_ADMIN_USERNAME",
+      "purpose": "Initial administrator login (`admin.adminUserName`), read once by the install. Later accounts and their roles are managed inside the product, not through the environment.",
+      "type": "string",
+      "required": true,
+      "defaultValue": "Admin",
+      "constraint": "At most 40 characters",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ORANGEHRM_ADMIN_PASSWORD",
+      "purpose": "Password for that administrator (`admin.adminPassword`), used by the install only. The value shipped in the upstream sample (`Ohrm@1423`) is public, which is why this one is required and never defaulted.",
+      "type": "secret",
+      "required": true,
+      "defaultValue": null,
+      "constraint": "At least 12 characters",
+      "conditional": null,
+      "secret": true,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ORANGEHRM_ADMIN_EMAIL",
+      "purpose": "Work address on the administrator's employee record (`admin.workEmail`). It is also the mailbox the product's own notifications are sent to, so it must be a monitored address. The shipped default is the address the reference deployment used; replace it with the team's monitored mailbox before a production install.",
+      "type": "string",
+      "required": true,
+      "defaultValue": "hr.admin@example.com",
+      "constraint": "Valid e-mail address, at most 50 characters",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ORANGEHRM_ADMIN_FIRST_NAME",
+      "purpose": "First name of the employee record the administrator account is attached to (`admin.adminEmployeeFirstName`). The installer requires it and truncates nothing, so a longer value fails the install rather than being shortened. The default is the platform's own administrator persona, which is what the reference deployment installed.",
+      "type": "string",
+      "required": true,
+      "defaultValue": "Platform",
+      "constraint": "At most 30 characters",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ORANGEHRM_ADMIN_LAST_NAME",
+      "purpose": "Last name of that employee record (`admin.adminEmployeeLastName`). Same limit and same install-time-only behaviour as the first name. The default completes the platform administrator persona.",
+      "type": "string",
+      "required": true,
+      "defaultValue": "Administrator",
+      "constraint": "At most 30 characters",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ORANGEHRM_ORGANIZATION_NAME",
+      "purpose": "Company name stored as the instance's organisation (`organization.name`), shown in the product and printed on the documents it generates. Written at install; renaming it later is a change inside the product. The default is the name the reference deployment installed: an operator must set the real company name before a production install, because the value is not read again afterwards.",
+      "type": "string",
+      "required": true,
+      "defaultValue": "Example GmbH",
+      "constraint": "At most 100 characters",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ORANGEHRM_ORGANIZATION_COUNTRY",
+      "purpose": "Country of the organisation (`organization.country` in the installer config). The installer stores it in `ohrm_organization_gen_info.country`, a two-character column validated against its own country list, so a name such as \"Germany\" is refused and `DE` is required.",
+      "type": "string",
+      "required": false,
+      "defaultValue": "DE",
+      "constraint": "ISO 3166-1 alpha-2 country code (DE, FR, GB, US …)",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ORANGEHRM_DATA_ENCRYPTION",
+      "purpose": "Turn on the product's data encryption at install (`database.enableDataEncryption`). It also makes the installer write the key file into `lib/confs/cryptokeys` and add a write-permission check to its system check, so the mounted configuration volume becomes mandatory and must be in every backup: without the key file the encrypted columns cannot be read back.",
+      "type": "boolean",
+      "required": false,
+      "defaultValue": "false",
+      "constraint": "true or false",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_only"
+    },
+    {
+      "name": "ORANGEHRM_REGISTRATION_CONSENT",
+      "purpose": "Let the install register the instance with OrangeHRM and send it usage data (the installer's `registrationConsent` prompt). Upstream defaults to yes; the platform default is no, so an installation only reports itself when an operator asks for it.",
+      "type": "boolean",
+      "required": false,
+      "defaultValue": "false",
+      "constraint": "true or false",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    }
+  ]
+}

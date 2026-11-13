@@ -1,0 +1,23 @@
+# Static dev routes. Phase 4D replaces these with generated `instance_route` files; Phase 4C adds
+# the restore gate (`published: false` on every product router).
+http:
+  routers:
+    api:
+      rule: 'PathPrefix(`/api/v1`)'
+      entryPoints: [web]
+      service: api
+      middlewares: [security-headers]
+
+  services:
+    api:
+      loadBalancer:
+        servers:
+          - url: 'http://api:8080'
+
+  middlewares:
+    security-headers:
+      headers:
+        stsSeconds: 0
+        contentTypeNosniff: true
+        frameDeny: true
+        browserXssFilter: true

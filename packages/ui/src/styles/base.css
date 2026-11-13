@@ -1,0 +1,409 @@
+/*
+ * base.css — the typeface layer, the layout tokens, the element rebase and the shells.
+ *
+ * Everything here is element-level or structural. `base.css` may read tokens; it may not
+ * declare a colour of its own.
+ */
+
+/* Self-hosted so the intended typography survives an offline venue (C-8: no third-party services). */
+@font-face {
+  font-family: 'Barlow Semi Condensed';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('../assets/fonts/barlow-semi-condensed-500.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Barlow Semi Condensed';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('../assets/fonts/barlow-semi-condensed-600.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Barlow Semi Condensed';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('../assets/fonts/barlow-semi-condensed-700.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Source Sans 3';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../assets/fonts/source-sans-3-400.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Source Sans 3';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('../assets/fonts/source-sans-3-500.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Source Sans 3';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('../assets/fonts/source-sans-3-600.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../assets/fonts/jetbrains-mono-400.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('../assets/fonts/jetbrains-mono-500.woff2') format('woff2');
+}
+
+/*
+ * Metric-adjusted fallbacks.
+ *
+ * `font-display: swap` shows the system face first; without an adjusted fallback the lines
+ * are re-measured when the webfont lands, which is exactly the layout shift the self-hosted
+ * fonts are meant to avoid. These are `local()` faces — no new files, no third-party host.
+ * The ratios are measured against the shipped faces and only need to be close, not exact.
+ */
+@font-face {
+  font-family: 'Source Sans 3 Fallback';
+  src: local('Segoe UI'), local('Helvetica Neue'), local('Arial');
+  size-adjust: 101%;
+  ascent-override: 96%;
+  descent-override: 24%;
+  line-gap-override: 0%;
+}
+
+@font-face {
+  font-family: 'Barlow Semi Condensed Fallback';
+  src: local('Segoe UI'), local('Helvetica Neue'), local('Arial');
+  size-adjust: 92%;
+  ascent-override: 100%;
+  descent-override: 25%;
+  line-gap-override: 0%;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono Fallback';
+  src: local('Consolas'), local('Menlo'), local('DejaVu Sans Mono');
+  size-adjust: 100%;
+  ascent-override: 102%;
+  descent-override: 28%;
+  line-gap-override: 0%;
+}
+
+@layer base {
+  /*
+   * Layout and interaction tokens live here rather than in `@theme`: they generate no
+   * utilities, and declaring them in `:root` guarantees they are always emitted.
+   */
+  :root {
+    /* Typography is per-scheme, but the platform control colours (scrollbars, form
+       widgets, `accent-color`) follow `color-scheme` from theme-dark.css. */
+    accent-color: var(--color-primary);
+
+    --shell-sidebar-width: 248px;
+    --shell-content-max: 1600px; /* console: dense workspace */
+    --shell-content-max-narrow: 1500px; /* portal: editorial reading width */
+    --shell-gutter: calc(var(--spacing) * 3);
+
+    /* The sign-in / sign-out card measure: one editorial column, shared by both shells. */
+    --shell-auth-measure: 420px;
+
+    /*
+     * One height for every chrome strip: the console's sidebar masthead and content header sit
+     * side by side and are measured by this value, and the portal's own strip holds the same
+     * floor, so signing in does not change the height of the bar above the page.
+     *
+     * It is the portal's measured strip — a 34px row of brand, navigation and session chrome
+     * inside 10px of padding, plus its hairline, 55.2px in total — rounded to the 8px grid, and
+     * it clears the tallest thing the console puts in it, the 32px brand mark, with 11.5px above
+     * and below. The previous 64px was twice the content it held, and it made the two
+     * applications disagree about the one dimension a person sees first when moving between
+     * them.
+     */
+    --shell-header-height: 56px;
+    --focus-ring-width: 2px;
+    --focus-ring-offset: 2px;
+
+    /*
+     * Minimum comfortable pointer target (WCAG 2.5.8 / §9.4), and how far a small control
+     * may grow to reach it.
+     *
+     * The growth is the invariant that keeps dense toolbars usable: it is capped at 8px per
+     * side and every row of `tap-target` controls is spaced with at least `gap-2` (8px), so
+     * two invisible hit areas touch at most and can never overlap. A row that wants the full
+     * 44px on a sub-24px control must raise both values together — growth and gap — or one
+     * control starts stealing its neighbour's clicks.
+     */
+    --tap-target: 44px;
+    --tap-target-grow: 8px;
+
+    /* Stacking order, named once. Tailwind v4 has no `--z-*` theme namespace, so these are
+       exposed as `z-node … z-modal` utilities in utilities.css; the skip link reads
+       `--z-skip` directly because it is a single recipe, not a composable layer. */
+    --z-node: 10;
+    --z-header: 20;
+    --z-nav: 30;
+    --z-overlay: 40;
+    --z-modal: 50;
+    --z-skip: 60;
+  }
+
+  *,
+  *::before,
+  *::after {
+    border-color: var(--color-line);
+  }
+
+  html {
+    text-size-adjust: 100%;
+
+    /* Declared once, for both applications. The portal used to set this unlayered, which
+       silently beat the reduced-motion override and left smooth scrolling on. */
+    scroll-behavior: smooth;
+
+    /* Reserves the scrollbar so opening a modal (which locks scroll) does not reflow the
+       page behind it by the width of the scrollbar. Panes do not reserve it: see
+       `scroll-pane` in utilities.css. */
+    scrollbar-gutter: stable;
+    -webkit-tap-highlight-color: color-mix(in oklab, var(--color-ink) 8%, transparent);
+  }
+
+  body {
+    margin: 0;
+    min-height: 100dvh;
+    background-color: var(--color-paper);
+    color: var(--color-text);
+    font-family: var(--font-sans);
+    font-size: var(--text-body);
+    line-height: 1.5;
+    text-underline-offset: 0.2em;
+
+    /* Faint instrument grid: the "work surface" of the console. The line colour is a token,
+       so it stays visible when the paper inverts. */
+    background-image:
+      linear-gradient(to right, var(--color-grid-line) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--color-grid-line) 1px, transparent 1px);
+    background-size: calc(var(--spacing) * 8) calc(var(--spacing) * 8);
+  }
+
+  /*
+   * Tabular figures belong to columns of numbers, not to prose: they are wider, and applied
+   * to every paragraph they make editorial copy read loose.
+   */
+  table,
+  code,
+  kbd,
+  pre,
+  samp,
+  .font-mono {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /*
+   * The element rebase is the safety net for markup that carries no type utilities: headings
+   * get one ramp, optical sizes stay proportional, and long strings break instead of escaping
+   * their container. Utilities still win wherever a screen styles its own heading.
+   */
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    text-wrap: balance;
+    font-family: var(--font-display);
+    font-weight: 600;
+    letter-spacing: -0.011em;
+    color: var(--color-text);
+  }
+
+  h1 {
+    font-size: var(--text-display);
+    line-height: var(--text-display--line-height);
+  }
+
+  h2 {
+    font-size: var(--text-title);
+    line-height: var(--text-title--line-height);
+  }
+
+  h3 {
+    font-size: var(--text-heading);
+    line-height: var(--text-heading--line-height);
+  }
+
+  h4 {
+    font-size: var(--text-body);
+    line-height: 1.3;
+  }
+
+  h5 {
+    font-size: var(--text-meta);
+    line-height: 1.35;
+  }
+
+  h6 {
+    font-family: var(--font-mono);
+    font-size: var(--text-micro);
+    line-height: 1.2;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--color-faint);
+  }
+
+  p {
+    text-wrap: pretty;
+    overflow-wrap: break-word;
+  }
+
+  /* A link inside running text must be identifiable without colour alone. Navigation and
+     card links carry their own utilities and override this. */
+  :where(p, li, dd) a[href] {
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+    text-decoration-color: var(--color-line-strong);
+    color: var(--color-link);
+  }
+
+  :where(p, li, dd) a[href]:hover {
+    text-decoration-color: currentcolor;
+  }
+
+  code,
+  kbd,
+  pre,
+  samp {
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+  }
+
+  hr {
+    border: 0;
+    border-block-start: 1px solid var(--color-line);
+  }
+
+  ::marker {
+    color: var(--color-faint);
+  }
+
+  ::placeholder {
+    color: var(--color-faint);
+    opacity: 1;
+  }
+
+  ::selection {
+    background: var(--color-selection-bg);
+    color: var(--color-selection-fg);
+  }
+
+  /*
+   * One focus ring for the whole product. It used to be restated — with three different
+   * offsets and a `border-radius` override that fought the element's own radius — in every
+   * component. Sizing is a token; only the colour changes on a dark surface.
+   */
+  :focus-visible {
+    outline: var(--focus-ring-width) solid var(--color-focus);
+    outline-offset: var(--focus-ring-offset);
+  }
+
+  :where(.ink-grid, .ink-flat, .log-surface) :focus-visible {
+    outline-color: var(--color-focus-on-ink);
+  }
+
+  /* Chrome's autofill paints a light-blue slab over the field and its text; on the sign-in
+     form that reads as a different UI. Keep the panel colour and the brand text colour. */
+  input:-webkit-autofill,
+  input:-webkit-autofill:hover,
+  input:-webkit-autofill:focus,
+  textarea:-webkit-autofill,
+  select:-webkit-autofill {
+    -webkit-text-fill-color: var(--color-text);
+    box-shadow: 0 0 0 1000px var(--color-panel) inset;
+    caret-color: var(--color-text);
+    transition: background-color 9999s ease-out;
+  }
+}
+
+/*
+ * Layout classes stay in `@layer components`: they are structural, the print sheet and both
+ * shells depend on these exact selectors, and none of them is meant to be combined with a
+ * variant. Everything that behaves like a utility is a `@utility` in utilities.css, so it
+ * can take `md:` / `hover:` like any other utility.
+ *
+ * Breakpoints inside these rules are written as `@variant sm` / `@variant lg` rather than as
+ * literal `40rem`/`64rem` media queries, so they follow a `--breakpoint-*` change.
+ */
+@layer components {
+  /*
+   * The two chrome strips — the sidebar masthead and the content header — are one
+   * continuous bar split by the sidebar seam, so they are built by one rule: the same
+   * height, the same inline inset, the same centring and the same hairline. Height includes
+   * the border (border-box), so a strip is exactly --shell-header-height tall.
+   *
+   * The rule owns geometry only. The console paints both strips with `ink-flat` and gives
+   * them `border-line-ink`, because a band made of two elements has to be one surface: the
+   * fill it used to inherit (`paper` right, `panel-soft` left) was 1.05:1 apart from the page
+   * it frames, so the band read as content. The border colour is a utility rather than part
+   * of this rule so a paper strip keeps the paper hairline.
+   */
+  .shell-header {
+    display: flex;
+    align-items: center;
+    gap: calc(var(--spacing) * 3);
+    height: var(--shell-header-height);
+    padding-inline: calc(var(--spacing) * 4);
+    border-bottom: 1px solid var(--color-line);
+  }
+
+  /*
+   * The page container. Both applications previously repeated `mx-auto w-full max-w-[…]
+   * px-3 sm:px-5 lg:px-7` by hand, which is how the portal header, portal main, portal
+   * footer and console main ended up with three different gutters at 768px.
+   */
+  .shell-container {
+    width: 100%;
+    max-width: var(--shell-content-max);
+    margin-inline: auto;
+    padding-inline: var(--shell-gutter);
+
+    @variant sm {
+      padding-inline: calc(var(--spacing) * 5);
+    }
+
+    @variant lg {
+      padding-inline: calc(var(--spacing) * 7);
+    }
+  }
+
+  .shell-container--narrow {
+    max-width: var(--shell-content-max-narrow);
+  }
+
+  /*
+   * The console's content column steps in by the width of the persistent sidebar. It is a
+   * class rather than an inline `lg:pl-…` so the print sheet can undo it: printing dropped
+   * the sidebar but kept its 248px reservation, shifting every page 248px right.
+   */
+  .shell-content {
+    padding-inline-start: 0;
+
+    @variant lg {
+      padding-inline-start: var(--shell-sidebar-width);
+    }
+  }
+}

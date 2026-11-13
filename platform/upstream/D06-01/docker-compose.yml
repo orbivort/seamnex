@@ -1,0 +1,227 @@
+# Vendored upstream tree — D06-01 ERPNext 16.53.0
+#
+# Provenance: `frappe_docker` publishes the reviewed Compose layout
+# (`compose.yaml` + `compose.mariadb.yaml` + `compose.redis.yaml`) and the image
+# `frappe/erpnext`, which contains both roles the platform needs: `start.sh`
+# (gunicorn, port 8000) and `nginx-entrypoint.sh` (nginx, port 8080). The
+# application repository `frappe/erpnext` ships no Compose file at all, which is
+# why `packagingSource` names this vendored tree rather than the repository.
+#
+# Deviations from the upstream reference layout, each recorded rather than hidden:
+#
+#   1. The `configurator` one-shot service is folded into the backend's start-up
+#      script. The platform's `verify` stage requires *every* container of the
+#      instance to be `running`; a service that exits successfully
+#      (`service_completed_successfully`) is exactly the shape it cannot accept.
+#   2. `bench new-site` — a manual step in the reference documentation — is run
+#      on first boot instead. Without it the image starts nginx in front of an
+#      empty sites volume, and every request answers "site not found": a
+#      deployment that reports ready without deploying (the D07-01 failure mode).
+#   3. `pull_policy: always` is dropped. The deploy engine reaches the daemon
+#      through the socket proxy and the images are pinned by tag; a forced pull
+#      only adds a registry round trip inside the apply stage.
+#   4. `platform: linux/amd64` is not pinned. The image is multi-arch and the
+#      host decides; pinning an architecture would force emulation on the hosts
+#      that do not need it.
+#   5. No service publishes a port. The platform rewrites `ports:` into
+#      `expose:` anyway, and the edge reaches the product at
+#      `http://<slug>:8080` over the instance network.
+#
+# Two properties are load-bearing and easy to break:
+#
+#   - `FRAPPE_SITE_NAME_HEADER` is a *literal site name*, not `$host`. It is
+#     used three ways by the image's nginx template (`server_name`, the
+#     `X-Frappe-Site-Name` upstream header, and `try_files /<site>/public/...`).
+#     A single-site ERPNext behind one platform route therefore pins it to
+#     `ERPNEXT_SITE_NAME`, and the operator keeps that value equal to the route
+#     host (`<slug>.<SEAMNEX_INGRESS_DOMAIN>`) so absolute URLs the product builds
+#     are the ones the browser can follow.
+#   - every interpolation intended for the container shell is written `$$`, so
+#     Compose leaves it alone and the value is resolved from the *injected*
+#     environment at run time instead of being baked into the command line.
+#
+# `container_name` is absent on purpose: the platform strips it anyway (two
+# instances of the same product would collide) and the removal is recorded as a
+# normalisation patch.
+name: erpnext
+
+services:
+  erpnext-db:
+    image: mariadb:11.4
+    # ERPNext's schema assumes utf8mb4 and a server-side collation; without these
+    # flags `bench new-site` succeeds but the first migration fails on an index
+    # key that is longer than the 767-byte limit of the default collation.
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-character-set-client-handshake
+    environment:
+      # No fallback: `${...:-root}` is the kind of default that gives every
+      # instance of every product the same superuser password. The catalog
+      # declares this variable required and secret.
+      MARIADB_ROOT_PASSWORD: ${ERPNEXT_DATABASE_ROOT_PASSWORD:?ERPNEXT_DATABASE_ROOT_PASSWORD must be supplied}
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: ['CMD', 'healthcheck.sh', '--connect', '--innodb_initialized']
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  erpnext-redis-cache:
+    image: redis:7-alpine
+    # No persistence: both Redis instances hold cache and queue state that
+    # ERPNext rebuilds, and an appendonly file in a named volume only makes a
+    # stale queue replay after a restart.
+    command: ['redis-server', '--save', '', '--appendonly', 'no']
+    restart: unless-stopped
+
+  erpnext-redis-queue:
+    image: redis:7-alpine
+    command: ['redis-server', '--save', '', '--appendonly', 'no']
+    restart: unless-stopped
+
+  erpnext-backend:
+    image: frappe/erpnext:v16.53.0
+    depends_on:
+      erpnext-db:
+        condition: service_healthy
+      erpnext-redis-cache:
+        condition: service_started
+      erpnext-redis-queue:
+        condition: service_started
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+    # First-boot bootstrap, then the image's own gunicorn command. The script is
+    # idempotent: a restart (or a platform reconfigure) sees `.seamnex-ready` and
+    # goes straight to gunicorn, and a crash *during* the install is finished
+    # off instead of failing forever against "site already exists".
+    command:
+      - bash
+      - -c
+      - |
+        set -euo pipefail
+        cd /home/frappe/frappe-bench
+
+        SITE="$$ERPNEXT_SITE_NAME"
+        DB_HOST="$$ERPNEXT_DATABASE_HOST"
+        DB_PORT="$$ERPNEXT_DATABASE_PORT"
+        CACHE="$$ERPNEXT_REDIS_CACHE"
+        QUEUE="$$ERPNEXT_REDIS_QUEUE"
+
+        mkdir -p sites
+        ls -1 apps > sites/apps.txt
+
+        bench set-config -g db_host "$$DB_HOST"
+        bench set-config -gp db_port "$$DB_PORT"
+        bench set-config -g redis_cache "$$CACHE"
+        bench set-config -g redis_queue "$$QUEUE"
+        bench set-config -g redis_socketio "$$QUEUE"
+        bench set-config -gp socketio_port 9000
+
+        if [ ! -f "sites/$$SITE/.seamnex-ready" ]; then
+          if [ ! -d "sites/$$SITE" ]; then
+            echo "[seamnex] creating site $$SITE on $$DB_HOST:$$DB_PORT"
+            bench new-site \
+              --db-host "$$DB_HOST" \
+              --db-port "$$DB_PORT" \
+              --mariadb-root-password "$$ERPNEXT_DATABASE_ROOT_PASSWORD" \
+              --admin-password "$$ERPNEXT_ADMIN_PASSWORD" \
+              --install-app erpnext \
+              --set-default \
+              "$$SITE"
+          else
+            echo "[seamnex] site $$SITE exists without a ready marker; completing the install"
+            bench --site "$$SITE" install-app erpnext
+            echo "$$SITE" > sites/currentsite.txt
+          fi
+          bench --site "$$SITE" set-config host_name "http://$$SITE"
+          touch "sites/$$SITE/.seamnex-ready"
+          echo "[seamnex] site $$SITE ready"
+        fi
+
+        exec /usr/local/bin/start.sh
+    healthcheck:
+      # The marker, not an HTTP probe: gunicorn answers `/api/method/ping` with a
+      # 404 for a site that is not installed yet, so an HTTP probe would either
+      # declare a half-installed site healthy or need a second, product-aware
+      # check in the platform. This one states the fact the frontend waits for.
+      test: ['CMD-SHELL', 'test -f "/home/frappe/frappe-bench/sites/$$ERPNEXT_SITE_NAME/.seamnex-ready"']
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      # A first install of ERPNext migrates a few hundred doctypes; the start
+      # period keeps the container in `starting` (never `unhealthy`) while it
+      # does, which is what the platform's verify stage reads.
+      start_period: 1500s
+    restart: unless-stopped
+
+  erpnext-websocket:
+    image: frappe/erpnext:v16.53.0
+    command: ['node', '/home/frappe/frappe-bench/apps/frappe/socketio.js']
+    depends_on:
+      erpnext-backend:
+        condition: service_healthy
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+    restart: unless-stopped
+
+  erpnext-worker-short:
+    image: frappe/erpnext:v16.53.0
+    command: ['bench', 'worker', '--queue', 'short,default']
+    depends_on:
+      erpnext-backend:
+        condition: service_healthy
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+    restart: unless-stopped
+
+  erpnext-worker-long:
+    image: frappe/erpnext:v16.53.0
+    command: ['bench', 'worker', '--queue', 'long,default']
+    depends_on:
+      erpnext-backend:
+        condition: service_healthy
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+    restart: unless-stopped
+
+  erpnext-scheduler:
+    image: frappe/erpnext:v16.53.0
+    command: ['bench', 'schedule']
+    depends_on:
+      erpnext-backend:
+        condition: service_healthy
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+    restart: unless-stopped
+
+  # The one service that answers on the product's HTTP port. The platform
+  # attaches the instance's network alias (`<slug>`) to whichever service
+  # `expose`s `httpPort`, so this is the container the route and the readiness
+  # probe address.
+  erpnext:
+    image: frappe/erpnext:v16.53.0
+    command: ['nginx-entrypoint.sh']
+    environment:
+      BACKEND: erpnext-backend:8000
+      SOCKETIO: erpnext-websocket:9000
+      NGINX_LISTEN_PORT: '8080'
+      FRAPPE_SITE_NAME_HEADER: ${ERPNEXT_SITE_NAME:?ERPNEXT_SITE_NAME must be supplied}
+      PROXY_READ_TIMEOUT: '120'
+      CLIENT_MAX_BODY_SIZE: '50m'
+    expose: ['8080']
+    depends_on:
+      erpnext-backend:
+        condition: service_healthy
+      erpnext-websocket:
+        condition: service_started
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+    restart: unless-stopped
+
+volumes:
+  sites:
+  db-data:

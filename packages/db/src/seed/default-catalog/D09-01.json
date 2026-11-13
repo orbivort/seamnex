@@ -1,0 +1,100 @@
+{
+  "key": "D09-01",
+  "domain": "Project & Work Management",
+  "cluster": "Core Operations",
+  "product": "OpenProject",
+  "description": "Gantt, baseline and budget reporting alongside agile boards, backlogs and time tracking for delivery teams.",
+  "repoUrl": "https://github.com/opf/openproject",
+  "licenseId": "GPL-3.0",
+  "stack": "Ruby / Postgres",
+  "imageRef": "openproject/openproject:17.9.6",
+  "imageDigest": "sha256:c4802aca392506c389ff10a2766caf949000383f20ac752ee5913e1793fdff98",
+  "upstream": {
+    "currentVersion": "17.9.6",
+    "latestVersion": "17.9.6",
+    "advisory": null,
+    "releaseUrl": "https://github.com/opf/openproject/releases",
+    "checkedAt": "2026-11-01T01:00:00Z"
+  },
+  "guaranteeClass": "fa_gate",
+  "authMethod": "Proxy gate only: the product keeps its own local credential (native OIDC/SAML needs the Enterprise token for `sso_auth_providers`)",
+  "packaging": "compose",
+  "packagingSource": "vendored definition (platform/upstream/D9) pinning the published all-in-one image @ 17.9.6",
+  "primaryInstanceId": null,
+  "sharedWith": [],
+  "httpPort": 80,
+  "resources": {
+    "cpu": 1,
+    "memoryMb": 2048,
+    "diskMb": 51200
+  },
+  "dependencies": ["database", "cache", "worker"],
+  "volumes": [
+    {
+      "name": "pgdata",
+      "mountPath": "/var/openproject/pgdata",
+      "quotaMb": 30720
+    },
+    {
+      "name": "assets",
+      "mountPath": "/var/openproject/assets",
+      "quotaMb": 20480
+    }
+  ],
+  "integration": {
+    "apiBaseUrl": "https://openproject.seamnex.local/api",
+    "authMethod": "Proxy gate only: the product keeps its own local credential (native OIDC/SAML needs the Enterprise token for `sso_auth_providers`)",
+    "guaranteeClassVerified": "fa_gate",
+    "operationInventory": [
+      {
+        "id": "work_packages.read",
+        "label": "Read work packages",
+        "mode": "read",
+        "description": "Work package status, assignee and dates.",
+        "path": "/api/v3/work_packages",
+        "method": "GET"
+      },
+      {
+        "id": "work_packages.write",
+        "label": "Create work package",
+        "mode": "write",
+        "description": "Create a task or milestone in a project.",
+        "path": "/api/v3/work_packages",
+        "method": "POST"
+      },
+      {
+        "id": "time_entries.write",
+        "label": "Log time entry",
+        "mode": "write",
+        "description": "Record hours against a work package.",
+        "path": "/api/v3/time_entries",
+        "method": "POST"
+      }
+    ],
+    "eventModes": [
+      {
+        "mode": "webhook",
+        "label": "work_package.updated"
+      },
+      {
+        "mode": "poll",
+        "label": "Poll overdue work packages",
+        "minimumIntervalMinutes": 15
+      }
+    ],
+    "credentialGranularity": "account",
+    "sessionMaxMinutes": 120,
+    "sloSupported": false,
+    "verifiedBy": "Platform Administrator",
+    "verifiedAt": "2026-11-01T01:00:00Z",
+    "nextReviewAt": "2027-01-31T01:00:00Z",
+    "stale": false
+  },
+  "owner": {
+    "name": "Platform Administrator",
+    "team": "Platform Operations"
+  },
+  "notes": "Free core is genuinely capable. Advanced boards are paid features and are not assumed; the seeded administrator is the only account that exists before the opt-in sign-in relay provisions one per person (ADR-BE-22), and that path is not yet verified end to end. Runtime verified on 17.9.6: the published all-in-one image bundles PostgreSQL 17, memcached and the worker, so the definition is a single service and the container port is 80 (the canonical 8080 is the host side of the example mapping).",
+  "deviation": "Native OIDC/SAML is Enterprise-gated (`sso_auth_providers`): measured on 17.9.6 with OPENPROJECT_EDITION=standard, the OmniAuth strategy is filtered at boot and no provider can be signed in with, so the free core runs behind the proxy gate. The gate protects the route; it does not sign anyone in. ADR-BE-22 adds an opt-in relay that may sign a person in afterwards, and the class stays `fa_gate` either way. ADR-BE-15 records the flip to native OIDC once a token exists.",
+  "verifiedAt": "2026-11-01T01:00:00Z"
+}
