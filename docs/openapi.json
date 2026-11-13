@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Seamnex API",
-    "version": "0.0.0",
+    "version": "0.1.0",
     "description": "Seamnex — self-hosted FOSS domain platform. Generated from packages/domain/src/contract.ts. Authorization is deny-by-default against the §5.2 capability matrix; every denied request writes an access.denied audit record. Long operations answer 202 and are polled through the returned job link, or streamed through /jobs/{id}/stream."
   },
   "servers": [

@@ -1466,7 +1466,7 @@ export type OpenApiDocument = {
  *
  * `pnpm check:version` fails if a literal replaces this constant.
  */
-export const CONTRACT_DOCUMENT_VERSION = '0.0.0';
+export const CONTRACT_DOCUMENT_VERSION = '0.1.0';
 
 /**
  * Builds the OpenAPI 3.1 document from the shared contracts.
