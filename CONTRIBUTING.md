@@ -44,7 +44,14 @@ documentation defect, and it is fixed the same way.
 
 ## Licensing
 
-Seamnex is distributed under `GPL-3.0-only`.
+Seamnex is distributed under `GPL-3.0-only` — version 3 only, not "or any later version": the GPL-3.0
+§14 option to relicense under a later version is deliberately withheld. Every dependency inherits its own
+terms, so read [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) before touching a `package.json`.
+
+**No inbound grant.** External code contributions are not accepted at present. There is no CLA and none
+is planned, so a patch from outside the project cannot be merged, however good the change is — the
+useful contribution is an issue (§ [Before you start](#before-you-start)). Copyright stays with Orbivort,
+which is what makes the outbound grant above accurate.
 
 ## Set up and run
 

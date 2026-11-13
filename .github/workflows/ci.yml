@@ -254,7 +254,7 @@ jobs:
           restore-keys: turbo-${{ runner.os }}-${{ github.job }}-
       - run: pnpm install --frozen-lockfile
       - name: served document equals docs/openapi.json
-        run: pnpm --filter @seamnex/api test src/contract/openapi.controller.test.ts
+        run: pnpm --filter @seamnex/api test test/unit/contract/openapi.controller.test.ts
       - name: registry matches the golden file
         run: pnpm --filter @seamnex/domain test
       - name: production builds exclude the mock worker
