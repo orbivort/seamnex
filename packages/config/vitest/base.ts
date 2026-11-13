@@ -22,17 +22,14 @@ type Reporters = NonNullable<Coverage['reporter']>;
 
 /**
  * `json-summary` is the machine-readable report a PR comment or an upload step reads; `lcov` stays
- * for the artifact. `github-actions` is added only in CI, because its annotations have no meaning
- * in a terminal that is not a workflow log.
+ * for the artifact.
+ *
+ * `github-actions` belongs nowhere in this list: the V8 provider resolves a reporter name it does
+ * not recognise as a package import, so listing it here fails every coverage run under CI with
+ * `Cannot find package 'github-actions'`. It is a *test* reporter, and Vitest already appends it by
+ * itself when `GITHUB_ACTIONS` is set — the only environment where its annotations mean anything.
  */
-const BASE_REPORTERS: Reporters = ['text', 'lcov', 'json-summary'];
-
-export function coverageReporters(): Reporters {
-  const { CI } = process.env;
-  return CI === undefined || CI === '' || CI === 'false'
-    ? [...BASE_REPORTERS]
-    : [...BASE_REPORTERS, 'github-actions'];
-}
+const COVERAGE_REPORTERS: Reporters = ['text', 'lcov', 'json-summary'];
 
 export type CoverageOptions = {
   /** Source files to measure. Required: in v5 only loaded files are reported without it. */
@@ -78,7 +75,7 @@ const BASE_EXCLUDES = [
 export function coverageConfig({ include, exclude = [] }: CoverageOptions): Coverage {
   return {
     provider: 'v8',
-    reporter: coverageReporters(),
+    reporter: COVERAGE_REPORTERS,
     reportsDirectory: './coverage',
     include,
     exclude: [...coverageConfigDefaults.exclude, ...BASE_EXCLUDES, ...exclude],

@@ -19,6 +19,25 @@ function primeActiveSession(): void {
   if (active) active.expiresAt = new Date(Date.now() + 28 * 60_000).toISOString();
 }
 
+/**
+ * Picks the first deployed instance in the request form.
+ *
+ * The select fills from its own query, so the dialog can be open while the placeholder is still
+ * the only option: a single read of the options is a race, and on a loaded CI runner it returns
+ * the placeholder alone — which used to fail as `undefined.value` rather than as a slow list.
+ */
+async function chooseTargetInstance(dialog: HTMLElement): Promise<void> {
+  const target = await waitFor(() => {
+    const options = within(dialog).getAllByRole('option') as HTMLOptionElement[];
+    const found = options.find((option) => option.value !== '');
+    if (!found) throw new Error('the instance list has not loaded yet');
+    return found;
+  });
+  fireEvent.change(within(dialog).getByLabelText(/Target instance/), {
+    target: { value: target.value },
+  });
+}
+
 describe('break-glass sessions', () => {
   it('opens on the elevation history with its counts', async () => {
     primeActiveSession();
@@ -57,11 +76,7 @@ describe('break-glass sessions', () => {
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByText('Request break-glass elevation')).toBeDefined();
 
-    const options = await within(dialog).findAllByRole('option');
-    const target = options.find((option) => (option as HTMLOptionElement).value !== '');
-    fireEvent.change(within(dialog).getByLabelText(/Target instance/), {
-      target: { value: (target as HTMLOptionElement).value },
-    });
+    await chooseTargetInstance(dialog);
     fireEvent.click(within(dialog).getByRole('radio', { name: /Read-write/ }));
     fireEvent.change(within(dialog).getByLabelText(/Justification/), {
       target: {
@@ -84,11 +99,7 @@ describe('break-glass sessions', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Request elevation' }));
     const dialog = await screen.findByRole('dialog');
-    const options = await within(dialog).findAllByRole('option');
-    const target = options.find((option) => (option as HTMLOptionElement).value !== '');
-    fireEvent.change(within(dialog).getByLabelText(/Target instance/), {
-      target: { value: (target as HTMLOptionElement).value },
-    });
+    await chooseTargetInstance(dialog);
     fireEvent.change(within(dialog).getByLabelText(/Justification/), {
       target: { value: 'too short' },
     });
