@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # `version-bump.yml` dispatches this on the release branch it pushes: a pull request opened with
+  # `GITHUB_TOKEN` never fires `pull_request`, and a bump has to be seen green before review.
+  workflow_dispatch:
   # `release.yml` calls this workflow on a version tag, so a release can only publish a
   # commit that passed exactly these gates: the release pipeline re-uses this definition
   # instead of restating the checks, and the two cannot drift. Only the optional turbo

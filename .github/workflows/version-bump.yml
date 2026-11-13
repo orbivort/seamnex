@@ -30,8 +30,9 @@ env:
   # `engines.node`/`devEngines` in package.json state and `engineStrict` enforces on install.
   TURBO_TELEMETRY_DISABLED: '1'
 
-# Least privilege at the workflow level. `bump` escalates once, to exactly what pushing a branch and
-# opening a pull request need — no `contents: write` on the fetch that precedes it.
+# Least privilege at the workflow level. `bump` escalates once, to exactly what pushing a branch,
+# dispatching `ci.yml` on it and opening a pull request need — no `contents: write` on the fetch that
+# precedes it.
 permissions:
   contents: read
 
@@ -44,9 +45,12 @@ jobs:
     name: bump, verify and open the pull request
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # `actions: write` is the one addition to what a bump appears to need: `gh workflow run` is the
+    # only way to put a CI run on a branch whose pull request `GITHUB_TOKEN` opened.
     permissions:
       contents: write
       pull-requests: write
+      actions: write
     steps:
       - name: checkout
         uses: actions/checkout@v7
@@ -78,6 +82,13 @@ jobs:
           # minutes old at best.
           if [[ "${GITHUB_REF_TYPE}" != 'branch' ]]; then
             echo "::error::run this workflow from a branch, not from ${GITHUB_REF_TYPE} ${GITHUB_REF_NAME}."
+            exit 1
+          fi
+          # `main` is the branch `ci.yml` gates and `release.yml` tags from. Prepared on a feature
+          # branch, the release pull request would target that branch instead, and the bump would
+          # reach `main` — and a tag — by a route nothing here reviews.
+          if [[ "${GITHUB_REF_NAME}" != 'main' ]]; then
+            echo "::error::run this workflow from main, not from ${GITHUB_REF_NAME}."
             exit 1
           fi
           branch="release/v${version}"
@@ -160,6 +171,17 @@ jobs:
           git commit -m "chore(release): v$VERSION"
           git push origin "refs/heads/$BRANCH"
           echo "Pushed $BRANCH at $(git rev-parse --short HEAD)."
+      # A pull request opened with `GITHUB_TOKEN` does not start `pull_request` workflows, so without
+      # this the checks a reviewer needs would arrive only after a manual close/reopen. Dispatching
+      # `ci.yml` on the pushed branch puts the same definition on the commit the pull request shows.
+      - name: start the CI run on the release branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ steps.version.outputs.branch }}
+        run: |
+          set -euo pipefail
+          gh workflow run ci.yml --ref "$BRANCH"
+          echo "Dispatched ci.yml on $BRANCH."
       # A pull request is the deliverable, so its body says what a reviewer has to check and what
       # happens after the merge. `--body-file` keeps the Markdown out of the YAML.
       - name: open the pull request
@@ -182,7 +204,7 @@ jobs:
             for file in $(git show --name-only --pretty=format: HEAD); do
               case "$file" in
                 CHANGELOG.md)
-                  result="\`## Unreleased\` -> \`## [$VERSION] - $DATE\`, with a fresh \`## Unreleased\` section above it"
+                  result="\`## [Unreleased]\` -> \`## [$VERSION] - $DATE\`, with a fresh \`## [Unreleased]\` section above it and the link definitions moved to \`v$VERSION\`"
                   ;;
                 packages/domain/src/contract.ts)
                   result="\`CONTRACT_DOCUMENT_VERSION\` -> \`$VERSION\`"
@@ -200,7 +222,7 @@ jobs:
             echo "### What to review"
             echo
             echo "- Every manifest carries the same number, and \`pnpm check:version\` is green in this run."
-            echo "- The changelog entries under \`## Unreleased\` are the ones meant for \`v$VERSION\`; nothing was reworded, only the heading moved."
+            echo "- The changelog entries under \`## [Unreleased]\` are the ones meant for \`v$VERSION\`; nothing was reworded, only the heading moved."
             echo "- \`docs/openapi.json\` differs only in \`info.version\`."
             echo
             echo "### After merge"
@@ -209,7 +231,7 @@ jobs:
             echo
             echo "### CI on this pull request"
             echo
-            echo "A pull request opened with \`GITHUB_TOKEN\` does not start \`pull_request\` workflows, so \`ci.yml\` has not run against this branch yet. Close and reopen this pull request once to start it, or push a trivial commit from a maintainer account."
+            echo "\`ci.yml\` was dispatched on \`$BRANCH\` after the push, because a pull request opened with \`GITHUB_TOKEN\` does not start \`pull_request\` workflows. That run is attached to the branch, not to a \`pull_request\` event; re-dispatch it from the Actions tab if it did not start."
           } > "$body"
           url=$(gh pr create --base "$GITHUB_REF_NAME" --head "$BRANCH" --title "chore(release): v$VERSION" --body-file "$body")
           echo "url=$url" >> "$GITHUB_OUTPUT"

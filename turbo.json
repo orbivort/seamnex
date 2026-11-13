@@ -1,5 +1,8 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "remoteCache": {
+    "enabled": false
+  },
   "ui": "stream",
   "globalEnv": ["NODE_ENV", "DATABASE_URL", "REDIS_URL", "SEAMNEX_ROOT_KEY_FILE"],
   "globalDependencies": [

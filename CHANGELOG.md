@@ -5,10 +5,14 @@ identity, one portal and one operator console for the products it runs — are r
 
 Format: [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) · Versioning:
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) · Licence: [GPL-3.0-only](LICENSE). The
-version is the git tag (`vX.Y.Z`). This `## Unreleased` heading becomes the released version in the
-`version-bump` pull request, which moves the same number through every manifest.
+version is the git tag (`vX.Y.Z`). This `## [Unreleased]` heading becomes the released version in the
+`version-bump` pull request, which moves the same number through every manifest and the link
+definitions at the foot of this file.
 
-## Unreleased
+[Repository](https://github.com/orbivort/seamnex) · [Issues](https://github.com/orbivort/seamnex/issues) ·
+[Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
+
+## [Unreleased]
 
 Initial release — platform capabilities at the first tag, grouped rather than itemised by commit.
 
@@ -59,5 +63,4 @@ Initial release — platform capabilities at the first tag, grouped rather than 
 - **API contract** — `packages/domain/src/contract.ts` as the single source, with
   [`docs/openapi.json`](docs/openapi.json) generated and committed alongside it.
 
-[Repository](https://github.com/orbivort/seamnex) · [Issues](https://github.com/orbivort/seamnex/issues) ·
-[Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
+[Unreleased]: https://github.com/orbivort/seamnex/commits/main

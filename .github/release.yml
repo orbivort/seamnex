@@ -33,9 +33,10 @@
 # not a fix this project made, and listing it as one would misstate the release. If those author
 # exclusions are ever dropped, that label has to leave the Renovate rules first.
 #
-# This file shapes the GitHub release body only. `CHANGELOG.md` is the human document, edited by a
-# maintainer when cutting the tag; the exclusions below mirror the ones stated there, and the two
-# must not drift.
+# This file shapes the generated body only, which is the fallback: both release workflows publish the
+# `## [X.Y.Z]` section of `CHANGELOG.md` when `scripts/release-notes.mjs` finds one, and reach GitHub's
+# generator only when it does not. `CHANGELOG.md` states no exclusions of its own, so nothing makes
+# the two agree — the changelog body wins whenever it exists.
 changelog:
   exclude:
     # Label exclusion is the deterministic one — a label matches on every pull request. The bot
@@ -49,6 +50,12 @@ changelog:
       - 'dependabot[bot]'
       - renovate
       - 'renovate[bot]'
+      # The `version-bump` pull request is the release's own bookkeeping (`chore(release): vX.Y.Z`):
+      # a note that cites it tells the reader nothing about what changed. It is the only pull request
+      # this repository's workflows open, so the exclusion hides no real content — a workflow that
+      # starts opening substantive pull requests must not reuse this identity here.
+      - github-actions
+      - 'github-actions[bot]'
   categories:
     - title: Breaking changes
       labels:

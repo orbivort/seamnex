@@ -366,22 +366,30 @@ secret or personal data in the diff, fixtures or logs; revertable in one commit.
 ## Releases
 
 Maintainers cut releases from tags. Contributors do not bump versions, edit `CHANGELOG.md` or tag
-anything — a merged, gated pull request is the contribution, and release notes are generated from the
-commits since the previous tag.
+anything — a merged, gated pull request is the contribution. The release body is the `## [X.Y.Z]`
+section of `CHANGELOG.md`, published as written; only when there is no such section — the first
+release, or a tag cut before the bump merged — are notes generated from the commits since the
+previous tag.
 
 The tag is the version, and the repository keeps one copy of it: every manifest, the
 `CONTRACT_DOCUMENT_VERSION` constant and therefore the committed `docs/openapi.json` carry the last
 released version — `0.0.0` before the first release — and `pnpm check:version` fails when the copies
 disagree. That copy is written in one place, never by hand:
 
-- **Bump** — run the `version-bump` workflow with the version. It opens a `release/vX.Y.Z` pull
-  request that moves every manifest, the contract constant and the regenerated `docs/openapi.json`,
-  and turns `## Unreleased` in `CHANGELOG.md` into `## [X.Y.Z] - <date>`, leaving a fresh
-  `## Unreleased` above it. `node scripts/bump-version.mjs X.Y.Z` is the same edit locally.
-- **Merge** — one approval and green gates. The number the repository states about itself is then
-  that version, and a release refuses an identity its manifests disagree with.
+- **Bump** — run the `version-bump` workflow from `main` with the version. It opens a `release/vX.Y.Z`
+  pull request that moves every manifest, the contract constant and the regenerated
+  `docs/openapi.json`, and turns `## [Unreleased]` in `CHANGELOG.md` into `## [X.Y.Z] - <date>`,
+  leaving a fresh `## [Unreleased]` above it and moving the link definitions to `vX.Y.Z`. The
+  version must sort above the one the manifests already carry. `node scripts/bump-version.mjs X.Y.Z`
+  is the same edit locally.
+- **Merge** — one approval and green gates. `ci.yml` is dispatched on the release branch for you,
+  because a pull request opened with `GITHUB_TOKEN` does not start one. The number the repository
+  states about itself is then that version, and a release refuses an identity its manifests
+  disagree with.
 - **Release** — `release-dispatch.yml`, or a pushed `vX.Y.Z` tag. That path re-runs CI, tags the merge
-  commit and publishes the artefacts; the version is not retyped anywhere.
+  commit and publishes the artefacts. `release-dispatch.yml` takes the version as an input, and
+  `pnpm check:version` refuses it unless the bumped tree carries that number in every manifest, in
+  `docs/openapi.json` and in the `## [X.Y.Z]` heading of `CHANGELOG.md`.
 
 "Breaking" is a property of a self-hosted deployment, not of the diff:
 

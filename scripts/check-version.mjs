@@ -5,9 +5,10 @@
  * — `0.0.0` until the first bump — written only by `scripts/bump-version.mjs` and only behind the
  * pull request `.github/workflows/version-bump.yml` opens.
  *
- * That copy has three ways to go wrong, and none of them is visible in a diff once it is committed:
+ * That copy has four ways to go wrong, and none of them is visible in a diff once it is committed:
  * one manifest that disagrees with the rest, a `docs/openapi.json` that advertises its own number,
- * and a release tag whose commit carries a different one. All three are asserted here.
+ * a release tag whose commit carries a different one, and a `CHANGELOG.md` with no section for the
+ * version being released — which is where the release body is read from. All four are asserted here.
  *
  * The tag half runs only where there is something to compare: `release.yml` and
  * `release-dispatch.yml` pass the version they resolved as `SEAMNEX_BUILD_VERSION`, and the image is
@@ -131,9 +132,28 @@ if (refType === 'tag') {
   }
 }
 
+// 5. The changelog carries it too, because it is where the release body comes from:
+//    `scripts/release-notes.mjs` publishes the `## [X.Y.Z]` section and falls back to generated notes
+//    only when there is none. Nothing else reads the document during a release, so a bumped tree
+//    without that heading would publish notes that contradict its own changelog.
+const changelogPath = resolve(root, 'CHANGELOG.md');
+
+// The placeholder tree is exempt for the same reason the manifests are (see the tag rule above): a
+// tag may name a version no bump ever wrote, and then the changelog cannot have the heading either.
+if (shared !== null && shared !== PLACEHOLDER) {
+  if (!existsSync(changelogPath)) {
+    problems.push('CHANGELOG.md is missing; the release body is read from its version section');
+  } else if (!readFileSync(changelogPath, 'utf8').includes(`## [${shared}]`)) {
+    problems.push(
+      `CHANGELOG.md has no "## [${shared}]" section; run \`node scripts/bump-version.mjs ${shared}\` first`,
+    );
+  }
+}
+
 if (problems.length > 0) {
-  console.error('The version is the git tag; the manifests, docs/openapi.json and');
-  console.error('CONTRACT_DOCUMENT_VERSION carry one copy of the last released version.');
+  console.error('The version is the git tag; the manifests, docs/openapi.json,');
+  console.error('CONTRACT_DOCUMENT_VERSION and CHANGELOG.md carry one copy of the last released');
+  console.error('version.');
   console.error('Found:');
   for (const problem of problems) console.error(`  - ${problem}`);
   console.error('\nSee CONTRIBUTING.md §"Releases" for the versioning rule.');

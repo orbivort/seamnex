@@ -106,10 +106,17 @@ if (!/COPY[^\n]*\bLICENSE\b/.test(dockerfile)) {
 }
 
 // 5. And the other one: the release tarballs, which are a checkout's `dist/` plus nothing else
-//    unless the packaging step says otherwise.
-const release = readFileSync(resolve(root, '.github', 'workflows', 'release.yml'), 'utf8');
-if (!release.includes('LICENSE THIRD-PARTY-NOTICES.md')) {
-  problems.push('.github/workflows/release.yml: the release tarball omits LICENSE or the notices');
+//    unless the packaging step says otherwise. Both workflows publish into the same release, so both
+//    are read — naming one file is how the manual path dropped the licence unnoticed.
+for (const workflow of ['release.yml', 'release-dispatch.yml']) {
+  const path = `.github/workflows/${workflow}`;
+  if (
+    !readFileSync(resolve(root, '.github', 'workflows', workflow), 'utf8').includes(
+      'LICENSE THIRD-PARTY-NOTICES.md',
+    )
+  ) {
+    problems.push(`${path}: the release tarball omits LICENSE or the notices`);
+  }
 }
 
 // 6. No inbound grant exists, because no outside code is accepted (§CONTRIBUTING "Licensing"). That

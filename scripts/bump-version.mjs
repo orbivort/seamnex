@@ -16,8 +16,8 @@ import { relative, resolve } from 'node:path';
 /** The value meaning "nothing has been released from this checkout yet". */
 const PLACEHOLDER = '0.0.0';
 
-/** The heading holding the entries that are not released yet. */
-const UNRELEASED = '## Unreleased';
+/** The heading holding the entries that are not released yet, in Keep a Changelog's bracketed form. */
+const UNRELEASED = '## [Unreleased]';
 
 /**
  * SemVer core plus an optional pre-release: the shape `release.yml` and `release-dispatch.yml`
@@ -58,6 +58,47 @@ function isCalendarDate(value) {
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
 
+/** Numeric identifiers compare as numbers, alphanumeric ones as strings, and numbers sort first. */
+function compareIdentifiers(left, right) {
+  const numeric = /^\d+$/;
+  if (numeric.test(left) && numeric.test(right)) return Number(left) - Number(right);
+  if (numeric.test(left)) return -1;
+  if (numeric.test(right)) return 1;
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
+}
+
+/**
+ * SemVer 2.0.0 precedence, enough to order two release versions. Build metadata cannot reach this —
+ * `VERSION` rejects `+...` — and a pre-release sorts below the release it precedes, which is what
+ * makes `0.2.0-rc.1` a legal step after `0.1.0` and an illegal one after `0.2.0`.
+ */
+function compareVersions(left, right) {
+  const split = (version) => {
+    const [core, ...pre] = version.split('-');
+    return {
+      core: core.split('.').map(Number),
+      pre: pre.length === 0 ? [] : pre.join('-').split('.'),
+    };
+  };
+  const a = split(left);
+  const b = split(right);
+
+  for (let index = 0; index < 3; index += 1) {
+    if (a.core[index] !== b.core[index]) return a.core[index] - b.core[index];
+  }
+  if (a.pre.length === 0 || b.pre.length === 0) return b.pre.length - a.pre.length;
+
+  for (let index = 0; index < Math.max(a.pre.length, b.pre.length); index += 1) {
+    if (a.pre[index] === undefined) return -1;
+    if (b.pre[index] === undefined) return 1;
+    const order = compareIdentifiers(a.pre[index], b.pre[index]);
+    if (order !== 0) return order;
+  }
+
+  return 0;
+}
+
 /** Every manifest the gate reads: the root plus one per workspace project. */
 function discoverManifests() {
   const manifests = [resolve(root, 'package.json')];
@@ -76,11 +117,38 @@ function discoverManifests() {
 }
 
 /**
+ * Keeps the link definitions that make `## [1.2.3]` and `## [Unreleased]` links rather than literal
+ * text. The repository URL is read from the existing `[Unreleased]` definition, so `CHANGELOG.md`
+ * stays the one place it is stated; a file without that line is returned unchanged rather than given
+ * a URL this script guessed.
+ */
+function planLinks(text, { version, previous, eol }) {
+  const lines = text.split(/\r?\n/);
+  const prefix = '[Unreleased]: ';
+  const index = lines.findIndex((line) => line.startsWith(prefix));
+  if (index === -1) return text;
+
+  const base = /^(https?:\/\/[^/\s]+\/[^/\s]+\/[^/\s]+)/.exec(
+    lines[index].slice(prefix.length),
+  )?.[1];
+  if (base === undefined) return text;
+
+  // The first release has no previous tag to compare against, so it links to the tag itself.
+  const released =
+    previous === undefined || previous === PLACEHOLDER
+      ? `[${version}]: ${base}/releases/tag/v${version}`
+      : `[${version}]: ${base}/compare/v${previous}...v${version}`;
+
+  lines.splice(index, 1, `[Unreleased]: ${base}/compare/v${version}...HEAD`, released);
+  return lines.join(eol);
+}
+
+/**
  * The released section keeps the entries that were under `Unreleased`, and a fresh empty
  * `Unreleased` stays on top so the next entry has somewhere to go. That is the Keep a Changelog
  * convention this file declares in its header.
  */
-function planChangelog(text, version, date) {
+function planChangelog(text, version, date, previous) {
   // The working copy decides the line ending, not this script: a Windows checkout that git converted
   // to CRLF must not come back rewritten from top to bottom.
   const eol = text.includes('\r\n') ? '\r\n' : '\n';
@@ -108,7 +176,10 @@ function planChangelog(text, version, date) {
   const block = [UNRELEASED, '', `## [${version}] - ${date}`, '', ...body, ''];
   const next = [...lines.slice(0, start), ...block, ...lines.slice(end)].join(eol);
 
-  return { next, heading: `## [${version}] - ${date}` };
+  return {
+    next: planLinks(next, { version, previous, eol }),
+    heading: `## [${version}] - ${date}`,
+  };
 }
 
 function main() {
@@ -153,6 +224,14 @@ function main() {
   const previous = [...currentVersions][0];
   if (currentVersions.size === 1 && previous === version) {
     problems.push(`the manifests already carry "${version}"`);
+  } else if (VERSION.test(version) && previous !== undefined && previous !== PLACEHOLDER) {
+    // A published tag is never reused, so a version that sorts below the released one can only be a
+    // typo or a stale branch: the next release is the next greater version, never an earlier one.
+    if (compareVersions(version, previous) < 0) {
+      problems.push(
+        `"${version}" sorts below the released "${previous}"; a release only moves forward`,
+      );
+    }
   }
 
   const contractPath = resolve(root, CONTRACT);
@@ -164,7 +243,7 @@ function main() {
   }
 
   const changelogPath = resolve(root, 'CHANGELOG.md');
-  const planned = planChangelog(readFileSync(changelogPath, 'utf8'), version, date);
+  const planned = planChangelog(readFileSync(changelogPath, 'utf8'), version, date, previous);
   if (planned.problem !== undefined) problems.push(planned.problem);
 
   if (problems.length > 0) {

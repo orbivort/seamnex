@@ -196,15 +196,24 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      # The release body is the `CHANGELOG.md` section for this version, written to `release-notes.md`
+      # by `scripts/release-notes.mjs`; the step below publishes it when it exists. Checkout comes
+      # first because the section is read from the repository, not from the tag: a tag pushed without
+      # the `version-bump` pull request has no `## [X.Y.Z]` heading and falls back to generated notes.
+      - name: prepare the release body from the changelog
+        id: notes
+        env:
+          VERSION: ${{ needs.package.outputs.version }}
+        run: node scripts/release-notes.mjs "$VERSION"
       - name: download packaged artefacts
         uses: actions/download-artifact@v8
         with:
           name: release-assets
           path: release
-      # `--verify-tag` is the guard that the tag exists on the remote, `--generate-notes`
-      # derives the body from the commits and merged pull requests since the previous tag
-      # instead of a hand-maintained changelog, and `gh` ships on the runner — no
-      # third-party action to pin for the one step that holds a write token.
+      # `--verify-tag` is the guard that the tag exists on the remote. The body is whatever the step
+      # above prepared — the changelog section when there was one, and `--generate-notes` (commits and
+      # merged pull requests since the previous tag) when there was not. `gh` ships on the runner, so
+      # no third-party action has to be pinned for the one step that holds a write token.
       - name: create the versioned release
         env:
           # The workflow's own token, not a personal access token: it expires with the
@@ -215,7 +224,12 @@ jobs:
           PRERELEASE: ${{ needs.package.outputs.prerelease }}
         run: |
           set -euo pipefail
-          args=(--verify-tag --title "$VERSION" --generate-notes)
+          args=(--verify-tag --title "$VERSION")
+          if [[ -f release-notes.md ]]; then
+            args+=(--notes-file release-notes.md)
+          else
+            args+=(--generate-notes)
+          fi
           if [[ "$PRERELEASE" == 'true' ]]; then
             args+=(--prerelease)
           else
@@ -225,10 +239,15 @@ jobs:
       - name: summarise the published release
         env:
           TAG: ${{ needs.package.outputs.tag }}
+          # `changelog` or `commits`: which step prepared the body is the one fact the run summary
+          # cannot recover from the release itself.
+          NOTES: ${{ steps.notes.outputs.source }}
         run: |
           set -euo pipefail
           {
             echo "### Released $TAG"
+            echo
+            echo "Release notes taken from: \`$NOTES\`"
             echo
             echo "| Asset | Bytes |"
             echo "| --- | --- |"

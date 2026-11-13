@@ -108,9 +108,15 @@ describe('recovery evidence', () => {
     expect(within(dialog).getByText('Schedule a restore drill')).toBeDefined();
 
     const select = within(dialog).getByLabelText(/Instance/);
-    const options = within(dialog).getAllByRole('option') as HTMLOptionElement[];
-    const target = options.find((option) => option.value !== '');
-    fireEvent.change(select, { target: { value: target?.value ?? '' } });
+    // The select fills from its own query, so the placeholder can be the only option for a frame.
+    const target = await waitFor(() => {
+      const found = (within(dialog).getAllByRole('option') as HTMLOptionElement[]).find(
+        (option) => option.value !== '',
+      );
+      if (!found) throw new Error('the instance list has not loaded yet');
+      return found;
+    });
+    fireEvent.change(select, { target: { value: target.value } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Run drill' }));
 
     expect(await screen.findByText(/Drill .* passed/)).toBeDefined();
