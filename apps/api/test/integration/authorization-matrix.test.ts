@@ -13,9 +13,11 @@ import {
   type ApiOperation,
   type Capability,
   type PlatformRole,
+  type PolicyKey,
 } from '@seamnex/domain';
 import { createApplication } from '../../src/bootstrap/create-app';
 import { loadConfig } from '../../src/config/config';
+import { policyRefusalDetail } from '../../src/contract/guards/policy.guard';
 import { PG_POOL } from '../../src/database/database.module';
 
 /**
@@ -32,9 +34,14 @@ import { PG_POOL } from '../../src/database/database.module';
  *   - `GET /jobs/:id/stream` is excluded: SSE holds the connection open, and the refusal shape is
  *     already covered by its five sibling job operations.
  *
+ * `403` alone is not a decision: a handler refuses business rules with the same status (the portal
+ * BFF answers `FORBIDDEN` when the subject holds no entitlement, which every synthetic instance id
+ * here provokes). What the suite asserts is therefore the *policy layer's* verdict, recognised by
+ * `policyRefusalDetail` — an `allow` row must not carry it, a `deny` row must.
+ *
  * `scoped` is not a blanket yes: every resource id here is a synthetic UUID outside any seeded
  * scope, so the PDP may answer 403 — but only with the scope-coverage reason, asserted from the
- * audit trail. A 403 in any other shape (no grant at all) is a wiring regression and fails.
+ * audit trail. A policy refusal in any other shape (no grant at all) is a wiring regression.
  */
 const canRun =
   (process.env.DATABASE_URL ?? '').length > 0 && (process.env.REDIS_URL ?? '').length > 0;
@@ -72,8 +79,8 @@ const TERMINAL = 'POST /me/logout';
  * each action against the matrix.
  */
 const BREAK_GLASS_ACTION = 'POST /break-glass-sessions/:id/:action';
-/** Exact wording from `PdpService.scopeCovers` for a scoped grant that does not reach the resource. */
-const SCOPE_REFUSAL = 'the scoped grant does not cover the resource';
+/** Exact wording from `PdpService.evaluate` for a scoped grant that does not reach the resource. */
+const SCOPE_REFUSAL = 'the scoped grant does not cover this resource';
 
 /** The stub directory's usernames; the roles themselves come from `PLATFORM_ROLES`. */
 const DIRECTORY: Readonly<Record<PlatformRole, string>> = {
@@ -167,6 +174,18 @@ async function request(
 
 function json(result: HttpResult): unknown {
   return result.text.length === 0 ? null : (JSON.parse(result.text) as unknown);
+}
+
+/**
+ * Whether the **policy layer** refused, as opposed to a handler enforcing its own rule with the
+ * same status. `PolicyGuard` words its refusal from the capability it evaluated; a handler that
+ * refuses a business rule keeps its own wording, so the two are told apart by `detail`.
+ */
+function refusedByPolicy(result: HttpResult, policyKey: PolicyKey): boolean {
+  if (result.status !== 403) return false;
+  const body = json(result);
+  if (body === null || typeof body !== 'object') return false;
+  return (body as { detail?: unknown }).detail === policyRefusalDetail(policyKey);
 }
 
 function setCookies(headers: HttpHeaders): readonly string[] {
@@ -325,19 +344,28 @@ describe.skipIf(skipReason !== false)('authorization matrix', () => {
 
         const result = await request(operation.method, urlFor(operation.path), headers);
         const expectation = expectationFor(operation, role);
+        const policyRefused = refusedByPolicy(result, operation.policyKey);
 
         if (expectation === 'deny') {
-          // Deny-by-default: the only legal answer, whatever the handler would have done.
+          // Deny-by-default: the only legal answer, whatever the handler would have done — and it
+          // has to be the policy layer answering, not a handler that happens to refuse as well.
           expect(result.status, `${role} ${key} must be refused`).toBe(403);
+          expect(policyRefused, `${role} ${key} must be refused by the policy layer`).toBe(true);
           denied.push(operation.policyKey);
         } else if (expectation === 'allow') {
-          // Phase 4 handlers are deferred, so 200/202/204/404/409/412/422/500/501 are all legal;
-          // an authorization refusal is not.
-          expect(result.status, `${role} ${key} must not be refused`).not.toBe(403);
+          // Phase 4 handlers are deferred, so 200/202/204/404/409/412/422/500/501 are all legal, and
+          // so is a handler refusing its own business rule (see `refusedByPolicy`); a refusal of the
+          // capability the matrix grants is not.
+          expect(
+            policyRefused,
+            `${role} ${key} must not be refused by the policy layer: ${result.text}`,
+          ).toBe(false);
+          expect(result.status, `${role} ${key} must stay authenticated`).not.toBe(401);
         } else {
-          // `scoped`: the synthetic resource is outside every seeded scope, so the PDP may refuse.
+          // `scoped`: the synthetic resource is outside every seeded scope, so the PDP may refuse —
+          // but only for scope coverage, asserted from the audit trail below.
           expect(result.status, `${role} ${key} (scoped) must stay authenticated`).not.toBe(401);
-          if (result.status === 403) scopedRefusals.add(operation.policyKey);
+          if (policyRefused) scopedRefusals.add(operation.policyKey);
         }
       }
 

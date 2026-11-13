@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -49,11 +49,15 @@ describe('envelope encryption', () => {
 
 const dirs: string[] = [];
 
-function keyFile(content: string): string {
+function keyFile(content: string, mode = 0o600): string {
   const dir = mkdtempSync(join(tmpdir(), 'seamnex-root-key-'));
   dirs.push(dir);
   const path = join(dir, 'seamnex-root-key');
-  writeFileSync(path, content, { encoding: 'utf8', mode: 0o600 });
+  writeFileSync(path, content, { encoding: 'utf8', mode });
+  // `mode` on creation is filtered through the process umask, and Windows ignores it outright, so
+  // the requested bits are applied again: the permission check reads the mode on disk, and a test
+  // that asked for 0644 must not silently get 0600 on a host with a strict umask.
+  chmodSync(path, mode);
   return path;
 }
 
@@ -98,11 +102,13 @@ describe('root key loading', () => {
   it('refuses a key any other user can read, when the host can express file modes', () => {
     // Docker Desktop bind mounts report 0777 for every file, which is why the check is skippable;
     // the check itself must still run where POSIX modes are real. The platform is pinned so the
-    // assertion holds on the CI runner as well as on a developer machine.
+    // assertion holds on the CI runner as well as on a developer machine. The file is deliberately
+    // group- and world-readable: a 0600 key is the case the store must accept, so creating one here
+    // would assert a refusal the code has no reason to raise.
     const original = Object.getOwnPropertyDescriptor(process, 'platform');
     Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
     try {
-      const path = keyFile(randomBytes(32).toString('base64'));
+      const path = keyFile(randomBytes(32).toString('base64'), 0o644);
 
       expect(() => loadRootKey(path)).toThrow(/readable by other users/);
       // The documented opt-out for a mount that cannot express modes.

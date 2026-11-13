@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ApiOperation } from '@seamnex/domain';
-import { PolicyGuard } from '../../../../src/contract/guards/policy.guard';
+import { PolicyGuard, policyRefusalDetail } from '../../../../src/contract/guards/policy.guard';
 import type { OperationGuardContext } from '../../../../src/contract/guards/operation-guard';
 import { MFA_REASON } from '../../../../src/modules/m09-access-control/pdp.service';
 import { AppError } from '../../../../src/common/problem/app-error';
@@ -119,6 +119,9 @@ describe('PolicyGuard', () => {
 
     const error = await refuses(guard.canActivate(context()));
     expect(error.code).toBe('FORBIDDEN');
+    // The exact wording is a contract: the authorization-matrix suite tells a policy refusal apart
+    // from a handler's own `403` by it, so a reworded sentence must fail here rather than there.
+    expect(error.detail).toBe(policyRefusalDetail(operationOf('GET /jobs').policyKey));
     expect(error.detail).toContain(operationOf('GET /jobs').policyKey);
     expect(error.remediation).toContain('request-access');
   });

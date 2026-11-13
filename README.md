@@ -9,7 +9,7 @@
 
 Seamnex is a self-hosted platform for the open-source business applications a small organisation runs:
 one identity, one portal, one operator console, and an audit trail for every change — on hardware you
-control, with no SaaS dependency. Three example catalogue entries ship today: EspoCRM (CRM), OrangeHRM (HRM), 
+control, with no SaaS dependency. Three example catalogue entries ship today: EspoCRM (CRM), OrangeHRM (HRM),
 OpenProject (Project Management).
 
 ## Prerequisites

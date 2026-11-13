@@ -223,12 +223,16 @@ jobs:
         run: pnpm db:migrate
       # The datastore suites only: the unit project needs nothing this job provisions. Selecting
       # it by project is what lets `pnpm test` stay fast and free of env-gated skips elsewhere.
+      #
+      # No `--` before the flags: pnpm forwards script arguments unchanged, and vitest treats
+      # everything after a bare `--` as a usage error it silently drops, so `test -- --project x`
+      # runs *every* project in the package instead of selecting one.
       - name: schema, invariants and audit chain
-        run: pnpm --filter @seamnex/db test -- --project db-schema
+        run: pnpm --filter @seamnex/db test --project db-schema
       - name: write a development root key
         run: node -e "const{randomBytes}=require('crypto');const fs=require('fs');fs.mkdirSync('temp',{recursive:true});fs.writeFileSync('temp/seamnex-root-key',randomBytes(32).toString('base64')+'\n',{mode:0o600})"
       - name: API integration (audit fail-closed, jobs, secrets)
-        run: pnpm --filter @seamnex/api test -- --project api-integration
+        run: pnpm --filter @seamnex/api test --project api-integration
       - name: migration rollback on an empty database
         run: pnpm --filter @seamnex/db exec tsx src/cli.ts down 10
 
@@ -250,7 +254,7 @@ jobs:
           restore-keys: turbo-${{ runner.os }}-${{ github.job }}-
       - run: pnpm install --frozen-lockfile
       - name: served document equals docs/openapi.json
-        run: pnpm --filter @seamnex/api test -- src/contract/openapi.controller.test.ts
+        run: pnpm --filter @seamnex/api test src/contract/openapi.controller.test.ts
       - name: registry matches the golden file
         run: pnpm --filter @seamnex/domain test
       - name: production builds exclude the mock worker

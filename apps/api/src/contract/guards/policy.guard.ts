@@ -1,8 +1,18 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { resourceForRequest } from '@seamnex/domain';
+import { resourceForRequest, type PolicyKey } from '@seamnex/domain';
 import { AppError } from '../../common/problem/app-error';
 import { MFA_REASON, PdpService } from '../../modules/m09-access-control/pdp.service';
 import type { OperationGuard, OperationGuardContext } from './operation-guard';
+
+/**
+ * The `detail` a policy refusal carries, naming the capability that was evaluated.
+ *
+ * Exported so a caller can tell this refusal apart from a handler's own `403`: both are
+ * `FORBIDDEN`, and only this one is evidence about the capability matrix.
+ */
+export function policyRefusalDetail(policyKey: PolicyKey): string {
+  return `The ${policyKey} capability is not granted for this resource.`;
+}
 
 /**
  * The authorization decision, for every operation that is not explicitly anonymous.
@@ -52,7 +62,7 @@ export class PolicyGuard implements OperationGuard {
 
     throw new AppError({
       code: 'FORBIDDEN',
-      detail: `The ${operation.policyKey} capability is not granted for this resource.`,
+      detail: policyRefusalDetail(operation.policyKey),
       remediation:
         'Ask the scope owner for the capability, or use the request-access flow. The refusal was audited.',
     });
