@@ -14,6 +14,8 @@ definitions at the foot of this file.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-13
+
 Initial release — platform capabilities at the first tag, grouped rather than itemised by commit.
 
 ### Added
@@ -63,4 +65,5 @@ Initial release — platform capabilities at the first tag, grouped rather than 
 - **API contract** — `packages/domain/src/contract.ts` as the single source, with
   [`docs/openapi.json`](docs/openapi.json) generated and committed alongside it.
 
-[Unreleased]: https://github.com/orbivort/seamnex/commits/main
+[Unreleased]: https://github.com/orbivort/seamnex/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/orbivort/seamnex/releases/tag/v0.1.0
