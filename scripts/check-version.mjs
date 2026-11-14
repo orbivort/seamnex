@@ -3,17 +3,19 @@
  *
  * A release is a git tag. The number inside the repository is a copy of the last released version
  * — `0.0.0` until the first bump — written only by `scripts/bump-version.mjs` and only behind the
- * pull request `.github/workflows/version-bump.yml` opens.
+ * pull request `.github/workflows/release-prepare.yml` opens.
  *
  * That copy has four ways to go wrong, and none of them is visible in a diff once it is committed:
  * one manifest that disagrees with the rest, a `docs/openapi.json` that advertises its own number,
  * a release tag whose commit carries a different one, and a `CHANGELOG.md` with no section for the
  * version being released — which is where the release body is read from. All four are asserted here.
  *
- * The tag half runs only where there is something to compare: `release.yml` and
- * `release-dispatch.yml` pass the version they resolved as `SEAMNEX_BUILD_VERSION`, and the image is
- * built with the same value, so a release cannot publish an artefact whose own health endpoint
- * reports a different version than its tag.
+ * The tag half runs only where there is something to compare: `release.yml` passes the version it
+ * resolved as `SEAMNEX_BUILD_VERSION`, and the image is built with the same value, so a release
+ * cannot publish an artefact whose own health endpoint reports a different version than its tag.
+ *
+ * `--print` answers "which version does this tree state?" for the release entrypoints, so the
+ * number is read by the gate that judges it rather than by a second parser that could disagree.
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { relative, resolve } from 'node:path';
@@ -27,6 +29,19 @@ const VERSION = /^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$/;
 
 const root = resolve(process.cwd());
 const problems = [];
+
+/**
+ * `--print` is the machine-readable mode: the version alone on stdout, for a workflow to read with
+ * `$(...)`. Any other argument is a caller bug rather than a mode, and is reported with the rest.
+ */
+const requested = process.argv.slice(2);
+const printOnly = requested.includes('--print');
+const unknown = requested.filter((argument) => argument !== '--print');
+if (unknown.length > 0) {
+  problems.push(
+    `unexpected argument "${unknown[0]}"; usage: node scripts/check-version.mjs [--print]`,
+  );
+}
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
@@ -158,6 +173,10 @@ if (problems.length > 0) {
   for (const problem of problems) console.error(`  - ${problem}`);
   console.error('\nSee CONTRIBUTING.md §"Releases" for the versioning rule.');
   process.exitCode = 1;
+} else if (printOnly) {
+  // The number and nothing else: `shared` is null only where the manifests disagree, which is a
+  // problem, so this branch always has one value to print.
+  process.stdout.write(`${shared}\n`);
 } else {
   const described =
     shared === PLACEHOLDER ? `the unreleased placeholder "${PLACEHOLDER}"` : `"${shared}"`;

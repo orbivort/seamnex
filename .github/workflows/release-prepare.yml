@@ -1,13 +1,14 @@
-name: version-bump
+name: release-prepare
 
 # The maintainer-facing half of a release: it turns the version named in the Actions UI into a
 # reviewable pull request that carries that version in every manifest, in `CONTRACT_DOCUMENT_VERSION`
 # (and so in the committed `docs/openapi.json`) and in `CHANGELOG.md`.
 #
-# It never tags and never publishes. `release-dispatch.yml` and `release.yml` still cut the release
-# from a commit; this workflow only removes the hand edit that used to happen before them, and puts
-# it behind review. A version that is already tagged is refused, so this cannot rewrite a past
-# release — and the branch it pushes is a pull-request branch, not a protected one.
+# It never tags and never publishes. `release.yml` still cuts the release from a commit, and
+# `release-auto.yml` runs it when the `main` push this pull request becomes changes the version; this
+# workflow only removes the hand edit that used to happen before them, and puts it behind review.
+# A version that is already tagged is refused, so this cannot rewrite a past release — and the branch
+# it pushes is a pull-request branch, not a protected one.
 #
 # The number writing itself lives in `scripts/bump-version.mjs`, not in this file: the same command
 # prepares a release by hand, and `pnpm check:version` is the gate that reads the result back.
@@ -22,7 +23,7 @@ on:
 # Two bumps running together would race for the same branch name; the second should queue behind the
 # first rather than cancel a half-written tree.
 concurrency:
-  group: version-bump
+  group: release-prepare
   cancel-in-progress: false
 
 env:
@@ -45,12 +46,18 @@ jobs:
     name: bump, verify and open the pull request
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # `actions: write` is the one addition to what a bump appears to need: `gh workflow run` is the
-    # only way to put a CI run on a branch whose pull request `GITHUB_TOKEN` opened.
+    # `actions: write` belongs to the fallback below, not to the bump: it is what `gh workflow run`
+    # needs to put a CI run on a branch whose pull request `GITHUB_TOKEN` opened. With the optional
+    # release app credential configured, the pull request starts its own run and no dispatch happens.
     permissions:
       contents: write
       pull-requests: write
       actions: write
+    env:
+      # Presence check for the optional app credential, which is what turns the pre-merge gates into
+      # checks on the pull request. Only this id is visible to every step; the private key is passed to
+      # the one step that uses it, never exported to the job.
+      RELEASE_APP_ID: ${{ secrets.RELEASE_APP_ID }}
     steps:
       - name: checkout
         uses: actions/checkout@v7
@@ -160,6 +167,7 @@ jobs:
           printf 'Changed by the bump:\n%s\n' "$changed"
           git diff --cached --stat
       - name: commit and push the branch
+        id: push
         env:
           VERSION: ${{ steps.version.outputs.version }}
           BRANCH: ${{ steps.version.outputs.branch }}
@@ -170,34 +178,64 @@ jobs:
           git switch --create "$BRANCH"
           git commit -m "chore(release): v$VERSION"
           git push origin "refs/heads/$BRANCH"
-          echo "Pushed $BRANCH at $(git rev-parse --short HEAD)."
-      # A pull request opened with `GITHUB_TOKEN` does not start `pull_request` workflows, so without
-      # this the checks a reviewer needs would arrive only after a manual close/reopen. Dispatching
-      # `ci.yml` on the pushed branch puts the same definition on the commit the pull request shows.
+          sha=$(git rev-parse HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Pushed $BRANCH at ${sha:0:7}."
+      # A pull request opened with `GITHUB_TOKEN` starts no `pull_request` workflow, and that event is
+      # the only way the gates arrive as check runs — the form branch protection evaluates. An app
+      # credential fixes the cause; without one, the fallback below dispatches `ci.yml` on the branch,
+      # which is attached to the branch rather than to the pull request but is otherwise the same run.
+      - name: mint a token whose pull request starts workflows
+        id: bot
+        if: env.RELEASE_APP_ID != ''
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ env.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          # Opening the pull request is all this token does; pushing keeps the workflow's own token.
+          permission-pull-requests: write
       - name: start the CI run on the release branch
+        if: env.RELEASE_APP_ID == ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BRANCH: ${{ steps.version.outputs.branch }}
+          SHA: ${{ steps.push.outputs.sha }}
         run: |
           set -euo pipefail
+          # Idempotent, because re-running a failed job re-runs this step: a second dispatch for the
+          # same commit is a duplicate run, and `ci.yml` cancels one of the two halfway through.
+          existing=$(gh run list --workflow ci.yml --commit "$SHA" --limit 100 --json databaseId --jq 'length')
+          if [[ "$existing" != '0' ]]; then
+            echo "ci.yml already has a run on ${SHA:0:7}; not dispatching another."
+            exit 0
+          fi
           gh workflow run ci.yml --ref "$BRANCH"
-          echo "Dispatched ci.yml on $BRANCH."
+          echo "Dispatched ci.yml on $BRANCH (a pull request opened with GITHUB_TOKEN starts none)."
       # A pull request is the deliverable, so its body says what a reviewer has to check and what
       # happens after the merge. `--body-file` keeps the Markdown out of the YAML.
       - name: open the pull request
         id: pull-request
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The app token when there is one, because the actor of `gh pr create` is what decides
+          # whether this pull request starts its own workflow run.
+          GH_TOKEN: ${{ steps.bot.outputs.token || secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
           BRANCH: ${{ steps.version.outputs.branch }}
           DATE: ${{ steps.version.outputs.date }}
         run: |
           set -euo pipefail
-          body="$RUNNER_TEMP/version-bump.md"
+          body="$RUNNER_TEMP/release-prepare.md"
+          # Which gate the reviewer will see is the one difference the app credential makes, so the
+          # body states which one applies instead of describing the fallback as if it were the rule.
+          if [[ -n "${RELEASE_APP_ID}" ]]; then
+            ci_note="\`ci.yml\` started from this pull request's own \`pull_request\` event, so the gates are check runs on this pull request and can be required before merge."
+          else
+            ci_note="\`ci.yml\` was dispatched on \`$BRANCH\` after the push, because a pull request opened with \`GITHUB_TOKEN\` does not start \`pull_request\` workflows. That run is attached to the branch rather than to this pull request; re-dispatch it from the Actions tab if it did not start. Configuring the release app credential turns it into a required check."
+          fi
           {
             echo "## Release preparation: \`v$VERSION\`"
             echo
-            echo "Generated by \`.github/workflows/version-bump.yml\` from \`${GITHUB_REF_NAME}@${GITHUB_SHA:0:7}\`. Merging this pull request is what makes \`v$VERSION\` the version the repository states about itself."
+            echo "Generated by \`.github/workflows/release-prepare.yml\` from \`${GITHUB_REF_NAME}@${GITHUB_SHA:0:7}\`. Merging this pull request is what makes \`v$VERSION\` the version the repository states about itself."
             echo
             echo "| File | Result |"
             echo "| --- | --- |"
@@ -227,11 +265,13 @@ jobs:
             echo
             echo "### After merge"
             echo
-            echo "Tag the merge commit with \`release-dispatch.yml\` (input \`$VERSION\`) or by pushing \`v$VERSION\` yourself. That workflow re-runs the full CI definition before it tags, and it refuses a version whose manifests disagree with the released identity."
+            echo "Merging this pull request releases it. \`release-auto.yml\` runs on the \`main\` push this becomes, re-uses the CI run already green on that commit (or runs the gates itself when there is none), packages the artefacts, tags \`v$VERSION\` and publishes the release with the \`## [$VERSION]\` section of \`CHANGELOG.md\` as its body."
+            echo
+            echo "To retry a release that failed after the merge, run \`release-dispatch.yml\` with \`$VERSION\`: no version change follows, so nothing re-triggers the automatic path."
             echo
             echo "### CI on this pull request"
             echo
-            echo "\`ci.yml\` was dispatched on \`$BRANCH\` after the push, because a pull request opened with \`GITHUB_TOKEN\` does not start \`pull_request\` workflows. That run is attached to the branch, not to a \`pull_request\` event; re-dispatch it from the Actions tab if it did not start."
+            echo "$ci_note"
           } > "$body"
           url=$(gh pr create --base "$GITHUB_REF_NAME" --head "$BRANCH" --title "chore(release): v$VERSION" --body-file "$body")
           echo "url=$url" >> "$GITHUB_OUTPUT"

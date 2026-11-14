@@ -3,17 +3,28 @@
  *
  * The changelog is the human document: `scripts/bump-version.mjs` turns `## [Unreleased]` into
  * `## [X.Y.Z] - <date>` behind review, and the release publishes that section instead of a list of
- * commits. When there is no section — the first release, or a tag cut before the `version-bump`
+ * commits. When there is no section — the first release, or a tag cut before the `release-prepare`
  * pull request merged — nothing is written and the caller keeps `gh release create --generate-notes`.
  *
- *   node scripts/release-notes.mjs 1.2.3
+ *   node scripts/release-notes.mjs 1.2.3 [--no-footer]
  *
  * Both outcomes exit 0: "no section for this version" is a documented release path, not a failure.
  * With `GITHUB_OUTPUT` set the resolved source is appended there as `source=changelog|commits`.
  * Only Node built-ins are used — the release jobs run this before anything is installed.
+ *
+ * A published section is followed by a generated footer: download verification, the licence and the
+ * full-changelog link. Those are facts the pipeline already owns — the checksums it wrote, the
+ * identifier in `package.json` that `check:license` gates, and the tag the release is cut from — so
+ * restating them in every section would be a copy that can disagree. Nothing else is generated: the
+ * summary, the migration steps and the limits of the release are judgement and stay authored in
+ * `CHANGELOG.md`. `--no-footer` publishes the section exactly as written.
+ *
+ * Deliberately absent: a version/date line (the release page states both, and a retried run would
+ * contradict the timestamp it shows) and an asset table (GitHub renders that from the uploaded files).
  */
 import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 /**
  * SemVer core plus a pre-release: the only shape a release tag takes. Splitting rather than matching
@@ -71,6 +82,94 @@ function findSection(changelog, version) {
   return (end === -1 ? rest : rest.slice(0, end)).join('\n').trim();
 }
 
+/** The GitHub slug the links are built from. Absent on a developer checkout. */
+function repositorySlug() {
+  return (process.env.GITHUB_REPOSITORY ?? '').trim();
+}
+
+/**
+ * The tag this release follows, for the compare link. `--exclude` because the tag being released may
+ * already be fetched when this runs (a retried run does exactly that), and `--match` so a tag that is
+ * not a version is never offered as a release boundary. An empty string means "no previous tag": the
+ * first release, or a checkout with no tags — both are answered without inventing one.
+ */
+function previousTag(version) {
+  try {
+    return execFileSync(
+      'git',
+      ['describe', '--tags', '--abbrev=0', '--match', 'v[0-9]*', `--exclude=v${version}`, 'HEAD'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+    ).trim();
+  } catch {
+    return '';
+  }
+}
+
+/** The identifier from the root manifest — the value `pnpm check:license` is the gate for. */
+function licenceIdentifier(root) {
+  try {
+    return JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8')).license ?? '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * The footer, in the order a reader needs it: how to check what they downloaded, what they may do
+ * with it, and where the rest of the changes are. A section is omitted when its input is unknown, so
+ * this never prints a link it cannot substantiate — a checkout without `GITHUB_REPOSITORY` publishes
+ * verification and licence, and no compare link.
+ */
+function renderFooter({ root, version }) {
+  const sections = [];
+
+  sections.push(
+    [
+      '## Verify the download',
+      '',
+      '```bash',
+      'sha256sum --ignore-missing -c SHA256SUMS.txt',
+      '```',
+      '',
+      'On macOS: `shasum -a 256 --ignore-missing -c SHA256SUMS.txt`. Each archive carries its bundle,',
+      '`LICENSE` and `THIRD-PARTY-NOTICES.md`; an archive missing either is not a release asset —',
+      'download it again.',
+    ].join('\n'),
+  );
+
+  const licence = licenceIdentifier(root);
+  if (licence !== '') {
+    sections.push(
+      [
+        '## Licence',
+        '',
+        `\`${licence}\` — the full text is in \`LICENSE\` inside each archive, and the corresponding`,
+        `source for this release is the tag \`v${version}\`.`,
+      ].join('\n'),
+    );
+  }
+
+  const repository = repositorySlug();
+  if (repository !== '') {
+    const previous = previousTag(version);
+    const url =
+      previous === ''
+        ? `https://github.com/${repository}/commits/v${version}`
+        : `https://github.com/${repository}/compare/${previous}...v${version}`;
+    sections.push(
+      [
+        '## Full changelog',
+        '',
+        previous === ''
+          ? `Initial release — no previous tag to compare against. [\`v${version}\` commits](${url})`
+          : `[\`${previous}...v${version}\`](${url})`,
+      ].join('\n'),
+    );
+  }
+
+  return sections.join('\n\n');
+}
+
 /**
  * Appending rather than writing the whole `GITHUB_OUTPUT`: the file is shared by every step in the
  * job, and truncating it would drop another step's outputs.
@@ -89,11 +188,17 @@ function record(source, version) {
 }
 
 function main() {
-  const [argument, ...extra] = process.argv.slice(2);
+  const argv = process.argv.slice(2);
+  const [argument, ...extra] = argv.filter((item) => !item.startsWith('--'));
+  const flags = argv.filter((item) => item.startsWith('--'));
+  const unknown = flags.filter((flag) => flag !== '--no-footer');
   const version = (argument ?? '').replace(/^v/, '');
 
-  if (argument === undefined || extra.length > 0) {
-    console.error('release-notes: usage: node scripts/release-notes.mjs <version>');
+  if (argument === undefined || extra.length > 0 || unknown.length > 0) {
+    console.error(
+      'release-notes: usage: node scripts/release-notes.mjs <version> [--no-footer]' +
+        (unknown.length > 0 ? ` (unknown flag "${unknown[0]}")` : ''),
+    );
     process.exitCode = 1;
     return;
   }
@@ -119,7 +224,17 @@ function main() {
     return;
   }
 
-  writeFileSync(bodyPath, `${section}\n`, 'utf8');
+  // The footer is separated by a rule so a reader can see where the reviewed section ends. The blank
+  // line before it is what keeps `---` a thematic break rather than a setext heading.
+  const footer = flags.includes('--no-footer') ? '' : renderFooter({ root, version });
+  const body = footer === '' ? section : `${section}\n\n---\n\n${footer}`;
+
+  writeFileSync(bodyPath, `${body}\n`, 'utf8');
+  console.log(
+    footer === ''
+      ? `release-notes: wrote the section for ${version} as written.`
+      : `release-notes: wrote the section for ${version} plus the generated footer.`,
+  );
   record('changelog', version);
 }
 

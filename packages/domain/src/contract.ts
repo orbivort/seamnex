@@ -1458,7 +1458,7 @@ export type OpenApiDocument = {
  *
  * `docs/openapi.json` is committed, and two tests assert that the document served by
  * `GET /api/v1/openapi.json` is byte-identical to it. The copy therefore moves in one commit with
- * its own regeneration — `scripts/bump-version.mjs` writes this constant, `version-bump.yml` runs
+ * its own regeneration — `scripts/bump-version.mjs` writes this constant, `release-prepare.yml` runs
  * the generator — and `pnpm check:version` fails while the three disagree. The running release is
  * reported by `GET /api/v1/healthz` (`version`, `revision`) and by the image's OCI labels, so a
  * deployment built from a tag answers with that tag whatever a checkout carries. The compatibility

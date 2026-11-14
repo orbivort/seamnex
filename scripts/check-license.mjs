@@ -106,16 +106,32 @@ if (!/COPY[^\n]*\bLICENSE\b/.test(dockerfile)) {
 }
 
 // 5. And the other one: the release tarballs, which are a checkout's `dist/` plus nothing else
-//    unless the packaging step says otherwise. Both workflows publish into the same release, so both
-//    are read — naming one file is how the manual path dropped the licence unnoticed.
-for (const workflow of ['release.yml', 'release-dispatch.yml']) {
-  const path = `.github/workflows/${workflow}`;
+//    unless the packaging step says otherwise. The list is derived, not named: every workflow that
+//    publishes a release is one that has to package the licence, so a workflow added later is read on
+//    the day it is written rather than on the day it drops the file. The manual path once published
+//    from its own copy of the packaging step and lost the licence; it now calls the same pipeline.
+const workflowsDirectory = resolve(root, '.github', 'workflows');
+const publishers = readdirSync(workflowsDirectory)
+  .filter((entry) => entry.endsWith('.yml'))
+  .filter((entry) =>
+    readFileSync(resolve(workflowsDirectory, entry), 'utf8').includes('gh release create'),
+  );
+
+if (publishers.length === 0) {
+  problems.push(
+    '.github/workflows: no workflow publishes a release, so the packaging check below proves nothing',
+  );
+}
+
+for (const workflow of publishers) {
   if (
-    !readFileSync(resolve(root, '.github', 'workflows', workflow), 'utf8').includes(
+    !readFileSync(resolve(workflowsDirectory, workflow), 'utf8').includes(
       'LICENSE THIRD-PARTY-NOTICES.md',
     )
   ) {
-    problems.push(`${path}: the release tarball omits LICENSE or the notices`);
+    problems.push(
+      `.github/workflows/${workflow}: publishes a release but its tarball omits LICENSE or the notices`,
+    );
   }
 }
 

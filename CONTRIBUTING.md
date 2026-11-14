@@ -365,31 +365,40 @@ secret or personal data in the diff, fixtures or logs; revertable in one commit.
 
 ## Releases
 
-Maintainers cut releases from tags. Contributors do not bump versions, edit `CHANGELOG.md` or tag
-anything — a merged, gated pull request is the contribution. The release body is the `## [X.Y.Z]`
-section of `CHANGELOG.md`, published as written; only when there is no such section — the first
-release, or a tag cut before the bump merged — are notes generated from the commits since the
-previous tag.
+Maintainers release, and a release is a tag written by the pipeline rather than by hand. Contributors
+do not bump versions, edit `CHANGELOG.md` or tag anything — a merged, gated pull request is the
+contribution. The release body is the `## [X.Y.Z]` section of `CHANGELOG.md`, published as written and
+followed by a generated footer — how to verify the download, the licence, and the full-changelog link;
+only when there is no such section — the first release, or a tag cut before the bump merged — are
+notes generated from the commits since the previous tag.
 
 The tag is the version, and the repository keeps one copy of it: every manifest, the
 `CONTRACT_DOCUMENT_VERSION` constant and therefore the committed `docs/openapi.json` carry the last
 released version — `0.0.0` before the first release — and `pnpm check:version` fails when the copies
 disagree. That copy is written in one place, never by hand:
 
-- **Bump** — run the `version-bump` workflow from `main` with the version. It opens a `release/vX.Y.Z`
+- **Prepare** — run the `release-prepare` workflow from `main` with the version. It opens a `release/vX.Y.Z`
   pull request that moves every manifest, the contract constant and the regenerated
   `docs/openapi.json`, and turns `## [Unreleased]` in `CHANGELOG.md` into `## [X.Y.Z] - <date>`,
   leaving a fresh `## [Unreleased]` above it and moving the link definitions to `vX.Y.Z`. The
   version must sort above the one the manifests already carry. `node scripts/bump-version.mjs X.Y.Z`
   is the same edit locally.
-- **Merge** — one approval and green gates. `ci.yml` is dispatched on the release branch for you,
-  because a pull request opened with `GITHUB_TOKEN` does not start one. The number the repository
-  states about itself is then that version, and a release refuses an identity its manifests
-  disagree with.
-- **Release** — `release-dispatch.yml`, or a pushed `vX.Y.Z` tag. That path re-runs CI, tags the merge
-  commit and publishes the artefacts. `release-dispatch.yml` takes the version as an input, and
-  `pnpm check:version` refuses it unless the bumped tree carries that number in every manifest, in
-  `docs/openapi.json` and in the `## [X.Y.Z]` heading of `CHANGELOG.md`.
+- **Merge** — one approval and green gates. Either the release app credential is configured and the
+  pull request starts its own `ci.yml` run as pull-request checks, or `ci.yml` is dispatched on the
+  release branch for you, because a pull request opened with `GITHUB_TOKEN` starts neither. The number
+  the repository states about itself is then that version, and a release refuses an identity its
+  manifests disagree with.
+- **Release** — automatic. Merging the preparation pull request releases it: `release-auto.yml` runs on the
+  `main` push that changes the version, takes that version from `scripts/check-version.mjs --print`,
+  re-uses the `ci.yml` run already green on the same commit (running the gates itself when there is
+  none), packages the artefacts, tags the merge commit and publishes the release with the `## [X.Y.Z]`
+  section of `CHANGELOG.md` as its body. `pnpm check:version` refuses a version the tree does not
+  carry, in every manifest, in `docs/openapi.json` and in that heading.
+- **Retry or rehearse** — `release-dispatch.yml` runs the same `release.yml` pipeline: give it a
+  version, or leave the input blank to release the version the tree states, and check `dry_run` to
+  build without tagging. An automatic run that fails changes no version, so a retry is the manual
+  path. Pushing `vX.Y.Z` yourself runs that pipeline too. Nothing tags by hand: the tag is written by
+  the run that built and verified the assets.
 
 "Breaking" is a property of a self-hosted deployment, not of the diff:
 

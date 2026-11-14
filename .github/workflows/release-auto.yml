@@ -1,0 +1,121 @@
+name: release-auto
+
+# The release nobody types. Merging the `release-prepare` pull request *is* the release request,
+# because the bump already wrote the version into every manifest, into `CONTRACT_DOCUMENT_VERSION`
+# (and so into `docs/openapi.json`) and into `CHANGELOG.md`. Nothing here invents a number:
+# `scripts/check-version.mjs --print` reads the one the review approved.
+#
+# This is an entrypoint, not a pipeline. It decides whether the merge is a release and then calls
+# `release.yml`, so an automatic release and `release-dispatch.yml` cannot state different gates,
+# different artefacts or different notes.
+#
+# Every condition that says "not now" turns the release *off* rather than failing the run: a merge
+# that did not change the version, a version whose tag already exists, and the `0.0.0` placeholder
+# are all ordinary rather than errors. Only a tree the version gate rejects fails, because that tree
+# could not be released correctly by anyone.
+on:
+  push:
+    branches: [main]
+    # The bump always rewrites the root manifest, so no other merge starts this workflow at all; the
+    # version comparison below then filters the changes to that file which are not a bump (a
+    # dependency, a script, a description). A path list is a filter, not a decision: the decision is
+    # the version, which is why nothing here reads the paths.
+    paths: ['package.json']
+
+# One automatic release at a time. `cancel-in-progress: false` because a half-uploaded release is
+# worse than a queued one, and the tag check in `release.yml` keeps a queued duplicate harmless.
+concurrency:
+  group: release-auto
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  resolve:
+    name: is this merge a release?
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      release: ${{ steps.detect.outputs.release }}
+      version: ${{ steps.detect.outputs.version }}
+    steps:
+      - name: checkout
+        uses: actions/checkout@v7
+        with:
+          # The previous commit's manifest is what proves this merge changed the version.
+          fetch-depth: 0
+      - name: install node (.nvmrc)
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+      - name: read the version this merge states
+        id: detect
+        run: |
+          set -euo pipefail
+          release=false
+          # The gate that judges the bump is also the reader of it: a tree whose manifests, contract
+          # constant, OpenAPI document and changelog disagree exits non-zero here, before a release
+          # could be built from it.
+          version=$(node scripts/check-version.mjs --print)
+          # `HEAD^` is the `main` tip before this merge, which is a squash commit under
+          # `CONTRIBUTING.md` § Review and merge and a merge commit otherwise: either way, the parent
+          # that carries the previous version.
+          previous_manifest="$RUNNER_TEMP/previous-package.json"
+          if ! git show HEAD^:package.json > "$previous_manifest" 2>/dev/null; then
+            printf '{"version":"0.0.0"}\n' > "$previous_manifest"
+            echo "::warning::no parent manifest to compare against; treating this as the first commit."
+          fi
+          previous=$(node -p \
+            "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')).version" \
+            "$previous_manifest")
+          if [[ "$version" == '0.0.0' ]]; then
+            echo "This merge carries the placeholder, so nothing was bumped and there is nothing to release."
+          elif [[ "$previous" == "$version" ]]; then
+            echo "The version was already $version before this merge; the merge that changed it owns the release."
+          elif git ls-remote --tags origin "refs/tags/v$version" | grep -q .; then
+            echo "v$version is already tagged, so a release of it already exists."
+          else
+            release=true
+            echo "This merge states $version and no tag carries it: releasing."
+          fi
+          {
+            echo "release=$release"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+      - name: summarise the decision
+        run: |
+          set -euo pipefail
+          {
+            echo "### Automatic release: ${{ steps.detect.outputs.version }}"
+            echo
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Version in the tree | \`${{ steps.detect.outputs.version }}\` |"
+            echo "| Release | \`${{ steps.detect.outputs.release }}\` |"
+            echo "| Commit | \`${GITHUB_SHA:0:7}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    name: tag and publish
+    needs: resolve
+    if: needs.resolve.outputs.release == 'true'
+    # The called workflow writes a tag and a release, so the caller has to grant both; each job inside
+    # it narrows that back down to what it uses.
+    permissions:
+      contents: write
+      actions: read
+    uses: ./.github/workflows/release.yml
+    # `dry_run` is left to its default (`false`): a merge either releases or does not, and a
+    # rehearsal is what `release-dispatch.yml` is for.
+    with:
+      version: ${{ needs.resolve.outputs.version }}
+    secrets:
+      TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
+      TURBO_TEAM: ${{ secrets.TURBO_TEAM }}

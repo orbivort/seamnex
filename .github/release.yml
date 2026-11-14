@@ -50,7 +50,7 @@ changelog:
       - 'dependabot[bot]'
       - renovate
       - 'renovate[bot]'
-      # The `version-bump` pull request is the release's own bookkeeping (`chore(release): vX.Y.Z`):
+      # The `release-prepare` pull request is the release's own bookkeeping (`chore(release): vX.Y.Z`):
       # a note that cites it tells the reader nothing about what changed. It is the only pull request
       # this repository's workflows open, so the exclusion hides no real content — a workflow that
       # starts opening substantive pull requests must not reuse this identity here.

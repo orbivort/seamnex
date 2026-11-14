@@ -1,382 +1,51 @@
 name: release-dispatch
 
-# The manual counterpart to `release.yml`. `release.yml` stays the primary path — it fires on
-# `push` to a version tag, which is the only event that guarantees the tag and the built commit are
-# the same object. This workflow exists for the case that path cannot cover: a maintainer names the
-# version in the Actions UI (`Run workflow` -> `version`) and the tag is created for them.
+# The manual entrypoint to `release.yml`. A maintainer states the version, or leaves it blank and the
+# pipeline reads the one the tree states — the number the bump pull request put there — and can ask
+# for a dry run. It covers what `release-auto.yml` cannot: a rehearsal, and a retry after an automatic
+# release failed, since a retry changes no version and so produces no `push` to react to.
 #
-# It does the whole pipeline in one run instead of pushing a tag and letting `push` re-enter
-# `release.yml`, because a tag pushed with `secrets.GITHUB_TOKEN` does not start a workflow. The
-# alternative — a personal access token with `contents: write`, held to re-enter the same
-# repository — buys nothing here and adds a long-lived credential. Everything the release needs
-# happens in this run, and the tag is written last, for a commit that has already passed the gates,
-# so it records a release that exists rather than predicting one.
-#
-# Known duplication: `package` and `publish` restate `release.yml`'s steps. Keeping the version
-# source in one place (the tag) was worth that; if the two drift in review, the fix is to turn
-# `release.yml` into a reusable workflow (`workflow_call` with a `version` input) and let both
-# triggers call it.
+# It has no jobs of its own beyond the call. It used to restate `package`, `tag` and `publish`; those
+# live in `release.yml` now, so a manual release cannot be a different release from an automatic one.
+# Nothing here creates the tag: `release.yml` writes it last, after the gates and the packaging, which
+# is also why a tag pushed with `secrets.GITHUB_TOKEN` is never needed to re-enter this repository.
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release: X.Y.Z or X.Y.Z-rc.N (a leading "v" is optional)'
-        required: true
+        description: 'Version to release: X.Y.Z or X.Y.Z-rc.N (a leading "v" is optional; blank: the version the tree states)'
+        required: false
         type: string
+        default: ''
       dry_run:
         description: 'Run every gate and build the artefacts, but do not tag or publish'
         required: false
         type: boolean
         default: false
 
-# One manual release at a time, and never cancel a run that is halfway through uploading assets:
-# a cancelled publish leaves a release carrying only some of its files. This group cannot collide
-# with `release.yml`'s per-tag group, so the version is also checked to be untagged and unpublished
-# below — the two paths then cannot address the same version even when they run close together.
+# One manual release at a time, and never cancel a run that is halfway through uploading assets: a
+# cancelled publish leaves a release carrying only some of its files. The pipeline itself refuses a
+# version whose tag or release exists, so this group and `release-auto.yml`'s cannot address the same
+# version even when they run close together.
 concurrency:
   group: release-dispatch
   cancel-in-progress: false
 
-env:
-  # No Node version here: `actions/setup-node` reads `node-version-file: .nvmrc`, the same pin
-  # `engines.node`/`devEngines` in package.json state and `engineStrict` enforces on install.
-  # Restating a major would be the one number able to disagree with that file.
-  TURBO_TELEMETRY_DISABLED: '1'
-
-# Actions are referenced by major version only (`@v7`, `@v8`), matching `ci.yml`; the note there
-# explains the convention and its one exception.
-
-# Least privilege at the workflow level. `tag` and `publish` escalate, each only to
-# `contents: write`, the single permission `git push` and `gh release create` need.
 permissions:
   contents: read
 
-defaults:
-  run:
-    shell: bash
-
 jobs:
-  # The input is untrusted text. It is validated here, once, and the normalised tag/version pair is
-  # carried to every later job as an output, so no job has to re-derive it and none can disagree.
-  validate:
-    name: validate the requested version
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  release:
+    name: tag and publish
+    # The called workflow writes a tag and a release, so the caller has to grant both; each job inside
+    # it narrows that back down to what it uses.
     permissions:
-      contents: read
-    outputs:
-      tag: ${{ steps.version.outputs.tag }}
-      version: ${{ steps.version.outputs.version }}
-      prerelease: ${{ steps.version.outputs.prerelease }}
-    steps:
-      - name: checkout
-        uses: actions/checkout@v7
-        with:
-          # `git ls-remote` below needs a remote to ask, and the tag walk needs the tags.
-          fetch-depth: 0
-      # `inputs.version` arrives through the environment rather than as an inline `${{ }}`
-      # substitution: a substituted value is pasted into the script before bash parses it, which is
-      # how a dispatch input becomes shell. Quoted and read from the environment, it cannot.
-      - name: check the input is a version and is not already released
-        id: version
-        env:
-          RAW_VERSION: ${{ inputs.version }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          version="${RAW_VERSION#v}"
-          # Strict SemVer core plus the pre-release form the release notes and `release.yml` already
-          # use. Leading zeros are refused (SemVer forbids them) and build metadata is refused
-          # (`release.yml`'s runtime check would reject `+...` on the tag). `0.0.0` is the
-          # placeholder every manifest carries, so it can never name a release.
-          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
-            echo "::error::'$RAW_VERSION' is not a version (expected X.Y.Z or X.Y.Z-<pre>)."
-            exit 1
-          fi
-          if [[ "$version" == '0.0.0' ]]; then
-            echo "::error::0.0.0 is the manifest placeholder and cannot be released."
-            exit 1
-          fi
-          tag="v$version"
-          # The version is a tag, and a published tag is never moved, deleted or reused
-          # (`CONTRIBUTING.md` section 11). Discovering that now is cheaper than discovering it at
-          # `gh release create`.
-          if git ls-remote --tags origin "refs/tags/$tag" | grep -q .; then
-            echo "::error::tag $tag already exists; pick a new version (a defective release is followed by the next patch)."
-            exit 1
-          fi
-          if gh release view "$tag" >/dev/null 2>&1; then
-            echo "::error::a release for $tag already exists."
-            exit 1
-          fi
-          # `workflow_dispatch` can also be started on a tag. That commit is already released by
-          # definition, and rebadging it with a new version is exactly the reuse forbidden above.
-          if [[ "${GITHUB_REF_TYPE}" != 'branch' ]]; then
-            echo "::error::run this workflow from a branch, not from ${GITHUB_REF_TYPE} ${GITHUB_REF_NAME}."
-            exit 1
-          fi
-          {
-            echo "tag=$tag"
-            echo "version=$version"
-            echo "prerelease=$([[ "$version" == *-* ]] && echo true || echo false)"
-          } >> "$GITHUB_OUTPUT"
-          echo "Releasing $tag from ${GITHUB_REF_NAME}@${GITHUB_SHA:0:7}."
-      - name: summarise the request
-        run: |
-          set -euo pipefail
-          {
-            echo "### Release request: ${{ steps.version.outputs.tag }}"
-            echo
-            echo "| Field | Value |"
-            echo "| --- | --- |"
-            echo "| Version | \`${{ steps.version.outputs.version }}\` |"
-            echo "| Pre-release | \`${{ steps.version.outputs.prerelease }}\` |"
-            echo "| Source | \`${GITHUB_REF_NAME}\` at \`${GITHUB_SHA:0:7}\` |"
-            echo "| Dry run | \`${{ inputs.dry_run }}\` |"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  # Testing is the CI definition itself, not a restatement of it: the same gates that protect
-  # `main` decide whether this version is publishable, and the two cannot drift. A red gate here
-  # keeps `needs:` from starting `package`, so nothing is tagged for a commit that did not pass.
-  ci:
-    name: CI (all gates) on the commit being released
-    needs: validate
-    uses: ./.github/workflows/ci.yml
-    permissions:
-      contents: read
+      contents: write
+      actions: read
+    uses: ./.github/workflows/release.yml
+    with:
+      version: ${{ inputs.version }}
+      dry_run: ${{ inputs.dry_run }}
     secrets:
       TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
       TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
-
-  package:
-    name: build and package
-    needs: [validate, ci]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    env:
-      TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
-      TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
-    steps:
-      - name: checkout
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - name: install pnpm (version from packageManager)
-        uses: pnpm/action-setup@v6
-      - name: install node (.nvmrc)
-        uses: actions/setup-node@v7
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - name: restore turbo cache
-        uses: actions/cache@v6
-        with:
-          path: .turbo
-          key: turbo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml') }}
-          restore-keys: turbo-${{ runner.os }}-${{ github.job }}-
-      - name: install dependencies
-        run: pnpm install --frozen-lockfile
-      # The manifests stay placeholders at every release; the requested version is the identity the
-      # image would report, so this asserts the requested number and the committed documents agree.
-      - name: version gate
-        env:
-          SEAMNEX_BUILD_VERSION: ${{ needs.validate.outputs.version }}
-        run: pnpm check:version
-      # The production build, not the demo build: it typechecks first and refuses to emit a bundle
-      # that still contains the mock service worker.
-      - name: build production bundles
-        run: pnpm build
-      - name: verify the build produced both SPAs
-        run: |
-          set -euo pipefail
-          for app in portal console; do
-            if [[ ! -f "apps/$app/dist/index.html" ]]; then
-              echo "::error::apps/$app/dist/index.html is missing — the bundle was not built."
-              exit 1
-            fi
-          done
-      # GPL-3.0 §4 and §5: a conveyed copy carries the licence, and §6 makes the corresponding source
-      # part of the same distribution. `dist/` alone satisfies neither, so the two files are staged
-      # next to the bundle — the same archive `release.yml` builds for the same tag.
-      - name: package each app as a versioned tarball
-        env:
-          VERSION: ${{ needs.validate.outputs.version }}
-        run: |
-          set -euo pipefail
-          mkdir -p release
-          for app in portal console; do
-            stage="temp/release-$app"
-            rm -rf "$stage"
-            mkdir -p "$stage"
-            cp -R "apps/$app/dist" "$stage/dist"
-            cp LICENSE THIRD-PARTY-NOTICES.md "$stage/"
-            tar -czf "release/seamnex-$app-${VERSION}.tar.gz" \
-              -C "$stage" dist LICENSE THIRD-PARTY-NOTICES.md
-          done
-          ls -l release
-      # An archive that silently lost its licence is a licence violation rather than a packaging
-      # detail, and it is invisible in the release notes.
-      - name: verify every tarball carries its licence
-        run: |
-          set -euo pipefail
-          for archive in release/*.tar.gz; do
-            listing="$(tar -tzf "$archive")"
-            for required in LICENSE THIRD-PARTY-NOTICES.md dist/index.html; do
-              if ! grep -qx "$required" <<< "$listing"; then
-                echo "::error::$archive does not contain $required — a GPL-3.0 distribution must carry both files."
-                exit 1
-              fi
-            done
-          done
-          echo "every archive carries LICENSE, THIRD-PARTY-NOTICES.md and its bundle."
-      # A published asset nobody can verify is only half an asset.
-      - name: write checksums
-        run: |
-          set -euo pipefail
-          cd release
-          sha256sum ./*.tar.gz > SHA256SUMS.txt
-          cat SHA256SUMS.txt
-      - name: upload packaged artefacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: release-assets
-          path: release/*
-          retention-days: 7
-          if-no-files-found: error
-
-  # Tagging comes after packaging on purpose. A tag written before the build would survive a red
-  # build, leaving a published-looking version with no assets behind it and no way to reuse the
-  # number. Written here, it names a commit that already passed CI and whose artefacts are on disk.
-  tag:
-    name: create and push the version tag
-    needs: [validate, package]
-    if: inputs.dry_run == false
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: write
-    steps:
-      - name: checkout
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - name: create the annotated tag on the released commit
-        env:
-          TAG: ${{ needs.validate.outputs.tag }}
-        run: |
-          set -euo pipefail
-          # A re-check of the remote, because `validate` ran minutes ago: a tag that appeared
-          # meanwhile is a concurrent release of the same number, and this run must not move it.
-          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
-            echo "::error::$TAG appeared while this run was building; refusing to move a published tag."
-            exit 1
-          fi
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          # The dispatched commit, explicitly: an annotated tag follows the commit it names, not
-          # whatever `checkout` left on HEAD.
-          git tag -a "$TAG" -m "Release ${TAG#v}" "$GITHUB_SHA"
-          git push origin "refs/tags/$TAG"
-          echo "Tagged ${GITHUB_SHA:0:7} as $TAG."
-
-  publish:
-    name: publish GitHub release
-    needs: [validate, package, tag]
-    if: inputs.dry_run == false
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    # The one write outside `tag`, scoped to the job that needs it.
-    permissions:
-      contents: write
-    steps:
-      - name: checkout
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      # The body is the `CHANGELOG.md` section for this version when there is one — the same script
-      # `release.yml` runs, so the manual path and the tag path cannot publish different notes for
-      # the same changelog. `pnpm check:version` in `package` has already refused a bumped tree
-      # whose changelog has no such section, so only an unbumped (`0.0.0`) release reaches the
-      # fallback here.
-      - name: prepare the release body from the changelog
-        id: notes
-        env:
-          VERSION: ${{ needs.validate.outputs.version }}
-        run: node scripts/release-notes.mjs "$VERSION"
-      - name: download packaged artefacts
-        uses: actions/download-artifact@v8
-        with:
-          name: release-assets
-          path: release
-      # `--verify-tag` fails rather than silently creating a tag if the previous job's push did not
-      # land. The body is whatever the step above prepared; `--generate-notes` covers the case where
-      # the changelog had no section for this version.
-      - name: create the versioned release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.validate.outputs.tag }}
-          VERSION: ${{ needs.validate.outputs.version }}
-          PRERELEASE: ${{ needs.validate.outputs.prerelease }}
-        run: |
-          set -euo pipefail
-          # `checkout` does not promise a tag pushed by an earlier job in the same run, so ask for
-          # exactly the one this run created before inspecting it.
-          git fetch --force origin "+refs/tags/${TAG}:refs/tags/${TAG}"
-          # The tag must still point at the commit this run built and packaged.
-          if [[ "$(git rev-parse "${TAG}^{commit}")" != "$GITHUB_SHA" ]]; then
-            echo "::error::$TAG does not point at $GITHUB_SHA; refusing to publish the wrong commit."
-            exit 1
-          fi
-          args=(--verify-tag --title "$VERSION")
-          if [[ -f release-notes.md ]]; then
-            args+=(--notes-file release-notes.md)
-          else
-            args+=(--generate-notes)
-          fi
-          if [[ "$PRERELEASE" == 'true' ]]; then
-            args+=(--prerelease)
-          else
-            args+=(--latest)
-          fi
-          gh release create "$TAG" release/* "${args[@]}"
-      - name: summarise the published release
-        env:
-          TAG: ${{ needs.validate.outputs.tag }}
-          # `changelog` or `commits`: which step prepared the body is the one fact the run summary
-          # cannot recover from the release itself.
-          NOTES: ${{ steps.notes.outputs.source }}
-        run: |
-          set -euo pipefail
-          {
-            echo "### Released $TAG"
-            echo
-            echo "Release notes taken from: \`$NOTES\`"
-            echo
-            echo "| Asset | Bytes |"
-            echo "| --- | --- |"
-            for f in release/*; do
-              printf '| %s | %s |\n' "$(basename "$f")" "$(stat -c%s "$f")"
-            done
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  # A dry run that silently skipped is indistinguishable from one that passed, so say so in the UI.
-  dry-run-report:
-    name: dry run (nothing tagged or published)
-    needs: [validate, package]
-    if: inputs.dry_run == true
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    steps:
-      - name: record what a real run would have released
-        run: |
-          set -euo pipefail
-          {
-            echo "### Dry run: ${{ needs.validate.outputs.tag }} was not released"
-            echo
-            echo "CI passed and the artefacts were built and uploaded as \`release-assets\`."
-            echo "Re-run with \`dry_run\` unchecked to tag and publish this version."
-          } >> "$GITHUB_STEP_SUMMARY"

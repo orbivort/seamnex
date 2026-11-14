@@ -1,7 +1,7 @@
 /**
  * Writes one version into every manifest, the contract constant and the changelog.
  *
- * This is the only writer of that number. `version-bump.yml` runs it behind a reviewable pull
+ * This is the only writer of that number. `release-prepare.yml` runs it behind a reviewable pull
  * request, and a maintainer runs the same command when preparing the release by hand:
  *
  *   node scripts/bump-version.mjs 0.2.0 [--date YYYY-MM-DD]
@@ -20,8 +20,8 @@ const PLACEHOLDER = '0.0.0';
 const UNRELEASED = '## [Unreleased]';
 
 /**
- * SemVer core plus an optional pre-release: the shape `release.yml` and `release-dispatch.yml`
- * accept, so a version this script writes can always be tagged. The nested repetition trips
+ * SemVer core plus an optional pre-release: the shape `release.yml` accepts, so a version this script
+ * writes can always be tagged. The nested repetition trips
  * `security/detect-unsafe-regex`, which is re-enabled immediately below the declaration: the input
  * is one short argument, not a document.
  */
