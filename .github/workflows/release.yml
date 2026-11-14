@@ -227,7 +227,10 @@ jobs:
     needs: [resolve, gate]
     # Skipped only when `gate` found the same definition already green on this exact commit. The
     # result is read explicitly so a `gate` that failed does not reach this job through a loose `if`.
-    if: !cancelled() && needs.gate.result == 'success' && needs.gate.outputs.reuse != 'true'
+    # Quoted because a plain scalar that starts with `!` is a YAML *tag*, not a string: unquoted, the
+    # line is a syntax error at parse time, the whole workflow is rejected on push, and the condition
+    # never reaches the expression evaluator.
+    if: "!cancelled() && needs.gate.result == 'success' && needs.gate.outputs.reuse != 'true'"
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
