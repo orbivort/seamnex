@@ -229,7 +229,8 @@
         "instance_env_value",
         "instance_service",
         "instance_volume",
-        "instance_route"
+        "instance_route",
+        "render_file"
       ]
     },
     {

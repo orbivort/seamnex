@@ -223,6 +223,43 @@ describe('process', () => {
     );
   });
 
+  /**
+   * The console renders the failed step and the job log as the whole diagnosis. An `AppError`
+   * carries a remediation that says what to do; dropping it left "DATABASE_URL points at postgres"
+   * on screen without the setting that fixes it.
+   */
+  it('carries an AppError remediation into the step, the log and the job error', async () => {
+    const stages = [
+      {
+        step: 'dump',
+        run: vi.fn(async () => {
+          throw new AppError({
+            code: 'ADAPTER_UNAVAILABLE',
+            detail: 'A platform backup needs a host-reachable database address.',
+            remediation: 'Set SEAMNEX_PLATFORM_DB_URL to the published localhost address.',
+          });
+        }),
+      },
+    ];
+    const { jobs, worker } = setup({ stages });
+    worker.start();
+
+    const expected =
+      'A platform backup needs a host-reachable database address. Set SEAMNEX_PLATFORM_DB_URL to the published localhost address.';
+
+    await expect(processor()(bullJob())).rejects.toMatchObject({
+      code: 'ADAPTER_UNAVAILABLE',
+    });
+
+    expect(jobs.setStep).toHaveBeenCalledWith('job-1', 1, 'failed', expected);
+    expect(jobs.appendLog).toHaveBeenCalledWith('job-1', 'stderr', expected);
+    expect(jobs.transition).toHaveBeenLastCalledWith('job-1', 'failed', {
+      errorCode: 'ADAPTER_UNAVAILABLE',
+      errorDetail: expected,
+      actorId: 'deploy-worker',
+    });
+  });
+
   it('records a non-Error stage failure by its string form', async () => {
     const stages = [
       {

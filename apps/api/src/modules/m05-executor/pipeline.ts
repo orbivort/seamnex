@@ -41,8 +41,13 @@ import {
   INTEGRATION_SERVICE,
   type IntegrationService,
 } from '../m07-integration/integration.contract';
-import { DockerEngineClient, type ComposeProject } from '../../common/docker/docker.client';
-import { instanceNetwork } from '../../common/docker/naming';
+import {
+  DockerEngineClient,
+  type ComposeProject,
+  type VolumeSummary,
+} from '../../common/docker/docker.client';
+import { instanceNetwork, projectName } from '../../common/docker/naming';
+import { composeDocumentOf, mountPathForVolume } from '../../common/compose/compose-volumes';
 import { describeProbe, probeProductHttp } from '../../common/exec/http-probe';
 
 type InstanceRow = {
@@ -405,6 +410,10 @@ export class DeploymentPipeline implements OnModuleInit {
     }
     await this.docker.composeUp(project, (line) => context.log('stdout', line));
     await context.log('stdout', 'compose project applied');
+    // FR-1.9 / FR-1.12: `compose up` is what creates the named volumes, so this is the first moment
+    // they exist. Recorded here rather than in `record` on purpose — a deployment that fails its
+    // readiness check still holds real data, and a backup of that state must not be empty.
+    await this.recordVolumes(state.instance, renderSet, context);
   }
 
   /**
@@ -1210,6 +1219,142 @@ export class DeploymentPipeline implements OnModuleInit {
         ],
       );
     }
+  }
+
+  /**
+   * FR-1.9 / FR-1.12 — the instance's data volumes, as the daemon has them.
+   *
+   * Three facts decide what is written:
+   *   - **the name comes from the daemon.** Compose prefixes a named volume with `--project-name`
+   *     (`seamnex-<slug>_db-data`), and a backup that mounted the key from the file would mount
+   *     nothing. The label a Compose-created volume carries also gives the declarative key
+   *     (`com.docker.compose.volume`), which is what the catalog describes.
+   *   - **the quota comes from the declaration**, matched by that key (`VolumeSpecSchema`). A volume
+   *     the catalog does not describe is not refused — it is a definition the entry has not caught
+   *     up with — but it must not borrow a flattering default: the instance's whole disk reservation
+   *     is used and the gap is named in the job log.
+   *   - **a failed listing changes nothing.** Registration is an observation; deleting rows because
+   *     the daemon could not be asked would erase the only record of where a product's data lives.
+   */
+  private async recordVolumes(
+    instance: InstanceRow,
+    renderSet: RenderSet,
+    context: PipelineContext,
+  ): Promise<void> {
+    const project = projectName(instance.slug);
+    let listed: VolumeSummary[];
+    try {
+      listed = await this.docker.volumes([`com.docker.compose.project=${project}`]);
+    } catch (error) {
+      await context.log(
+        'system',
+        `the volumes of ${project} could not be listed (${error instanceof Error ? error.message : String(error)}); the recorded set is unchanged`,
+      );
+      return;
+    }
+
+    const declared = await this.declaredVolumes(instance.entry_key);
+    const platformFile = renderSet.files.find(
+      (file) => file.path === 'docker-compose.platform.yml',
+    );
+    const document = platformFile === undefined ? null : composeDocumentOf(platformFile.content);
+    const reservationMb = resourcesOf(instance).diskMb;
+    const registered: string[] = [];
+
+    for (const volume of listed) {
+      const key = volume.labels['com.docker.compose.volume'] ?? volume.name;
+      const spec = declared.get(key);
+      const declaredPath = spec?.mountPath;
+      const mountPath =
+        declaredPath !== undefined && declaredPath.length > 0
+          ? declaredPath
+          : document === null
+            ? null
+            : mountPathForVolume(document, key);
+      if (mountPath === null || mountPath.length === 0) {
+        // A Compose volume is only created when a service mounts it, so this is a label the platform
+        // cannot read rather than a volume with no path. Naming it is better than inventing `/`.
+        await context.log(
+          'system',
+          `volume ${volume.name} has no mount path in the render set; it is not registered and a backup will refuse while the definition still declares it`,
+        );
+        continue;
+      }
+      if (spec === undefined) {
+        await context.log(
+          'system',
+          `volume ${volume.name} is not declared by ${instance.entry_key}; its quota is the instance reservation of ${reservationMb} MB`,
+        );
+      }
+      await this.pool.query(
+        `INSERT INTO instance_volume (instance_id, name, mount_path, host_path, quota_mb)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (instance_id, name) DO UPDATE
+            SET mount_path = EXCLUDED.mount_path,
+                host_path = EXCLUDED.host_path,
+                quota_mb = EXCLUDED.quota_mb`,
+        [
+          instance.id,
+          volume.name,
+          mountPath,
+          volume.mountpoint.length > 0 ? volume.mountpoint : null,
+          spec?.quotaMb ?? reservationMb,
+        ],
+      );
+      registered.push(volume.name);
+    }
+
+    const existing = await this.pool.query<{ name: string }>(
+      `SELECT name FROM instance_volume WHERE instance_id = $1`,
+      [instance.id],
+    );
+    const stale = existing.rows.map((row) => row.name).filter((name) => !registered.includes(name));
+    if (stale.length > 0) {
+      await this.pool.query(
+        `DELETE FROM instance_volume WHERE instance_id = $1 AND name = ANY($2::text[])`,
+        [instance.id, stale],
+      );
+      await context.log(
+        'system',
+        `dropped ${stale.length} volume record(s) the daemon no longer holds: ${stale.join(', ')}`,
+      );
+    }
+
+    await context.log(
+      'stdout',
+      `${registered.length} data volume(s) registered for backup and quota checks${
+        registered.length === 0 ? ' (the definition declares none)' : `: ${registered.join(', ')}`
+      }`,
+    );
+  }
+
+  /** `catalog_entry.payload.volumes[]`, keyed by the Compose volume key. */
+  private async declaredVolumes(
+    entryKey: string,
+  ): Promise<Map<string, { mountPath: string; quotaMb: number }>> {
+    const result = await this.pool.query<{ volumes: unknown }>(
+      `SELECT payload -> 'volumes' AS volumes FROM catalog_entry WHERE key = $1`,
+      [entryKey],
+    );
+    const rows = Array.isArray(result.rows[0]?.volumes)
+      ? (result.rows[0]?.volumes as unknown[])
+      : [];
+    const declared = new Map<string, { mountPath: string; quotaMb: number }>();
+    for (const row of rows) {
+      if (typeof row !== 'object' || row === null) continue;
+      const record = row as Record<string, unknown>;
+      if (typeof record.name !== 'string' || record.name.length === 0) continue;
+      const quotaMb =
+        typeof record.quotaMb === 'number' && record.quotaMb > 0
+          ? Math.round(record.quotaMb)
+          : null;
+      if (quotaMb === null) continue;
+      declared.set(record.name, {
+        mountPath: typeof record.mountPath === 'string' ? record.mountPath : '',
+        quotaMb,
+      });
+    }
+    return declared;
   }
 
   private async previousRenderSet(instanceId: string): Promise<string | null> {

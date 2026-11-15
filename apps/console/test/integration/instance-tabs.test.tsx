@@ -203,6 +203,37 @@ describe('deployment tabs', () => {
     expect(within(panel).getByText('Inbound event endpoints')).toBeDefined();
   });
 
+  /**
+   * FR-1.9 — the volume panel is the only place the soft limit is visible before it is hit. The
+   * fixture sits at 42 %, so both thresholds are exercised by replacing the measured figures.
+   */
+  it('flags a volume near its quota and one over it', async () => {
+    openAs('R1', '/instances/inst-crm');
+    present(getState().instanceDetails['inst-crm'], 'the crm instance detail').volumes = [
+      { id: 'v-near', name: 'crm-data', mountPath: '/data', quotaMb: 1_000, usedMb: 950 },
+      { id: 'v-over', name: 'crm-files', mountPath: '/files', quotaMb: 1_000, usedMb: 1_200 },
+    ];
+    render(<App />);
+    await screen.findByRole('heading', { name: 'EspoCRM' });
+
+    const panel = await openTab('Integration');
+    expect(await within(panel).findByText('near quota')).toBeDefined();
+    expect(within(panel).getByText('over quota')).toBeDefined();
+  });
+
+  it('says a backup is refused, not just quieter, when no volume is registered', async () => {
+    openAs('R1', '/instances/inst-crm');
+    present(getState().instanceDetails['inst-crm'], 'the crm instance detail').volumes = [];
+    render(<App />);
+    await screen.findByRole('heading', { name: 'EspoCRM' });
+
+    const panel = await openTab('Integration');
+    expect(await within(panel).findByText('No data volume registered')).toBeDefined();
+    // The old copy promised a database-only backup; the runner now refuses one, and the panel
+    // must describe the behaviour that actually exists.
+    expect(within(panel).getByText(/backup is refused until they are/)).toBeDefined();
+  });
+
   it('warns that a deployment has no verified restore', async () => {
     openAs('R1', '/instances/inst-itsm');
     render(<App />);

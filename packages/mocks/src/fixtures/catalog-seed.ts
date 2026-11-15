@@ -67,9 +67,14 @@ export type EntrySeed = {
   stale?: boolean;
 };
 
+/**
+ * FR-1.9: a deployment is refused when the declared quotas add up to more than the disk
+ * reservation, so a fixture that declared 40 GB of volumes on a 20 GB shape described a product the
+ * platform would not deploy. The pair below totals 19 GB, the same shape the seeded catalog uses.
+ */
 const DEFAULT_VOLUMES = [
-  { name: 'app-data', mountPath: '/var/www/html/data', quotaMb: 20_480 },
-  { name: 'db-data', mountPath: '/var/lib/mysql', quotaMb: 20_480 },
+  { name: 'app-data', mountPath: '/var/www/html/data', quotaMb: 12_288 },
+  { name: 'db-data', mountPath: '/var/lib/mysql', quotaMb: 7_168 },
 ];
 
 /** Deterministic 32-byte digest so fixtures never contain randomness. */

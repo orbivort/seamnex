@@ -82,8 +82,17 @@ function context(payload: Record<string, unknown> = { backupId: 'bkp-1' }): Ctx 
   return ctx;
 }
 
+/**
+ * The applied definition every fixture starts from: no top-level `volumes:`, so a backup of it is
+ * complete with the database. Tests that need a declared volume override this route.
+ */
+const NO_VOLUMES_DEFINITION: Route = [
+  'SELECT content FROM render_file',
+  [{ content: 'services:\n  app:\n    image: app:1\n' }],
+];
+
 function runner(routes: readonly Route[] = [], config: Partial<AppConfig> = {}) {
-  const db = fakeDb(routes);
+  const db = fakeDb([...routes, NO_VOLUMES_DEFINITION]);
   const audit = {
     append: vi.fn(async () => ({ seq: '1', hash: 'h' })),
     exportAnchors: vi.fn(async () => ({
@@ -102,6 +111,8 @@ function runner(routes: readonly Route[] = [], config: Partial<AppConfig> = {}) 
   const secrets = { rootKeyId: vi.fn(() => '0123456789abcdef') };
   const docker = {
     imageExists: vi.fn(async (_ref: string) => true),
+    volumeExists: vi.fn(async (_name: string) => true),
+    ensureVolume: vi.fn(async (_name: string, _labels: Record<string, string>) => undefined),
     containers: vi.fn(async (_labels: readonly string[]) => [] as { id: string; state: string }[]),
     stop: vi.fn(async (_containerId: string, _graceSeconds: number) => undefined),
     ensureNetwork: vi.fn(async (_name: string, _labels: Record<string, string>) => undefined),
@@ -113,6 +124,8 @@ function runner(routes: readonly Route[] = [], config: Partial<AppConfig> = {}) 
   const store = {
     putFile: vi.fn(async (key: string, _path: string) => ({ key, bytes: 100 })),
     putText: vi.fn(async (_key: string, _body: string) => undefined),
+    // Verification asks the target, not the manifest, whether an object is really there.
+    exists: vi.fn(async (key: string) => key in objects),
     download: vi.fn(async (key: string, path: string) => {
       writeFileSync(path, objects[key] ?? '');
     }),
@@ -286,6 +299,68 @@ describe('dump stage', () => {
     ]);
     expect(ctx.lines.some((line) => line.includes('volume seamnex-vol-1: archive written'))).toBe(
       true,
+    );
+  });
+
+  /**
+   * ISSUE-02 / AC-13 — the load-bearing test: a product whose applied definition declares a volume
+   * but which has no registered volume would otherwise produce a "complete" backup of the database
+   * alone. It must refuse, before uploading anything, and say what to do.
+   */
+  it('refuses when the definition declares volumes but none is registered for the instance', async () => {
+    const { db, stage } = runner([
+      INSTANCE,
+      ['FROM instance i WHERE i.id = $1', [{ id: 'rs-1' }]],
+      [
+        'SELECT content FROM render_file',
+        [
+          {
+            content: 'services:\n  app:\n    volumes:\n      - data:/data\nvolumes:\n  data:\n',
+          },
+        ],
+      ],
+      servicesRoute({ service_name: 'db', image_ref: 'postgres:16' }),
+      ['FROM instance_env_value', []],
+      ['FROM instance_volume WHERE instance_id', []],
+      manifestWrite,
+    ]);
+
+    await expect(stage('backup', 0)(context())).rejects.toMatchObject({
+      code: 'BACKUP_UNUSABLE',
+      detail:
+        'crm declares 1 data volume(s) (data) but none is registered for the instance, so a backup would capture the database and none of the files.',
+      remediation: expect.stringContaining('Reconfigure the instance'),
+    });
+    // Nothing was captured and no manifest was written, so there is no misleading half-set.
+    expect(state.runOrThrow).not.toHaveBeenCalled();
+    expect(db.calls.some((call) => call.sql.includes('UPDATE backup SET manifest'))).toBe(false);
+  });
+
+  it('skips a registered volume the daemon no longer holds and says so', async () => {
+    const { db, stage, docker } = runner([
+      INSTANCE,
+      ['FROM instance i WHERE i.id = $1', [{ id: 'rs-1' }]],
+      servicesRoute({ service_name: 'db', image_ref: 'postgres:16' }),
+      [
+        'FROM instance_env_value',
+        [{ var_name: 'DATABASE_URL', value_enc: Buffer.from('postgres://app@db:5432/app') }],
+      ],
+      ['FROM instance_volume WHERE instance_id', [{ name: 'seamnex-vol-gone' }]],
+      manifestWrite,
+    ]);
+    docker.volumeExists.mockResolvedValue(false);
+    const ctx = context();
+
+    await stage('backup', 0)(ctx);
+
+    const manifest = JSON.parse(
+      String(db.calls.find((call) => call.sql.includes('UPDATE backup SET manifest'))?.params[1]),
+    ) as { includes: string[]; volumes: unknown[] };
+    // An absent volume holds nothing, so the set is honest about containing only the database.
+    expect(manifest.volumes).toEqual([]);
+    expect(manifest.includes).toEqual(['database']);
+    expect(ctx.lines).toContain(
+      'system:volume seamnex-vol-gone is registered but absent from the daemon; it holds no data and is not captured',
     );
   });
 
@@ -477,14 +552,17 @@ describe('verify stage', () => {
     return env;
   }
 
-  it('parses the uploaded manifest and logs what it holds', async () => {
-    const { store, docker, stage } = verifyRunner({
+  it('parses the uploaded manifest, checks every object it names and logs what it holds', async () => {
+    const env = verifyRunner({
       version: 1,
       services: [{ name: 'db', imageRef: 'postgres:16', imageDigest: '' }],
       engineDumps: [{ service: 'db', engine: 'postgres', objectKey: 'bkp-1/db.dump.age' }],
-      volumes: [{ name: 'v', archiveKey: 'bkp-1/x.age', digest: '' }],
+      volumes: [{ name: 'v', archiveKey: 'bkp-1/x.age', digest: 'a'.repeat(64) }],
       includes: [],
     });
+    env.objects['bkp-1/db.dump.age'] = 'dump';
+    env.objects['bkp-1/x.age'] = 'archive';
+    const { store, docker, stage } = env;
     const ctx = context();
 
     await stage('verify', 0)(ctx);
@@ -493,8 +571,49 @@ describe('verify stage', () => {
       'bkp-1/manifest.json',
       join(CONFIG.SEAMNEX_BACKUP_TMP_DIR, 'bkp-1-verify', 'manifest.json'),
     );
-    expect(ctx.lines).toContain('stdout:manifest verified: 1 dump(s), 1 volume(s)');
+    expect(store.exists.mock.calls).toEqual([['bkp-1/db.dump.age'], ['bkp-1/x.age']]);
+    expect(ctx.lines).toContain(
+      'stdout:manifest verified: 1 dump(s), 1 volume(s), 2 object(s) present',
+    );
     expect(docker.imageExists).toHaveBeenCalledWith('postgres:16');
+  });
+
+  it('refuses a backup whose volume archive never reached the target', async () => {
+    const { stage } = verifyRunner({
+      version: 1,
+      services: [],
+      engineDumps: [],
+      volumes: [{ name: 'seamnex-crm-data', archiveKey: 'bkp-1/data.age', digest: 'a'.repeat(64) }],
+      includes: ['volumes'],
+    });
+
+    // The manifest names the archive; the store does not have it. That is the failure the old
+    // "verified" log could not see, and it must not end in a verified_at.
+    await expect(stage('verify', 0)(context())).rejects.toMatchObject({
+      code: 'BACKUP_UNUSABLE',
+      detail: expect.stringContaining(
+        'volume seamnex-crm-data (bkp-1/data.age is not in the target)',
+      ),
+      remediation: expect.stringContaining('Take the backup again'),
+    });
+  });
+
+  it('refuses a captured volume with no digest to compare on restore', async () => {
+    const { stage } = verifyRunner(
+      {
+        version: 1,
+        services: [],
+        engineDumps: [],
+        volumes: [{ name: 'seamnex-crm-data', archiveKey: 'bkp-1/data.age', digest: '' }],
+        includes: ['volumes'],
+      },
+      [],
+    );
+
+    await expect(stage('verify', 0)(context())).rejects.toMatchObject({
+      code: 'BACKUP_UNUSABLE',
+      detail: expect.stringContaining('volume seamnex-crm-data (no digest recorded)'),
+    });
   });
 
   it.each([
@@ -602,7 +721,7 @@ describe('restore stages', () => {
   });
 
   it('restores every volume archive and moves the run on to the products phase', async () => {
-    const { store, age, stage } = runner([
+    const { store, age, docker, stage } = runner([
       INSTANCE,
       [
         'SELECT manifest, instance_id, render_set_id FROM backup WHERE id = $1',
@@ -640,6 +759,11 @@ describe('restore stages', () => {
       `${archive}.age`,
     );
     expect(age.decrypt).toHaveBeenCalledWith(`${archive}.age`);
+    // The volume is re-created under the instance label first: extracting into a name the applied
+    // project does not use would lose the data the restore just downloaded.
+    expect(docker.ensureVolume).toHaveBeenCalledWith('seamnex-vol-1', {
+      'seamnex.instance': 'inst-1',
+    });
     expect(String(state.runOrThrow.mock.calls[0]?.[1])).toContain('tar --zstd -xf');
     expect(ctx.lines).toContain('stdout:volume seamnex-vol-1 restored');
     expect(ctx.lines).toContain('stdout:render set none will be applied');

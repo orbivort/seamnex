@@ -18,6 +18,17 @@ export type ContainerSummary = {
 
 export type ImageIdentity = { readonly ref: string; readonly digest: string; readonly id: string };
 
+/**
+ * A volume as the daemon knows it. `name` is the authority: Compose prefixes a named volume with
+ * the project (`seamnex-<slug>_db-data`), so the key in the file and the name to mount are two
+ * different strings and only the engine can settle which is which.
+ */
+export type VolumeSummary = {
+  readonly name: string;
+  readonly mountpoint: string;
+  readonly labels: Readonly<Record<string, string>>;
+};
+
 /** A container joined to a network: the daemon keys attachments by container id, not by name. */
 export type NetworkEndpoint = { readonly id: string; readonly name: string };
 
@@ -177,6 +188,57 @@ export class DockerEngineClient {
       .catch((error: unknown) => {
         if (!isNotFound(error)) throw error;
       });
+  }
+
+  /**
+   * Volumes carrying every one of `labels`. Compose labels each volume it creates with
+   * `com.docker.compose.project` (the project) and `com.docker.compose.volume` (the key in the file),
+   * so one call answers "which volumes does this instance own" without parsing YAML or guessing the
+   * project prefix.
+   */
+  async volumes(labels: readonly string[]): Promise<VolumeSummary[]> {
+    this.guard();
+    const result = await this.docker.listVolumes({ filters: { label: [...labels] } });
+    return (result.Volumes ?? []).map((entry) => ({
+      name: entry.Name,
+      mountpoint: entry.Mountpoint ?? '',
+      labels: entry.Labels ?? {},
+    }));
+  }
+
+  /**
+   * Whether the daemon still has the volume.
+   *
+   * Only a 404 is "absent". A transport or authorisation failure must surface: a backup that read
+   * an unreachable daemon as "no volumes" is exactly the false success this module exists to stop.
+   */
+  async volumeExists(name: string): Promise<boolean> {
+    this.guard();
+    try {
+      await this.docker.getVolume(name).inspect();
+      return true;
+    } catch (error) {
+      if (isNotFound(error)) return false;
+      throw error;
+    }
+  }
+
+  /**
+   * Measured size of a volume, in MiB, through a read-only helper mount.
+   *
+   * The Engine API has no per-volume size, and `docker system df -v` reports every volume on the
+   * host. A one-shot `du` is scoped to the volume, needs no host filesystem access and costs a
+   * metadata walk rather than a copy. The mount is read-only so a sampling bug cannot write.
+   */
+  async volumeUsageMb(name: string): Promise<number> {
+    this.guard();
+    const result = await runOrThrow(
+      'docker',
+      ['run', '--rm', '-v', `${name}:/src:ro`, 'alpine:3.20', 'du', '-sm', '/src'],
+      { env: this.dockerEnv(), timeoutMs: 300_000 },
+    );
+    const match = /^(\d+)/.exec(result.stdout.trim());
+    return match === null ? 0 : Number(match[1]);
   }
 
   async containers(labels: readonly string[], all = true): Promise<ContainerSummary[]> {

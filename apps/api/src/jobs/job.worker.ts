@@ -11,6 +11,24 @@ import { AppError } from '../common/problem/app-error';
 type Payload = { jobId: string; lane: string; kind: string; manual?: boolean };
 
 /**
+ * What an operator reads for a failed step or job.
+ *
+ * An `AppError`'s remediation is the actionable half — "set `SEAMNEX_PLATFORM_DB_URL` to the
+ * published localhost address" rather than only "`DATABASE_URL` points at `postgres`". The worker
+ * used to keep the diagnosis and drop the fix, so the one screen the platform promises is enough to
+ * diagnose a job without shell access was missing the instruction. A failure with no remediation
+ * keeps the message the stage threw, unchanged.
+ */
+function failureText(error: unknown): string {
+  const detail = error instanceof Error ? error.message : String(error);
+  if (!(error instanceof AppError)) return detail;
+  const remediation = error.remediation?.trim();
+  return remediation === undefined || remediation.length === 0
+    ? detail
+    : `${detail} ${remediation}`;
+}
+
+/**
  * The deploy-worker role (4A.5).
  *
  * The worker owns the lifecycle of a job — dequeue, queued → running, per-step progress, failure and
@@ -86,7 +104,7 @@ export class JobWorker implements OnApplicationShutdown {
     try {
       await this.execute(context, current.kind);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = failureText(error);
       await this.jobs.appendLog(jobId, 'stderr', message).catch(() => undefined);
 
       await this.settleFailure(current.kind, context, error);
@@ -197,12 +215,7 @@ export class JobWorker implements OnApplicationShutdown {
       try {
         await stage.run(context);
       } catch (error) {
-        await this.jobs.setStep(
-          jobId,
-          index + 1,
-          'failed',
-          error instanceof Error ? error.message : String(error),
-        );
+        await this.jobs.setStep(jobId, index + 1, 'failed', failureText(error));
         throw error;
       }
 

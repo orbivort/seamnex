@@ -17,6 +17,24 @@ const NO_DERIVATION_ENTRY: Route = [
   [{ key: 'X9', packaging: 'compose', payload: {} }],
 ];
 
+/** FR-1.9: two volumes whose quotas add up to 3 072 MB against a 1 024 MB reservation. */
+const VOLUME_ENTRY: Route = [
+  'FROM catalog_entry WHERE key',
+  [
+    {
+      key: 'V1',
+      packaging: 'compose',
+      payload: {
+        resources: { memoryMb: 1_024, diskMb: 2_048 },
+        volumes: [
+          { name: 'a', mountPath: '/a', quotaMb: 1_024 },
+          { name: 'b', mountPath: '/b', quotaMb: 2_048 },
+        ],
+      },
+    },
+  ],
+];
+
 const DEFAULTS: readonly Route[] = [
   ['FROM catalog_entry WHERE key', [ENTRY]],
   ['SELECT entry_key, state, domain_route', []],
@@ -219,6 +237,44 @@ describe('deploy', () => {
     await expect(service.deploy(deployInput({ resources }))).resolves.toMatchObject({
       instanceId: 'inst-new',
     });
+  });
+
+  /**
+   * FR-1.9 — the per-volume limit is a configuration, and a configuration that cannot be honoured
+   * is refused before the row exists. The numbers below are the shipped shape: two volumes summing
+   * past the requested disk reservation.
+   */
+  it('refuses a request whose declared volume quotas exceed its disk reservation', async () => {
+    const { capacity, db, service } = setup([VOLUME_ENTRY]);
+
+    await expect(
+      service.deploy(
+        deployInput({ entryKey: 'V1', resources: { cpu: 1, memoryMb: 1_024, diskMb: 1_024 } }),
+      ),
+    ).rejects.toMatchObject({
+      code: 'VALIDATION_FAILED',
+      status: 422,
+      detail:
+        'V1 declares 3072 MB of volume quotas (a: 1024 MB, b: 2048 MB) but the deployment reserves 1024 MB of disk.',
+      fieldErrors: [
+        expect.objectContaining({
+          field: 'resources.diskMb',
+          message: 'At least 3072 MB is required to honour the declared volume quotas.',
+        }),
+      ],
+    });
+    expect(capacity.admit).not.toHaveBeenCalled();
+    expect(db.calls.some((call) => call.sql.includes('INSERT INTO instance'))).toBe(false);
+  });
+
+  it('admits a request that matches the declared volume quotas exactly', async () => {
+    const { service } = setup([VOLUME_ENTRY]);
+
+    await expect(
+      service.deploy(
+        deployInput({ entryKey: 'V1', resources: { cpu: 1, memoryMb: 1_024, diskMb: 3_072 } }),
+      ),
+    ).resolves.toMatchObject({ instanceId: 'inst-new' });
   });
 
   it('admits a request below no declared minimum, because none is declared', async () => {
@@ -673,6 +729,18 @@ describe('preview', () => {
     // The capacity verdict stays in `detail`; the refusal the operator reads is the route's.
     expect(result.headline).toContain('already published by D01-01');
     expect(result.warnings).toEqual([expect.stringContaining('A live deployment owns this route')]);
+  });
+
+  it('reports the volume shortfall instead of promising a deployment it would refuse', async () => {
+    const { service } = setup([VOLUME_ENTRY]);
+
+    const result = await service.preview({ entryKey: 'V1', slug: 'crm' } as never);
+
+    // The default request reserves 2 048 MB, 1 024 MB short of the declared 3 072 MB of quotas.
+    expect(result.admissible).toBe(false);
+    expect(result.warnings).toEqual([
+      'Volume quotas total 3072 MB, 1024 MB more than the 2048 MB disk reservation; a deployment would be refused.',
+    ]);
   });
 
   it('warns about a missing definition when the entry has no scaffold either', async () => {

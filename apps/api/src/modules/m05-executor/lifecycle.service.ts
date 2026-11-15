@@ -89,6 +89,34 @@ export class InstanceLifecycleService {
       });
     }
 
+    /**
+     * FR-1.9 — the per-volume limit, checked where it can still prevent harm.
+     *
+     * A product whose declared volumes add up to more disk than the instance reserves can never keep
+     * its promise: the volumes are the product's data, and a reservation smaller than their sum is a
+     * configuration that will either run out or be reported as "over quota" from day one. The check
+     * belongs here, before the row exists, so the shortfall is stated instead of discovered.
+     */
+    const quotas = volumeQuotaShortfall(entry.payload, resources.diskMb);
+    if (quotas.shortfallMb > 0) {
+      throw new AppError({
+        code: 'VALIDATION_FAILED',
+        status: 422,
+        detail: `${entry.key} declares ${quotas.declaredMb} MB of volume quotas (${quotas.volumes
+          .map((volume) => `${volume.name}: ${volume.quotaMb} MB`)
+          .join(', ')}) but the deployment reserves ${resources.diskMb} MB of disk.`,
+        fieldErrors: [
+          {
+            field: 'resources.diskMb',
+            code: 'below_declared_minimum',
+            message: `At least ${quotas.declaredMb} MB is required to honour the declared volume quotas.`,
+          },
+        ],
+        remediation:
+          'Request at least the summed quota, or change the catalog declaration; nothing was created.',
+      });
+    }
+
     const decision = await this.capacity.admit({ resources });
     if (!decision.admissible) {
       throw new AppError({
@@ -296,6 +324,9 @@ export class InstanceLifecycleService {
   async preview(input: PreviewInput): Promise<DeployPreview> {
     const entry = await this.entry(input.entryKey);
     const resources = this.resourcesOf(entry, input);
+    // The same FR-1.9 comparison `deploy` refuses on. A preview that stayed silent would let the
+    // wizard promise a deployment the API rejects one click later.
+    const quotas = volumeQuotaShortfall(entry.payload, resources.diskMb);
     const decision = await this.capacity.admit({ resources });
     const conflict = await this.slugConflict(input.slug);
     const slugAvailable = conflict === null;
@@ -303,9 +334,13 @@ export class InstanceLifecycleService {
       entry.packaging === 'none' && !(await this.hasApprovedScaffold(entry.key))
         ? 'This entry has no Compose file or Dockerfile; approve a scaffold draft before deploying.'
         : null;
+    const quotaWarning =
+      quotas.shortfallMb > 0
+        ? `Volume quotas total ${quotas.declaredMb} MB, ${quotas.shortfallMb} MB more than the ${resources.diskMb} MB disk reservation; a deployment would be refused.`
+        : null;
 
     return {
-      admissible: decision.admissible && slugAvailable,
+      admissible: decision.admissible && slugAvailable && quotas.shortfallMb === 0,
       // "already routed" was the message for both a live deployment and a 30-day reservation, and it
       // sent the operator looking for a route that does not exist. The reason and, for a reservation,
       // the date it lapses are the part that makes the refusal actionable.
@@ -316,7 +351,7 @@ export class InstanceLifecycleService {
       routeHost: this.hostFor(input.slug),
       slugAvailable,
       policyVerdict: 'allowed',
-      warnings: [scaffoldWarning, conflict?.warning ?? null].filter(
+      warnings: [scaffoldWarning, quotaWarning, conflict?.warning ?? null].filter(
         (item): item is string => item !== null,
       ),
       evaluatedAt: new Date().toISOString(),
@@ -533,6 +568,30 @@ export class InstanceLifecycleService {
   private hostFor(slug: string): string {
     return `${slug}.${this.config.SEAMNEX_INGRESS_DOMAIN}`;
   }
+}
+
+/**
+ * FR-1.9 — Σ declared volume quota against the instance's disk reservation.
+ *
+ * The numbers come from the catalog document (`VolumeSpecSchema`), never from the request: a caller
+ * cannot raise a volume's limit by asking for a bigger `diskMb`, because the volume's size is part
+ * of the reviewed definition. The return value is shaped for both callers — `deploy` refuses on a
+ * positive shortfall, `preview` reports the same figure as a warning.
+ */
+function volumeQuotaShortfall(
+  payload: Record<string, unknown>,
+  diskMb: number,
+): { volumes: { name: string; quotaMb: number }[]; declaredMb: number; shortfallMb: number } {
+  const rows = Array.isArray(payload.volumes) ? payload.volumes : [];
+  const volumes = rows.flatMap((row) => {
+    if (typeof row !== 'object' || row === null) return [];
+    const record = row as Record<string, unknown>;
+    if (typeof record.name !== 'string' || record.name.length === 0) return [];
+    if (typeof record.quotaMb !== 'number' || !(record.quotaMb > 0)) return [];
+    return [{ name: record.name, quotaMb: Math.round(record.quotaMb) }];
+  });
+  const declaredMb = volumes.reduce((total, volume) => total + volume.quotaMb, 0);
+  return { volumes, declaredMb, shortfallMb: Math.max(0, declaredMb - diskMb) };
 }
 
 /** A date an operator can act on, in UTC so the answer does not depend on the API host's zone. */

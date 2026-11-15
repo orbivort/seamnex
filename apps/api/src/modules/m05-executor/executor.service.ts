@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { DeployPreview, DriftRecord, Instance, InstanceDetail } from '@seamnex/domain';
 import type {
   DeployInput,
@@ -14,6 +14,8 @@ import { AppError } from '../../common/problem/app-error';
 import { isUuid } from '../../common/http/uuid';
 import { CAPACITY_SERVICE, type CapacityService } from '../m19-capacity/capacity.contract';
 import { PLANNER_SERVICE, type PlannerService } from '../m04-planner/planner.contract';
+import { AUDIT_SERVICE, type AuditService } from '../m17-audit/audit.contract';
+import { DockerEngineClient } from '../../common/docker/docker.client';
 import { InstanceLifecycleService } from './lifecycle.service';
 import type { ExecutorService } from './executor.contract';
 
@@ -86,11 +88,15 @@ const INSTANCE_SELECT = `
 
 @Injectable()
 export class PostgresExecutorService implements ExecutorService {
+  private readonly logger = new Logger('m05-executor');
+
   constructor(
     @Inject(PG_POOL) private readonly pool: Pool,
     @Inject(PLANNER_SERVICE) private readonly planner: PlannerService,
     @Inject(InstanceLifecycleService) private readonly lifecycleService: InstanceLifecycleService,
     @Inject(CAPACITY_SERVICE) private readonly capacity: CapacityService,
+    @Inject(AUDIT_SERVICE) private readonly audit: AuditService,
+    @Inject(DockerEngineClient) private readonly docker: DockerEngineClient,
   ) {}
 
   preview(input: PreviewInput): Promise<DeployPreview> {
@@ -99,6 +105,64 @@ export class PostgresExecutorService implements ExecutorService {
 
   async recordCapacitySample(): Promise<void> {
     await this.capacity.record();
+  }
+
+  /**
+   * FR-1.9 — the measured half of the per-volume limit.
+   *
+   * `instance_volume` belongs to this module, so the sample is taken here and M06 only triggers it
+   * (the same arrangement as the capacity snapshot). One pass per cycle, sequential: a helper
+   * container per volume is an IO-bound metadata walk, and the sampler's interval — not a fan-out —
+   * is what bounds the cost.
+   *
+   * A measurement that fails leaves the previous figure in place. Writing `0` because the daemon did
+   * not answer would turn "unknown" into "empty", which is precisely the false claim this issue is
+   * about. Crossing the quota is audited once, at the moment it happens, so the evidence names the
+   * volume and the numbers rather than repeating every cycle.
+   */
+  async recordVolumeUsage(): Promise<void> {
+    const result = await this.pool.query<{
+      instance_id: string;
+      name: string;
+      quota_mb: number | null;
+      used_mb: number;
+    }>(
+      `SELECT v.instance_id, v.name, v.quota_mb, v.used_mb
+         FROM instance_volume v
+         JOIN instance i ON i.id = v.instance_id AND i.deleted_at IS NULL
+        ORDER BY v.instance_id, v.name`,
+    );
+
+    for (const volume of result.rows) {
+      const usedMb = await this.docker.volumeUsageMb(volume.name).catch((error: unknown) => {
+        this.logger.warn(
+          `volume ${volume.name} could not be measured: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return null;
+      });
+      if (usedMb === null) continue;
+
+      await this.pool.query(
+        `UPDATE instance_volume SET used_mb = $3, sampled_at = now()
+          WHERE instance_id = $1 AND name = $2`,
+        [volume.instance_id, volume.name, usedMb],
+      );
+
+      const quotaMb = volume.quota_mb ?? 0;
+      if (quotaMb <= 0 || usedMb < quotaMb || volume.used_mb >= quotaMb) continue;
+      this.logger.warn(
+        `volume ${volume.name} of instance ${volume.instance_id} holds ${usedMb} MiB against a ${quotaMb} MiB quota`,
+      );
+      await this.audit.append({
+        action: 'instance.volume.quota_exceeded',
+        actorType: 'service',
+        actorId: 'status-sampler',
+        targetType: 'instance',
+        targetId: volume.instance_id,
+        outcome: 'failure',
+        detail: { volume: volume.name, usedMb, quotaMb },
+      });
+    }
   }
 
   deploy(input: DeployInput): Promise<DeployResult> {
@@ -154,12 +218,21 @@ export class PostgresExecutorService implements ExecutorService {
         `SELECT service_name, role, image_ref, image_digest, internal_url FROM instance_service WHERE instance_id = $1 ORDER BY service_name`,
         [id],
       ),
-      this.pool.query<{ name: string; mount_path: string; quota_mb: number | null }>(
-        `SELECT name, mount_path, quota_mb FROM instance_volume WHERE instance_id = $1 ORDER BY name`,
+      this.pool.query<{
+        name: string;
+        mount_path: string;
+        quota_mb: number | null;
+        used_mb: number | null;
+      }>(
+        `SELECT name, mount_path, quota_mb, used_mb FROM instance_volume WHERE instance_id = $1 ORDER BY name`,
         [id],
       ),
     ]);
 
+    // A volume registered before the catalog described it has no quota of its own; the instance's
+    // disk reservation is the honest upper bound. `1` was neither: it made every such volume read as
+    // permanently full.
+    const reservationMb = Math.max(1, Math.round(base.resources.diskMb));
     const maintenance = base.maintenance;
     return {
       ...base,
@@ -175,8 +248,8 @@ export class PostgresExecutorService implements ExecutorService {
         id: `${id}:${volume.name}`,
         name: volume.name,
         mountPath: volume.mount_path,
-        quotaMb: volume.quota_mb !== null && volume.quota_mb > 0 ? volume.quota_mb : 1,
-        usedMb: 0,
+        quotaMb: volume.quota_mb !== null && volume.quota_mb > 0 ? volume.quota_mb : reservationMb,
+        usedMb: volume.used_mb ?? 0,
       })),
       integrationChecks: [],
       maintenance,

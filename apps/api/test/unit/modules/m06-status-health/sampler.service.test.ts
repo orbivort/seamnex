@@ -16,7 +16,10 @@ function setup(overrides: Record<string, unknown> = {}) {
     ...overrides,
   } as unknown as AppConfig;
   const status = { sample: vi.fn(async () => ({ instances: 2, ready: 1, degraded: 1 })) };
-  const executor = { recordCapacitySample: vi.fn(async () => undefined) };
+  const executor = {
+    recordCapacitySample: vi.fn(async () => undefined),
+    recordVolumeUsage: vi.fn(async () => undefined),
+  };
   const service = new SamplerService(config, status as never, executor as never);
   return { status, executor, service };
 }
@@ -150,5 +153,28 @@ describe('tick', () => {
     executor.recordCapacitySample.mockRejectedValue('cannot measure');
 
     await expect(service.tick()).resolves.toBeUndefined();
+  });
+
+  it('measures volume usage on the capacity cadence, not on every status tick', async () => {
+    const { executor, service } = setup();
+
+    await service.tick();
+    await service.tick();
+
+    expect(executor.recordVolumeUsage).toHaveBeenCalledOnce();
+
+    vi.advanceTimersByTime(300_000);
+    await service.tick();
+    expect(executor.recordVolumeUsage).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the cycle alive when a volume cannot be measured', async () => {
+    const { executor, status, service } = setup();
+    executor.recordVolumeUsage.mockRejectedValue(new Error('daemon down'));
+
+    await expect(service.tick()).resolves.toBeUndefined();
+    await service.tick();
+
+    expect(status.sample).toHaveBeenCalledTimes(2);
   });
 });

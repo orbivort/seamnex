@@ -20,6 +20,7 @@ import { AUDIT_SERVICE, type AuditService } from '../m17-audit/audit.contract';
 import { DockerEngineClient } from '../../common/docker/docker.client';
 import { KeycloakAdminClient } from '../../common/keycloak/keycloak-admin.client';
 import { instanceNetwork, projectName } from '../../common/docker/naming';
+import { composeDocumentOf, declaredVolumeKeys } from '../../common/compose/compose-volumes';
 import {
   PipelineRegistry,
   type PipelineContext,
@@ -158,8 +159,34 @@ export class BackupRunnerService implements OnModuleInit {
       volumes: [],
       engineDumps: [],
       encryption: { recipient: this.age.recipientId(), identityId: this.age.identityId() },
-      includes: ['database', 'volumes'],
+      // Filled in at the end from what was actually captured. The literal used to promise both
+      // contents before a byte was written, which made an empty volume set look like a complete one.
+      includes: [],
     };
+
+    /**
+     * FR-1.12 / AC-13 — a backup that cannot hold the product's files is not a backup.
+     *
+     * `instance_volume` is written when a stack is applied. An instance deployed before that was
+     * true has none, and archiving zero volumes then reporting `succeeded, verified` is the exact
+     * false assurance this check removes. The definition is read from the render set (M16 may not
+     * read `catalog_entry`), so the answer is "what the applied file declares", not a catalogue
+     * claim. The check sits before the first dump: the operator learns now, not after a long run
+     * that ends in a refusal anyway.
+     */
+    const volumes = await this.pool.query<{ name: string }>(
+      `SELECT name FROM instance_volume WHERE instance_id = $1 ORDER BY name`,
+      [instance.id],
+    );
+    const declared = await this.declaredVolumes(manifest.renderSetId);
+    if (declared.length > 0 && volumes.rows.length === 0) {
+      throw new AppError({
+        code: 'BACKUP_UNUSABLE',
+        detail: `${instance.slug} declares ${declared.length} data volume(s) (${declared.join(', ')}) but none is registered for the instance, so a backup would capture the database and none of the files.`,
+        remediation:
+          'Reconfigure the instance so the platform registers its data volumes, then take the backup again. Nothing was uploaded.',
+      });
+    }
 
     for (const service of services.rows) {
       const engine = engineOf(service.image_ref);
@@ -189,11 +216,16 @@ export class BackupRunnerService implements OnModuleInit {
       });
     }
 
-    const volumes = await this.pool.query<{ name: string }>(
-      `SELECT name FROM instance_volume WHERE instance_id = $1`,
-      [instance.id],
-    );
     for (const volume of volumes.rows) {
+      // A registered volume the daemon no longer holds contains no data; archiving it would fail on
+      // a missing mount, and failing the whole backup for a volume that holds nothing is worse.
+      if (!(await this.docker.volumeExists(volume.name))) {
+        await context.log(
+          'system',
+          `volume ${volume.name} is registered but absent from the daemon; it holds no data and is not captured`,
+        );
+        continue;
+      }
       const archive = join(directory, `${volume.name}.tar.zst`);
       await runOrThrow(
         'docker',
@@ -223,10 +255,42 @@ export class BackupRunnerService implements OnModuleInit {
       await context.log('stdout', `volume ${volume.name}: archive written`);
     }
 
+    manifest.includes = [
+      ...(manifest.engineDumps.length > 0 ? ['database'] : []),
+      ...(manifest.volumes.length > 0 ? ['volumes'] : []),
+    ];
+    await context.log(
+      'stdout',
+      `captured ${manifest.engineDumps.length} database dump(s) and ${manifest.volumes.length} volume(s)${
+        declared.length > manifest.volumes.length
+          ? `; the definition declares ${declared.length}`
+          : ''
+      }`,
+    );
+
     await this.pool.query(`UPDATE backup SET manifest = $2::jsonb WHERE id = $1`, [
       backupId,
       JSON.stringify(manifest),
     ]);
+  }
+
+  /**
+   * The named volumes the applied render set declares.
+   *
+   * Empty is a real answer: a definition with no top-level `volumes:` block has no file data the
+   * platform can promise to capture, so a backup of it is complete with the database alone.
+   */
+  private async declaredVolumes(renderSetId: string): Promise<string[]> {
+    if (renderSetId.length === 0) return [];
+    const result = await this.pool.query<{ content: string }>(
+      `SELECT content FROM render_file
+        WHERE render_set_id = $1 AND path = 'docker-compose.platform.yml'`,
+      [renderSetId],
+    );
+    const content = result.rows[0]?.content;
+    if (content === undefined) return [];
+    const document = composeDocumentOf(content);
+    return document === null ? [] : declaredVolumeKeys(document);
   }
 
   private async upload(context: PipelineContext): Promise<void> {
@@ -313,9 +377,45 @@ export class BackupRunnerService implements OnModuleInit {
         detail: `Unsupported manifest version ${String(manifest.version)}.`,
       });
     }
+    /**
+     * FR-1.12 — "verified" means the objects named by the manifest are actually there.
+     *
+     * The stage used to read the manifest, log its counts and call that verification, so a backup
+     * whose volume archives were never uploaded passed exactly the same way as a complete one. A
+     * digest is required on every captured volume too: it is what a restore compares against.
+     */
+    const artefacts = [
+      ...manifest.engineDumps.map((dump) => ({
+        key: dump.objectKey,
+        what: `database dump for ${dump.service}`,
+      })),
+      ...manifest.volumes.map((volume) => ({
+        key: volume.archiveKey,
+        what: `volume ${volume.name}`,
+      })),
+    ];
+    const unverified: string[] = [];
+    for (const artefact of artefacts) {
+      if (!(await this.store.exists(artefact.key))) {
+        unverified.push(`${artefact.what} (${artefact.key} is not in the target)`);
+      }
+    }
+    for (const volume of manifest.volumes) {
+      if (volume.digest.length === 0) {
+        unverified.push(`volume ${volume.name} (no digest recorded)`);
+      }
+    }
+    if (unverified.length > 0) {
+      throw new AppError({
+        code: 'BACKUP_UNUSABLE',
+        detail: `The backup names ${artefacts.length} artefact(s) but ${unverified.length} cannot be verified: ${unverified.join('; ')}.`,
+        remediation:
+          'Take the backup again. A set whose objects cannot be read is not a restore point, and reporting it as verified hides a missing file.',
+      });
+    }
     await context.log(
       'stdout',
-      `manifest verified: ${manifest.engineDumps.length} dump(s), ${manifest.volumes.length} volume(s)`,
+      `manifest verified: ${manifest.engineDumps.length} dump(s), ${manifest.volumes.length} volume(s), ${artefacts.length} object(s) present`,
     );
 
     // Load every image the manifest names before creating a container (BR-3).
@@ -381,6 +481,10 @@ export class BackupRunnerService implements OnModuleInit {
     const instance = await this.instanceOf(row.instance_id ?? '');
 
     for (const volume of manifest.volumes) {
+      // A restore also rebuilds: `compose up` creates a missing volume empty, and a tar extracted
+      // into a volume the project does not use under that name would silently lose the data. Create
+      // it first, with the instance label, so ownership and later clean-up still hold.
+      await this.docker.ensureVolume(volume.name, { 'seamnex.instance': instance.id });
       const archive = join(
         this.config.SEAMNEX_BACKUP_TMP_DIR,
         `${backupId}-restore`,
@@ -410,7 +514,6 @@ export class BackupRunnerService implements OnModuleInit {
     await this.pool.query(`UPDATE restore_run SET phase = 'products' WHERE id = $1`, [
       payloadOf(context, 'restoreId'),
     ]);
-    void instance;
   }
 
   private async startFromRenderSet(context: PipelineContext): Promise<void> {

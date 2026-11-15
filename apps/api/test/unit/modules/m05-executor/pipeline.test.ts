@@ -196,6 +196,9 @@ function setup(routes: readonly Route[] = [], configOverrides: Record<string, un
     imageIdentity: vi.fn(async () => ({ ref: 'repo/crm:7.4', digest: 'sha256:abc', id: 'abc' })),
     networkEndpoints: vi.fn(async () => [] as unknown[]),
     disconnectNetwork: vi.fn(async () => undefined),
+    volumes: vi.fn(async (_labels: readonly string[]) => [] as unknown[]),
+    volumeExists: vi.fn(async (_name: string) => true),
+    volumeUsageMb: vi.fn(async (_name: string) => 0),
     runCli: vi.fn(async () => ({ code: 0, stdout: 'HTTP 200 OK', stderr: '', truncated: false })),
   };
   const integration = {
@@ -1019,6 +1022,108 @@ describe('apply', () => {
       join(DATA_DIR, INSTANCE_ID, 'runtime', 'rs-twice.secrets.yml'),
     );
     expect(composeCall.envFiles).toContain(join(DATA_DIR, INSTANCE_ID, 'runtime', 'rs-twice.env'));
+  });
+});
+
+describe('recordVolumes', () => {
+  async function reachApply(h: ReturnType<typeof setup>, context: PipelineContext): Promise<void> {
+    await h.run('deploy', 'resolve', context);
+    await h.run('deploy', 'render', context);
+  }
+
+  it('registers the daemon’s volumes with the declared quota and drops the ones it no longer has', async () => {
+    const h = setup([
+      [
+        "SELECT payload -> 'volumes'",
+        [{ volumes: [{ name: 'db', mountPath: '/var/lib/mysql', quotaMb: 8_192 }] }],
+      ],
+      ['SELECT name FROM instance_volume', [{ name: 'seamnex-crm_old' }]],
+    ]);
+    h.docker.volumes.mockResolvedValue([
+      {
+        name: 'seamnex-crm_db',
+        mountpoint: '/var/lib/docker/volumes/seamnex-crm_db/_data',
+        labels: { 'com.docker.compose.volume': 'db' },
+      },
+    ]);
+    const context = ctx();
+    await reachApply(h, context);
+
+    await h.run('deploy', 'apply', context);
+
+    expect(h.docker.volumes).toHaveBeenCalledWith(['com.docker.compose.project=seamnex-crm']);
+    const insert = h.db.calls.find((call) => call.sql.includes('INSERT INTO instance_volume'));
+    expect(insert?.params).toEqual([
+      INSTANCE_ID,
+      'seamnex-crm_db',
+      '/var/lib/mysql',
+      '/var/lib/docker/volumes/seamnex-crm_db/_data',
+      8_192,
+    ]);
+    const remove = h.db.calls.find((call) => call.sql.includes('DELETE FROM instance_volume'));
+    expect(remove?.params).toEqual([INSTANCE_ID, ['seamnex-crm_old']]);
+    expect(context.log).toHaveBeenCalledWith(
+      'stdout',
+      '1 data volume(s) registered for backup and quota checks: seamnex-crm_db',
+    );
+  });
+
+  it('reads the mount path from the render set and the reservation when the catalog is silent', async () => {
+    const h = setup([["SELECT payload -> 'volumes'", [{ volumes: [] }]]]);
+    h.docker.volumes.mockResolvedValue([
+      {
+        name: 'seamnex-crm_media',
+        mountpoint: '',
+        labels: { 'com.docker.compose.volume': 'media' },
+      },
+    ]);
+    // The volume key is not declared by the entry, so both the mount path and the quota have to
+    // come from something else: the applied document and the instance's own disk reservation.
+    h.renderer.render.mockResolvedValue(
+      renderSetOf({
+        files: [
+          {
+            path: COMPOSE,
+            sha256: 'b'.repeat(64),
+            content: 'services:\n  app:\n    volumes:\n      - media:/data\nvolumes:\n  media:\n',
+          },
+        ],
+      }),
+    );
+    const context = ctx();
+    await reachApply(h, context);
+
+    await h.run('deploy', 'apply', context);
+
+    const insert = h.db.calls.find((call) => call.sql.includes('INSERT INTO instance_volume'));
+    // `resourcesOf` reads the instance document; an empty one declares 2 048 MB.
+    expect(insert?.params).toEqual([INSTANCE_ID, 'seamnex-crm_media', '/data', null, 2_048]);
+    expect(context.log).toHaveBeenCalledWith(
+      'system',
+      'volume seamnex-crm_media is not declared by D01-01; its quota is the instance reservation of 2048 MB',
+    );
+  });
+
+  it('leaves the recorded set untouched when the daemon cannot be asked', async () => {
+    const h = setup();
+    h.docker.volumes.mockRejectedValue(new Error('daemon down'));
+    const context = ctx();
+    await reachApply(h, context);
+
+    await h.run('deploy', 'apply', context);
+
+    // Deleting on a failed read would erase the only record of where the data lives.
+    expect(
+      h.db.calls.some(
+        (call) =>
+          call.sql.includes('INSERT INTO instance_volume') ||
+          call.sql.includes('DELETE FROM instance_volume'),
+      ),
+    ).toBe(false);
+    expect(context.log).toHaveBeenCalledWith(
+      'system',
+      expect.stringContaining('could not be listed (daemon down)'),
+    );
   });
 });
 

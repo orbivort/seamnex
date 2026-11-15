@@ -1,9 +1,10 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { HttpResponse, http } from 'msw';
 import { describe, expect, it } from 'vitest';
+import { getState } from '@seamnex/mocks';
 import { server } from '@seamnex/mocks/server';
 import { App } from '../../src/app';
-import { openAs } from '../helpers';
+import { openAs, present } from '../helpers';
 
 /**
  * The wizard's steps own their own edge cases: an imported .env is mapped, not trusted; a boolean
@@ -16,6 +17,32 @@ async function reachEnvironment(): Promise<void> {
   fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
   await screen.findByText(/Environment for/);
 }
+
+describe('deployment shape', () => {
+  /**
+   * FR-1.9 — the wizard is the last screen before a deployment that can be refused when the
+   * declared quotas exceed the disk reservation, so the total has to be visible here.
+   */
+  it('states the declared volume quotas beside the confirmation', async () => {
+    openAs('R1', '/deploy/D01-01');
+    render(<App />);
+    await screen.findByText('Instance identity');
+
+    expect(screen.getByText(/19\.0 GB of quotas/)).toBeDefined();
+  });
+
+  it('says no volume is declared rather than showing a zero total', async () => {
+    present(
+      getState().catalog.find((entry) => entry.key === 'D01-01'),
+      'the D01-01 entry',
+    ).volumes = [];
+    openAs('R1', '/deploy/D01-01');
+    render(<App />);
+    await screen.findByText('Instance identity');
+
+    expect(screen.getByText('None declared')).toBeDefined();
+  });
+});
 
 describe('environment import', () => {
   it('maps pasted values into the declared schema and applies them', async () => {

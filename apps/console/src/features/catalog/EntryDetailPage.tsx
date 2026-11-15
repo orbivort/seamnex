@@ -41,10 +41,15 @@ import {
   Tabs,
   buttonVariants,
 } from '@seamnex/ui';
-import { formatDate, formatDateTime } from '@seamnex/utils';
+import { formatBytes, formatDate, formatDateTime } from '@seamnex/utils';
 import { useSession } from '../../session';
 import { QueryError } from '@seamnex/shell';
 import { EnvTab, IntegrationTab, ScaffoldTab } from './EntryTabs';
+
+/** What the deploy path compares with the disk reservation (FR-1.9). */
+function volumeQuotaMb(volumes: readonly { quotaMb: number }[]): number {
+  return volumes.reduce((total, volume) => total + volume.quotaMb, 0);
+}
 
 export function EntryDetailPage() {
   const { key = '' } = useParams();
@@ -281,6 +286,11 @@ export function EntryDetailPage() {
                     </div>
                   ))}
                 </Grid>
+                {/*
+                  FR-1.9: the per-volume quota is the number a deployment is refused against
+                  (declared quotas may not exceed the disk reservation), so an entry that lists
+                  volumes without it hid the one fact the operator needed before deploying.
+                */}
                 <div className="border-t border-line px-4 py-2.5">
                   <p className="text-faint label-caps-sans">Volumes</p>
                   <ul className="mt-1 space-y-0.5">
@@ -290,9 +300,33 @@ export function EntryDetailPage() {
                         className="flex items-baseline justify-between gap-2 text-meta"
                       >
                         <span className="font-mono text-muted">{volume.name}</span>
-                        <span className="text-faint">{volume.mountPath}</span>
+                        <span className="flex items-baseline gap-2">
+                          <span className="text-faint">{volume.mountPath}</span>
+                          <span className="font-mono text-micro text-muted">
+                            {formatBytes(volume.quotaMb * 1024 ** 2)}
+                          </span>
+                        </span>
                       </li>
                     ))}
+                    {data.volumes.length === 0 ? (
+                      <li className="text-meta text-faint">
+                        This entry declares no data volume, so a backup holds the database only.
+                      </li>
+                    ) : (
+                      <li className="flex items-baseline justify-between gap-2 border-t border-line pt-1 text-micro">
+                        <span className="text-faint">Declared total</span>
+                        <span
+                          className={
+                            volumeQuotaMb(data.volumes) > data.resources.diskMb
+                              ? 'font-mono text-danger'
+                              : 'font-mono text-muted'
+                          }
+                        >
+                          {formatBytes(volumeQuotaMb(data.volumes) * 1024 ** 2)} of{' '}
+                          {formatBytes(data.resources.diskMb * 1024 ** 2)} reserved
+                        </span>
+                      </li>
+                    )}
                   </ul>
                 </div>
               </Panel>

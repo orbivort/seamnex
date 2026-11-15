@@ -1,5 +1,13 @@
 import type { InstanceDetail } from '@seamnex/domain';
-import { Badge, InlineNote, KeyValueRows, Panel, PanelHeader, SplitLayout } from '@seamnex/ui';
+import {
+  Badge,
+  Callout,
+  InlineNote,
+  KeyValueRows,
+  Panel,
+  PanelHeader,
+  SplitLayout,
+} from '@seamnex/ui';
 import { formatBytes, formatRelative } from '@seamnex/utils';
 
 export function IntegrationTab({ instance }: { instance: InstanceDetail }) {
@@ -53,20 +61,44 @@ export function IntegrationTab({ instance }: { instance: InstanceDetail }) {
         <Panel>
           <PanelHeader eyebrow="Storage" title="Volumes and quota" />
           <div className="p-4">
-            <KeyValueRows
-              rows={instance.volumes.map((volume) => ({
-                key: volume.id,
-                label: <span className="font-mono text-meta">{volume.name}</span>,
-                value: (
-                  <span className="font-mono text-micro text-muted">
-                    {formatBytes(volume.usedMb * 1024 ** 2)} /{' '}
-                    {formatBytes(volume.quotaMb * 1024 ** 2)}
-                  </span>
-                ),
-              }))}
-            />
+            {instance.volumes.length === 0 ? (
+              /**
+               * FR-1.12: the sentence is the platform's actual behaviour, not an aspiration. It
+               * used to promise "a backup would capture the database and none of the files", which
+               * is what the backup now refuses to do; and the gap is a data-protection one, so it
+               * gets a caution surface rather than a grey paragraph an operator skims past.
+               */
+              <Callout tone="caution" title="No data volume registered">
+                The platform records the volumes a stack creates when it is applied, and none is
+                recorded for this instance yet. A backup is refused until they are — the alternative
+                would be restoring a database with none of the product&apos;s files. Reconfigure the
+                instance to register them.
+              </Callout>
+            ) : (
+              <KeyValueRows
+                rows={instance.volumes.map((volume) => {
+                  const tone = quotaTone(volume.usedMb, volume.quotaMb);
+                  return {
+                    key: volume.id,
+                    label: <span className="font-mono text-meta">{volume.name}</span>,
+                    value: (
+                      <span className="flex items-center gap-2 font-mono text-micro text-muted">
+                        {formatBytes(volume.usedMb * 1024 ** 2)} /{' '}
+                        {formatBytes(volume.quotaMb * 1024 ** 2)}
+                        {tone === null ? null : (
+                          <Badge tone={tone} size="sm">
+                            {tone === 'danger' ? 'over quota' : 'near quota'}
+                          </Badge>
+                        )}
+                      </span>
+                    ),
+                  };
+                })}
+              />
+            )}
             <InlineNote className="mt-2">
-              Mount paths are internal; nothing is exposed on a host path without an approved
+              Usage is measured by the status sampler; the quota is the reviewed per-volume limit.
+              Mount paths are internal, and nothing is exposed on a host path without an approved
               exception.
             </InlineNote>
           </div>
@@ -101,4 +133,14 @@ export function IntegrationTab({ instance }: { instance: InstanceDetail }) {
       </Panel>
     </div>
   );
+}
+
+/**
+ * FR-1.9 — the per-volume limit is soft, so the screen is where an operator can see it coming: 90 %
+ * is worth a word, and at the quota itself the volume is over the reviewed limit.
+ */
+function quotaTone(usedMb: number, quotaMb: number): 'caution' | 'danger' | null {
+  if (quotaMb <= 0) return null;
+  if (usedMb >= quotaMb) return 'danger';
+  return usedMb * 10 >= quotaMb * 9 ? 'caution' : null;
 }

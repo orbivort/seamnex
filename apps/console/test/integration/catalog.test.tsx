@@ -73,6 +73,22 @@ describe('catalog entry', () => {
     expect(screen.getByText('Default resource shape')).toBeDefined();
   });
 
+  /**
+   * FR-1.9 — the entry is where an operator decides to deploy, so the declared per-volume quotas and
+   * their total against the disk reservation belong here: a deployment whose quotas exceed that
+   * reservation is refused, and no other screen said so before the refusal.
+   */
+  it('shows each declared volume with its quota and the total against the reservation', async () => {
+    openAs('R1', '/catalog/D01-01');
+    render(<App />);
+    await screen.findByRole('heading', { name: /EspoCRM/ });
+
+    expect(await screen.findByText('app-data')).toBeDefined();
+    expect(screen.getByText('12.0 GB')).toBeDefined();
+    expect(screen.getByText('7.0 GB')).toBeDefined();
+    expect(screen.getByText(/19.0 GB of 20.0 GB reserved/)).toBeDefined();
+  });
+
   it('lists the verified integration facts and the operation inventory', async () => {
     openAs('R1', '/catalog/D01-01');
     render(<App />);

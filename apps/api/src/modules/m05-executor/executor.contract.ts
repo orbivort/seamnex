@@ -76,4 +76,10 @@ export interface ExecutorService {
    * by a deliberate decision, not by an import.
    */
   recordCapacitySample(): Promise<void>;
+  /**
+   * FR-1.9 — measures every registered volume and stores the figure. Exposed for the same reason as
+   * `recordCapacitySample`: M06 owns the cycle, M05 owns the table, and M06 does not read
+   * `instance_volume`.
+   */
+  recordVolumeUsage(): Promise<void>;
 }

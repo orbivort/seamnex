@@ -79,13 +79,17 @@ function setup(routes: readonly Route[] = []) {
     prefetch: vi.fn(async () => ({ jobId: 'job-1' })),
   };
   const capacity = { record: vi.fn(async () => null) };
+  const audit = { append: vi.fn(async () => undefined) };
+  const docker = { volumeUsageMb: vi.fn(async () => 0) };
   const service = new PostgresExecutorService(
     db.pool,
     planner as never,
     lifecycleService as never,
     capacity as never,
+    audit as never,
+    docker as never,
   );
-  return { db, planner, lifecycleService, capacity, service };
+  return { db, planner, lifecycleService, capacity, audit, docker, service };
 }
 
 /** The projection of one row, through the same `instances` query the fleet list uses. */
@@ -475,9 +479,9 @@ describe('instance detail', () => {
       [
         'FROM instance_volume WHERE instance_id',
         [
-          { name: 'data', mount_path: '/var/lib/app', quota_mb: 5_120 },
-          { name: 'none', mount_path: '/tmp', quota_mb: null },
-          { name: 'zero', mount_path: '/var/zero', quota_mb: 0 },
+          { name: 'data', mount_path: '/var/lib/app', quota_mb: 5_120, used_mb: 2_048 },
+          { name: 'none', mount_path: '/tmp', quota_mb: null, used_mb: 12 },
+          { name: 'zero', mount_path: '/var/zero', quota_mb: 0, used_mb: null },
         ],
       ],
     ]);
@@ -509,10 +513,18 @@ describe('instance detail', () => {
         name: 'data',
         mountPath: '/var/lib/app',
         quotaMb: 5_120,
+        // The measured figure, not a placeholder: this is what the storage panel renders.
+        usedMb: 2_048,
+      },
+      // No declared quota: the instance's own disk reservation is the honest bound, never 1 MB.
+      { id: `${INSTANCE_ID}:none`, name: 'none', mountPath: '/tmp', quotaMb: 4_096, usedMb: 12 },
+      {
+        id: `${INSTANCE_ID}:zero`,
+        name: 'zero',
+        mountPath: '/var/zero',
+        quotaMb: 4_096,
         usedMb: 0,
       },
-      { id: `${INSTANCE_ID}:none`, name: 'none', mountPath: '/tmp', quotaMb: 1, usedMb: 0 },
-      { id: `${INSTANCE_ID}:zero`, name: 'zero', mountPath: '/var/zero', quotaMb: 1, usedMb: 0 },
     ]);
     expect(detail.integrationChecks).toEqual([]);
     expect(db.calls[1]?.params).toEqual([INSTANCE_ID]);
@@ -532,6 +544,73 @@ describe('instance detail', () => {
     const { service } = setup([['FROM instance i', []]]);
 
     await expect(service.instance(INSTANCE_ID)).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+});
+
+describe('volume usage', () => {
+  const volumes = (rows: Record<string, unknown>[]): Route => ['FROM instance_volume v', rows];
+  const write: Route = ['UPDATE instance_volume SET used_mb', []];
+
+  it('measures every live volume and stores the figure with its sample time', async () => {
+    const { db, docker, audit, service } = setup([
+      volumes([
+        { instance_id: 'inst-1', name: 'seamnex-crm_data', quota_mb: 5_120, used_mb: 100 },
+        { instance_id: 'inst-1', name: 'seamnex-crm_db', quota_mb: null, used_mb: 0 },
+      ]),
+      write,
+    ]);
+    docker.volumeUsageMb.mockResolvedValueOnce(1_024).mockResolvedValueOnce(12);
+
+    await service.recordVolumeUsage();
+
+    expect(docker.volumeUsageMb.mock.calls).toEqual([['seamnex-crm_data'], ['seamnex-crm_db']]);
+    expect(db.calls.filter((call) => call.sql.includes('UPDATE instance_volume'))).toEqual([
+      expect.objectContaining({ params: ['inst-1', 'seamnex-crm_data', 1_024] }),
+      expect.objectContaining({ params: ['inst-1', 'seamnex-crm_db', 12] }),
+    ]);
+    expect(audit.append).not.toHaveBeenCalled();
+  });
+
+  it('audits the moment a volume crosses its quota, and not again while it stays over', async () => {
+    const { audit, docker, service } = setup([
+      volumes([{ instance_id: 'inst-1', name: 'vol', quota_mb: 100, used_mb: 99 }]),
+      write,
+    ]);
+    docker.volumeUsageMb.mockResolvedValue(120);
+
+    await service.recordVolumeUsage();
+
+    expect(audit.append).toHaveBeenCalledOnce();
+    expect(audit.append).toHaveBeenCalledWith({
+      action: 'instance.volume.quota_exceeded',
+      actorType: 'service',
+      actorId: 'status-sampler',
+      targetType: 'instance',
+      targetId: 'inst-1',
+      outcome: 'failure',
+      detail: { volume: 'vol', usedMb: 120, quotaMb: 100 },
+    });
+
+    // Already over the limit before this sample: the crossing was recorded when it happened.
+    const second = setup([
+      volumes([{ instance_id: 'inst-1', name: 'vol', quota_mb: 100, used_mb: 130 }]),
+      write,
+    ]);
+    second.docker.volumeUsageMb.mockResolvedValue(140);
+    await second.service.recordVolumeUsage();
+    expect(second.audit.append).not.toHaveBeenCalled();
+  });
+
+  it('keeps the previous figure when a volume cannot be measured', async () => {
+    const { db, docker, service } = setup([
+      volumes([{ instance_id: 'inst-1', name: 'vol', quota_mb: 100, used_mb: 5 }]),
+    ]);
+    docker.volumeUsageMb.mockRejectedValueOnce(new Error('daemon unreachable'));
+
+    await expect(service.recordVolumeUsage()).resolves.toBeUndefined();
+
+    // Writing 0 would turn "unknown" into "empty" — the false claim this sampling exists to remove.
+    expect(db.calls.some((call) => call.sql.includes('UPDATE instance_volume'))).toBe(false);
   });
 });
 

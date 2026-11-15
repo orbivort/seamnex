@@ -34,10 +34,11 @@ const h = vi.hoisted(() => {
     options,
     network: network(),
     container: container(),
-    volume: { remove: vi.fn() },
+    volume: { inspect: vi.fn(), remove: vi.fn() },
     ping: vi.fn(),
     createNetwork: vi.fn(),
     createVolume: vi.fn(),
+    listVolumes: vi.fn(),
     listContainers: vi.fn(),
     getNetwork: vi.fn(),
     getContainer: vi.fn(),
@@ -60,6 +61,7 @@ vi.mock('dockerode', () => ({
     ping = () => h.ping();
     createNetwork = (...args: unknown[]) => h.createNetwork(...args);
     createVolume = (...args: unknown[]) => h.createVolume(...args);
+    listVolumes = (...args: unknown[]) => h.listVolumes(...args);
     listContainers = (...args: unknown[]) => h.listContainers(...args);
     getNetwork = (...args: unknown[]) => h.getNetwork(...args);
     getContainer = (...args: unknown[]) => h.getContainer(...args);
@@ -118,9 +120,11 @@ beforeEach(() => {
   h.network.connect.mockResolvedValue(undefined);
   h.network.disconnect.mockResolvedValue(undefined);
   h.network.remove.mockResolvedValue(undefined);
+  h.volume.inspect.mockResolvedValue({ Name: 'v' });
   h.volume.remove.mockResolvedValue(undefined);
   h.createNetwork.mockResolvedValue(undefined);
   h.createVolume.mockResolvedValue(undefined);
+  h.listVolumes.mockResolvedValue({ Volumes: [] });
   h.listContainers.mockResolvedValue([]);
   runOrThrowMock.mockResolvedValue({ code: 0, stdout: '', stderr: '', truncated: false });
 });
@@ -347,6 +351,73 @@ describe('volumes', () => {
 
     h.volume.remove.mockRejectedValueOnce(statusError(500));
     await expect(client.removeVolume('v')).rejects.toThrow('engine said 500');
+  });
+
+  it('lists the volumes of one project by its compose labels', async () => {
+    h.listVolumes.mockResolvedValueOnce({
+      Volumes: [
+        {
+          Name: 'seamnex-orangehrm_orangehrm-db',
+          Mountpoint: '/var/lib/docker/volumes/seamnex-orangehrm_orangehrm-db/_data',
+          Labels: {
+            'com.docker.compose.project': 'seamnex-orangehrm',
+            'com.docker.compose.volume': 'orangehrm-db',
+          },
+        },
+        { Name: 'anonymous', Mountpoint: undefined },
+      ],
+    });
+
+    await expect(
+      makeClient().volumes(['com.docker.compose.project=seamnex-orangehrm']),
+    ).resolves.toEqual([
+      {
+        name: 'seamnex-orangehrm_orangehrm-db',
+        mountpoint: '/var/lib/docker/volumes/seamnex-orangehrm_orangehrm-db/_data',
+        labels: {
+          'com.docker.compose.project': 'seamnex-orangehrm',
+          'com.docker.compose.volume': 'orangehrm-db',
+        },
+      },
+      // A volume without labels or a mountpoint is still a volume: the caller decides what to do.
+      { name: 'anonymous', mountpoint: '', labels: {} },
+    ]);
+    expect(h.listVolumes).toHaveBeenCalledWith({
+      filters: { label: ['com.docker.compose.project=seamnex-orangehrm'] },
+    });
+  });
+
+  it('answers whether a volume still exists, and only a 404 means no', async () => {
+    const client = makeClient();
+
+    await expect(client.volumeExists('v')).resolves.toBe(true);
+
+    h.volume.inspect.mockRejectedValueOnce(statusError(404));
+    await expect(client.volumeExists('v')).resolves.toBe(false);
+
+    // A transport failure must not be read as "no volume": that is a backup claiming an empty set.
+    h.volume.inspect.mockRejectedValueOnce(statusError(500));
+    await expect(client.volumeExists('v')).rejects.toThrow('engine said 500');
+  });
+
+  it('measures a volume through a read-only du helper', async () => {
+    runOrThrowMock.mockResolvedValueOnce({
+      code: 0,
+      stdout: '2048\t/src\n',
+      stderr: '',
+      truncated: false,
+    });
+
+    await expect(makeClient().volumeUsageMb('seamnex-shop_data')).resolves.toBe(2_048);
+    expect(runOrThrowMock).toHaveBeenCalledWith(
+      'docker',
+      ['run', '--rm', '-v', 'seamnex-shop_data:/src:ro', 'alpine:3.20', 'du', '-sm', '/src'],
+      expect.objectContaining({ timeoutMs: 300_000 }),
+    );
+  });
+
+  it('reports an unreadable du line as zero rather than NaN', async () => {
+    await expect(makeClient().volumeUsageMb('v')).resolves.toBe(0);
   });
 });
 

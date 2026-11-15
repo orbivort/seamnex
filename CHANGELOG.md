@@ -16,6 +16,16 @@ the same number through every manifest and the link definitions at the foot of t
 
 ### Added
 
+- **Product data volumes are recorded, measured and captured** (`FR-1.9`, `FR-1.12`, `AC-13`) — a
+  deployment now registers the volumes Compose created, under the name the daemon gave them, with the
+  catalog's mount path and per-volume quota, and drops the rows whose volume no longer exists. The
+  status sampler measures each volume (`used_mb`, `sampled_at`), so the instance screen shows real
+  usage with a near-quota and over-quota state, and the first sample that crosses a quota writes an
+  `instance.volume.quota_exceeded` audit record. The limit is soft, as `DA-2` allows: the deploy is
+  refused before anything is created when the declared quotas add up to more disk than the instance
+  reserves, and the preview states the same shortfall. A backup of an instance whose applied
+  definition declares volumes but none is registered fails with the reconfigure remediation instead
+  of reporting a database-only set as complete.
 - **Licence review workflow** (`ADR-BE-25`) — the auditor (R2) records obligations, restriction
   flags and the upstream LICENSE reference through `PUT /licenses/:instanceId/review`; the register
   shows the reviewer, date and evidence on every cleared row.
@@ -35,6 +45,11 @@ the same number through every manifest and the link definitions at the foot of t
 
 ### Changed
 
+- **"Verified" now means the objects are there** — verification listed the manifest and called that
+  a check; it now requires every named dump and volume archive to exist in the target and every
+  captured volume to carry a digest, and refuses with `BACKUP_UNUSABLE` naming what is missing. A
+  restore re-creates a missing volume under the instance label before unpacking into it, and an
+  instance backup's `includes` is computed from what was captured rather than asserted up front.
 - **Recovery contents are read from the set, not asserted** — the "What the backup contains" panel is
   generated from the newest finished platform backup's manifest; an artefact shows `in` only when its
   object was stored, `ref` with the recorded location otherwise, and the panel states that no set has
@@ -45,6 +60,20 @@ the same number through every manifest and the link definitions at the foot of t
   when the licence table already knows the term. The refusal sentence is shared by the API and the
   mock platform. Migration `0031` resets partial sign-offs and makes reviewer, date and reference
   all-or-nothing.
+- **Volume facts where the decision is made** — the catalog entry lists each declared volume with its
+  quota and the total against the disk reservation, the deploy wizard repeats the total beside the
+  confirmation, and the instance panel's empty state says a backup is refused until the volumes are
+  registered instead of describing a database-only one.
+
+### Fixed
+
+- **A failed job keeps the fix, not only the diagnosis** — the worker wrote the stage's message and
+  dropped an `AppError`'s remediation, so the console showed "the database is not reachable" without
+  the setting that makes it reachable. The remediation now travels into the failed step, the job log
+  and the job's error detail.
+- **Mock catalog quotas fit their shape** — the sample entry declared 40 GB of volumes on a 20 GB
+  disk reservation, a configuration the platform now refuses; the fixture totals 19 GB, matching the
+  seeded catalog.
 
 ## [0.1.0] - 2026-11-13
 
