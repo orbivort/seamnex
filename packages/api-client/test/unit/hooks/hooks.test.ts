@@ -276,6 +276,7 @@ describe('console hooks', () => {
       ['useAuditProof', [1, false]],
       ['useExportAudit', []],
       ['useLicenses', []],
+      ['useRecordLicenseReview', ['inst-crm']],
       ['useSetHostedService', ['inst-crm']],
       ['usePatchRegister', []],
       ['usePosture', []],

@@ -8,6 +8,7 @@ import {
   BreakGlassSessionSchema,
   CapacitySnapshotSchema,
   LicenseGateSchema,
+  LicenseRecordSchema,
   OperationsResponseSchema,
   PostureSummarySchema,
 } from '@seamnex/domain';
@@ -270,6 +271,49 @@ describe('useLicenses', () => {
 
     expect(lastRequest().path).toBe('/licenses');
     expectValidatedArray(lastRequest().options['schema']);
+  });
+});
+
+describe('useRecordLicenseReview', () => {
+  it('puts the review and returns the row the server derived from it', async () => {
+    const reviewed = { instanceId: 'inst-crm', status: 'cleared' };
+    recorder.request.mockResolvedValueOnce(reviewed);
+    governance.useRecordLicenseReview('inst-crm');
+    const mutation = lastMutation();
+    const body = {
+      licenseId: 'MIT',
+      obligations: ['Keep the copyright notice'],
+      resaleRestricted: false,
+      hostedServiceRestricted: false,
+      upstreamRef: 'https://example.test/crm/LICENSE',
+      acknowledgeUnknownLicence: false,
+      confirmNoObligations: false,
+    };
+
+    const result = await mutation.mutationFn?.(body);
+
+    // The instance is the address and the licence id is the subject; neither stands for the other.
+    expect(lastRequest()).toEqual({
+      path: '/licenses/inst-crm/review',
+      options: expect.objectContaining({ method: 'PUT', body, schema: LicenseRecordSchema }),
+    });
+    // ADR-BE-25: the dialog closes on the server's verdict rather than an optimistic guess.
+    expect(result).toBe(reviewed);
+  });
+
+  it('refreshes the register, the instance, the score and the chain the review lands in', () => {
+    governance.useRecordLicenseReview('inst-crm');
+    const mutation = lastMutation();
+
+    mutation.onSuccess?.({}, {});
+
+    // A verdict moves the ledger, the instance badge, the posture score and the audit chain.
+    expect(invalidatedKeys()).toEqual([
+      queryKeys.licenses,
+      queryKeys.instances,
+      queryKeys.posture,
+      queryKeys.audit,
+    ]);
   });
 });
 
