@@ -8,6 +8,7 @@ import { AppError } from '../../common/problem/app-error';
 import { maskDeep } from '../../common/logging/masking';
 import { currentRequestId } from '../../common/logging/logger';
 import type {
+  AuditAnchorExport,
   AuditAppendInput,
   AuditAppendResult,
   AuditService,
@@ -165,6 +166,37 @@ export class PostgresAuditService implements AuditService {
        WHERE audit_anchor.last_seq < EXCLUDED.last_seq`,
       [day.toISOString().slice(0, 10), last.seq, last.hash],
     );
+  }
+
+  async exportAnchors(): Promise<AuditAnchorExport> {
+    const anchors = await this.pool.query<{
+      day: string;
+      last_seq: string;
+      last_hash: string;
+      signature: string | null;
+      stored_at: Date;
+    }>(
+      `SELECT to_char(day, 'YYYY-MM-DD') AS day, last_seq, last_hash, signature, stored_at
+         FROM audit_anchor ORDER BY day`,
+    );
+    const head = await this.pool.query<{ seq: string; hash: string; ts: Date }>(
+      `SELECT seq, hash, ts FROM audit_event ORDER BY seq DESC LIMIT 1`,
+    );
+    const headRow = head.rows[0];
+
+    return {
+      anchors: anchors.rows.map((row) => ({
+        day: row.day,
+        lastSeq: row.last_seq,
+        lastHash: row.last_hash,
+        signature: row.signature,
+        storedAt: row.stored_at.toISOString(),
+      })),
+      chainHead:
+        headRow === undefined
+          ? null
+          : { seq: headRow.seq, hash: headRow.hash, ts: headRow.ts.toISOString() },
+    };
   }
 }
 

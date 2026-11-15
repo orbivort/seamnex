@@ -102,6 +102,15 @@ const EnvironmentSchema = z
      * a Docker Desktop bind mount reports mode 0777 for a file that is 0600 on disk.
      */
     SEAMNEX_ROOT_KEY_STRICT_MODE: booleanish.default(true),
+    /**
+     * FR-1.35 — where the operator escrowed the root key. The key itself never enters a backup: a
+     * set that carried its own secret root would turn one stolen archive into every product secret,
+     * and the age identity that opens the set lives on the same host anyway. The manifest records
+     * this reference plus the key's non-secret identifier, so a restore can prove the right key is
+     * present instead of guessing. Empty means "location not recorded", which the recovery screen
+     * reports as such.
+     */
+    SEAMNEX_ROOT_KEY_ESCROW_REF: z.string().default(''),
 
     /**
      * `stub` is the Phase 3 identity provider: a local authorization-code + PKCE exchange with no
@@ -265,12 +274,40 @@ const EnvironmentSchema = z
      */
     SEAMNEX_EDGE_CONTAINER: z.string().default(''),
     SEAMNEX_TRAEFIK_ACME_EMAIL: z.string().default(''),
+    /**
+     * FR-1.35 — where the operator's edge keeps the parts the platform does not own: the static
+     * Traefik configuration, the ACME store (`acme.json`) or an internal CA's material. Where TLS
+     * terminates at an operator-provided ingress, the platform cannot read the certificate store at
+     * all, so the review's own alternative applies: record the owner and the location instead of
+     * claiming an artefact that was never captured.
+     */
+    SEAMNEX_EDGE_CONFIG_REF: z.string().default(''),
 
     /** Keycloak Admin REST API; the client secret lives in M15, never in this file. */
     SEAMNEX_KEYCLOAK_ADMIN_URL: z.string().min(1).default('http://localhost:8082'),
     SEAMNEX_KEYCLOAK_REALM: z.string().min(1).default('seamnex'),
     SEAMNEX_KEYCLOAK_ADMIN_CLIENT_ID: z.string().min(1).default('seamnex-platform-admin'),
     SEAMNEX_KEYCLOAK_ADMIN_CLIENT_SECRET_FILE: z.string().default(''),
+    /**
+     * FR-1.35 — the identity provider's own database. Keycloak runs on a separate database with its
+     * own role, so this is stated explicitly instead of being derived from `DATABASE_URL`: a derived
+     * URL would silently dump the platform database and label it "identity provider". Empty means
+     * the IdP database cannot be captured, and a platform backup fails naming the setting rather
+     * than producing a set without it.
+     *
+     * The address has to be reachable from a helper container on the host network, exactly like
+     * `DATABASE_URL` (see the reachability guard in the backup runner).
+     */
+    SEAMNEX_KEYCLOAK_DB_URL: z.string().default(''),
+    /**
+     * FR-1.35 — the platform database as the *dump helper* reaches it.
+     *
+     * `DATABASE_URL` is written for this process, which on a compose network calls the server
+     * `postgres`; the dump runs in a helper container on the host network, where that name does not
+     * resolve. The two addresses are therefore not interchangeable. Empty means `DATABASE_URL` is
+     * already host-reachable, which is the case whenever the API runs natively on the host.
+     */
+    SEAMNEX_PLATFORM_DB_URL: z.string().default(''),
     /**
      * 4D.5 — the identity the SSO check signs in as. A test account in the platform realm, never a
      * real user's. The password is a *file path*: the probe reads it per run, so rotating it does
@@ -300,6 +337,17 @@ const EnvironmentSchema = z
     S3_BUCKET: z.string().min(1).default('seamnex-backups'),
     S3_REGION: z.string().min(1).default('us-east-1'),
     SEAMNEX_BACKUP_TMP_DIR: z.string().min(1).default('./temp/backups'),
+    /**
+     * How a bind source handed to a helper container is spelled where the daemon resolves it.
+     *
+     * A dump or an archive runs through `docker run`, and the daemon reads the source on the *host*
+     * filesystem while this process only knows the path inside its own container. Wherever the two
+     * differ — the dev stack mounts `temp/backups` at `/var/lib/seamnex/backups` — the helper mounts
+     * an empty directory, the dump lands outside this container and the upload stage finds no file.
+     * Comma-separated `containerPath=hostPath` pairs, longest prefix first; empty means one path
+     * serves both, which is the case on a host that mounts the same tree at the same place.
+     */
+    SEAMNEX_DOCKER_PATH_MAP: z.string().default(''),
     /** `age` recipient used to encrypt every backup before it leaves the host. */
     SEAMNEX_AGE_RECIPIENT: z.string().default(''),
     SEAMNEX_AGE_IDENTITY_FILE: z.string().min(1).default('./temp/seamnex-age-identity'),

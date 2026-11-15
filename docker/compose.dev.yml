@@ -147,6 +147,14 @@ x-api-environment: &api-environment
   # authorization request and says so in its detail line.
   SEAMNEX_SSO_PROBE_USERNAME: ${SEAMNEX_SSO_PROBE_USERNAME:-dev-user}
   SEAMNEX_SSO_PROBE_PASSWORD_FILE: /run/seamnex/sso-probe-password
+  # FR-1.35 — the platform database as the dump helper reaches it. `DATABASE_URL` above names the
+  # server `postgres`, which does not resolve on the helper's host network; the published port does.
+  SEAMNEX_PLATFORM_DB_URL: ${SEAMNEX_PLATFORM_DB_URL:-postgres://${POSTGRES_USER:-seamnex}:${POSTGRES_PASSWORD:-seamnex_dev_password}@127.0.0.1:${SEAMNEX_PG_HOST_PORT:-5432}/${POSTGRES_DB:-seamnex_dev}}
+  # FR-1.35 — the identity provider's own database is part of a platform backup, and the dump runs
+  # in a helper container on the host network, so the address is the *published* port: `postgres`
+  # does not resolve there, and the runner refuses it by name rather than surfacing a psql error.
+  # One cluster, three databases and three roles (design §4.2); Keycloak keeps its own.
+  SEAMNEX_KEYCLOAK_DB_URL: ${SEAMNEX_KEYCLOAK_DB_URL:-postgres://keycloak:${KEYCLOAK_DB_PASSWORD:-keycloak_dev_password}@127.0.0.1:${SEAMNEX_PG_HOST_PORT:-5432}/seamnex_keycloak}
   SEAMNEX_N8N_URL: http://n8n:5678
   SEAMNEX_N8N_API_KEY: ${SEAMNEX_N8N_API_KEY:-}
   # Literal, not `${SEAMNEX_MAILPIT_URL}`: the root `.env` carries the *host* address
@@ -159,6 +167,11 @@ x-api-environment: &api-environment
   S3_BUCKET: ${S3_BUCKET:-seamnex-backups}
   S3_REGION: ${S3_REGION:-us-east-1}
   SEAMNEX_BACKUP_TMP_DIR: /var/lib/seamnex/backups
+  # A backup helper is started by the daemon, which resolves a bind source on the *host* filesystem,
+  # while this container knows only `/var/lib/seamnex/backups`. Those are two different paths here
+  # (`temp/backups` on the host), so `.env` carries the mapping; without it the helper mounts an
+  # empty directory and the dump lands where the API cannot read it.
+  SEAMNEX_DOCKER_PATH_MAP: ${SEAMNEX_DOCKER_PATH_MAP:-}
   SEAMNEX_AGE_RECIPIENT: ${SEAMNEX_AGE_RECIPIENT:-}
   SEAMNEX_AGE_IDENTITY_FILE: /var/lib/seamnex/age/identity
 

@@ -1,6 +1,14 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Logger } from '@nestjs/common';
 import { AppError } from '../../../../src/common/problem/app-error';
@@ -8,6 +16,11 @@ import { fakeDb, type Route } from '../../../support/fakes';
 import type { AppConfig } from '../../../../src/config/config';
 import { PipelineRegistry, type PipelineContext } from '../../../../src/jobs/pipeline-registry';
 import { BackupRunnerService } from '../../../../src/modules/m16-backup-restore/backup-runner.service';
+import {
+  createPlatformManifest,
+  plannedArtefact,
+  referenceArtefact,
+} from '../../../../src/modules/m16-backup-restore/platform-manifest';
 
 /**
  * The runner owns two things: the stage list each job kind is executed by, and the side effects of a
@@ -27,9 +40,20 @@ vi.mock('../../../../src/common/exec/exec', async (importOriginal) => {
   return { ...actual, runOrThrow: state.runOrThrow };
 });
 
+const EDGE_DIR = join(SCRATCH, 'traefik-dynamic');
+const CATALOG_DIR = join(SCRATCH, 'catalog-repo');
+
 const CONFIG = {
   SEAMNEX_BACKUP_TMP_DIR: join(SCRATCH, 'backups'),
   SEAMNEX_INSTANCE_DATA_DIR: join(SCRATCH, 'instances'),
+  SEAMNEX_TRAEFIK_DYNAMIC_DIR: EDGE_DIR,
+  SEAMNEX_CATALOG_REPO_PATH: CATALOG_DIR,
+  SEAMNEX_ROOT_KEY_ESCROW_REF: 'vault://platform/root-key',
+  SEAMNEX_EDGE_CONFIG_REF: 'vault://edge/ingress-tls',
+  SEAMNEX_KEYCLOAK_DB_URL: 'postgres://keycloak:k%40y@127.0.0.1:5432/seamnex_keycloak',
+  SEAMNEX_PLATFORM_DB_URL: '',
+  SEAMNEX_AGE_RECIPIENT: 'age1recipient',
+  SEAMNEX_DOCKER_PATH_MAP: '',
   SEAMNEX_DOCKER_HOST: 'unix:///var/run/docker.sock',
   DATABASE_URL: 'postgres://seamnex:p%40ss@127.0.0.1:5432/seamnex_platform',
 } as unknown as AppConfig;
@@ -60,7 +84,22 @@ function context(payload: Record<string, unknown> = { backupId: 'bkp-1' }): Ctx 
 
 function runner(routes: readonly Route[] = [], config: Partial<AppConfig> = {}) {
   const db = fakeDb(routes);
-  const audit = { append: vi.fn(async () => ({ seq: '1', hash: 'h' })) };
+  const audit = {
+    append: vi.fn(async () => ({ seq: '1', hash: 'h' })),
+    exportAnchors: vi.fn(async () => ({
+      anchors: [
+        {
+          day: '2026-11-15',
+          lastSeq: '42',
+          lastHash: 'a'.repeat(64),
+          signature: null,
+          storedAt: '2026-11-15T00:00:00.000Z',
+        },
+      ],
+      chainHead: { seq: '42', hash: 'b'.repeat(64), ts: '2026-11-15T05:00:00.000Z' },
+    })),
+  };
+  const secrets = { rootKeyId: vi.fn(() => '0123456789abcdef') };
   const docker = {
     imageExists: vi.fn(async (_ref: string) => true),
     containers: vi.fn(async (_labels: readonly string[]) => [] as { id: string; state: string }[]),
@@ -72,14 +111,20 @@ function runner(routes: readonly Route[] = [], config: Partial<AppConfig> = {}) 
   };
   const objects: Record<string, string> = {};
   const store = {
-    putFile: vi.fn(async (key: string) => ({ key, bytes: 100 })),
-    putText: vi.fn(async () => undefined),
+    putFile: vi.fn(async (key: string, _path: string) => ({ key, bytes: 100 })),
+    putText: vi.fn(async (_key: string, _body: string) => undefined),
     download: vi.fn(async (key: string, path: string) => {
       writeFileSync(path, objects[key] ?? '');
     }),
   };
   const age = {
-    encrypt: vi.fn(async (path: string) => ({ path: `${path}.age`, recipient: 'age1recipient' })),
+    // The real encryptor writes `<path>.age` next to the plaintext; the upload stage then streams
+    // that file for its digest, so the double has to produce it.
+    encrypt: vi.fn(async (path: string) => {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(`${path}.age`, `encrypted:${path}`);
+      return { path: `${path}.age`, recipient: 'age1recipient' };
+    }),
     decrypt: vi.fn(async (path: string) => path.replace(/\.age$/, '')),
     recipientId: vi.fn(() => 'age1recipient'),
     identityId: vi.fn(() => 'escrowed'),
@@ -95,6 +140,7 @@ function runner(routes: readonly Route[] = [], config: Partial<AppConfig> = {}) 
     age as never,
     pipelines,
     keycloak as never,
+    secrets as never,
   );
   service.onModuleInit();
   const stage = (kind: string, index: number) => {
@@ -102,11 +148,27 @@ function runner(routes: readonly Route[] = [], config: Partial<AppConfig> = {}) 
     if (found === undefined) throw new Error(`no stage ${index} in ${kind}`);
     return found.run;
   };
-  return { db, audit, docker, store, age, keycloak, pipelines, objects, service, stage };
+  return {
+    db,
+    audit,
+    docker,
+    store,
+    age,
+    keycloak,
+    secrets,
+    pipelines,
+    objects,
+    service,
+    stage,
+  };
 }
 
 beforeEach(() => {
   rmSync(SCRATCH, { recursive: true, force: true });
+  // A platform capture refuses when a required directory is absent, so every test starts on a host
+  // that has the edge tree and the catalogue tree.
+  mkdirSync(EDGE_DIR, { recursive: true });
+  mkdirSync(CATALOG_DIR, { recursive: true });
   state.runOrThrow.mockReset();
   state.runOrThrow.mockResolvedValue({ code: 0, stdout: '', stderr: '', truncated: false });
   for (const method of ['debug', 'log', 'warn', 'error'] as const) {
@@ -765,38 +827,237 @@ describe('restore stages', () => {
 
 describe('platform dump stage', () => {
   const manifestWrite: Route = ['UPDATE backup SET manifest = $2::jsonb', []];
+  const platformRoutes: Route[] = [manifestWrite];
 
-  it('writes a 0600 password file and dumps the platform database without the secret in argv', async () => {
-    const { db, keycloak, age, stage } = runner([manifestWrite]);
+  function manifestOf(db: ReturnType<typeof runner>['db']): Record<string, unknown> {
+    const call = db.calls.find((entry) => entry.sql.includes('UPDATE backup SET manifest'));
+    return JSON.parse(String(call?.params[1])) as Record<string, unknown>;
+  }
+
+  it('dumps both databases with a 0600 password file that never reaches argv', async () => {
+    const seen: { name: string; content: string; mode: number }[] = [];
+    state.runOrThrow.mockImplementation(async (_file: string, args: readonly string[]) => {
+      const flag = args.find((arg) => arg.startsWith('PGPASSFILE='));
+      if (flag !== undefined) {
+        const name = flag.replace('PGPASSFILE=/backup/', '');
+        const path = join(CONFIG.SEAMNEX_BACKUP_TMP_DIR, 'bkp-p', name);
+        seen.push({ name, content: readFileSync(path, 'utf8'), mode: statSync(path).mode & 0o777 });
+      }
+      return { code: 0, stdout: '', stderr: '', truncated: false };
+    });
+    const { stage } = runner(platformRoutes);
+
+    await stage('platform-backup', 0)(context({ backupId: 'bkp-p' }));
+
+    expect(seen).toEqual([
+      {
+        name: '.pgpass',
+        content: '127.0.0.1:5432:seamnex_platform:seamnex:p@ss\n',
+        mode: seen[0]?.mode,
+      },
+      {
+        name: '.pgpass-idp',
+        content: '127.0.0.1:5432:seamnex_keycloak:keycloak:k@y\n',
+        mode: seen[1]?.mode,
+      },
+    ]);
+    if (process.platform !== 'win32') {
+      // POSIX is where the check has meaning; a Windows bind mount reports 0666 for everything.
+      expect(seen.map((entry) => entry.mode)).toEqual([0o600, 0o600]);
+    }
+    // Both are removed as soon as their dump returns: the scratch directory outlives the job.
+    expect(existsSync(join(CONFIG.SEAMNEX_BACKUP_TMP_DIR, 'bkp-p', '.pgpass'))).toBe(false);
+    expect(existsSync(join(CONFIG.SEAMNEX_BACKUP_TMP_DIR, 'bkp-p', '.pgpass-idp'))).toBe(false);
+    const [, platformArgs] = state.runOrThrow.mock.calls[0] ?? [];
+    expect(platformArgs).toEqual(
+      expect.arrayContaining(['pg_dump', '--format=custom', '--file=/backup/platform.dump']),
+    );
+    expect(platformArgs).toContain('PGDATABASE=seamnex_platform');
+    expect(String(platformArgs)).not.toContain('p@ss');
+    const [, idpArgs] = state.runOrThrow.mock.calls[1] ?? [];
+    expect(idpArgs).toEqual(
+      expect.arrayContaining(['pg_dump', '--format=custom', '--file=/backup/idp.dump']),
+    );
+    expect(idpArgs).toContain('PGDATABASE=seamnex_keycloak');
+    expect(String(idpArgs)).not.toContain('k@y');
+  });
+
+  it('dumps the platform database at the address the helper can reach, when that differs', async () => {
+    // The API talks to `postgres`, the helper cannot resolve that name. `SEAMNEX_PLATFORM_DB_URL` is
+    // the same database as the host network sees it, and the refusal trail names whichever setting
+    // actually went wrong.
+    const { stage } = runner(platformRoutes, {
+      SEAMNEX_PLATFORM_DB_URL: 'postgres://seamnex:host-secret@127.0.0.1:55432/seamnex_platform',
+    });
+
+    await stage('platform-backup', 0)(context({ backupId: 'bkp-p' }));
+
+    const [, args] = state.runOrThrow.mock.calls[0] ?? [];
+    expect(args).toEqual(expect.arrayContaining(['PGPORT=55432', 'PGDATABASE=seamnex_platform']));
+    expect(String(args)).not.toContain('host-secret');
+  });
+
+  it('hands the daemon the host spelling of every bind source it is given', async () => {
+    // The helper is started by the daemon, which reads a bind source on the host filesystem. Where
+    // the container path and the host path differ — the dev stack mounts `temp/backups` at
+    // `/var/lib/seamnex/backups` — an unmapped source mounts an empty directory, so the dump would
+    // be written somewhere this process cannot read.
+    const { stage } = runner(platformRoutes, {
+      SEAMNEX_DOCKER_PATH_MAP: `${CONFIG.SEAMNEX_BACKUP_TMP_DIR}=/host/backups, ${EDGE_DIR}=/host/edge`,
+    });
+
+    await stage('platform-backup', 0)(context({ backupId: 'bkp-p' }));
+
+    const commands = state.runOrThrow.mock.calls.map((call) => String(call[1]));
+    const dump = commands.find((args) => args.includes('PGDATABASE=seamnex_platform'));
+    // The remainder after the prefix keeps whatever separator the platform uses; the prefix does not.
+    expect(dump).toContain('/host/backups');
+    expect(dump).toContain('bkp-p:/backup');
+    expect(dump).not.toContain(CONFIG.SEAMNEX_BACKUP_TMP_DIR);
+    expect(commands.some((args) => args.includes('/host/edge:/src:ro'))).toBe(true);
+  });
+
+  it('captures the realm, the edge routes, the audit anchor with its chain head and the catalogue copy', async () => {
+    const { keycloak, stage } = runner(platformRoutes);
     const ctx = context({ backupId: 'bkp-p' });
 
     await stage('platform-backup', 0)(ctx);
 
-    const passFile = join(CONFIG.SEAMNEX_BACKUP_TMP_DIR, 'bkp-p', '.pgpass');
-    expect(readFileSync(passFile, 'utf8')).toBe('127.0.0.1:5432:seamnex_platform:seamnex:p@ss\n');
-    const [, args] = state.runOrThrow.mock.calls[0] ?? [];
-    expect(args).toContain('PGPASSFILE=/backup/.pgpass');
-    expect(args).toContain('PGDATABASE=seamnex_platform');
-    expect(String(args)).not.toContain('p@ss');
-    expect(args).toEqual(
-      expect.arrayContaining(['pg_dump', '--format=custom', '--file=/backup/platform.dump']),
-    );
+    const directory = join(CONFIG.SEAMNEX_BACKUP_TMP_DIR, 'bkp-p');
     expect(keycloak.exportRealm).toHaveBeenCalled();
-    expect(
-      JSON.parse(readFileSync(join(CONFIG.SEAMNEX_BACKUP_TMP_DIR, 'bkp-p', 'realm.json'), 'utf8')),
-    ).toEqual({ realm: 'seamnex' });
-    const manifest = JSON.parse(
-      String(db.calls.find((call) => call.sql.includes('UPDATE backup SET manifest'))?.params[1]),
-    ) as Record<string, unknown>;
-    expect(manifest).toMatchObject({
-      includes: ['platform_database', 'realm', 'traefik', 'acme', 'audit_anchor', 'catalog_repo'],
-      dump: 'platform.dump',
-      encryption: { recipient: age.recipientId(), identityId: age.identityId() },
+    expect(JSON.parse(readFileSync(join(directory, 'realm.json'), 'utf8'))).toEqual({
+      realm: 'seamnex',
     });
+    // The agent archives with a helper rather than walking the trees in the API process.
+    const commands = state.runOrThrow.mock.calls.map((call) => String(call[1]));
+    expect(commands.some((args) => args.includes(`${EDGE_DIR}:/src:ro`))).toBe(true);
+    expect(commands.some((args) => args.includes(`${CATALOG_DIR}:/src:ro`))).toBe(true);
+    expect(commands.some((args) => args.includes('edge-routes.tar.gz'))).toBe(true);
+    expect(commands.some((args) => args.includes('catalog.tar.gz'))).toBe(true);
+    const anchor = JSON.parse(readFileSync(join(directory, 'audit-anchor.json'), 'utf8')) as {
+      anchors: unknown[];
+      chainHead: { seq: string; hash: string };
+    };
+    expect(anchor.anchors).toHaveLength(1);
+    expect(anchor.chainHead).toMatchObject({ seq: '42', hash: 'b'.repeat(64) });
+    expect(ctx.lines).toContain('stdout:identity-provider database dumped to idp.dump');
+  });
+
+  it('writes a manifest that claims nothing before the upload stage', async () => {
+    const { db, age, stage } = runner(platformRoutes);
+
+    await stage('platform-backup', 0)(context({ backupId: 'bkp-p' }));
+
+    const manifest = manifestOf(db) as {
+      version: number;
+      includes: string[];
+      artefacts: {
+        kind: string;
+        included: boolean;
+        objectKey: string | null;
+        location: string | null;
+      }[];
+      encryption: { recipient: string };
+      rootKeyId: string | null;
+    };
+    expect(manifest.version).toBe(2);
+    // Nothing has been uploaded yet, so the set claims nothing — not even the parts it wrote.
+    expect(manifest.includes).toEqual([]);
+    expect(manifest.artefacts.map((artefact) => artefact.kind)).toEqual([
+      'platform_database',
+      'idp_database',
+      'idp_realm',
+      'edge_routes',
+      'audit_anchor',
+      'catalog_repo',
+      'edge_static_and_tls',
+      'secret_root_key',
+    ]);
+    expect(manifest.artefacts.every((artefact) => !artefact.included)).toBe(true);
+    expect(manifest.artefacts.every((artefact) => artefact.objectKey === null)).toBe(true);
+    expect(manifest.artefacts[6]).toMatchObject({ location: 'vault://edge/ingress-tls' });
+    expect(manifest.artefacts[7]).toMatchObject({ location: 'vault://platform/root-key' });
+    expect(manifest.encryption.recipient).toBe(age.recipientId());
+    // The key's identifier, never the key: 16 hex characters hashed from the file.
+    expect(manifest.rootKeyId).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  it('says so when an operator-owned artefact has no recorded location', async () => {
+    const { stage } = runner(platformRoutes, { SEAMNEX_ROOT_KEY_ESCROW_REF: '' });
+    const ctx = context({ backupId: 'bkp-p' });
+
+    await stage('platform-backup', 0)(ctx);
+
+    expect(ctx.lines).toContain(
+      'system:operator-owned artefacts with no recorded location: secret_root_key',
+    );
+  });
+
+  it('refuses before writing anything when the identity-provider database is not configured', async () => {
+    const { stage } = runner(platformRoutes, { SEAMNEX_KEYCLOAK_DB_URL: '' });
+
+    await expect(stage('platform-backup', 0)(context({ backupId: 'bkp-p' }))).rejects.toMatchObject(
+      {
+        code: 'ADAPTER_UNAVAILABLE',
+        detail: expect.stringContaining('SEAMNEX_KEYCLOAK_DB_URL'),
+        remediation: expect.stringContaining('identity provider'),
+      },
+    );
+    expect(state.runOrThrow).not.toHaveBeenCalled();
+  });
+
+  it('reports every missing prerequisite in one refusal instead of one per run', async () => {
+    const { stage } = runner(platformRoutes, {
+      SEAMNEX_KEYCLOAK_DB_URL: '',
+      SEAMNEX_AGE_RECIPIENT: '',
+    });
+
+    const error = await stage(
+      'platform-backup',
+      0,
+    )(context({ backupId: 'bkp-p' })).catch((thrown: unknown) => thrown);
+
+    // An operator who fixes one item and waits through two dumps to learn the next is the defect this
+    // message exists to prevent, so both settings appear in the sentence the console renders.
+    expect(error).toMatchObject({
+      code: 'ADAPTER_UNAVAILABLE',
+      detail: expect.stringMatching(/SEAMNEX_KEYCLOAK_DB_URL[\s\S]*SEAMNEX_AGE_RECIPIENT/),
+    });
+    expect((error as AppError).detail).toContain('take the backup again');
+    expect(state.runOrThrow).not.toHaveBeenCalled();
+  });
+
+  it('refuses when the edge route directory is absent', async () => {
+    rmSync(EDGE_DIR, { recursive: true, force: true });
+    const { stage } = runner(platformRoutes);
+
+    await expect(stage('platform-backup', 0)(context({ backupId: 'bkp-p' }))).rejects.toMatchObject(
+      {
+        code: 'ADAPTER_UNAVAILABLE',
+        detail: expect.stringContaining('SEAMNEX_TRAEFIK_DYNAMIC_DIR'),
+      },
+    );
+    expect(state.runOrThrow).not.toHaveBeenCalled();
+  });
+
+  it('refuses when the catalogue tree is absent', async () => {
+    rmSync(CATALOG_DIR, { recursive: true, force: true });
+    const { stage } = runner(platformRoutes);
+
+    await expect(stage('platform-backup', 0)(context({ backupId: 'bkp-p' }))).rejects.toMatchObject(
+      {
+        code: 'ADAPTER_UNAVAILABLE',
+        detail: expect.stringContaining('SEAMNEX_CATALOG_REPO_PATH'),
+      },
+    );
+    expect(state.runOrThrow).not.toHaveBeenCalled();
   });
 
   it('defaults the port and the database name a URL may omit', async () => {
-    const { stage } = runner([manifestWrite], { DATABASE_URL: 'postgres://seamnex@localhost/' });
+    const { stage } = runner(platformRoutes, {
+      DATABASE_URL: 'postgres://seamnex@localhost/',
+      SEAMNEX_KEYCLOAK_DB_URL: 'postgres://keycloak@localhost/',
+    });
 
     await stage('platform-backup', 0)(context({ backupId: 'bkp-q' }));
 
@@ -807,7 +1068,7 @@ describe('platform dump stage', () => {
 
   it('passes the helper an environment even when the API has no PATH', async () => {
     vi.stubEnv('PATH', undefined);
-    const { stage } = runner([manifestWrite]);
+    const { stage } = runner(platformRoutes);
     try {
       await stage('platform-backup', 0)(context({ backupId: 'bkp-p' }));
 
@@ -819,7 +1080,7 @@ describe('platform dump stage', () => {
   });
 
   it('refuses a database URL the dump container cannot reach', async () => {
-    const { stage } = runner([manifestWrite], {
+    const { stage } = runner(platformRoutes, {
       DATABASE_URL: 'postgres://seamnex:secret@postgres:5432/seamnex_platform',
     });
 
@@ -835,21 +1096,153 @@ describe('platform dump stage', () => {
 });
 
 describe('platform upload stage', () => {
-  it('uploads the encrypted dump and records the platform backup', async () => {
-    const { audit, store, stage } = runner([['UPDATE backup SET state = ', []]]);
-    store.putFile.mockResolvedValueOnce({ key: 'bkp-p/platform.dump.age', bytes: 2048 });
-    const ctx = context({ backupId: 'bkp-p' });
+  const stateWrite: Route = ['UPDATE backup SET state = ', []];
+
+  /** The manifest a completed capture leaves behind, with every captured file present on disk. */
+  function capturedManifest(backupId: string) {
+    const capturedAt = '2026-11-15T10:02:00.000Z';
+    const artefacts = [
+      plannedArtefact('platform_database', capturedAt),
+      plannedArtefact('idp_database', capturedAt),
+      plannedArtefact('idp_realm', capturedAt),
+      plannedArtefact('edge_routes', capturedAt),
+      plannedArtefact('audit_anchor', capturedAt),
+      plannedArtefact('catalog_repo', capturedAt),
+      referenceArtefact('edge_static_and_tls', 'vault://edge/ingress-tls', capturedAt),
+      referenceArtefact('secret_root_key', 'vault://platform/root-key', capturedAt),
+    ];
+    const directory = join(CONFIG.SEAMNEX_BACKUP_TMP_DIR, backupId);
+    mkdirSync(directory, { recursive: true });
+    for (const file of [
+      'platform.dump',
+      'idp.dump',
+      'realm.json',
+      'edge-routes.tar.gz',
+      'audit-anchor.json',
+      'catalog.tar.gz',
+    ]) {
+      writeFileSync(join(directory, file), `plaintext:${file}`);
+    }
+    return createPlatformManifest({
+      artefacts,
+      encryption: { recipient: 'age1recipient', identityId: 'escrowed' },
+      rootKeyId: 'ab'.repeat(8),
+      capturedAt,
+    });
+  }
+
+  it('uploads every captured artefact with a content digest and only then claims the set', async () => {
+    const backupId = 'bkp-u';
+    const manifest = capturedManifest(backupId);
+    const { audit, db, stage, store } = runner([
+      ['SELECT manifest FROM backup WHERE id = $1', [{ manifest }]],
+      stateWrite,
+    ]);
+    const ctx = context({ backupId });
 
     await stage('platform-backup', 1)(ctx);
 
-    expect(store.putFile).toHaveBeenCalledWith(
-      'bkp-p/platform.dump.age',
-      join(CONFIG.SEAMNEX_BACKUP_TMP_DIR, 'bkp-p', 'platform.dump.age'),
-    );
+    expect(store.putFile).toHaveBeenCalledTimes(6);
+    const keys = store.putFile.mock.calls.map((call) => call[0]);
+    expect(keys).toEqual([
+      `${backupId}/platform.dump.age`,
+      `${backupId}/idp.dump.age`,
+      `${backupId}/realm.json.age`,
+      `${backupId}/edge-routes.tar.gz.age`,
+      `${backupId}/audit-anchor.json.age`,
+      `${backupId}/catalog.tar.gz.age`,
+    ]);
+    // The digest is of the stored bytes, not of the key and the size.
+    const stored = store.putFile.mock.calls.map((call) => call[1] as string);
+    expect(stored[0]).toBe(join(CONFIG.SEAMNEX_BACKUP_TMP_DIR, backupId, 'platform.dump.age'));
+
+    const update = db.calls.find((call) => call.sql.includes('UPDATE backup SET state = '));
+    expect(update?.params[1]).toBe(600);
+    expect(update?.params[2]).toBe(`${backupId}/manifest.json`);
+    const written = update?.params[3] as string;
+    const finalManifest = JSON.parse(written) as {
+      includes: string[];
+      artefacts: { kind: string; included: boolean; digest: string | null; bytes: number | null }[];
+    };
+    expect(finalManifest.includes).toEqual([
+      'platform_database',
+      'idp_database',
+      'idp_realm',
+      'edge_routes',
+      'audit_anchor',
+      'catalog_repo',
+    ]);
+    expect(finalManifest.artefacts[0]?.digest).toMatch(/^[0-9a-f]{64}$/);
+    // The manifest is uploaded as its own object, in the same shape the row now carries.
+    const [manifestKey, manifestBody] = store.putText.mock.calls[0] ?? [];
+    expect(manifestKey).toBe(`${backupId}/manifest.json`);
+    expect(JSON.parse(String(manifestBody))).toEqual(finalManifest);
+    // The operator-owned entries keep `included: false`; nothing was uploaded for them.
+    expect(finalManifest.artefacts[6]).toMatchObject({ included: false, bytes: null });
+    expect(finalManifest.artefacts[7]).toMatchObject({ included: false, bytes: null });
+    // Plaintext and the local encrypted copy both go: the object store is the durable location.
+    expect(existsSync(join(CONFIG.SEAMNEX_BACKUP_TMP_DIR, backupId, 'realm.json'))).toBe(false);
+    expect(existsSync(join(CONFIG.SEAMNEX_BACKUP_TMP_DIR, backupId, 'realm.json.age'))).toBe(false);
     expect(audit.append).toHaveBeenCalledWith(
-      expect.objectContaining({ action: 'platform.backup.succeeded', detail: { bytes: 2048 } }),
+      expect.objectContaining({
+        action: 'platform.backup.succeeded',
+        detail: {
+          bytes: 600,
+          artefacts: 6,
+          referenced: ['edge_static_and_tls', 'secret_root_key'],
+        },
+      }),
     );
-    expect(ctx.lines).toContain('system:platform backup uploaded (2048 bytes)');
+    expect(ctx.lines).toContain('system:platform backup uploaded (600 bytes, 6 artefacts)');
+  });
+
+  it('refuses a set whose capture manifest is missing or not readable', async () => {
+    const { db, stage, store } = runner([
+      [
+        'SELECT manifest FROM backup WHERE id = $1',
+        [{ manifest: { version: 1, includes: ['platform_database', 'realm'] } }],
+      ],
+    ]);
+
+    await expect(stage('platform-backup', 1)(context({ backupId: 'bkp-p' }))).rejects.toMatchObject(
+      {
+        code: 'BACKUP_UNUSABLE',
+        detail: expect.stringContaining('no readable capture manifest'),
+      },
+    );
+    expect(store.putFile).not.toHaveBeenCalled();
+    expect(db.calls.some((call) => call.sql.includes("state = 'succeeded'"))).toBe(false);
+  });
+
+  it('leaves the set unclaimed when an upload fails halfway', async () => {
+    const backupId = 'bkp-half';
+    const manifest = capturedManifest(backupId);
+    const { db, stage, store } = runner([
+      ['SELECT manifest FROM backup WHERE id = $1', [{ manifest }]],
+      stateWrite,
+    ]);
+    store.putFile.mockRejectedValueOnce(new Error('the object store is unreachable'));
+
+    await expect(stage('platform-backup', 1)(context({ backupId }))).rejects.toThrow(
+      'the object store is unreachable',
+    );
+    expect(db.calls.some((call) => call.sql.includes("state = 'succeeded'"))).toBe(false);
+    expect(store.putText).not.toHaveBeenCalled();
+  });
+
+  it('refuses to call an artefact included when the stored object is empty', async () => {
+    const backupId = 'bkp-empty';
+    const manifest = capturedManifest(backupId);
+    const { db, stage, store } = runner([
+      ['SELECT manifest FROM backup WHERE id = $1', [{ manifest }]],
+      stateWrite,
+    ]);
+    store.putFile.mockResolvedValue({ key: `${backupId}/platform.dump.age`, bytes: 0 });
+
+    await expect(stage('platform-backup', 1)(context({ backupId }))).rejects.toThrow(
+      /stored with no bytes/,
+    );
+    expect(db.calls.some((call) => call.sql.includes("state = 'succeeded'"))).toBe(false);
   });
 });
 
@@ -923,6 +1316,21 @@ describe('settling a failed platform job', () => {
         detail: { code: 'ADAPTER_UNAVAILABLE', message: 'docker is down', jobId: 'job-1' },
       }),
     );
+  });
+
+  it('keeps no scratch copy of a set that failed', async () => {
+    const { pipelines } = runner([settleBackup]);
+    const directory = join(CONFIG.SEAMNEX_BACKUP_TMP_DIR, 'bkp-p');
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, 'realm.json'), '{"clients":[{"secret":"s3cr3t"}]}');
+
+    await pipelines.failureHandler('platform-backup')?.(
+      context({ backupId: 'bkp-p' }),
+      new AppError({ code: 'BACKUP_FAILED', detail: 'the upload died' }),
+    );
+
+    // The directory held a dump and an unencrypted realm export; a retry is another capture.
+    expect(existsSync(directory)).toBe(false);
   });
 
   it('falls back to BACKUP_FAILED for an error that is not an AppError', async () => {

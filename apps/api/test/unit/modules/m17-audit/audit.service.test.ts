@@ -250,3 +250,69 @@ describe('anchor', () => {
     expect(String(db.calls[0]?.params[0])).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 });
+
+/**
+ * FR-1.35 — the anchor export is what the platform recovery set carries. Its only obligations are
+ * to keep the day as a date string, to serialise both stored timestamps as ISO instants, and to
+ * report a chain with no events as an absent head rather than as an empty one.
+ */
+describe('exportAnchors', () => {
+  it('returns every anchor and the chain head with ISO timestamps', async () => {
+    const { service } = setup([
+      [
+        'FROM audit_anchor ORDER BY day',
+        [
+          {
+            day: '2026-11-14',
+            last_seq: '41',
+            last_hash: 'h41',
+            signature: 'sig-41',
+            stored_at: new Date('2026-11-14T00:05:00.000Z'),
+          },
+          {
+            day: '2026-11-15',
+            last_seq: '42',
+            last_hash: 'h42',
+            signature: null,
+            stored_at: new Date('2026-11-15T00:05:00.000Z'),
+          },
+        ],
+      ],
+      [
+        'FROM audit_event ORDER BY seq DESC',
+        [{ seq: '42', hash: 'h42', ts: new Date('2026-11-15T09:30:00.000Z') }],
+      ],
+    ]);
+
+    await expect(service.exportAnchors()).resolves.toEqual({
+      anchors: [
+        {
+          day: '2026-11-14',
+          lastSeq: '41',
+          lastHash: 'h41',
+          signature: 'sig-41',
+          storedAt: '2026-11-14T00:05:00.000Z',
+        },
+        {
+          day: '2026-11-15',
+          lastSeq: '42',
+          lastHash: 'h42',
+          signature: null,
+          storedAt: '2026-11-15T00:05:00.000Z',
+        },
+      ],
+      chainHead: { seq: '42', hash: 'h42', ts: '2026-11-15T09:30:00.000Z' },
+    });
+  });
+
+  it('reports no chain head on a chain that has no events yet', async () => {
+    const { db, service } = setup([
+      ['FROM audit_anchor ORDER BY day', []],
+      ['FROM audit_event ORDER BY seq DESC', []],
+    ]);
+
+    await expect(service.exportAnchors()).resolves.toEqual({ anchors: [], chainHead: null });
+    // The day is formatted in SQL so the export never reinterprets a date as a local instant.
+    expect(db.calls[0]?.sql).toContain("to_char(day, 'YYYY-MM-DD')");
+  });
+});

@@ -50,6 +50,27 @@ export type AuditVerification = {
   readonly firstBrokenSeq: string | null;
 };
 
+/** FR-1.35 — one day's anchor as the platform recovery set exports it. */
+export type AuditAnchorRecord = {
+  readonly day: string;
+  readonly lastSeq: string;
+  readonly lastHash: string;
+  readonly signature: string | null;
+  readonly storedAt: string;
+};
+
+export type AuditChainHead = {
+  readonly seq: string;
+  readonly hash: string;
+  readonly ts: string;
+};
+
+export type AuditAnchorExport = {
+  readonly anchors: readonly AuditAnchorRecord[];
+  /** Null on a chain that has no events yet. */
+  readonly chainHead: AuditChainHead | null;
+};
+
 export interface AuditService {
   /**
    * Takes the chain-tip row lock for the current transaction. Callers that also lock business rows
@@ -76,4 +97,15 @@ export interface AuditService {
 
   /** Daily anchor row (design §7.2 `audit_anchor`). Idempotent per day. */
   anchor(day?: Date): Promise<void>;
+
+  /**
+   * FR-1.35 — the anchors plus the chain head, for the platform recovery set.
+   *
+   * The anchors alone prove the chain up to the last anchored day; the head is what lets a restore
+   * tell "the tail is intact" from "events after the anchor are missing". The query stays here
+   * because `audit_event` and `audit_anchor` are this module's tables: a backup that copied the SQL
+   * would become a second owner of the chain's shape. Read-only, and deliberately no audit row of
+   * its own — a backup reading the chain is not an event the chain needs to hold.
+   */
+  exportAnchors(): Promise<AuditAnchorExport>;
 }

@@ -19,9 +19,27 @@ the same number through every manifest and the link definitions at the foot of t
 - **Licence review workflow** (`ADR-BE-25`) — the auditor (R2) records obligations, restriction
   flags and the upstream LICENSE reference through `PUT /licenses/:instanceId/review`; the register
   shows the reviewer, date and evidence on every cleared row.
+- **A platform recovery set that holds what it names** (`ADR-BE-26`) — a platform backup now captures
+  and uploads the platform database, the identity provider's **database** and realm export, the edge
+  route configuration, the audit anchors with the chain head, and a catalogue fallback copy, each with
+  its byte count and a SHA-256 digest in a typed manifest. The secret-store root key and the operator's
+  edge TLS material are recorded as references with their location (`SEAMNEX_ROOT_KEY_ESCROW_REF`,
+  `SEAMNEX_EDGE_CONFIG_REF`), never bundled. A capture refuses before writing anything when
+  `SEAMNEX_KEYCLOAK_DB_URL` or a required directory is missing, `.pgpass`/plaintext files do not
+  outlive the upload, a failed set leaves no scratch copy, and a zero-byte artefact is refused rather
+  than advertised. The escrow reference names the root key's non-secret id. Two settings make the
+  capture work where the API runs in a container: `SEAMNEX_PLATFORM_DB_URL` is the platform database
+  as the host-network dump helper reaches it, and `SEAMNEX_DOCKER_PATH_MAP` is the host spelling of a
+  bind source (`containerPath=hostPath` pairs). Both default to empty, which is correct wherever the
+  API's address and mount paths are already the host's.
 
 ### Changed
 
+- **Recovery contents are read from the set, not asserted** — the "What the backup contains" panel is
+  generated from the newest finished platform backup's manifest; an artefact shows `in` only when its
+  object was stored, `ref` with the recorded location otherwise, and the panel states that no set has
+  been captured when none has. A legacy manifest produces no claims, and the register's item count
+  reflects stored artefacts.
 - **Hosted-service gate** — an unreviewed licence now refuses
   `PUT /licenses/:instanceId/hosted-service` (409, audited) instead of being treated as permissive
   when the licence table already knows the term. The refusal sentence is shared by the API and the

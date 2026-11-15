@@ -1,7 +1,7 @@
 import { http, HttpResponse } from 'msw';
 import type { Backup, PlatformRestoreRun, RestoreDrill } from '@seamnex/domain';
 import { at } from '../fixtures/context';
-import { RECOVERY_CONTENTS } from '../fixtures/recovery';
+import { contentsFor, includedLabels, registerCapturedSet } from '../fixtures/recovery';
 import { buildRestorePhases, startPlatformRestore } from '../recovery-simulator';
 import { appendAudit, getState } from '../store';
 import { BACKUP_STEPS, enqueueJob } from './job-factory';
@@ -26,13 +26,24 @@ export const recoveryHandlers = [
     );
     const lastVerified =
       runs.find((run) => run.state === 'succeeded' && run.loginVerifiedAt !== null) ?? null;
+    // FR-1.35: the contents panel is the newest *finished* platform set's own artefact list. No set
+    // captured means no claims, not a list of things a backup was supposed to contain.
+    const newestPlatform = state.recovery.backups.reduce<Backup | null>(
+      (latest, backup) =>
+        backup.kind !== 'platform' || backup.state !== 'succeeded'
+          ? latest
+          : latest === null || Date.parse(backup.startedAt) > Date.parse(latest.startedAt)
+            ? backup
+            : latest,
+      null,
+    );
     return HttpResponse.json({
       generatedAt: at(0),
       backups: state.recovery.backups,
       runs,
       drills: state.recovery.drills,
       gate: state.recovery.gate,
-      contents: RECOVERY_CONTENTS,
+      contents: newestPlatform === null ? [] : (contentsFor(newestPlatform.id) ?? []),
       lastBackupAt: lastBackup?.startedAt ?? null,
       lastVerifiedRestoreAt: lastVerified?.finishedAt ?? null,
     });
@@ -43,8 +54,12 @@ export const recoveryHandlers = [
     const guard = requireCapability(role, 'recovery.manage');
     if (guard) return guard;
     const state = getState();
+    const id = `bkp-platform-${1023 + state.recovery.backups.length}`;
+    // A completed capture is registered with its own artefact list, so the contents panel derives
+    // from this set rather than from a constant shared with every other backup.
+    registerCapturedSet(id, at(0));
     const backup: Backup = {
-      id: `bkp-platform-${1023 + state.recovery.backups.length}`,
+      id,
       kind: 'platform',
       instanceId: null,
       instanceLabel: 'Platform state (including IdP realm)',
@@ -53,7 +68,7 @@ export const recoveryHandlers = [
       finishedAt: at(0),
       sizeBytes: Math.round(2.4 * GB),
       objectKey: `s3://seamnex-backups/platform/2026/10/22/platform-state-${state.recovery.backups.length + 1}.tar.zst.age`,
-      includes: RECOVERY_CONTENTS.filter((item) => item.included).map((item) => item.label),
+      includes: includedLabels(id),
       verifiedAt: null,
       verifyMethod: null,
       renderSetId: 'rs-platform-183',
@@ -74,7 +89,7 @@ export const recoveryHandlers = [
       targetId: backup.id,
       targetLabel: 'Platform state backup',
       outcome: 'success',
-      detail: `Entitlements, audit, job history, workflow IR, keys, TLS material and the identity-provider realm queued as job ${accepted.jobId}.`,
+      detail: `Platform database, identity-provider database and realm, edge routes, audit anchor and a catalogue fallback copy queued as job ${accepted.jobId}. Operator-owned TLS material and the escrowed root key are recorded as references.`,
       actor: actorFor(role),
     });
     return HttpResponse.json(accepted, { status: 202 });

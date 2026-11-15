@@ -2,6 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Logger } from '@nestjs/common';
 import { fakeDb, type Route } from '../../../support/fakes';
 import { PostgresBackupRestoreService } from '../../../../src/modules/m16-backup-restore/backup-restore.service';
+import {
+  createPlatformManifest,
+  plannedArtefact,
+  referenceArtefact,
+  storedArtefact,
+} from '../../../../src/modules/m16-backup-restore/platform-manifest';
 
 /**
  * The 4C facade: every mutation records a row, closes or opens the restore gate and hands the work to
@@ -56,6 +62,28 @@ function backupRow(overrides: Record<string, unknown> = {}): Record<string, unkn
     error_code: null,
     ...overrides,
   };
+}
+
+/** A captured platform set: two stored artefacts, two recorded operator references. */
+function platformManifest(): Record<string, unknown> {
+  const capturedAt = '2026-01-01T00:04:00.000Z';
+  const stored = (kind: 'platform_database' | 'idp_database') =>
+    storedArtefact(plannedArtefact(kind, capturedAt), {
+      objectKey: `bkp-p/${kind}.age`,
+      bytes: 2048,
+      digest: 'a'.repeat(64),
+    });
+  return createPlatformManifest({
+    artefacts: [
+      stored('platform_database'),
+      stored('idp_database'),
+      referenceArtefact('edge_static_and_tls', 'vault://edge/ingress-tls', capturedAt),
+      referenceArtefact('secret_root_key', 'vault://platform/root-key', capturedAt),
+    ],
+    encryption: { recipient: 'age1recipient', identityId: 'escrowed' },
+    rootKeyId: 'abababababababab',
+    capturedAt,
+  }) as unknown as Record<string, unknown>;
 }
 
 function restoreRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -828,15 +856,16 @@ describe('recovery overview', () => {
     backups: readonly Record<string, unknown>[],
     drills: readonly Record<string, unknown>[],
     runs: readonly Record<string, unknown>[],
-    overrides: readonly Route[] = [],
+    platform: readonly Record<string, unknown>[] = [],
   ): Route[] {
     return [
       ['SELECT * FROM backup ORDER BY started_at DESC LIMIT 25', backups],
       ['FROM restore_drill ORDER BY performed_at DESC LIMIT 25', drills],
       ['ORDER BY r.started_at DESC', runs],
+      // Asked separately from the register window, so a busy platform cannot hide its own set.
+      ["SELECT * FROM backup WHERE kind = 'platform'", platform],
       GATE_COUNT_OPEN,
       ['SELECT slug FROM instance', [{ slug: 'crm' }]],
-      ...overrides,
     ];
   }
 
@@ -857,6 +886,14 @@ describe('recovery overview', () => {
         [
           restoreRow({ id: 'run-early', state: 'failed', finished_at: null }),
           restoreRow({ id: 'run-verified' }),
+        ],
+        [
+          backupRow({
+            id: 'bkp-p',
+            kind: 'platform',
+            instance_id: null,
+            manifest: platformManifest(),
+          }),
         ],
       ),
     );
@@ -880,14 +917,77 @@ describe('recovery overview', () => {
         evidenceUrl: 'job:drill-1',
       },
     ]);
-    expect(overview.contents.map((entry) => entry.label)).toEqual([
-      'Platform database',
-      'Identity provider',
-      'Edge configuration',
-      'Audit anchor',
-      'Catalogue repository',
+    // FR-1.35: the contents come from the set's own manifest, and only a stored object is `in`.
+    expect(overview.contents.map((entry) => [entry.label, entry.included])).toEqual([
+      ['Platform database', true],
+      ['Identity-provider database', true],
+      ['Edge static configuration and TLS material', false],
+      ['Secret-store root key', false],
     ]);
+    expect(overview.contents[0]?.detail).toContain('2.0 KB');
+    expect(overview.contents[0]?.detail).toContain('captured 2026-01-01 00:04 UTC');
+    expect(overview.contents[2]?.detail).toContain('Recorded location: vault://edge/ingress-tls');
+    // The escrow reference alone does not say which key the operator has to fetch.
+    expect(overview.contents[3]?.detail).toContain(
+      'Recorded location: vault://platform/root-key, key id abababababababab',
+    );
     expect(overview.gate.routesPublished).toBe(true);
+  });
+
+  it('claims nothing while no platform set has succeeded', async () => {
+    const { service } = setup(
+      overviewRoutes(
+        [
+          backupRow({ id: 'bkp-p1', kind: 'platform', instance_id: null, state: 'running' }),
+          backupRow({ id: 'bkp-p2', kind: 'platform', instance_id: null, state: 'failed' }),
+        ],
+        [],
+        [],
+        [],
+      ),
+    );
+
+    expect((await service.recoveryOverview()).contents).toEqual([]);
+  });
+
+  it('reads nothing proven out of a legacy manifest instead of repeating its claim', async () => {
+    const { service } = setup(
+      overviewRoutes(
+        [],
+        [],
+        [],
+        [
+          backupRow({
+            id: 'bkp-p',
+            kind: 'platform',
+            instance_id: null,
+            // The shape the platform wrote before the manifest became evidence.
+            manifest: {
+              includes: ['platform_database', 'realm', 'traefik', 'acme', 'audit_anchor'],
+            },
+          }),
+        ],
+      ),
+    );
+
+    expect((await service.recoveryOverview()).contents).toEqual([]);
+  });
+
+  it('does not render an included entry that lost its object key', async () => {
+    const manifest = platformManifest() as { artefacts: Record<string, unknown>[] };
+    manifest.artefacts[0] = { ...manifest.artefacts[0], objectKey: null };
+    const { service } = setup(
+      overviewRoutes(
+        [],
+        [],
+        [],
+        [backupRow({ id: 'bkp-p', kind: 'platform', instance_id: null, manifest })],
+      ),
+    );
+
+    const [first] = (await service.recoveryOverview()).contents;
+
+    expect(first).toMatchObject({ included: false });
   });
 
   it('reports nothing captured, nothing verified and no audit trail', async () => {
@@ -960,6 +1060,7 @@ describe('platform timeline', () => {
       ['SELECT * FROM backup ORDER BY started_at DESC LIMIT 25', []],
       ['FROM restore_drill ORDER BY performed_at DESC LIMIT 25', []],
       ['ORDER BY r.started_at DESC', [row]],
+      ["SELECT * FROM backup WHERE kind = 'platform'", []],
       GATE_COUNT_OPEN,
     ]);
     return service

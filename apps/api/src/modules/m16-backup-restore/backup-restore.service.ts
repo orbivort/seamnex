@@ -21,6 +21,7 @@ import {
 import { OUTBOX_SERVICE, type Outbox } from '../m17-audit/audit.contract';
 import { JobService } from '../../jobs/job.service';
 import { PipelineRegistry } from '../../jobs/pipeline-registry';
+import { describeArtefact, readPlatformManifest } from './platform-manifest';
 import type { BackupRestoreService, ScheduleInput } from './backup-restore.contract';
 
 type BackupRow = {
@@ -131,6 +132,28 @@ function platformTimeline(run: RestoreRow): RestorePhaseStatus[] {
           : PLATFORM_PHASE_DETAIL[phase],
     };
   });
+}
+
+/**
+ * FR-1.35 — what the newest *finished* platform set actually holds.
+ *
+ * The screen used to render five literal entries marked `included: true`; nothing connected them to
+ * the artefacts the runner uploaded. The list now comes from the manifest of the newest successful
+ * platform backup, and an entry is `included` only when that manifest carries an object key for it.
+ * No finished set means no claims: the list is empty and the screen says so.
+ */
+function recoveryContents(newest: BackupRow | undefined): RecoveryOverview['contents'] {
+  if (newest === undefined) return [];
+  const manifest = readPlatformManifest(newest.manifest);
+  if (manifest === null) return [];
+  return manifest.artefacts.map((artefact) => ({
+    label: artefact.label,
+    // The key id is not a secret and is what an operator needs to fetch the right key from escrow.
+    detail: describeArtefact(artefact, { rootKeyId: manifest.rootKeyId }),
+    // The manifest already refuses to set this without an object key; checked again so a projection
+    // can never be the thing that turns an unproven artefact into an `in`.
+    included: artefact.included && (artefact.objectKey ?? '').length > 0,
+  }));
 }
 
 /**
@@ -412,7 +435,7 @@ export class PostgresBackupRestoreService implements BackupRestoreService {
   }
 
   async recoveryOverview(): Promise<RecoveryOverview> {
-    const [backups, drills, runs] = await Promise.all([
+    const [backups, drills, runs, platformSet] = await Promise.all([
       this.pool.query<BackupRow>(`SELECT * FROM backup ORDER BY started_at DESC LIMIT 25`),
       this.pool.query<{
         id: string;
@@ -425,6 +448,12 @@ export class PostgresBackupRestoreService implements BackupRestoreService {
         `SELECT id, instance_id, performed_at, smoke_test, passed, evidence_url FROM restore_drill ORDER BY performed_at DESC LIMIT 25`,
       ),
       this.platformRuns(10),
+      // Asked separately rather than found in the register window: a busy platform pushes 25 instance
+      // backups past a daily set in a few hours, and "nothing has been captured" would then be a
+      // false negative about a set that exists.
+      this.pool.query<BackupRow>(
+        `SELECT * FROM backup WHERE kind = 'platform' AND state = 'succeeded' ORDER BY started_at DESC LIMIT 1`,
+      ),
     ]);
     const gate = await this.platformRestoreStatus();
     // "Last verified restore" means a restore whose administrative login was proven — not a backup
@@ -448,21 +477,7 @@ export class PostgresBackupRestoreService implements BackupRestoreService {
         evidenceUrl: row.evidence_url ?? '',
       })),
       gate: gate.gate,
-      contents: [
-        { label: 'Platform database', detail: 'pg_dump --format=custom', included: true },
-        {
-          label: 'Identity provider',
-          detail: 'Keycloak database dump plus realm export',
-          included: true,
-        },
-        {
-          label: 'Edge configuration',
-          detail: 'Traefik dynamic configuration and acme.json',
-          included: true,
-        },
-        { label: 'Audit anchor', detail: 'audit_anchor rows', included: true },
-        { label: 'Catalogue repository', detail: 'bare clone of the working tree', included: true },
-      ],
+      contents: recoveryContents(platformSet.rows[0]),
       lastBackupAt:
         backups.rows.find((row) => row.state === 'succeeded')?.finished_at?.toISOString() ?? null,
       lastVerifiedRestoreAt: lastVerified?.finishedAt ?? null,

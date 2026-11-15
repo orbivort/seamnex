@@ -4,9 +4,18 @@ import type { Pool } from 'pg';
 import { APP_CONFIG } from '../../config/config.module';
 import type { AppConfig } from '../../config/config';
 import { PG_POOL } from '../../database/database.module';
-import { ensureDir, sha256, writeFileAtomic } from '../../common/fs/files';
+import {
+  ensureDir,
+  exists,
+  removeQuietly,
+  removeTree,
+  sha256,
+  sha256File,
+  writeFileAtomic,
+} from '../../common/fs/files';
 import { runOrThrow } from '../../common/exec/exec';
 import { AppError } from '../../common/problem/app-error';
+import { SECRETS_SERVICE, type SecretsService } from '../m15-secrets/secrets.contract';
 import { AUDIT_SERVICE, type AuditService } from '../m17-audit/audit.contract';
 import { DockerEngineClient } from '../../common/docker/docker.client';
 import { KeycloakAdminClient } from '../../common/keycloak/keycloak-admin.client';
@@ -17,6 +26,15 @@ import {
   type PipelineStage,
 } from '../../jobs/pipeline-registry';
 import { AgeEncryptor } from './age';
+import {
+  artefactFile,
+  createPlatformManifest,
+  plannedArtefact,
+  readPlatformManifest,
+  referenceArtefact,
+  storedArtefact,
+  type PlatformArtefact,
+} from './platform-manifest';
 import { BackupObjectStore } from './s3.client';
 
 type BackupManifest = {
@@ -48,6 +66,7 @@ export class BackupRunnerService implements OnModuleInit {
     @Inject(AgeEncryptor) private readonly age: AgeEncryptor,
     @Inject(PipelineRegistry) private readonly pipelines: PipelineRegistry,
     @Inject(KeycloakAdminClient) private readonly keycloak: KeycloakAdminClient,
+    @Inject(SECRETS_SERVICE) private readonly secrets: SecretsService,
   ) {}
 
   onModuleInit(): void {
@@ -155,7 +174,7 @@ export class BackupRunnerService implements OnModuleInit {
           '--network',
           instanceNetwork(instance.slug),
           '-v',
-          `${directory}:/backup`,
+          `${this.mountSource(directory)}:/backup`,
           ...Object.entries(env).flatMap(([key, value]) => ['-e', `${key}=${value}`]),
           service.image_ref,
           ...dumpCommand(engine, `/backup/${basename(file)}`),
@@ -184,7 +203,7 @@ export class BackupRunnerService implements OnModuleInit {
           '-v',
           `${volume.name}:/src:ro`,
           '-v',
-          `${directory}:/out`,
+          `${this.mountSource(directory)}:/out`,
           'alpine:3.20',
           'tar',
           '--zstd',
@@ -475,90 +494,183 @@ export class BackupRunnerService implements OnModuleInit {
 
   // ---- platform --------------------------------------------------------------------------------
 
+  /**
+   * FR-1.35 — capture the platform recovery set.
+   *
+   * Everything the platform owns is written into the scratch directory here and uploaded by the next
+   * stage. The manifest records every artefact with `included: false` and is only rewritten by the
+   * upload stage, so a capture that dies halfway cannot leave a row claiming a set it never wrote.
+   * Material the operator owns (the edge's TLS store, the escrowed root key) is recorded as a
+   * reference with its location — never as an included artefact.
+   */
   private async platformDump(context: PipelineContext): Promise<void> {
     const backupId = payloadOf(context, 'backupId');
+    // Checked before the scratch directory exists: a refusal must leave no trace of a capture that
+    // never started.
+    this.assertPlatformCaptureIsPossible();
     const directory = join(this.config.SEAMNEX_BACKUP_TMP_DIR, backupId);
     ensureDir(directory);
 
-    // The credential never travels in `docker run -e`: that would put the platform database password
-    // into the container's Config.Env, readable by anything that can talk to the shared daemon.
-    // A 0600 password file on the mounted backup directory is the same mechanism psql already uses.
-    const connection = platformDatabase(this.config.DATABASE_URL);
-    if (!['127.0.0.1', 'localhost', '::1', 'host.docker.internal'].includes(connection.host)) {
-      // The dump runs on the host network so the password file can be mounted; a compose service
-      // name (`postgres`) does not resolve there. Say so once, instead of surfacing a psql error
-      // from inside a helper container.
-      throw new AppError({
-        code: 'ADAPTER_UNAVAILABLE',
-        detail: `A platform backup needs a host-reachable database URL; DATABASE_URL points at "${connection.host}".`,
-        remediation:
-          'Use the published localhost address (for example postgres://seamnex:...@127.0.0.1:5432/seamnex_platform) for the role that runs the backup, or mount the password another way.',
-      });
-    }
-    const passFile = join(directory, '.pgpass');
-    writeFileAtomic(
-      passFile,
-      `${connection.host}:${connection.port}:${connection.database}:${connection.user}:${connection.password}\n`,
-      0o600,
-    );
+    const artefacts: PlatformArtefact[] = [];
 
-    const dumpPath = join(directory, 'platform.dump');
-    await runOrThrow(
-      'docker',
-      [
-        'run',
-        '--rm',
-        '--network',
-        'host',
-        '-v',
-        `${directory}:/backup`,
-        '-e',
-        'PGPASSFILE=/backup/.pgpass',
-        '-e',
-        `PGHOST=${connection.host}`,
-        '-e',
-        `PGPORT=${connection.port}`,
-        '-e',
-        `PGDATABASE=${connection.database}`,
-        '-e',
-        `PGUSER=${connection.user}`,
-        'postgres:18-alpine',
-        'pg_dump',
-        '--format=custom',
-        '--file=/backup/platform.dump',
-      ],
-      {
-        env: { PATH: process.env.PATH ?? '', DOCKER_HOST: this.config.SEAMNEX_DOCKER_HOST },
-        timeoutMs: 900_000,
-      },
-    );
-    await context.log('stdout', `platform database dumped to ${basename(dumpPath)}`);
+    const platformFile = artefactFile('platform_database') ?? 'platform.dump';
+    // `DATABASE_URL` is this process's address; on a compose network it names the server by its
+    // service name, which a host-network helper cannot resolve. `SEAMNEX_PLATFORM_DB_URL` is that
+    // same database as the helper sees it, and stays empty where the two coincide.
+    const platformUrl = this.config.SEAMNEX_PLATFORM_DB_URL.trim() || this.config.DATABASE_URL;
+    await this.dumpRemoteDatabase({
+      what: 'the platform database',
+      setting:
+        this.config.SEAMNEX_PLATFORM_DB_URL.trim().length > 0
+          ? 'SEAMNEX_PLATFORM_DB_URL'
+          : 'DATABASE_URL',
+      url: platformUrl,
+      directory,
+      passFileName: '.pgpass',
+      dumpFileName: platformFile,
+    });
+    await context.log('stdout', `platform database dumped to ${platformFile}`);
+    artefacts.push(plannedArtefact('platform_database', now()));
+
+    const idpFile = artefactFile('idp_database') ?? 'idp.dump';
+    await this.dumpRemoteDatabase({
+      what: 'the identity-provider database',
+      setting: 'SEAMNEX_KEYCLOAK_DB_URL',
+      url: this.config.SEAMNEX_KEYCLOAK_DB_URL,
+      directory,
+      passFileName: '.pgpass-idp',
+      dumpFileName: idpFile,
+    });
+    await context.log('stdout', `identity-provider database dumped to ${idpFile}`);
+    artefacts.push(plannedArtefact('idp_database', now()));
 
     // FR-1.35: the realm is part of platform state. An export that cannot be produced fails the
-    // backup; writing an empty document would make the manifest claim something it does not hold.
-    const realm = join(directory, 'realm.json');
+    // capture; writing an empty document would make the set claim something it does not hold. The
+    // file is 0600 because it carries client secrets until the upload stage encrypts it.
+    const realmFile = artefactFile('idp_realm') ?? 'realm.json';
     const document = await this.keycloak.exportRealm();
-    writeFileAtomic(realm, JSON.stringify(document, null, 2));
-    await context.log('stdout', 'realm exported');
+    writeFileAtomic(join(directory, realmFile), JSON.stringify(document, null, 2), 0o600);
+    await context.log('stdout', `identity-provider realm exported to ${realmFile}`);
+    artefacts.push(plannedArtefact('idp_realm', now()));
+
+    const edgeFile = artefactFile('edge_routes') ?? 'edge-routes.tar.gz';
+    await this.archiveDirectory({
+      source: this.config.SEAMNEX_TRAEFIK_DYNAMIC_DIR,
+      directory,
+      fileName: edgeFile,
+    });
+    await context.log('stdout', `edge route configuration archived to ${edgeFile}`);
+    artefacts.push(plannedArtefact('edge_routes', now()));
+
+    const anchorFile = artefactFile('audit_anchor') ?? 'audit-anchor.json';
+    await this.exportAuditAnchor(join(directory, anchorFile), context);
+    artefacts.push(plannedArtefact('audit_anchor', now()));
+
+    // FR-1.35 calls this a fallback copy: the catalogue repository stays authoritative (DD-14), so a
+    // restore may re-apply from it but must never overwrite it from this archive.
+    const catalogFile = artefactFile('catalog_repo') ?? 'catalog.tar.gz';
+    await this.archiveDirectory({
+      source: this.config.SEAMNEX_CATALOG_REPO_PATH,
+      directory,
+      fileName: catalogFile,
+    });
+    await context.log('stdout', `catalogue fallback copy archived to ${catalogFile}`);
+    artefacts.push(plannedArtefact('catalog_repo', now()));
+
+    // Operator-owned material. Where TLS terminates at an operator ingress, the platform cannot read
+    // the certificate store at all; naming the owner and the location is the honest record.
+    const references = [
+      referenceArtefact('edge_static_and_tls', this.config.SEAMNEX_EDGE_CONFIG_REF, now()),
+      referenceArtefact('secret_root_key', this.config.SEAMNEX_ROOT_KEY_ESCROW_REF, now()),
+    ];
+    artefacts.push(...references);
+    const missingReferences = references
+      .filter((artefact) => artefact.location === null)
+      .map((artefact) => artefact.kind);
+    if (missingReferences.length > 0) {
+      // Not fatal: FR-1.35 allows recording where the material lives, and an operator may not have
+      // written it down yet. The screen shows "not captured", and the log names the gap.
+      await context.log(
+        'system',
+        `operator-owned artefacts with no recorded location: ${missingReferences.join(', ')}`,
+      );
+    }
+
+    const manifest = createPlatformManifest({
+      artefacts,
+      encryption: { recipient: this.age.recipientId(), identityId: this.age.identityId() },
+      rootKeyId: this.secrets.rootKeyId(),
+      capturedAt: now(),
+    });
     await this.pool.query(`UPDATE backup SET manifest = $2::jsonb WHERE id = $1`, [
       backupId,
-      JSON.stringify({
-        includes: ['platform_database', 'realm', 'traefik', 'acme', 'audit_anchor', 'catalog_repo'],
-        encryption: { recipient: this.age.recipientId(), identityId: this.age.identityId() },
-        dump: basename(dumpPath),
-      }),
+      JSON.stringify(manifest),
     ]);
+    await context.log('system', `recovery set captured: ${manifest.artefacts.length} artefacts`);
   }
 
+  /**
+   * Uploads every captured artefact and only then claims the set.
+   *
+   * The manifest is re-read rather than assumed: this stage resumes from the files the capture stage
+   * wrote, and a manifest that is missing or unreadable means there is nothing to upload. `included`
+   * becomes true one artefact at a time, after `putFile` returned a byte count and the digest of the
+   * stored object was computed.
+   */
   private async platformUpload(context: PipelineContext): Promise<void> {
     const backupId = payloadOf(context, 'backupId');
     const directory = join(this.config.SEAMNEX_BACKUP_TMP_DIR, backupId);
-    const dump = join(directory, 'platform.dump');
-    const encrypted = await this.age.encrypt(dump);
-    const put = await this.store.putFile(`${backupId}/platform.dump.age`, encrypted.path);
+    const row = await this.pool.query<{ manifest: Record<string, unknown> }>(
+      `SELECT manifest FROM backup WHERE id = $1`,
+      [backupId],
+    );
+    const manifest = readPlatformManifest(row.rows[0]?.manifest);
+    if (manifest === null) {
+      throw new AppError({
+        code: 'BACKUP_UNUSABLE',
+        detail: `Platform backup ${backupId} has no readable capture manifest, so nothing can be claimed as uploaded.`,
+        remediation:
+          'Take the backup again; a set is uploaded from the manifest its capture stage wrote.',
+      });
+    }
+
+    const uploaded: PlatformArtefact[] = [];
+    let bytes = 0;
+    for (const artefact of manifest.artefacts) {
+      const file = artefactFile(artefact.kind);
+      if (file === null) {
+        // A referenced artefact has no object behind it and stays `included: false`.
+        uploaded.push(artefact);
+        continue;
+      }
+      const plaintext = join(directory, file);
+      const encrypted = await this.age.encrypt(plaintext);
+      // The digest covers the encrypted bytes: that is what a restore downloads and verifies.
+      const digest = await sha256File(encrypted.path);
+      const put = await this.store.putFile(`${backupId}/${file}.age`, encrypted.path);
+      uploaded.push(storedArtefact(artefact, { objectKey: put.key, bytes: put.bytes, digest }));
+      // The dumps and the realm export are plaintext on disk and the scratch directory is reused, so
+      // the plaintext goes as soon as its encrypted object exists. The encrypted copy goes too: the
+      // object store is the durable location, and a second full-size copy per backup would fill a
+      // disk nobody is watching.
+      removeQuietly(plaintext);
+      removeQuietly(encrypted.path);
+      bytes += put.bytes;
+      await context.log('stdout', `uploaded ${put.key} (${put.bytes} bytes)`);
+    }
+
+    const finalManifest = createPlatformManifest({
+      artefacts: uploaded,
+      encryption: manifest.encryption,
+      rootKeyId: manifest.rootKeyId,
+      capturedAt: manifest.capturedAt,
+    });
+    const manifestKey = `${backupId}/manifest.json`;
+    await this.store.putText(manifestKey, JSON.stringify(finalManifest, null, 2));
     await this.pool.query(
-      `UPDATE backup SET state = 'succeeded', finished_at = now(), size_bytes = $2, object_key = $3 WHERE id = $1`,
-      [backupId, put.bytes, put.key],
+      `UPDATE backup SET state = 'succeeded', finished_at = now(), size_bytes = $2, object_key = $3, manifest = $4::jsonb
+        WHERE id = $1`,
+      [backupId, bytes, manifestKey, JSON.stringify(finalManifest)],
     );
     await this.audit.append({
       action: 'platform.backup.succeeded',
@@ -567,9 +679,199 @@ export class BackupRunnerService implements OnModuleInit {
       targetType: 'backup',
       targetId: backupId,
       outcome: 'success',
-      detail: { bytes: put.bytes },
+      detail: {
+        bytes,
+        artefacts: finalManifest.includes.length,
+        referenced: finalManifest.artefacts
+          .filter((artefact) => !artefact.included)
+          .map((artefact) => artefact.kind),
+      },
     });
-    await context.log('system', `platform backup uploaded (${put.bytes} bytes)`);
+    await context.log(
+      'system',
+      `platform backup uploaded (${bytes} bytes, ${finalManifest.includes.length} artefacts)`,
+    );
+  }
+
+  /**
+   * Fails before the first byte is written, and names **every** missing prerequisite at once.
+   *
+   * One blocker per run is not actionable: an operator fixes the first, waits through two database
+   * dumps, and only then learns the set cannot be encrypted either. The plaintext dumps are the most
+   * expensive thing this module produces, so everything that would refuse a capture — a required
+   * setting, a required directory, the encryption recipient the upload stage would reject — is
+   * collected here and reported together.
+   */
+  private assertPlatformCaptureIsPossible(): void {
+    const missing: string[] = [];
+    if (this.config.SEAMNEX_KEYCLOAK_DB_URL.trim().length === 0) {
+      missing.push(
+        "the identity provider's database has no connection string (SEAMNEX_KEYCLOAK_DB_URL)",
+      );
+    }
+    if (!exists(this.config.SEAMNEX_TRAEFIK_DYNAMIC_DIR)) {
+      missing.push(
+        `the edge route directory ${this.config.SEAMNEX_TRAEFIK_DYNAMIC_DIR} is missing (SEAMNEX_TRAEFIK_DYNAMIC_DIR)`,
+      );
+    }
+    if (!exists(this.config.SEAMNEX_CATALOG_REPO_PATH)) {
+      missing.push(
+        `the catalogue tree ${this.config.SEAMNEX_CATALOG_REPO_PATH} is missing (SEAMNEX_CATALOG_REPO_PATH)`,
+      );
+    }
+    // Without a recipient the upload stage refuses after both dumps have been written, which is the
+    // worst possible moment to find out.
+    if ((this.config.SEAMNEX_AGE_RECIPIENT ?? '').trim().length === 0) {
+      missing.push('no encryption recipient is configured (SEAMNEX_AGE_RECIPIENT)');
+    }
+    if (missing.length === 0) return;
+
+    throw new AppError({
+      code: 'ADAPTER_UNAVAILABLE',
+      // The job surface carries `detail` only, so the instruction has to travel with it: the console
+      // renders the job's error message, not the problem document's remediation.
+      detail: `The recovery set cannot be captured: ${missing.join('; ')}. Set every item in the API environment and take the backup again — .env.example documents each value.`,
+      remediation:
+        'Configure the items named above and retry. Nothing was written or uploaded: a set without the identity provider cannot restore a login, and a set that cannot be encrypted is not a backup.',
+    });
+  }
+
+  /**
+   * The source string a helper container can bind.
+   *
+   * `docker run` is executed by the daemon, which resolves a bind source on the *host* filesystem,
+   * while this process knows only the path inside its own container. Where the two differ the
+   * mapping in `SEAMNEX_DOCKER_PATH_MAP` bridges them; where they are the same path the value is
+   * passed through unchanged, so a deployment that mounts the scratch tree identically needs no
+   * configuration.
+   */
+  private mountSource(containerPath: string): string {
+    return dockerMountSource(containerPath, this.config.SEAMNEX_DOCKER_PATH_MAP);
+  }
+
+  /**
+   * Dumps a platform-owned PostgreSQL database through an ephemeral helper container.
+   *
+   * The credential never travels in `docker run -e`: that would put a database password into the
+   * container's Config.Env, readable by anything that can talk to the shared daemon. A 0600 password
+   * file in the mounted scratch directory is the mechanism psql already uses, and it is removed as
+   * soon as the dump returns — including when the dump fails.
+   */
+  private async dumpRemoteDatabase(input: {
+    what: string;
+    setting: string;
+    url: string;
+    directory: string;
+    passFileName: string;
+    dumpFileName: string;
+  }): Promise<void> {
+    const connection = remoteDatabase(input.url);
+    if (!HOST_REACHABLE_DATABASE_HOSTS.includes(connection.host)) {
+      // The dump runs on the host network so the password file can be mounted; a compose service
+      // name (`postgres`) does not resolve there. Say so once, instead of surfacing a psql error
+      // from inside a helper container.
+      throw new AppError({
+        code: 'ADAPTER_UNAVAILABLE',
+        detail: `A platform backup needs a host-reachable database address; ${input.setting} points at "${connection.host}".`,
+        remediation: `Use the published localhost address (for example postgres://…@127.0.0.1:5432/…) for ${input.what}, or mount the password another way.`,
+      });
+    }
+    const passFile = join(input.directory, input.passFileName);
+    writeFileAtomic(
+      passFile,
+      `${connection.host}:${connection.port}:${connection.database}:${connection.user}:${connection.password}\n`,
+      0o600,
+    );
+    try {
+      await runOrThrow(
+        'docker',
+        [
+          'run',
+          '--rm',
+          '--network',
+          'host',
+          '-v',
+          `${this.mountSource(input.directory)}:/backup`,
+          '-e',
+          `PGPASSFILE=/backup/${input.passFileName}`,
+          '-e',
+          `PGHOST=${connection.host}`,
+          '-e',
+          `PGPORT=${connection.port}`,
+          '-e',
+          `PGDATABASE=${connection.database}`,
+          '-e',
+          `PGUSER=${connection.user}`,
+          'postgres:18-alpine',
+          'pg_dump',
+          '--format=custom',
+          `--file=/backup/${input.dumpFileName}`,
+        ],
+        {
+          env: { PATH: process.env.PATH ?? '', DOCKER_HOST: this.config.SEAMNEX_DOCKER_HOST },
+          timeoutMs: 900_000,
+        },
+      );
+    } finally {
+      removeQuietly(passFile);
+    }
+  }
+
+  /**
+   * Archives a directory through an ephemeral helper rather than walking it in the API process.
+   *
+   * gzip, not zstd: the helper is plain `alpine:3.20`, whose `tar` always supports `-z`, while
+   * `--zstd` depends on how that image was built. A slightly larger archive that always works beats
+   * a capture that fails on one host.
+   */
+  private async archiveDirectory(input: {
+    source: string;
+    directory: string;
+    fileName: string;
+  }): Promise<void> {
+    await runOrThrow(
+      'docker',
+      [
+        'run',
+        '--rm',
+        '-v',
+        `${this.mountSource(input.source)}:/src:ro`,
+        '-v',
+        `${this.mountSource(input.directory)}:/out`,
+        'alpine:3.20',
+        'tar',
+        '-czf',
+        `/out/${input.fileName}`,
+        '-C',
+        '/src',
+        '.',
+      ],
+      {
+        env: { PATH: process.env.PATH ?? '', DOCKER_HOST: this.config.SEAMNEX_DOCKER_HOST },
+        timeoutMs: 900_000,
+      },
+    );
+  }
+
+  /**
+   * Exports the audit anchors and the chain head.
+   *
+   * FR-1.35 requires audit records to remain verifiable after a restore. The anchors alone prove the
+   * chain up to the last anchored day; the head is exported beside them so a restore can tell "the
+   * tail is intact" from "events after the anchor are missing". The query stays in the audit module;
+   * this method only decides how the export is packaged.
+   */
+  private async exportAuditAnchor(path: string, context: PipelineContext): Promise<void> {
+    const exported = await this.audit.exportAnchors();
+    writeFileAtomic(
+      path,
+      JSON.stringify({ version: 1, exportedAt: now(), ...exported }, null, 2),
+      0o600,
+    );
+    await context.log(
+      'stdout',
+      `audit anchor exported: ${exported.anchors.length} day(s), chain head ${exported.chainHead?.seq ?? 'none'}`,
+    );
   }
 
   /**
@@ -627,6 +929,9 @@ export class BackupRunnerService implements OnModuleInit {
     const backupId = payloadOf(context, 'backupId');
     const message = cause instanceof Error ? cause.message : 'the capture did not finish';
     const code = cause instanceof AppError ? cause.code : 'BACKUP_FAILED';
+    // A failed set keeps no scratch copy: the directory holds database dumps and an unencrypted
+    // realm export, and the retry is another capture rather than a resume.
+    removeTree(join(this.config.SEAMNEX_BACKUP_TMP_DIR, backupId));
     await this.pool.query(
       `UPDATE backup
           SET state = 'failed', finished_at = now(), error_code = $2,
@@ -746,11 +1051,54 @@ function dumpCommand(engine: 'postgres' | 'mysql' | 'mariadb', target: string): 
   ];
 }
 
+/** A database address the dump helper can reach from the host network. */
+const HOST_REACHABLE_DATABASE_HOSTS = ['127.0.0.1', 'localhost', '::1', 'host.docker.internal'];
+
 /**
- * The platform database as pg_dump needs it. A DATABASE_URL with credentials in the userinfo is
- * split here so the password can go to a 0600 file instead of a process argument or container env.
+ * Rewrites a container path into the path the Docker daemon resolves it as.
+ *
+ * Pairs are `containerPath=hostPath`, comma separated, and the longest matching prefix wins so a
+ * narrower rule can sit beside a broader one. A path that matches nothing is returned unchanged:
+ * mounting the same tree at the same place is the normal deployment, and this must not disturb it.
  */
-function platformDatabase(url: string): {
+function dockerMountSource(containerPath: string, map: string): string {
+  for (const [from, to] of pathMap(map)) {
+    if (containerPath === from) return to;
+    const boundary = containerPath.charAt(from.length);
+    if (containerPath.startsWith(from) && (boundary === '/' || boundary === '\\')) {
+      return `${to}${containerPath.slice(from.length)}`;
+    }
+  }
+  return containerPath;
+}
+
+function pathMap(map: string): readonly (readonly [string, string])[] {
+  return map
+    .split(',')
+    .map((pair) => pair.trim())
+    .filter((pair) => pair.includes('='))
+    .map((pair): readonly [string, string] => {
+      const separator = pair.indexOf('=');
+      return [
+        pair
+          .slice(0, separator)
+          .trim()
+          .replace(/[\\/]+$/, ''),
+        pair
+          .slice(separator + 1)
+          .trim()
+          .replace(/[\\/]+$/, ''),
+      ];
+    })
+    .filter(([from, to]) => from.length > 0 && to.length > 0)
+    .sort((left, right) => right[0].length - left[0].length);
+}
+
+/**
+ * A platform-owned database as pg_dump needs it. A URL with credentials in the userinfo is split
+ * here so the password can go to a 0600 file instead of a process argument or container env.
+ */
+function remoteDatabase(url: string): {
   host: string;
   port: string;
   database: string;
@@ -765,4 +1113,8 @@ function platformDatabase(url: string): {
     user: decodeURIComponent(parsed.username),
     password: decodeURIComponent(parsed.password),
   };
+}
+
+function now(): string {
+  return new Date().toISOString();
 }

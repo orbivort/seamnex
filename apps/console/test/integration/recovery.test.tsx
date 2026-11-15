@@ -207,4 +207,30 @@ describe('recovery evidence', () => {
     expect(await screen.findByText('The platform API could not be reached')).toBeDefined();
     expect(screen.queryByText('No platform restore has run')).toBeNull();
   });
+
+  it('reads the contents panel from the newest set and marks operator-owned material as a reference', async () => {
+    openAs('R1', '/governance/recovery');
+    render(<App />);
+    await screen.findByText('What the backup contains');
+
+    // FR-1.35: the panel is the set's own artefact list — six captured, two referenced.
+    expect(await screen.findByText('Identity-provider database')).toBeDefined();
+    expect(screen.getByText('Identity-provider realm export')).toBeDefined();
+    expect(screen.getByText('Catalogue repository (fallback copy)')).toBeDefined();
+    expect(screen.getByText(/Recorded location: operator:\/\/edge\/ingress-tls/)).toBeDefined();
+    // The escrow reference alone does not tell an operator which key to fetch.
+    expect(screen.getByText(/key id 9f2c41d7a0b3e568/)).toBeDefined();
+    expect(screen.getAllByText('ref')).toHaveLength(2);
+  });
+
+  it('states plainly that no set has been captured instead of listing what a backup should contain', async () => {
+    getState().recovery.backups = [];
+
+    openAs('R1', '/governance/recovery');
+    render(<App />);
+
+    expect(await screen.findByText('No platform set has been captured')).toBeDefined();
+    expect(screen.queryByText('Platform database')).toBeNull();
+    expect(screen.queryByText('Secret-store root key')).toBeNull();
+  });
 });

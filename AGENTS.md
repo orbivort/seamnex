@@ -57,7 +57,7 @@ pnpm lint               # ESLint, --max-warnings=0
 pnpm stylelint          # CSS
 pnpm format:check       # Prettier
 pnpm test               # unit tests inside each package
-pnpm test:coverage      # test coverage inside each package
+pnpm test:coverage      # test coverage inside each package, shall meet global threshold
 ```
 
 Conditional gates — run the one your change touches: `pnpm check:migrations`, `check:route-policy`,

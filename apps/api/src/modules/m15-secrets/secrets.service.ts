@@ -36,6 +36,19 @@ export class EnvelopeSecretsService implements SecretsService {
     return this.cachedRootKey;
   }
 
+  /**
+   * FR-1.35 — the key's identifier, never the key. Swallows a missing or unreadable key file because
+   * a backup of a role that holds no secrets is still a valid backup; the manifest then records no
+   * root-key id, and a restore that needs one refuses for want of the key, not for want of a backup.
+   */
+  rootKeyId(): string | null {
+    try {
+      return this.rootKey().id;
+    } catch {
+      return null;
+    }
+  }
+
   async put(
     scope: SecretScope,
     ownerId: string,

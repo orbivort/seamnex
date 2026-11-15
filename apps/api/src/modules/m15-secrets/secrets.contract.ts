@@ -91,4 +91,13 @@ export interface SecretsService {
    * writes no `secret.read` audit row.
    */
   find(scope: SecretScope, ownerId: string, name: string): Promise<SecretMetadata | null>;
+  /**
+   * FR-1.35 — the non-secret identifier of the root key that seals every secret on this host.
+   *
+   * A platform backup records the id so a restore can prove the right key is present. The key itself
+   * is never handed out: a set that carried its own root would turn one stolen archive into every
+   * product secret, and the age identity that opens the set lives on the same host anyway. Null when
+   * this role holds no readable key, which is a valid state for a role that never touches secrets.
+   */
+  rootKeyId(): string | null;
 }
