@@ -654,3 +654,311 @@ describe('decideAny', () => {
     });
   });
 });
+
+/**
+ * FR-5.9 / ISSUE-04: a workflow is a set of write targets, not a place.
+ *
+ * Before this, every scoped grant was refused every `/workflows*` operation, because the resource
+ * resolved to `{type:'workflow'}` and neither `domainOf` branch knew it. These cases pin the four
+ * answers that matter: a collection has no target yet, a domain grant must cover *every* target, an
+ * instance grant only reaches a definition with one target, and a definition that writes nowhere is
+ * still its author's.
+ */
+const WORKFLOW = { type: 'workflow', id: 'd9c1e2f3-0a1b-4c2d-8e3f-4a5b6c7d8e9f' } as never;
+const OTHER_WORKFLOW = { type: 'workflow', id: 'a1b2c3d4-1111-4222-8333-444455556666' } as never;
+const COLLECTION = { type: 'workflow', id: '' } as never;
+const WORKFLOW_SCOPE_ROUTE = 'WITH definition AS';
+
+function workflowRow(over: Record<string, unknown> = {}) {
+  return {
+    owner_id: 'uuid-1',
+    entry_key: 'D01-01',
+    domain: 'CRM & Sales Pipeline',
+    instance_id: 'inst-crm',
+    granularity: 'scoped',
+    ...over,
+  };
+}
+
+describe('workflow scope resolution', () => {
+  it('admits a collection or a create on role alone, because no target exists yet', async () => {
+    const { db, service } = setup({
+      grants: [
+        { role: 'R3', scopeType: 'domain', scopeId: 'CRM & Sales Pipeline', expiresAt: null },
+      ],
+    });
+
+    await expect(
+      service.decide({ context: context(), policyKey: 'workflow.author', resource: COLLECTION }),
+    ).resolves.toMatchObject({ allowed: true });
+    // Nothing to resolve, so nothing was read.
+    expect(db.calls).toHaveLength(0);
+  });
+
+  it('lets a domain grant cover every write target in that domain', async () => {
+    const { service } = setup({
+      grants: [
+        { role: 'R3', scopeType: 'domain', scopeId: 'CRM & Sales Pipeline', expiresAt: null },
+      ],
+      routes: [[WORKFLOW_SCOPE_ROUTE, [workflowRow()]]],
+    });
+
+    await expect(
+      service.decide({ context: context(), policyKey: 'workflow.author', resource: WORKFLOW }),
+    ).resolves.toMatchObject({
+      allowed: true,
+      reason: 'R3 holds workflow.author within domain',
+    });
+  });
+
+  it('refuses a domain grant when one target is in another domain', async () => {
+    const { service } = setup({
+      grants: [
+        { role: 'R3', scopeType: 'domain', scopeId: 'CRM & Sales Pipeline', expiresAt: null },
+      ],
+      routes: [
+        [
+          WORKFLOW_SCOPE_ROUTE,
+          [
+            workflowRow(),
+            workflowRow({
+              entry_key: 'D08-01',
+              domain: 'Document & Content Management',
+              instance_id: 'inst-docs',
+            }),
+          ],
+        ],
+      ],
+    });
+
+    await expect(
+      service.decide({ context: context(), policyKey: 'workflow.author', resource: WORKFLOW }),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: 'the scoped grant does not cover this resource',
+    });
+  });
+
+  it('refuses a target whose catalogue entry declares no domain', async () => {
+    const { service } = setup({
+      grants: [
+        { role: 'R3', scopeType: 'domain', scopeId: 'CRM & Sales Pipeline', expiresAt: null },
+      ],
+      routes: [[WORKFLOW_SCOPE_ROUTE, [workflowRow({ domain: null })]]],
+    });
+
+    await expect(
+      service.decide({ context: context(), policyKey: 'workflow.author', resource: WORKFLOW }),
+    ).resolves.toMatchObject({ allowed: false });
+  });
+
+  it('lets an instance grant reach a definition whose sole write target is that instance', async () => {
+    const { service } = setup({
+      grants: [{ role: 'R4', scopeType: 'instance', scopeId: 'inst-crm', expiresAt: null }],
+      routes: [[WORKFLOW_SCOPE_ROUTE, [workflowRow()]]],
+    });
+
+    await expect(
+      service.decide({
+        context: context({ role: 'R4' }),
+        policyKey: 'workflow.author',
+        resource: WORKFLOW,
+      }),
+    ).resolves.toMatchObject({ allowed: true, reason: 'R4 holds workflow.author within instance' });
+  });
+
+  it('refuses an instance grant once the definition has two write targets', async () => {
+    const { service } = setup({
+      grants: [{ role: 'R4', scopeType: 'instance', scopeId: 'inst-crm', expiresAt: null }],
+      routes: [
+        [
+          WORKFLOW_SCOPE_ROUTE,
+          [workflowRow(), workflowRow({ entry_key: 'D08-01', instance_id: 'inst-docs' })],
+        ],
+      ],
+    });
+
+    await expect(
+      service.decide({
+        context: context({ role: 'R4' }),
+        policyKey: 'workflow.author',
+        resource: WORKFLOW,
+      }),
+    ).resolves.toMatchObject({ allowed: false });
+  });
+
+  it('refuses an instance grant that names a different instance', async () => {
+    const { service } = setup({
+      grants: [{ role: 'R4', scopeType: 'instance', scopeId: 'inst-other', expiresAt: null }],
+      routes: [[WORKFLOW_SCOPE_ROUTE, [workflowRow()]]],
+    });
+
+    await expect(
+      service.decide({
+        context: context({ role: 'R4' }),
+        policyKey: 'workflow.author',
+        resource: WORKFLOW,
+      }),
+    ).resolves.toMatchObject({ allowed: false });
+  });
+
+  it('ranks two deployments of one product the way the compiler will write to them', async () => {
+    const { service } = setup({
+      grants: [{ role: 'R4', scopeType: 'instance', scopeId: 'inst-scoped', expiresAt: null }],
+      routes: [
+        [
+          WORKFLOW_SCOPE_ROUTE,
+          [
+            workflowRow({ instance_id: 'inst-account', granularity: 'account' }),
+            workflowRow({ instance_id: 'inst-scoped', granularity: 'scoped' }),
+          ],
+        ],
+      ],
+    });
+
+    // Both rows describe the *same* entry key: one product, one target, and it is the scoped
+    // deployment the run would write to.
+    await expect(
+      service.decide({
+        context: context({ role: 'R4' }),
+        policyKey: 'workflow.author',
+        resource: WORKFLOW,
+      }),
+    ).resolves.toMatchObject({ allowed: true });
+  });
+
+  it('does not treat a target no deployment can write to as a target', async () => {
+    const reader = {
+      role: 'R3' as const,
+      scopeType: 'domain' as const,
+      scopeId: 'HR & People Operations',
+      expiresAt: null,
+    };
+
+    const { service } = setup({
+      grants: [reader],
+      routes: [[WORKFLOW_SCOPE_ROUTE, [workflowRow({ granularity: 'account' })]]],
+    });
+
+    // The write gate skips an `account`-wide product for the same reason (C-11), so refusing the
+    // read here would let a caller create a definition and then be locked out of its own screen.
+    await expect(
+      service.decide({ context: context(), policyKey: 'workflow.view_runs', resource: WORKFLOW }),
+    ).resolves.toMatchObject({ allowed: true });
+  });
+
+  it('keeps a read-only definition visible to its author and nobody else', async () => {
+    const reader = {
+      role: 'R3' as const,
+      scopeType: 'domain' as const,
+      scopeId: 'CRM & Sales Pipeline',
+      expiresAt: null,
+    };
+
+    await expect(
+      setup({
+        grants: [reader],
+        routes: [
+          [
+            WORKFLOW_SCOPE_ROUTE,
+            [
+              {
+                owner_id: 'uuid-1',
+                entry_key: null,
+                domain: null,
+                instance_id: null,
+                granularity: null,
+              },
+            ],
+          ],
+        ],
+      }).service.decide({
+        context: context(),
+        policyKey: 'workflow.view_runs',
+        resource: WORKFLOW,
+      }),
+    ).resolves.toMatchObject({ allowed: true });
+
+    await expect(
+      setup({
+        grants: [reader],
+        routes: [
+          [
+            WORKFLOW_SCOPE_ROUTE,
+            [
+              {
+                owner_id: 'someone-else',
+                entry_key: null,
+                domain: null,
+                instance_id: null,
+                granularity: null,
+              },
+            ],
+          ],
+        ],
+      }).service.decide({
+        context: context(),
+        policyKey: 'workflow.view_runs',
+        resource: OTHER_WORKFLOW,
+      }),
+    ).resolves.toMatchObject({ allowed: false });
+  });
+
+  it('resolves a run id to the workflow it belongs to', async () => {
+    const { db, service } = setup({
+      grants: [
+        { role: 'R3', scopeType: 'domain', scopeId: 'CRM & Sales Pipeline', expiresAt: null },
+      ],
+      routes: [[WORKFLOW_SCOPE_ROUTE, [workflowRow()]]],
+    });
+
+    await expect(
+      service.decide({ context: context(), policyKey: 'workflow.view_runs', resource: WORKFLOW }),
+    ).resolves.toMatchObject({ allowed: true });
+    // The statement accepts a workflow id or a run id in one pass rather than two round trips.
+    expect(db.calls[0]?.params).toEqual([(WORKFLOW as { id: string }).id]);
+  });
+
+  it('refuses an id that addresses no definition', async () => {
+    const { service } = setup({
+      grants: [
+        { role: 'R3', scopeType: 'domain', scopeId: 'CRM & Sales Pipeline', expiresAt: null },
+      ],
+      routes: [[WORKFLOW_SCOPE_ROUTE, []]],
+    });
+
+    await expect(
+      service.decide({ context: context(), policyKey: 'workflow.author', resource: WORKFLOW }),
+    ).resolves.toMatchObject({ allowed: false });
+  });
+
+  it('refuses a malformed id without asking the database', async () => {
+    const { db, service } = setup({
+      grants: [
+        { role: 'R3', scopeType: 'domain', scopeId: 'CRM & Sales Pipeline', expiresAt: null },
+      ],
+    });
+
+    await expect(
+      service.decide({
+        context: context(),
+        policyKey: 'workflow.author',
+        resource: { type: 'workflow', id: 'not-a-uuid' } as never,
+      }),
+    ).resolves.toMatchObject({ allowed: false });
+    expect(db.calls).toHaveLength(0);
+  });
+
+  it('treats a failed resolution as unresolved rather than granting access', async () => {
+    const { service } = setup({
+      grants: [
+        { role: 'R3', scopeType: 'domain', scopeId: 'CRM & Sales Pipeline', expiresAt: null },
+      ],
+      routes: [[WORKFLOW_SCOPE_ROUTE, () => Promise.reject(new Error('db down'))]],
+    });
+
+    await expect(
+      service.decide({ context: context(), policyKey: 'workflow.author', resource: WORKFLOW }),
+    ).resolves.toMatchObject({ allowed: false });
+  });
+});

@@ -698,6 +698,35 @@ export class PostgresGovernanceService implements GovernanceService {
     }));
   }
 
+  /**
+   * FR-5.9: an R1 writing through a product is exercising an elevation, not standing authority.
+   *
+   * Four conditions, each load-bearing: the actor must be the **requester** (an elevation
+   * authorises one person's actions, never their approver's), the mode must be `read_write`
+   * (a read-only grant cannot write), the state must still be `active` and the window must be
+   * open. `revoked_at IS NULL` covers a revocation whose state sweep has not run yet.
+   */
+  async activeWriteElevations(
+    actorId: string,
+    instanceIds: readonly string[],
+  ): Promise<{ instanceId: string; sessionId: string }[]> {
+    if (instanceIds.length === 0) return [];
+    const result = await this.pool.query<{ id: string; instance_id: string }>(
+      `SELECT id, instance_id
+         FROM break_glass_session
+        WHERE requester = $1
+          AND access_mode = 'read_write'
+          AND state = 'active'
+          AND revoked_at IS NULL
+          AND expires_at IS NOT NULL
+          AND expires_at > now()
+          AND instance_id = ANY($2::uuid[])
+        ORDER BY expires_at DESC, id`,
+      [actorId, instanceIds],
+    );
+    return result.rows.map((row) => ({ instanceId: row.instance_id, sessionId: row.id }));
+  }
+
   async maintenance(): Promise<MaintenanceWindow[]> {
     /* Newest first: the window an operator needs is the one that is running or next up. */
     const result = await this.pool.query<MaintenanceWindowRow>(

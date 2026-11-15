@@ -34,6 +34,17 @@ describe('workflow inventory', () => {
     expect(await screen.findByText('Workflow inventory')).toBeDefined();
   });
 
+  it('offers an auditor no authoring action', async () => {
+    // `workflow.author` is `none` for R2 while `workflow.view_runs` is full: the auditor reads every
+    // definition and may author none, so the two authoring buttons must not be rendered at all.
+    openAs('R2', '/workflows');
+    render(<App />);
+    await screen.findByText('Workflow inventory');
+
+    expect(screen.queryByRole('button', { name: 'New workflow' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Import' })).toBeNull();
+  });
+
   it('surfaces the failed run queue without opening the workspace', async () => {
     openAs('R1', '/workflows');
     render(<App />);

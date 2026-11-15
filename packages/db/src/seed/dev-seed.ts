@@ -170,7 +170,13 @@ const DEV_SUBJECTS: readonly DevSubject[] = [
   {
     username: 'dev-owner',
     role: 'R3',
-    scope: { type: 'domain', id: 'Revenue & Customer' },
+    /**
+     * A **domain**, not a cluster. The PDP and FR-5.9 compare `role_binding.scope_id` with
+     * `catalog_entry.domain`, whose values are the specific domains (`CRM & Sales Pipeline`);
+     * "Revenue & Customer" is the cluster that groups D1-D4, so a binding to it resolved to no
+     * product at all and the seeded domain owner could not author or read anything.
+     */
+    scope: { type: 'domain', id: 'CRM & Sales Pipeline' },
     groups: ['/seamnex-domain-owners', '/seamnex-domains/revenue-customer'],
     mfa: false,
   },
@@ -403,6 +409,20 @@ async function main(): Promise<number> {
 
         // Instance-scoped roles have no referent in a user-only seed; see `DevSubject.scope`.
         if (subject.scope === null) continue;
+
+        /*
+         * A development grant may move scope between releases: R3 was seeded against the cluster
+         * "Revenue & Customer", which matches no `catalog_entry.domain`, so the operator held no
+         * authority at all. Keeping the old row would also keep a grant that resolves to nothing;
+         * this block is the only place that knows the two spellings are the same person. Only the
+         * six development subjects are touched, and only for the scope shape being reconciled.
+         */
+        await client.query(
+          `DELETE FROM role_binding
+            WHERE subject_idp_id = $1 AND role = $2 AND scope_type = $3
+              AND scope_id IS DISTINCT FROM $4`,
+          [sub, subject.role, subject.scope.type, subject.scope.id],
+        );
 
         // A platform grant has a NULL scope_id, and NULL never conflicts in a unique index, so
         // `ON CONFLICT` would add a duplicate binding on every seed run. The NOT EXISTS guard makes

@@ -16,6 +16,7 @@ import { AppError } from '../../common/problem/app-error';
 import { isUuid } from '../../common/http/uuid';
 import { assertIfMatch, etagFor } from '../../common/http/etag';
 import { N8nClient } from './n8n.client';
+import { WORKFLOW_AUTHORITY, type WorkflowAuthority } from './workflow-authority.contract';
 import type { WorkflowListFilter, WorkflowListResult, WorkflowService } from './workflow.contract';
 import {
   formatIrHash,
@@ -39,6 +40,8 @@ type Row = {
   owner_username: string | null;
   owner_display_name: string | null;
   state: string;
+  /** The definition's write targets, as recorded; `rename` re-checks authority against them. */
+  write_targets: string[] | null;
   version: number | null;
   ir_hash: string | null;
   ir: WorkflowIr | null;
@@ -114,12 +117,31 @@ export class PostgresWorkflowService implements WorkflowService {
     @Inject(PG_POOL) private readonly pool: Pool,
     @Inject(AUDIT_SERVICE) private readonly audit: AuditService,
     @Inject(N8nClient) private readonly n8n: N8nClient,
+    @Inject(WORKFLOW_AUTHORITY) private readonly authority: WorkflowAuthority,
   ) {}
 
+  /**
+   * FR-5.9 / NFR-4.4 — the list is the caller's, not the platform's.
+   *
+   * The route already refuses a role the matrix does not grant, but "may list workflows" is not
+   * "may list *all* workflows": an R3 owns domains and an R4 one instance. The predicate runs in
+   * SQL so `x-total-count` is the size of the visible set, and a page of 200 does not load a
+   * portfolio to discard most of it.
+   */
   async list(filter: WorkflowListFilter): Promise<WorkflowListResult> {
     const limit = pageLimit(filter.limit);
     const offset = pageOffset(filter.offset);
-    const params = [filter.state ?? null, likePattern(filter.q), limit, offset];
+    const scope = await this.authority.listScope(filter.actorId);
+    const params = [
+      filter.state ?? null,
+      likePattern(filter.q),
+      limit,
+      offset,
+      scope.unrestricted,
+      scope.unrestricted ? [] : scope.domains,
+      scope.unrestricted ? [] : scope.instanceIds,
+      filter.actorId,
+    ];
 
     const rows = await this.pool.query<Row>(LIST_SQL, params);
     if (rows.rows.length === 0) return { items: [], total: 0 };
@@ -181,6 +203,19 @@ export class PostgresWorkflowService implements WorkflowService {
       detail: 'The workflow changed since it was read.',
     });
 
+    /**
+     * FR-5.9 — a rename is a modification, and the requirement gates every modification on the
+     * write targets. Cheap here (the targets are already loaded) and it keeps the rule's shape:
+     * authority is over the products, not over the row.
+     */
+    const authority = await this.authority.assertPermitted({
+      actorId,
+      action: 'rename',
+      policyKey: 'workflow.author',
+      workflowId,
+      entryKeys: row.write_targets ?? [],
+    });
+
     const replacesDescription = Object.hasOwn(patch, 'description');
     await withTransaction(this.pool, async (tx) => {
       await this.audit.lockChain(tx);
@@ -200,7 +235,10 @@ export class PostgresWorkflowService implements WorkflowService {
           targetType: 'workflow',
           targetId: workflowId,
           outcome: 'success',
-          detail: { ...patch },
+          detail: {
+            ...patch,
+            ...(authority.elevations.length === 0 ? {} : { elevations: authority.elevations }),
+          },
         },
         tx,
       );
@@ -228,8 +266,9 @@ export class PostgresWorkflowService implements WorkflowService {
     const current = await this.pool.query<{
       state: string;
       compiled_n8n_id: string | null;
+      write_targets: string[] | null;
     }>(
-      `SELECT w.state, v.compiled_n8n_id
+      `SELECT w.state, w.write_targets, v.compiled_n8n_id
          FROM workflow w LEFT JOIN workflow_version v ON v.id = w.current_version_id
         WHERE w.id = $1`,
       [workflowId],
@@ -243,6 +282,16 @@ export class PostgresWorkflowService implements WorkflowService {
         remediation: 'Disable the workflow, then delete it.',
       });
     }
+
+    // FR-5.9 — deleting a definition ends an arrangement with the products it writes to, so it
+    // needs the authority that arrangement needed. Checked before n8n is touched.
+    const authority = await this.authority.assertPermitted({
+      actorId,
+      action: 'delete',
+      policyKey: 'workflow.author',
+      workflowId,
+      entryKeys: row.write_targets ?? [],
+    });
 
     const release = await this.n8n
       .remove(workflowId, row.compiled_n8n_id)
@@ -263,10 +312,12 @@ export class PostgresWorkflowService implements WorkflowService {
           targetType: 'workflow',
           targetId: workflowId,
           outcome: 'success',
-          detail:
-            'failed' in release
+          detail: {
+            ...('failed' in release
               ? { n8nRemoved: false, n8nRemovalFailed: release.failed }
-              : { n8nRemoved: release.removed },
+              : { n8nRemoved: release.removed }),
+            ...(authority.elevations.length === 0 ? {} : { elevations: authority.elevations }),
+          },
         },
         tx,
       );
@@ -384,7 +435,7 @@ type Related = {
  * and `owner.name` comes from the identity mirror rather than being echoed back as the opaque id.
  */
 const LIST_SELECT = `
-  SELECT w.id, w.name, w.description, w.owner_idp_id, w.state,
+  SELECT w.id, w.name, w.description, w.owner_idp_id, w.state, w.write_targets,
          u.username AS owner_username, u.display_name AS owner_display_name,
          v.version, v.ir_hash, v.ir, v.validated_at, v.validation_issues,
          w.created_at, w.updated_at,
@@ -405,6 +456,18 @@ const LIST_SQL = `
 ${LIST_SELECT}
    WHERE ($1::text IS NULL OR w.state = $1)
      AND ($2::text IS NULL OR w.name ILIKE $2 ESCAPE '\\' OR COALESCE(w.description, '') ILIKE $2 ESCAPE '\\')
+     AND ($5::boolean = TRUE
+          OR w.owner_idp_id = $8
+          OR EXISTS (
+               SELECT 1 FROM unnest(w.write_targets) AS t(entry_key)
+                WHERE EXISTS (
+                        SELECT 1 FROM catalog_entry c
+                         WHERE c.key = t.entry_key AND c.domain = ANY($6::text[]))
+                   OR EXISTS (
+                        SELECT 1 FROM instance i
+                         WHERE i.entry_key = t.entry_key
+                           AND i.deleted_at IS NULL
+                           AND i.id = ANY($7::uuid[]))))
    ORDER BY w.updated_at DESC, w.id DESC
    LIMIT $3 OFFSET $4`;
 

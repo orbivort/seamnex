@@ -504,6 +504,9 @@ export class Phase2Handlers implements OperationGroup {
         key('GET', '/workflows'),
         async (input) => {
           const result = await this.workflows.list({
+            // FR-5.9 / NFR-4.4: the visible set follows the caller's write authority, so a domain
+            // owner is not handed the whole portfolio by a capability that only says "may list".
+            actorId: input.context.subject.idpId,
             ...(input.query.state === undefined
               ? {}
               : { state: input.query.state as WorkflowState }),

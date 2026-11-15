@@ -12,6 +12,12 @@ export type WorkflowListFilter = {
   readonly q?: string;
   readonly limit?: number;
   readonly offset?: number;
+  /**
+   * Whose list this is (FR-5.9, NFR-4.4). Required: the route already decides that the role may
+   * list workflows, and this decides *which*, so an omission must be a type error rather than an
+   * unfiltered portfolio.
+   */
+  readonly actorId: string;
 };
 
 /**

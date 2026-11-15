@@ -3,6 +3,7 @@ import {
   isCredentialGranularity,
   isWorkflowEligible,
   isWriteEligible,
+  selectEgressInstance,
   workflowIneligibilityReason,
   writeIneligibilityReason,
 } from '../../src/credential-granularity';
@@ -92,5 +93,62 @@ describe('IntegrationMetadataRequestSchema', () => {
     expect(IntegrationMetadataRequestSchema.safeParse({ sessionMaxMinutes: 1.5 }).success).toBe(
       false,
     );
+  });
+});
+
+/**
+ * Which deployment of a product a node addresses.
+ *
+ * Both gates ask this — compilation ("where will the run write?") and FR-5.9 authorization ("which
+ * instance is the caller authorised against?") — so the ranking is pinned here rather than in either
+ * caller. A tie that went the other way in one of them would authorise one tenant and write into
+ * another.
+ */
+describe('selectEgressInstance', () => {
+  it('prefers the scoped deployment over an account-wide one', () => {
+    const chosen = selectEgressInstance(
+      [
+        { instanceId: 'a', granularity: 'account' },
+        { instanceId: 'b', granularity: 'scoped' },
+      ],
+      'write',
+    );
+
+    expect(chosen?.instanceId).toBe('b');
+  });
+
+  it('breaks a tie by the order it was given, which the query fixes at `i.id`', () => {
+    const chosen = selectEgressInstance(
+      [
+        { instanceId: 'first', granularity: 'scoped' },
+        { instanceId: 'second', granularity: 'scoped' },
+      ],
+      'write',
+    );
+
+    expect(chosen?.instanceId).toBe('first');
+  });
+
+  it('refuses an account-wide deployment as a write target, because no operation scope can be minted', () => {
+    expect(
+      selectEgressInstance([{ instanceId: 'a', granularity: 'account' }], 'write'),
+    ).toBeUndefined();
+  });
+
+  it('accepts an account-wide deployment for a read, which needs any brokered credential', () => {
+    const chosen = selectEgressInstance([{ instanceId: 'a', granularity: 'account' }], 'read');
+
+    expect(chosen?.instanceId).toBe('a');
+  });
+
+  it('refuses a product with no credential at all, for either mode', () => {
+    expect(
+      selectEgressInstance([{ instanceId: 'a', granularity: 'none' }], 'read'),
+    ).toBeUndefined();
+    expect(selectEgressInstance([{ instanceId: 'a', granularity: null }], 'write')).toBeUndefined();
+  });
+
+  it('answers nothing when no deployment exists', () => {
+    expect(selectEgressInstance([], 'write')).toBeUndefined();
   });
 });

@@ -63,6 +63,12 @@ const LOG_TEMPLATES: Record<JobKind, string[]> = {
     'restoring control plane',
     'holding the gate for login verification',
   ],
+  // The second tier of a platform restore: one instance at a time, after the operator's login.
+  'platform-restore-products': [
+    'queueing the product tier',
+    'restoring each instance from its newest backup',
+    'checking every deployment is running',
+  ],
   synthetic: ['resolving the check', 'certifying the target'],
 };
 

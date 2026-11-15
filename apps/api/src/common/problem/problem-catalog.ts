@@ -306,6 +306,18 @@ export const PROBLEM_CATALOG = {
     remediation: 'Resolve the per-node errors returned in `fieldErrors`, then validate again.',
     slug: 'workflow-invalid',
   },
+  /**
+   * FR-5.9 / AC-26 / NFR-4.4 — the caller lacks authority over one of the definition's write
+   * targets (design §20.1 names this code). A generic `FORBIDDEN` would tell a domain owner "you
+   * may not author workflows" when the truth is "not into that product", and the fix differs.
+   */
+  WORKFLOW_WRITE_NOT_PERMITTED: {
+    status: 403,
+    title: 'The caller has no write authority over a workflow target',
+    remediation:
+      'Remove the write target named in the detail, or ask the owner of that product for authority. The refusal was audited.',
+    slug: 'workflow-write-not-permitted',
+  },
   /** 4E.5: unknown, unsigned or stale trigger deliveries. */
   TRIGGER_REJECTED: {
     status: 401,

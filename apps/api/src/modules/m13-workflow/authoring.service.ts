@@ -2,7 +2,6 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import {
   isCredentialGranularity,
-  isWorkflowEligible,
   mappingExpression,
   WORKFLOW_EXPORT_API_VERSION,
   workflowIneligibilityReason,
@@ -41,6 +40,12 @@ import { N8nClient } from './n8n.client';
 import { FieldDiscoveryService } from './field-discovery.service';
 import { snapshotKey } from './field-snapshot.repository';
 import { WorkflowSampleService } from './sample.service';
+import {
+  WORKFLOW_AUTHORITY,
+  type WorkflowAuthority,
+  type WorkflowAuthorityEvidence,
+} from './workflow-authority.contract';
+import { resolveEgressInstance } from './egress-instance';
 import {
   formatIrHash,
   mappingsFor,
@@ -118,6 +123,13 @@ export class WorkflowAuthoringService {
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     @Inject(N8nClient) private readonly n8n: N8nClient,
     @Inject(CREDENTIAL_BROKER_SERVICE) private readonly broker: CredentialBrokerService,
+    /*
+     * FR-5.9. Required, not optional: a deployment that forgets to provide it must fail to start
+     * rather than serve a workflow authoring API with no write-target authority. The gate is called
+     * from every mutating path below, and `mutate` is where node, mapping and trigger edits converge,
+     * so there is one funnel rather than five.
+     */
+    @Inject(WORKFLOW_AUTHORITY) private readonly authority: WorkflowAuthority,
     /*
      * Both are optional so that a unit test can build the authoring service without a product or a
      * database behind the mapper. When absent, `fields()` refuses and validation simply skips the
@@ -226,6 +238,18 @@ export class WorkflowAuthoringService {
       mappings: [],
     });
 
+    /**
+     * FR-5.9 / AC-26 — authority is decided by the **write** target, and before the row exists: an
+     * R3 naming another domain's product gets a refusal that says which target and which authority,
+     * not a draft they can never activate.
+     */
+    const authority = await this.authority.assertPermitted({
+      actorId,
+      action: 'create',
+      policyKey: 'workflow.author',
+      instanceIds: [input.targetInstanceId],
+    });
+
     const workflowId = await withTransaction(this.pool, async (tx) => {
       await this.audit.lockChain(tx);
       const created = await tx.query<{ id: string }>(
@@ -246,7 +270,7 @@ export class WorkflowAuthoringService {
           targetType: 'workflow',
           targetId: id,
           outcome: 'success',
-          detail: { name: input.name },
+          detail: { name: input.name, ...authorityDetail(authority) },
         },
         tx,
       );
@@ -280,6 +304,17 @@ export class WorkflowAuthoringService {
     }
     const source = document.workflow;
     const ir: Ir = { trigger: source.trigger, nodes: source.nodes, edges: source.edges };
+    /**
+     * FR-5.9: an import is a create with the targets already written down, so the same rule applies
+     * to the document's own list before the row exists. Otherwise the way to get a cross-domain
+     * definition into the platform would be to export it elsewhere and import it here.
+     */
+    const authority = await this.authority.assertPermitted({
+      actorId,
+      action: 'import',
+      policyKey: 'workflow.author',
+      entryKeys: source.writeTargets.map((target) => target.entryKey),
+    });
     const workflowId = await withTransaction(this.pool, async (tx) => {
       await this.audit.lockChain(tx);
       const created = await tx.query<{ id: string }>(
@@ -303,7 +338,7 @@ export class WorkflowAuthoringService {
           targetType: 'workflow',
           targetId: id,
           outcome: 'success',
-          detail: { irHash: document.irHash },
+          detail: { irHash: document.irHash, ...authorityDetail(authority) },
         },
         tx,
       );
@@ -545,6 +580,19 @@ export class WorkflowAuthoringService {
        */
       this.n8n.assertReady();
       /**
+       * FR-5.9 — activation is where a definition starts acting, so authority is re-decided here
+       * even though the authoring edits were gated: the grant that allowed the edit may have been
+       * revoked since, and an imported definition arrives `disabled` precisely so that activating it
+       * is a second, attributable act.
+       */
+      const authority = await this.authority.assertPermitted({
+        actorId,
+        action: 'activate',
+        policyKey: 'workflow.author',
+        workflowId,
+        entryKeys: writeTargetsOf(version.ir),
+      });
+      /**
        * Resolved first, for the reason readiness is checked first: a node whose product publishes no
        * callable endpoint cannot run, and finding that out after minting would leave a live
        * credential behind for a definition that never went live. Each node's address is the broker,
@@ -589,7 +637,7 @@ export class WorkflowAuthoringService {
             targetType: 'workflow',
             targetId: workflowId,
             outcome: 'success',
-            detail: { version: version.version },
+            detail: { version: version.version, ...authorityDetail(authority) },
           },
           tx,
         );
@@ -615,6 +663,19 @@ export class WorkflowAuthoringService {
        * captured and written into the audit row, so "disabled" here means "disabled locally, n8n
        * unreachable" rather than a claim an operator cannot check.
        */
+      /*
+       * Requirements §5.2 lists enable/disable in the same row as run and replay, so it is gated
+       * too — but note the asymmetry this is *not*: an unauthorised caller is refused, never
+       * "allowed because stopping is safe". The safety action is `activate`'s opposite, and a
+       * definition stopped by someone who does not own it is still an outage.
+       */
+      const authority = await this.authority.assertPermitted({
+        actorId,
+        action: 'disable',
+        policyKey: 'workflow.author',
+        workflowId,
+        entryKeys: writeTargetsOf(version.ir),
+      });
       const deactivation = await this.n8n
         .deactivate(workflow.id, version.compiled_n8n_id)
         .then(() => undefined)
@@ -634,8 +695,12 @@ export class WorkflowAuthoringService {
             outcome: deactivation === undefined ? 'success' : 'failure',
             detail:
               deactivation === undefined
-                ? {}
-                : { n8nDeactivationFailed: deactivation, localStateOnly: true },
+                ? authorityDetail(authority)
+                : {
+                    n8nDeactivationFailed: deactivation,
+                    localStateOnly: true,
+                    ...authorityDetail(authority),
+                  },
           },
           tx,
         );
@@ -644,6 +709,15 @@ export class WorkflowAuthoringService {
     }
 
     if (action === 'duplicate') {
+      // A copy is a create with a definition attached, so it is gated like one: the write targets
+      // travel with the IR, and the caller is about to own a second definition that writes to them.
+      const authority = await this.authority.assertPermitted({
+        actorId,
+        action: 'duplicate',
+        policyKey: 'workflow.author',
+        workflowId,
+        entryKeys: writeTargetsOf(version.ir),
+      });
       const copy = await withTransaction(this.pool, async (tx) => {
         await this.audit.lockChain(tx);
         const created = await tx.query<{ id: string }>(
@@ -654,6 +728,24 @@ export class WorkflowAuthoringService {
         const id = created.rows[0]?.id;
         if (id === undefined) throw internal('The copy was not created.');
         await this.insertVersion(tx, id, version.ir, actorId);
+        // FR-5.9 — a duplicate is a change, and it left no audit row at all before this: the copy
+        // existed with nothing recording who made it, from what, or under which elevation.
+        await this.audit.append(
+          {
+            action: 'workflow.duplicated',
+            actorType: 'user',
+            actorId,
+            targetType: 'workflow',
+            targetId: id,
+            outcome: 'success',
+            detail: {
+              sourceId: workflowId,
+              version: version.version,
+              ...authorityDetail(authority),
+            },
+          },
+          tx,
+        );
         return id;
       });
       return { kind: 'workflow', value: await this.load(copy) };
@@ -682,7 +774,24 @@ export class WorkflowAuthoringService {
           remediation: 'Activate the workflow (which compiles and pushes it), then run it.',
         });
       }
-      const run = await this.startRun(workflow, version, 'manual', actorId, null, idempotencyKey);
+      // FR-5.9: a manual run writes through the definition's targets, so it needs the authority a
+      // change does. Checked before the run row exists, so a refused run leaves nothing behind.
+      const authority = await this.authority.assertPermitted({
+        actorId,
+        action: 'run',
+        policyKey: 'workflow.run',
+        workflowId,
+        entryKeys: writeTargetsOf(version.ir),
+      });
+      const run = await this.startRun(
+        workflow,
+        version,
+        'manual',
+        actorId,
+        null,
+        idempotencyKey,
+        authority.elevations,
+      );
       return { kind: 'run', value: run };
     }
 
@@ -706,7 +815,25 @@ export class WorkflowAuthoringService {
     }
     const workflow = await this.load(run.workflow_id);
     const version = await this.versionById(run.version_id);
-    return this.startRun(workflow, version, run.trigger as WorkflowRun['trigger'], actorId, runId);
+    // FR-5.9: a replay re-writes through the same targets as the run it retries, and §5.2 gates it
+    // with `workflow.run`. The elevation a replay leans on lands on its own `workflow.run.replayed`
+    // row rather than on the original run's.
+    const authority = await this.authority.assertPermitted({
+      actorId,
+      action: 'replay',
+      policyKey: 'workflow.run',
+      workflowId: run.workflow_id,
+      entryKeys: writeTargetsOf(version.ir),
+    });
+    return this.startRun(
+      workflow,
+      version,
+      run.trigger as WorkflowRun['trigger'],
+      actorId,
+      runId,
+      undefined,
+      authority.elevations,
+    );
   }
 
   async decideApproval(
@@ -1047,52 +1174,14 @@ export class WorkflowAuthoringService {
   }
 
   /**
-   * The instance a node's product resolves to.
+   * The instance a node's product resolves to — see `egress-instance.ts`.
    *
-   * The IR stores the entry key, not an instance id, and one entry can be deployed more than once.
-   * The scoped instance wins and `id` breaks the tie, so two activations of the same definition
-   * cannot mint against different tenants. A write needs `scoped` (C-11); a read needs any
-   * credential the platform can broker, because a product with `none` has nothing to authenticate
-   * with.
+   * Shared with the FR-5.9 gate on purpose: authority has to be decided against the instance the
+   * run will write to. Two implementations of "which deployment" would let a caller be authorised
+   * against one product and compiled against another.
    */
   private async egressInstance(entryKey: string, mode: 'read' | 'write'): Promise<string> {
-    const result = await this.pool.query<{ id: string; granularity: string | null }>(
-      `SELECT i.id, seamnex_effective_granularity(i.id) AS granularity
-         FROM instance i WHERE i.entry_key = $1 AND i.deleted_at IS NULL ORDER BY i.id`,
-      [entryKey],
-    );
-    if (result.rows.length === 0) {
-      throw new AppError({
-        code: 'VALIDATION_FAILED',
-        status: 422,
-        detail: `No deployed ${entryKey} instance to run this node against.`,
-        remediation: 'Deploy the product, then activate again.',
-      });
-    }
-    const usable = (granularity: string | null): boolean =>
-      mode === 'write'
-        ? granularity === 'scoped'
-        : isWorkflowEligible(isCredentialGranularity(granularity) ? granularity : 'none');
-    const chosen =
-      result.rows.find((row) => row.granularity === 'scoped' && usable('scoped')) ??
-      result.rows.find((row) => usable(row.granularity));
-    if (chosen === undefined) {
-      throw new AppError({
-        code: 'VALIDATION_FAILED',
-        status: 422,
-        detail:
-          mode === 'write'
-            ? `No deployed ${entryKey} instance can issue an operation-scoped credential.`
-            : `No deployed ${entryKey} instance can issue a credential the platform can broker.`,
-        // FR-2.14 — the workflow-mode remediation used to end with "(FR-2.14)". Remediation text
-        // is rendered to operators, so the id stays here.
-        remediation:
-          mode === 'write'
-            ? 'Deploy the product, or make the writing node read-only (C-11).'
-            : 'Record a verified credential granularity for the product, or make the node read from a product that has one.',
-      });
-    }
-    return chosen.id;
+    return resolveEgressInstance(this.pool, entryKey, mode);
   }
 
   /**
@@ -1340,6 +1429,8 @@ export class WorkflowAuthoringService {
     actorId: string,
     replayOf: string | null,
     idempotencyKey?: string,
+    /** FR-5.9 — the elevations the caller's authority leaned on, recorded on the run's own row. */
+    elevations: readonly { readonly instanceId: string; readonly elevationId: string }[] = [],
   ): Promise<WorkflowRun> {
     const key = `${replayOf ?? idempotencyKey ?? randomUUID()}:${version.id}`;
     const created = await withTransaction(this.pool, async (tx) => {
@@ -1380,7 +1471,12 @@ export class WorkflowAuthoringService {
           targetType: 'workflow_run',
           targetId: id,
           outcome: 'success',
-          detail: { trigger, version: version.version, replayOf },
+          detail: {
+            trigger,
+            version: version.version,
+            replayOf,
+            ...(elevations.length === 0 ? {} : { elevations }),
+          },
         },
         tx,
       );
@@ -1444,12 +1540,30 @@ export class WorkflowAuthoringService {
     const current = await this.currentVersion(workflowId);
     const ir: Ir = JSON.parse(JSON.stringify(current.ir)) as Ir;
     change(ir);
+    /**
+     * FR-5.9 — the check runs on the definition **as it will be**, not as it was.
+     *
+     * The gap this closes: an R3 owning one domain could take someone else's definition and
+     * `PATCH` a write node into a product they do not own, or add a second write node and turn a
+     * legitimate R4 draft into a pipeline they could never have created. Editing towards a target is
+     * creating that target.
+     */
+    const authority = await this.authority.assertPermitted({
+      actorId,
+      action: 'edit',
+      policyKey: 'workflow.author',
+      workflowId,
+      entryKeys: writeTargetsOf(ir),
+    });
     await withTransaction(this.pool, async (tx) => {
       await this.audit.lockChain(tx);
       await this.insertVersion(tx, workflowId, ir, actorId);
       await tx.query(
-        `UPDATE workflow SET state = CASE WHEN state = 'active' THEN 'disabled' ELSE 'draft' END, updated_at = now() WHERE id = $1`,
-        [workflowId],
+        `UPDATE workflow SET state = CASE WHEN state = 'active' THEN 'disabled' ELSE 'draft' END, write_targets = $2, updated_at = now() WHERE id = $1`,
+        // Kept in step with the version: the column is what the list, the PDP and the authority
+        // gate read, and an edit that adds a write target without recording it would leave all
+        // three answering for the previous definition.
+        [workflowId, writeTargetsOf(ir)],
       );
       await this.audit.append(
         {
@@ -1459,6 +1573,7 @@ export class WorkflowAuthoringService {
           targetType: 'workflow',
           targetId: workflowId,
           outcome: 'success',
+          detail: authorityDetail(authority),
         },
         tx,
       );
@@ -1975,6 +2090,17 @@ function writeTargetsOf(ir: Ir): string[] {
         .map((entry) => entry.entryKey as string),
     ),
   ];
+}
+
+/**
+ * FR-5.9 / §5.1 — the elevation a permitted write leaned on, as audit detail.
+ *
+ * Empty when the caller held standing authority: recording an elevation that was not used would
+ * misstate the evidence, and the audit chain is the one place where "which authority was exercised"
+ * has to be exact.
+ */
+function authorityDetail(evidence: WorkflowAuthorityEvidence): Record<string, unknown> {
+  return evidence.elevations.length === 0 ? {} : { elevations: evidence.elevations };
 }
 
 /**

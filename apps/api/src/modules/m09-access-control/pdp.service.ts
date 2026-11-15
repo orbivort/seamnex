@@ -4,6 +4,7 @@ import {
   isReservedPolicyKey,
   requiresMfa,
   scopeRuleFor,
+  selectEgressInstance,
   type Capability,
   type PolicyKey,
   type PolicyResource,
@@ -13,6 +14,7 @@ import type { Pool } from 'pg';
 import { PG_POOL } from '../../database/database.module';
 import { REDIS } from '../../redis/redis.module';
 import type { RequestContext } from '../../common/identity/request-context';
+import { isUuid } from '../../common/http/uuid';
 import { AUDIT_SERVICE, type AuditService } from '../m17-audit/audit.contract';
 import { ACCESS_CONTROL_SERVICE, type AccessControlService } from './access-control.contract';
 import { PolicyCompiler } from './policy.compiler';
@@ -248,6 +250,17 @@ export class PdpService {
     if (rule === 'platform') return false;
     if (grant.scopeType === 'platform') return true;
 
+    /*
+     * FR-5.9: a workflow is not a place, it is a set of write targets. Resolving the resource to the
+     * instances it writes to is what lets an R3 see and reach the definitions in their own domains;
+     * before this, every scoped grant was refused because `domainOf` only knew instances and catalog
+     * entries. The precise rule — R1 break-glass, R4 as the sole write target — is enforced by
+     * `WorkflowAuthority` in m13 before anything is written; this layer answers the coarser question
+     * "does this grant reach this definition at all", so the two cannot disagree in the permissive
+     * direction.
+     */
+    if (resource.type === 'workflow') return this.workflowScopeCovers(grant, resource.id, context);
+
     const domain = await this.domainOf(resource);
     if (rule === 'domain') {
       if (grant.scopeType === 'domain') return grant.scopeId !== null && grant.scopeId === domain;
@@ -289,6 +302,112 @@ export class PdpService {
       this.logger.warn(`scope resolution failed; treating as unresolved (${String(error)})`);
     }
     return null;
+  }
+
+  /**
+   * A workflow — or one of its runs — resolved to the products it writes to (FR-5.9).
+   *
+   * Four answers are deliberate:
+   *
+   *  - **No id yet** (`POST /workflows`, `POST /workflows/import`) is admitted on role alone. The
+   *    definition does not exist, so there is no target to resolve; m13 enforces the target rule
+   *    before it writes anything.
+   *  - **A definition that writes nowhere** is reachable by its author only. Resolving it to an
+   *    empty set must not read as "covers everything", and a read-only draft is still not a shared
+   *    document.
+   *  - **A declared target that no deployment can write to** (`account`-wide credential, C-11) is
+   *    not a target: the write gate skips it for exactly the same reason, and a definition that
+   *    cannot run must not answer differently to the two gates.
+   *  - **Every target must be covered**, by domain (`scope_id = catalog_entry.domain`) or, for an
+   *    instance grant, by being the single write target. A stronger answer than FR-5.9 would refuse
+   *    reads the requirement grants; a weaker one would leak another domain's definition.
+   */
+  private async workflowScopeCovers(
+    grant: Grant,
+    id: string,
+    context: RequestContext,
+  ): Promise<boolean> {
+    if (id.length === 0) return true;
+    // A malformed segment cannot address a row and would reach PostgreSQL as `22P02`; the route
+    // layer answers `422` before any decision, and a decision taken here stays a denial.
+    if (!isUuid(id)) return false;
+
+    const scope = await this.workflowScope(id);
+    if (!scope.found) return false;
+    if (scope.targets.length === 0) {
+      if (scope.declaresTargets) return true;
+      return scope.ownerId !== null && scope.ownerId === context.subject.idpId;
+    }
+    if (grant.scopeType === 'domain') {
+      return scope.targets.every(
+        (target) => target.domain !== null && target.domain === grant.scopeId,
+      );
+    }
+    const [only] = scope.targets;
+    return (
+      scope.targets.length === 1 &&
+      only !== undefined &&
+      grant.scopeId !== null &&
+      only.instanceId === grant.scopeId
+    );
+  }
+
+  private async workflowScope(id: string): Promise<{
+    readonly found: boolean;
+    readonly ownerId: string | null;
+    /** The definition names at least one write target, resolved or not. */
+    readonly declaresTargets: boolean;
+    readonly targets: readonly {
+      readonly entryKey: string;
+      readonly domain: string | null;
+      readonly instanceId: string;
+    }[];
+  }> {
+    try {
+      const result = await this.pool.query<{
+        owner_id: string | null;
+        entry_key: string | null;
+        domain: string | null;
+        instance_id: string | null;
+        granularity: string | null;
+      }>(WORKFLOW_SCOPE_SQL, [id]);
+      if (result.rows.length === 0) {
+        return { found: false, ownerId: null, declaresTargets: false, targets: [] };
+      }
+
+      const byEntry = new Map<
+        string,
+        { domain: string | null; candidates: { instanceId: string; granularity: string | null }[] }
+      >();
+      for (const row of result.rows) {
+        if (row.entry_key === null) continue;
+        const bucket = byEntry.get(row.entry_key) ?? { domain: row.domain, candidates: [] };
+        if (row.instance_id !== null) {
+          bucket.candidates.push({ instanceId: row.instance_id, granularity: row.granularity });
+        }
+        byEntry.set(row.entry_key, bucket);
+      }
+
+      const targets: { entryKey: string; domain: string | null; instanceId: string }[] = [];
+      for (const [entryKey, bucket] of byEntry) {
+        const chosen = selectEgressInstance(bucket.candidates, 'write');
+        if (chosen === undefined) continue;
+        targets.push({ entryKey, domain: bucket.domain, instanceId: chosen.instanceId });
+      }
+
+      return {
+        found: true,
+        ownerId: result.rows[0]?.owner_id ?? null,
+        declaresTargets: byEntry.size > 0,
+        targets,
+      };
+    } catch (error) {
+      // Fail closed: an unreachable database must never read as "this grant covers everything".
+      this.logger.warn(
+        `workflow scope resolution failed; treating as unresolved (${String(error)})`,
+      );
+      return { found: false, ownerId: null, declaresTargets: false, targets: [] };
+    }
   }
 
   private async deny(
@@ -348,3 +467,46 @@ export class PdpService {
     });
   }
 }
+
+/**
+ * The write targets of a workflow, or of the workflow a run belongs to.
+ *
+ * One statement, because the route resolves `GET /workflow-runs/:runId` and
+ * `POST /workflow-runs/:runId/replay` to a *run* id while every other workflow path carries the
+ * definition's. Instances are aggregated per entry key: a product may be deployed twice, and the
+ * decision is about the domain and about whether the grant is the single write target, not about
+ * which of two deployments an egress plan would pick (that is `WorkflowAuthority`'s job).
+ *
+ * `deleted_at IS NULL` matters: a torn-down instance is not a write target, and counting it would
+ * deny a definition that can no longer write anywhere.
+ */
+/**
+ * A workflow (or one of its runs) with one row per deployed instance of each write target.
+ *
+ * The instance rows are selected down to one per entry key in TypeScript with the same
+ * `selectEgressInstance` the compiler uses: a read must be authorised against the deployment the
+ * run would write to, or a caller could create a definition and then be refused the screen that
+ * shows it.
+ */
+const WORKFLOW_SCOPE_SQL = `
+  WITH definition AS (
+    SELECT w.id, w.owner_idp_id, w.write_targets
+      FROM workflow w
+     WHERE w.id = $1::uuid
+    UNION ALL
+    SELECT w.id, w.owner_idp_id, w.write_targets
+      FROM workflow_run r
+      JOIN workflow w ON w.id = r.workflow_id
+     WHERE r.id = $1::uuid
+    LIMIT 1
+  )
+  SELECT d.owner_idp_id AS owner_id,
+         t.entry_key,
+         c.domain,
+         i.id AS instance_id,
+         seamnex_effective_granularity(i.id) AS granularity
+    FROM definition d
+    LEFT JOIN LATERAL unnest(d.write_targets) AS t(entry_key) ON TRUE
+    LEFT JOIN instance i ON i.entry_key = t.entry_key AND i.deleted_at IS NULL
+    LEFT JOIN catalog_entry c ON c.key = t.entry_key
+   ORDER BY t.entry_key, i.id`;

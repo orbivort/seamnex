@@ -45,6 +45,18 @@ export interface GovernanceService {
   patches(): Promise<PatchRecord[]>;
   posture(): Promise<PostureSummary>;
   breakGlass(): Promise<BreakGlassSession[]>;
+  /**
+   * FR-5.9 / §5.1 — the read-write elevations this actor currently holds, by instance.
+   *
+   * R1's authority inside a business product is break-glass, so a workflow write by an R1 needs an
+   * active, unexpired, read-write session on each instance it writes to. The query lives here
+   * because `break_glass_session` is this module's table; a caller only ever sees the pairs it may
+   * record as evidence, never the justification.
+   */
+  activeWriteElevations(
+    actorId: string,
+    instanceIds: readonly string[],
+  ): Promise<{ instanceId: string; sessionId: string }[]>;
   maintenance(): Promise<MaintenanceWindow[]>;
   policyExceptions(): Promise<PolicyException[]>;
   dsar(): Promise<DsarRequest[]>;

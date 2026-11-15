@@ -22,7 +22,17 @@ function targetInstanceIds(writeTargets: Workflow['writeTargets']): string[] {
     .map((instance) => instance.id);
 }
 
-/** FR-5.9: authority follows the write targets, not the workflow's existence. */
+/**
+ * FR-5.9: authority follows the write targets, not the workflow's existence.
+ *
+ * The API enforces the same rule through `@seamnex/domain`'s `workflowWriteAuthority`, on role
+ * bindings, catalog domains and live break-glass elevations. This mock keeps a role-and-entitlement
+ * approximation for two reasons: it has no domain vocabulary (an `instance` fixture carries entry
+ * keys, not a domain), and the console has no elevation picker, so an R1 there stands in for "R1
+ * holding an active elevation". A screen that renders the *refusal* should read the API's
+ * `WORKFLOW_WRITE_NOT_PERMITTED` detail, not this code's wording; the shape (403, per-target
+ * remediation) is deliberately the same.
+ */
 function workflowScopeProblem(role: PlatformRole, ids: string[]) {
   if (role === 'R1') return null;
   if (role === 'R3') {

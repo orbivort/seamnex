@@ -8,6 +8,7 @@ export * from './policy';
 export * from './license-terms';
 export * from './license-gate';
 export * from './propagation';
+export * from './workflow-authority';
 export * from './capacity';
 export * from './version';
 export * from './routes';

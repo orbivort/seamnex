@@ -1,16 +1,15 @@
-import { useMemo, useState, type ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { ArrowRight, CircleAlert, Plus, Workflow as WorkflowIcon } from 'lucide-react';
 import {
   toProblem,
   useCreateWorkflow,
   useImportWorkflow,
-  useInstances,
   useRegistry,
   useWorkflows,
 } from '@seamnex/api-client';
 import type { Workflow, WorkflowExport } from '@seamnex/domain';
-import { TRIGGER_LABELS, WORKFLOW_STATE_LABELS } from '@seamnex/domain';
+import { can, TRIGGER_LABELS, WORKFLOW_STATE_LABELS } from '@seamnex/domain';
 import {
   Alert,
   Badge,
@@ -35,6 +34,7 @@ import {
 } from '@seamnex/ui';
 import { formatRelative } from '@seamnex/utils';
 import { AsyncPanel, QueryError } from '@seamnex/shell';
+import { useSession } from '../../session';
 
 /**
  * Module scope: no cell here reads component state, so the array and its closures are built once.
@@ -182,8 +182,13 @@ const workflowRowLink = (row: Workflow, className: string, children: ReactNode) 
 );
 
 export function WorkflowsPage() {
+  const { session } = useSession();
+  /**
+   * R2 (auditor) reads every definition and may author none. Offering the two authoring actions
+   * would be an affordance that only ever answers `403`; the capability table already says so.
+   */
+  const mayAuthor = can(session.role, 'workflow.author');
   const workflows = useWorkflows();
-  const instances = useInstances();
   const registry = useRegistry();
   const create = useCreateWorkflow();
   const importer = useImportWorkflow();
@@ -207,31 +212,23 @@ export function WorkflowsPage() {
     createProblem?.fieldErrors?.find((item) => item.field === field)?.message;
 
   /**
-   * FR-5.2 / C-11: the pickers offer what the platform can actually broker.
+   * FR-5.2 / C-11: the pickers offer exactly what the platform can broker, read from the registry.
    *
-   * The target list used to contain every deployed product, and the server refused the ones that
-   * cannot issue an operation-scoped credential — a round trip to learn something the registry had
-   * already published. The registry entry carries the verdict (`writeEligible`, `workflowEligible`),
-   * computed by the same predicate the broker and invariant 4 use, so the two cannot disagree.
-   * While the registry is still loading the full list is offered: a missing answer must not read as
-   * "nothing is eligible", and the API refuses the impossible choice anyway.
+   * The list is the registry projection rather than the fleet list. Two reasons, and the second is
+   * the important one:
+   *
+   *  - the registry entry already carries the verdict (`writeEligible`, `workflowEligible`),
+   *    computed by the same predicate the broker and invariant 4 use, so the two cannot disagree;
+   *  - `GET /instances` is the *operator's* fleet view (`instance.view_logs`, fleet-wide), which a
+   *    domain owner (R3) and a product administrator (R4) are refused. Building the pickers from it
+   *    left both roles with an empty select and no way to compose the cross-product workflow FR-5.9
+   *    grants them. `GET /registry/instances` is `registry.view`, which both hold in full.
    */
-  const eligibility = useMemo(
-    () => new Map((registry.data ?? []).map((entry) => [entry.instanceId, entry])),
-    [registry.data],
-  );
-  const sourceOptions = (instances.data ?? []).filter(
-    (instance) => eligibility.get(instance.id)?.workflowEligible ?? true,
-  );
-  const targetOptions = (instances.data ?? []).filter(
-    (instance) => eligibility.get(instance.id)?.writeEligible ?? true,
-  );
-  const notWriteEligible = (instances.data ?? []).filter(
-    (instance) => eligibility.get(instance.id)?.writeEligible === false,
-  );
-  const notSourceEligible = (instances.data ?? []).filter(
-    (instance) => eligibility.get(instance.id)?.workflowEligible === false,
-  );
+  const registryEntries = registry.data ?? [];
+  const sourceOptions = registryEntries.filter((entry) => entry.workflowEligible);
+  const targetOptions = registryEntries.filter((entry) => entry.writeEligible);
+  const notWriteEligible = registryEntries.filter((entry) => !entry.writeEligible);
+  const notSourceEligible = registryEntries.filter((entry) => !entry.workflowEligible);
 
   return (
     <Page>
@@ -241,18 +238,22 @@ export function WorkflowsPage() {
         description="Connect installed products without writing glue code. Discovery comes from the integration registry; credentials are brokered and operation-scoped."
         actions={
           <>
-            <Button variant="ghost" size="sm" onClick={() => setImportOpen(true)}>
-              Import
-            </Button>
-            <Button
-              variant="primary"
-              size="sm"
-              icon={<Plus />}
-              onClick={() => setOpen(true)}
-              aria-describedby="new-workflow-note"
-            >
-              New workflow
-            </Button>
+            {mayAuthor ? (
+              <Button variant="ghost" size="sm" onClick={() => setImportOpen(true)}>
+                Import
+              </Button>
+            ) : null}
+            {mayAuthor ? (
+              <Button
+                variant="primary"
+                size="sm"
+                icon={<Plus />}
+                onClick={() => setOpen(true)}
+                aria-describedby="new-workflow-note"
+              >
+                New workflow
+              </Button>
+            ) : null}
           </>
         }
         meta={
@@ -449,9 +450,9 @@ export function WorkflowsPage() {
                 onChange={(event) => setSourceId(event.target.value)}
               >
                 <option value="">Choose a product…</option>
-                {sourceOptions.map((instance) => (
-                  <option key={instance.id} value={instance.id}>
-                    {instance.entryKey} · {instance.product}
+                {sourceOptions.map((entry) => (
+                  <option key={entry.instanceId} value={entry.instanceId}>
+                    {entry.entryKey} · {entry.product}
                   </option>
                 ))}
               </Select>
@@ -469,9 +470,9 @@ export function WorkflowsPage() {
                 onChange={(event) => setTargetId(event.target.value)}
               >
                 <option value="">Choose a product…</option>
-                {targetOptions.map((instance) => (
-                  <option key={instance.id} value={instance.id}>
-                    {instance.entryKey} · {instance.product}
+                {targetOptions.map((entry) => (
+                  <option key={entry.instanceId} value={entry.instanceId}>
+                    {entry.entryKey} · {entry.product}
                   </option>
                 ))}
               </Select>

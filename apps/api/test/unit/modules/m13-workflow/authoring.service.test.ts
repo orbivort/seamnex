@@ -331,16 +331,26 @@ function harness(overrides: Route[] = [], discovery?: unknown, samples?: unknown
     revoke: vi.fn(async () => undefined),
   };
   const config = { SEAMNEX_BROKER_URL: 'http://broker.test' };
+  /**
+   * FR-5.9's gate, allowed by default: these tests are about the authoring behaviour behind it, and
+   * the rule itself is proved in `workflow-authority.service.test.ts` plus the domain matrix. A test
+   * that needs the refusal makes this reject.
+   */
+  const authority = {
+    assertPermitted: vi.fn(async () => ({ elevations: [] })),
+    listScope: vi.fn(async () => ({ unrestricted: true as const })),
+  };
   const service = new WorkflowAuthoringService(
     db.pool,
     audit as never,
     config as never,
     n8n as never,
     broker as never,
+    authority as never,
     discovery as never,
     samples as never,
   );
-  return { db, audit, n8n, broker, service };
+  return { db, audit, n8n, broker, authority, service };
 }
 
 /** The statement that persisted a version, so a test reads back exactly what the edit wrote. */
@@ -2589,6 +2599,124 @@ describe('replay', () => {
       }),
       db.client,
     );
+  });
+});
+
+// ---- FR-5.9 authority gate ----------------------------------------------------------------------
+
+/**
+ * The rule itself is proved twice over — the domain matrix and `workflow-authority.service.test.ts`.
+ * What these cases pin is that **no entry point forgets to ask it**: a capability check that one
+ * path skips is indistinguishable from no check at all, and the paths that matter (activate, run,
+ * replay) end in a real write against a customer's system of record.
+ */
+describe('FR-5.9 authority gate', () => {
+  it('asks before creating, naming the target the caller chose', async () => {
+    const { authority, service } = harness();
+
+    await service.create(CREATE_INPUT, ACTOR);
+
+    expect(authority.assertPermitted).toHaveBeenCalledWith({
+      actorId: ACTOR,
+      action: 'create',
+      policyKey: 'workflow.author',
+      instanceIds: [TARGET_INSTANCE],
+    });
+  });
+
+  it('asks on an edit, naming the write targets of the definition it is about to persist', async () => {
+    const { authority, service } = harness();
+
+    await service.addNode(WORKFLOW_ID, addRequest(newNode(), NODE_READ), ACTOR);
+
+    expect(authority.assertPermitted).toHaveBeenCalledWith({
+      actorId: ACTOR,
+      action: 'edit',
+      policyKey: 'workflow.author',
+      workflowId: WORKFLOW_ID,
+      // The resulting IR, not the one on disk: the added node could be the write target.
+      entryKeys: ['D02-01'],
+    });
+  });
+
+  it('asks before activating, under the authoring capability', async () => {
+    const { authority, service } = harness([
+      route('LEFT JOIN idp_user', [workflowRow({ state: 'validated' })]),
+    ]);
+
+    await service.action(WORKFLOW_ID, 'activate', ACTOR);
+
+    expect(authority.assertPermitted).toHaveBeenCalledWith({
+      actorId: ACTOR,
+      action: 'activate',
+      policyKey: 'workflow.author',
+      workflowId: WORKFLOW_ID,
+      entryKeys: ['D02-01'],
+    });
+  });
+
+  it.each(['duplicate', 'disable'] as const)('asks before %s', async (action) => {
+    const { authority, service } = harness([
+      route('LEFT JOIN idp_user', [workflowRow({ state: 'active' })]),
+    ]);
+
+    await service.action(WORKFLOW_ID, action, ACTOR);
+
+    expect(authority.assertPermitted).toHaveBeenCalledWith(
+      expect.objectContaining({ action, policyKey: 'workflow.author', workflowId: WORKFLOW_ID }),
+    );
+  });
+
+  it.each([
+    ['run', 'workflow.run'],
+    ['replay', 'workflow.run'],
+  ] as const)('asks before a %s, under the execution capability', async (action, policyKey) => {
+    const { authority, service } = harness([
+      route('LEFT JOIN idp_user', [workflowRow({ state: 'active' })]),
+      compiledVersion,
+    ]);
+
+    if (action === 'run') {
+      await service.action(WORKFLOW_ID, 'run', ACTOR);
+      expect(authority.assertPermitted).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'run', policyKey }),
+      );
+      return;
+    }
+
+    await service.replay(RUN_ID, ACTOR);
+    expect(authority.assertPermitted).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'replay', policyKey }),
+    );
+  });
+
+  it('does not ask to validate, which writes no definition', async () => {
+    const { authority, service } = harness();
+
+    await service.action(WORKFLOW_ID, 'validate', ACTOR);
+
+    expect(authority.assertPermitted).not.toHaveBeenCalled();
+  });
+
+  it('mints nothing and activates nothing when the gate refuses', async () => {
+    const { authority, n8n, broker, service } = harness([
+      route('LEFT JOIN idp_user', [workflowRow({ state: 'validated' })]),
+    ]);
+    authority.assertPermitted.mockRejectedValueOnce(
+      new AppError({
+        code: 'WORKFLOW_WRITE_NOT_PERMITTED',
+        status: 403,
+        detail: 'D02-01 is outside the domains you own.',
+        remediation: 'Remove that write target.',
+      }),
+    );
+
+    await expect(service.action(WORKFLOW_ID, 'activate', ACTOR)).rejects.toMatchObject({
+      code: 'WORKFLOW_WRITE_NOT_PERMITTED',
+      status: 403,
+    });
+    expect(broker.mint).not.toHaveBeenCalled();
+    expect(n8n.upsert).not.toHaveBeenCalled();
   });
 });
 

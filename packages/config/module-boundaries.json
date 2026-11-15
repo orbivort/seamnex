@@ -144,7 +144,15 @@
       "dir": "m09-access-control",
       "owns": ["role_binding", "policy_version", "settings", "machine_client"],
       "mayImport": [],
-      "reads": ["group_mapping", "idp_user", "instance", "catalog_entry"]
+      "$comment": "`workflow`/`workflow_run` are reads, not an edge: FR-5.9 decides scope by the products a definition writes to, so the PDP must resolve a workflow (or one of its runs) to instances without depending on M13.",
+      "reads": [
+        "group_mapping",
+        "idp_user",
+        "instance",
+        "catalog_entry",
+        "workflow",
+        "workflow_run"
+      ]
     },
     {
       "id": "M10",
@@ -195,7 +203,8 @@
         "workflow_approval",
         "field_snapshot"
       ],
-      "mayImport": ["M12", "M14"],
+      "$comment": "FR-5.9 needs two facts this module does not own: the live role bindings (M09) and the break-glass elevations an R1 write leans on (M18). Both are read through their contracts.",
+      "mayImport": ["M09", "M12", "M14", "M18"],
       "reads": ["instance", "credential_scope", "catalog_entry", "idp_user", "registry_snapshot"]
     },
     {

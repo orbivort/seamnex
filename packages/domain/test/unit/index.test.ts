@@ -16,6 +16,7 @@ import * as routes from '../../src/routes';
 import * as signInCopy from '../../src/sign-in-copy';
 import * as stateMachines from '../../src/state-machines';
 import * as version from '../../src/version';
+import * as workflowAuthority from '../../src/workflow-authority';
 import * as authSchema from '../../src/schemas/auth';
 import * as backupSchema from '../../src/schemas/backup';
 import * as capacitySchema from '../../src/schemas/capacity';
@@ -59,6 +60,7 @@ const MODULES = [
   ['sign-in-copy', signInCopy],
   ['state-machines', stateMachines],
   ['version', version],
+  ['workflow-authority', workflowAuthority],
   ['schemas/auth', authSchema],
   ['schemas/backup', backupSchema],
   ['schemas/capacity', capacitySchema],

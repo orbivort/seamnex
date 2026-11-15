@@ -92,6 +92,31 @@ the same number through every manifest and the link definitions at the foot of t
 
 ### Fixed
 
+- **Workflow write-target authority is enforced by the API, not only the mock** (`FR-5.9`, `AC-26`,
+  `NFR-4.4`) — a definition may now be created, imported, edited, activated, disabled, duplicated,
+  run, replayed, renamed or deleted only if the caller holds, for **every** product it writes to, R1
+  (with an active read-write break-glass session on that instance), R3 over that product's domain, or
+  R4 when its instance is the **only** write target. A refusal answers `403
+WORKFLOW_WRITE_NOT_PERMITTED` naming the target and the missing authority, and writes an
+  `access.denied` row; an authorisation that leans on an elevation records the elevation on the
+  change's own audit row. `/workflows*` no longer refuses every scoped grant outright: the PDP
+  resolves a workflow (or a run) to the instances it writes to, the list is filtered by the caller's
+  scope, and a definition that writes nowhere stays visible to its author. A duplicate now leaves a
+  `workflow.duplicated` record, and an edit keeps `workflow.write_targets` in step with the version.
+  Which instance a write target means is decided once, in `@seamnex/domain`
+  (`selectEgressInstance`), so authorisation, compilation and read scoping cannot rank two
+  deployments of one product differently.
+- **A domain owner can compose again** (`FR-5.2`, `FR-5.9`, `C-11`) — the workflow pickers were built
+  from `GET /instances`, the fleet view guarded by `instance.view_logs`, which a domain owner (R3) and
+  a product administrator (R4) are refused: both roles opened "New workflow", found two empty selects
+  and could not create the workflow FR-5.9 grants them. They now read the integration registry
+  (`registry.view`, full for both), which is where the builder's eligibility verdict already came
+  from. An auditor (R2) is also no longer offered "New workflow"/"Import", which only ever answered
+  `403`.
+- **The dev seed reconciles a grant whose scope moved** (`FR-5.9`) — the domain owner is granted a
+  catalog domain (`CRM & Sales Pipeline`) rather than the cluster that groups D1-D4, which resolved to
+  no product at all. Re-seeding now removes the superseded row for the same subject and role instead
+  of leaving a grant that matches no catalog entry beside the corrected one.
 - **A failed job keeps the fix, not only the diagnosis** — the worker wrote the stage's message and
   dropped an `AppError`'s remediation, so the console showed "the database is not reachable" without
   the setting that makes it reachable. The remediation now travels into the failed step, the job log

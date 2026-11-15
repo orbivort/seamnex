@@ -521,14 +521,16 @@ describe('workflow handlers', () => {
     });
   });
 
-  it('GET /workflows omits absent filters and coerces present ones', async () => {
+  it('GET /workflows omits absent filters, coerces present ones and names the caller', async () => {
     await call('GET /workflows');
-    expect(s.workflows.list).toHaveBeenCalledWith({});
+    // FR-5.9 / NFR-4.4: the visible set is the caller's, so the actor always travels with the query.
+    expect(s.workflows.list).toHaveBeenCalledWith({ actorId: 'sub-1' });
 
     await call('GET /workflows', {
       query: { state: 'draft', q: 'mail', limit: '10', offset: '20' },
     });
     expect(s.workflows.list).toHaveBeenLastCalledWith({
+      actorId: 'sub-1',
       state: 'draft',
       q: 'mail',
       limit: 10,

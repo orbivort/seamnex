@@ -214,15 +214,20 @@ describe('development seed under the stub provider', () => {
     expect(grants.map((params) => [params[0], params[1], params[2], params[3]])).toEqual([
       ['stub:dev-admin', 'R1', 'platform', null],
       ['stub:dev-auditor', 'R2', 'platform', null],
-      ['stub:dev-owner', 'R3', 'domain', 'Revenue & Customer'],
+      // A catalog domain, not the cluster that groups D1-D4: `PdpService` and FR-5.9 compare the
+      // scope with `catalog_entry.domain`, so a cluster name resolved to no product at all.
+      ['stub:dev-owner', 'R3', 'domain', 'CRM & Sales Pipeline'],
       ['stub:dev-user', 'R5', 'platform', null],
     ]);
   });
 
-  it('writes no stub cleanup in stub mode', async () => {
+  it('writes no stub-era cleanup in stub mode', async () => {
     await runSeed({ DATABASE_URL: CONNECTION, AUTH_PROVIDER: undefined });
 
-    expect(statements().filter((sql) => sql.includes('DELETE FROM'))).toEqual([]);
+    // The provider-switch cleanup is what must not run under the stub. A grant whose scope moved
+    // between releases is reconciled in both modes: it deletes by subject and scope, never by the
+    // `stub:%` predicate that marks a retired identity.
+    expect(statements().filter((sql) => sql.includes("LIKE 'stub:%'"))).toEqual([]);
   });
 
   it('refuses to start without DATABASE_URL', async () => {
@@ -232,6 +237,20 @@ describe('development seed under the stub provider', () => {
     expect(doubles.createPool).not.toHaveBeenCalled();
     expect(doubles.end).not.toHaveBeenCalled();
     expect(errorSpy.mock.calls[0]?.[0]).toBe('DATABASE_URL is required to seed development data.');
+  });
+
+  it('reconciles a development grant whose scope moved between releases', async () => {
+    await runSeed({ DATABASE_URL: CONNECTION, AUTH_PROVIDER: undefined });
+
+    // R3 used to be seeded against the cluster "Revenue & Customer", which matches no
+    // `catalog_entry.domain`. A re-seed has to remove that row, otherwise the operator keeps a grant
+    // that resolves to nothing and gains a second one beside it.
+    expect(paramsFor('DELETE FROM role_binding')).toContainEqual([
+      'stub:dev-owner',
+      'R3',
+      'domain',
+      'CRM & Sales Pipeline',
+    ]);
   });
 
   it('treats an empty DATABASE_URL as absent', async () => {

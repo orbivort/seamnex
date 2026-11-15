@@ -22,6 +22,12 @@ function service(routes: Parameters<typeof fakeDb>[0]) {
         append: () => Promise.resolve(),
       } as never,
       { remove: () => Promise.resolve(false) } as never,
+      // FR-5.9 scope is exercised in `workflow-authority.service.test.ts`; here the read surface is
+      // under test, so the actor sees everything and only the joins matter.
+      {
+        assertPermitted: () => Promise.resolve({ elevations: [] }),
+        listScope: () => Promise.resolve({ unrestricted: true as const }),
+      },
     ),
   };
 }
@@ -109,7 +115,7 @@ describe('write targets', () => {
       ['FROM credential_scope', []],
     ]);
 
-    const result = await workflows.list({});
+    const result = await workflows.list({ actorId: 'dev-admin' });
     const [workflow] = result.items;
 
     expect(workflow?.writeTargets).toEqual([
