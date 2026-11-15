@@ -1,5 +1,10 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { operationKey, type ApiOperation, type WorkflowState } from '@seamnex/domain';
+import {
+  operationKey,
+  type ApiOperation,
+  type LicenseReviewRequest,
+  type WorkflowState,
+} from '@seamnex/domain';
 import type { OperationGroup } from '../operation-handlers';
 import type { OperationHandler, OperationResult } from '../operation-handler';
 import { CATALOG_SERVICE, type CatalogService } from '../../modules/m01-catalog/catalog.contract';
@@ -458,6 +463,17 @@ export class Phase2Handlers implements OperationGroup {
             await this.governance.setHostedService(
               param(input, 'instanceId'),
               (input.body as { enabled: boolean }).enabled,
+              actor(input),
+            ),
+          ),
+      ],
+      [
+        key('PUT', '/licenses/:instanceId/review'),
+        async (input) =>
+          body(
+            await this.governance.recordReview(
+              param(input, 'instanceId'),
+              input.body as LicenseReviewRequest,
               actor(input),
             ),
           ),

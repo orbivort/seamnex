@@ -112,8 +112,20 @@ describe('step-up policy (ADR-BE-13)', () => {
 
   it('never asks for a factor on a capability the role cannot use anyway', () => {
     for (const capability of MFA_REQUIRED_CAPABILITIES) {
-      expect(can('R1', capability), capability).toBe(true);
+      for (const role of ['R1', 'R2'] as const) {
+        if (requiresMfa(role, capability)) {
+          expect(can(role, capability), `${role} ${capability}`).toBe(true);
+        }
+      }
     }
+  });
+
+  it('does not step up the administrator for the auditor-only review (ADR-BE-25)', () => {
+    expect(can('R2', 'license.review')).toBe(true);
+    expect(can('R1', 'license.review')).toBe(false);
+    expect(requiresMfa('R2', 'license.review')).toBe(true);
+    // A factor demanded from an operator who is denied anyway can never succeed.
+    expect(requiresMfa('R1', 'license.review')).toBe(false);
   });
 
   it('leaves ordinary reads and portal actions alone', () => {

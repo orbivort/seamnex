@@ -66,11 +66,51 @@ export const LicenseRecordSchema = z.object({
    * `new Date()` (which made an unreviewed licence look audited today).
    */
   reviewedBy: z.string().min(1).nullable(),
+  /**
+   * The same reviewer, rendered: the identity mirror's display name, then its username, and only
+   * then the identity id. `reviewedBy` stays the id because it is the join key back to
+   * `audit_event.actor_id`; a register that shows only the id prints `stub:dev-admin` for the person
+   * who signed the row off. Null exactly when `reviewedBy` is null.
+   */
+  reviewedByName: z.string().min(1).nullable(),
   reviewedAt: TimestampSchema.nullable(),
+  /**
+   * ADR-BE-25: the artefact the review was checked against — the upstream LICENSE URL or the
+   * commercial contract id. The database keeps it all-or-nothing with the reviewer and the date,
+   * so a cleared row can always be traced back to something a second person can open.
+   */
+  upstreamRef: z.string().min(1).nullable(),
+  /** Reviewer note; the audit detail records only its length. */
+  reviewNote: z.string().min(1).nullable(),
   status: z.enum(['cleared', 'review_required']),
   /** Whether this instance is offered as a hosted service (blocked for restricted licences). */
   hostedService: z.boolean(),
 });
+
+/**
+ * FR-1.14 / AC-44 / ADR-BE-25: the auditor's sign-off.
+ *
+ * The reviewer and the timestamp are deliberately absent: the server takes them from the session
+ * and its own clock, so no request can claim either. `upstreamRef` is required because a review
+ * that cannot be checked against an artefact is an assertion.
+ */
+export const LicenseReviewRequestSchema = z
+  .object({
+    licenseId: z.string().trim().min(1).max(120),
+    obligations: z.array(z.string().trim().min(1).max(300)).max(20),
+    resaleRestricted: z.boolean(),
+    hostedServiceRestricted: z.boolean(),
+    upstreamRef: z.string().trim().min(1).max(500),
+    note: z.string().trim().min(1).max(2000).optional(),
+    /** A licence outside `LICENSE_TERMS` is reviewable only if the auditor says so explicitly. */
+    acknowledgeUnknownLicence: z.boolean().default(false),
+    /** "No obligations apply" is a valid answer, but it must be chosen, not left blank. */
+    confirmNoObligations: z.boolean().default(false),
+  })
+  .refine((value) => value.obligations.length > 0 || value.confirmNoObligations, {
+    path: ['obligations'],
+    message: 'Confirm explicitly when no obligations apply.',
+  });
 
 /** FR-1.14 / AC-44: a restricted licence blocks a hosted-service configuration with a stated reason. */
 export const LicenseGateSchema = z.object({
@@ -261,6 +301,7 @@ export type AuditEvent = z.infer<typeof AuditEventSchema>;
 export type AuditProof = z.infer<typeof AuditProofSchema>;
 export type LicenseRecord = z.infer<typeof LicenseRecordSchema>;
 export type LicenseGate = z.infer<typeof LicenseGateSchema>;
+export type LicenseReviewRequest = z.infer<typeof LicenseReviewRequestSchema>;
 export type PatchRecord = z.infer<typeof PatchRecordSchema>;
 export type PostureSummary = z.infer<typeof PostureSummarySchema>;
 export type BreakGlassSession = z.infer<typeof BreakGlassSessionSchema>;

@@ -48,7 +48,11 @@ describe('licenses', () => {
             hosted_service_restricted: false,
             hosted_service_enabled: true,
             reviewed_by: 'auditor-1',
+            reviewer_display_name: 'Ruth Adler',
+            reviewer_username: 'ruth.adler',
             reviewed_at: new Date('2026-02-01T00:00:00.000Z'),
+            upstream_ref: 'https://example.invalid/LICENSE',
+            review_note: 'Checked against the signed contract.',
           },
         ],
       ],
@@ -65,10 +69,47 @@ describe('licenses', () => {
       resaleRestricted: true,
       hostedServiceRestricted: false,
       reviewedBy: 'auditor-1',
+      // The register shows the person, not the identity id the session handed the write path.
+      reviewedByName: 'Ruth Adler',
       reviewedAt: '2026-02-01T00:00:00.000Z',
+      upstreamRef: 'https://example.invalid/LICENSE',
+      reviewNote: 'Checked against the signed contract.',
       status: 'cleared',
       hostedService: true,
     });
+  });
+
+  it('falls back to the identity id when the reviewer is not in the mirror', async () => {
+    const { service } = setup([
+      [
+        LICENSE_QUERY,
+        [
+          {
+            instance_id: INSTANCE_ID,
+            entry_key: 'D01-01',
+            product: 'Mail',
+            license_id: 'MIT',
+            obligations: [],
+            recorded: true,
+            resale_restricted: false,
+            hosted_service_restricted: false,
+            hosted_service_enabled: false,
+            reviewed_by: 'auditor-1',
+            // A sign-off recorded before the user was synced still renders; the id is the one thing
+            // the platform actually holds.
+            reviewer_display_name: null,
+            reviewer_username: null,
+            reviewed_at: new Date('2026-02-01T00:00:00.000Z'),
+            upstream_ref: 'https://example.invalid/LICENSE',
+            review_note: null,
+          },
+        ],
+      ],
+    ]);
+
+    const [record] = await service.licenses();
+
+    expect(record?.reviewedByName).toBe('auditor-1');
   });
 
   it('states the licence terms for a deployment nobody has reviewed yet', async () => {
@@ -88,6 +129,8 @@ describe('licenses', () => {
             hosted_service_enabled: false,
             reviewed_by: null,
             reviewed_at: null,
+            upstream_ref: null,
+            review_note: null,
           },
         ],
       ],
@@ -100,7 +143,10 @@ describe('licenses', () => {
       resaleRestricted: false,
       hostedServiceRestricted: false,
       reviewedBy: null,
+      reviewedByName: null,
       reviewedAt: null,
+      upstreamRef: null,
+      reviewNote: null,
       status: 'review_required',
       hostedService: false,
     });
@@ -126,6 +172,8 @@ describe('licenses', () => {
             hosted_service_enabled: false,
             reviewed_by: null,
             reviewed_at: null,
+            upstream_ref: null,
+            review_note: null,
           },
         ],
       ],
@@ -144,7 +192,7 @@ describe('licenses', () => {
     ]);
   });
 
-  it('leaves an unrecognised licence with no obligations rather than inventing terms', async () => {
+  it('does not treat a date without a reviewer as a cleared review', async () => {
     const { service } = setup([
       [
         LICENSE_QUERY,
@@ -161,6 +209,8 @@ describe('licenses', () => {
             hosted_service_enabled: false,
             reviewed_by: null,
             reviewed_at: new Date('2026-03-01T00:00:00.000Z'),
+            upstream_ref: null,
+            review_note: null,
           },
         ],
       ],
@@ -172,7 +222,7 @@ describe('licenses', () => {
       obligations: [],
       resaleRestricted: false,
       hostedServiceRestricted: false,
-      status: 'cleared',
+      status: 'review_required',
     });
   });
 });
@@ -189,10 +239,179 @@ function gateRow(overrides: Row = {}): Row {
     resale_restricted: false,
     hosted_service_restricted: false,
     hosted_service_enabled: false,
+    reviewed_by: null,
     reviewed_at: null,
+    upstream_ref: null,
     ...overrides,
   };
 }
+
+/** ADR-BE-25: the three evidence fields together, as the database requires. */
+const REVIEWED = {
+  recorded: true,
+  reviewed_by: 'auditor-1',
+  reviewed_at: new Date('2026-02-01T00:00:00.000Z'),
+  upstream_ref: 'https://example.invalid/LICENSE',
+} as const;
+
+describe('recordReview', () => {
+  const REVIEW = {
+    licenseId: 'AGPL-3.0',
+    obligations: ['Offer the complete corresponding source'],
+    resaleRestricted: false,
+    hostedServiceRestricted: false,
+    upstreamRef: 'https://example.invalid/LICENSE',
+    note: 'Checked against the LICENSE file.',
+    acknowledgeUnknownLicence: false,
+    confirmNoObligations: false,
+  };
+
+  function reviewRow(overrides: Row = {}): Row {
+    return {
+      instance_id: INSTANCE_ID,
+      entry_key: 'D01-01',
+      product: 'Mail',
+      license_id: 'AGPL-3.0',
+      obligations: [],
+      recorded: false,
+      resale_restricted: false,
+      hosted_service_restricted: false,
+      hosted_service_enabled: false,
+      reviewed_by: null,
+      reviewer_display_name: null,
+      reviewer_username: null,
+      reviewed_at: null,
+      upstream_ref: null,
+      review_note: null,
+      ...overrides,
+    };
+  }
+
+  it('stamps the reviewer and the reference, and returns the cleared row', async () => {
+    let selects = 0;
+    const { db, audit, service } = setup([
+      ['INSERT INTO license_record', []],
+      [
+        'WHERE i.id = $1',
+        () => {
+          selects += 1;
+          return selects === 1
+            ? [reviewRow()]
+            : [
+                reviewRow({
+                  obligations: REVIEW.obligations,
+                  reviewed_by: 'auditor-1',
+                  reviewer_display_name: 'Ruth Adler',
+                  reviewer_username: 'ruth.adler',
+                  reviewed_at: new Date('2026-11-15T10:00:00.000Z'),
+                  upstream_ref: REVIEW.upstreamRef,
+                  review_note: REVIEW.note,
+                }),
+              ];
+        },
+      ],
+    ]);
+
+    const record = await service.recordReview(INSTANCE_ID, REVIEW, 'auditor-1');
+
+    expect(record).toMatchObject({
+      status: 'cleared',
+      reviewedBy: 'auditor-1',
+      reviewedByName: 'Ruth Adler',
+      reviewedAt: '2026-11-15T10:00:00.000Z',
+      upstreamRef: REVIEW.upstreamRef,
+      reviewNote: REVIEW.note,
+      obligations: REVIEW.obligations,
+    });
+    const insert = paramsFor(db.calls, 'INSERT INTO license_record');
+    expect(insert[0]).toBe(INSTANCE_ID);
+    expect(insert[5]).toBe('auditor-1');
+    expect(insert[6]).toBe(REVIEW.upstreamRef);
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'license.review.recorded',
+        actorId: 'auditor-1',
+        targetId: INSTANCE_ID,
+        detail: expect.objectContaining({
+          licenseId: 'AGPL-3.0',
+          noteLength: REVIEW.note.length,
+          acknowledgedUnknownLicence: false,
+        }),
+      }),
+      db.client,
+    );
+  });
+
+  it('refuses an unknown licence unless the auditor acknowledges it', async () => {
+    const { db, service } = setup([['WHERE i.id = $1', [reviewRow()]]]);
+
+    await expect(
+      service.recordReview(INSTANCE_ID, { ...REVIEW, licenseId: 'Unknown-1.0' }, 'auditor-1'),
+    ).rejects.toMatchObject({
+      code: 'VALIDATION_FAILED',
+      status: 422,
+      detail: expect.stringContaining('not a licence the platform knows'),
+    });
+    expect(callFor(db.calls, 'INSERT INTO license_record')).toBeUndefined();
+  });
+
+  it('accepts an unknown licence when it is acknowledged, and audits that fact', async () => {
+    const { db, audit, service } = setup([
+      ['INSERT INTO license_record', []],
+      ['WHERE i.id = $1', [reviewRow({ license_id: 'Unknown-1.0' })]],
+    ]);
+
+    await service.recordReview(
+      INSTANCE_ID,
+      { ...REVIEW, licenseId: 'Unknown-1.0', acknowledgeUnknownLicence: true },
+      'auditor-1',
+    );
+
+    expect(callFor(db.calls, 'INSERT INTO license_record')).toBeDefined();
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'license.review.recorded',
+        detail: expect.objectContaining({ acknowledgedUnknownLicence: true }),
+      }),
+      db.client,
+    );
+  });
+
+  it('refuses an empty obligation list unless the reviewer confirms it', async () => {
+    const { db, service } = setup([['WHERE i.id = $1', [reviewRow()]]]);
+
+    await expect(
+      service.recordReview(INSTANCE_ID, { ...REVIEW, obligations: [] }, 'auditor-1'),
+    ).rejects.toMatchObject({
+      code: 'VALIDATION_FAILED',
+      fieldErrors: [expect.objectContaining({ field: 'obligations' })],
+    });
+    expect(callFor(db.calls, 'INSERT INTO license_record')).toBeUndefined();
+  });
+
+  it('refuses to record a restriction while the instance is offered as a service', async () => {
+    const { db, service } = setup([
+      ['WHERE i.id = $1', [reviewRow({ hosted_service_enabled: true })]],
+    ]);
+
+    await expect(
+      service.recordReview(INSTANCE_ID, { ...REVIEW, resaleRestricted: true }, 'auditor-1'),
+    ).rejects.toMatchObject({
+      code: 'STATE_CONFLICT',
+      detail: expect.stringContaining('currently offered as a hosted service'),
+    });
+    expect(callFor(db.calls, 'INSERT INTO license_record')).toBeUndefined();
+  });
+
+  it('refuses a review for an instance that is gone', async () => {
+    const { service } = setup([['WHERE i.id = $1', []]]);
+
+    await expect(service.recordReview(INSTANCE_ID, REVIEW, 'auditor-1')).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+      detail: `No instance ${INSTANCE_ID}.`,
+    });
+  });
+});
 
 describe('setHostedService', () => {
   it('refuses an id that is not a uuid before querying', async () => {
@@ -217,10 +436,10 @@ describe('setHostedService', () => {
     const { db, audit, service } = setup([[GATE_QUERY, [gateRow({ license_id: null })]]]);
 
     await expect(service.setHostedService(INSTANCE_ID, true, 'admin-1')).rejects.toMatchObject({
-      code: 'LICENCE_RESTRICTED',
+      code: 'LICENCE_UNREVIEWED',
       detail:
         'No licence terms are recorded for Mail (unreviewed), so hosted-service mode stays off.',
-      remediation: expect.stringContaining('complete the licence review'),
+      remediation: expect.stringContaining('complete the review'),
     });
     expect(audit.append).toHaveBeenCalledWith({
       action: 'license.hosted_service.denied',
@@ -236,14 +455,25 @@ describe('setHostedService', () => {
         reviewed: false,
         resaleRestricted: false,
         hostedServiceRestricted: false,
+        refusal: 'LICENCE_UNREVIEWED',
       },
     });
     expect(callFor(db.calls, 'INSERT INTO license_record')).toBeUndefined();
   });
 
-  it('refuses a licence that does not permit offering the product to third parties', async () => {
+  it('refuses a reviewed licence that does not permit offering the product to third parties', async () => {
     const { service } = setup([
-      [GATE_QUERY, [gateRow({ license_id: 'Elastic License 2.0', product: 'Search' })]],
+      [
+        GATE_QUERY,
+        [
+          gateRow({
+            license_id: 'Elastic License 2.0',
+            product: 'Search',
+            ...REVIEWED,
+            resale_restricted: true,
+          }),
+        ],
+      ],
     ]);
 
     await expect(service.setHostedService(INSTANCE_ID, true, 'admin-1')).rejects.toMatchObject({
@@ -265,7 +495,7 @@ describe('setHostedService', () => {
           [
             gateRow({
               license_id: 'Commercial-2026',
-              reviewed_at: new Date('2026-02-01'),
+              ...REVIEWED,
               ...overrides,
             }),
           ],
@@ -280,9 +510,9 @@ describe('setHostedService', () => {
     },
   );
 
-  it('records the first toggle as the register row, taking terms from the licence table', async () => {
+  it('toggles a reviewed row and writes only the flag', async () => {
     const { db, audit, service } = setup([
-      [GATE_QUERY, [gateRow({ recorded: true, obligations: ['Keep the NOTICE file'] })]],
+      [GATE_QUERY, [gateRow({ obligations: ['Keep the NOTICE file'], ...REVIEWED })]],
       ['INSERT INTO license_record', []],
     ]);
 
@@ -314,24 +544,27 @@ describe('setHostedService', () => {
     expect(Number.isNaN(Date.parse(gate.evaluatedAt))).toBe(false);
   });
 
-  it('creates an unreviewed row from the licence table when none exists yet', async () => {
-    const { db, service } = setup([
-      [GATE_QUERY, [gateRow()]],
-      ['INSERT INTO license_record', []],
-    ]);
+  it('refuses an unreviewed row even when the licence table knows the terms', async () => {
+    const { db, audit, service } = setup([[GATE_QUERY, [gateRow()]]]);
 
-    await service.setHostedService(INSTANCE_ID, true, 'admin-1');
-
-    const insert = paramsFor(db.calls, 'INSERT INTO license_record');
-    expect(JSON.parse(String(insert[2]))).toContain(
-      'Offer the complete corresponding source to every user who interacts over a network',
+    await expect(service.setHostedService(INSTANCE_ID, true, 'admin-1')).rejects.toMatchObject({
+      code: 'LICENCE_UNREVIEWED',
+      detail:
+        'The AGPL-3.0 licence recorded for Mail has not been reviewed, so hosted-service mode stays off.',
+      remediation: expect.stringContaining('Ask an auditor'),
+    });
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'license.hosted_service.denied',
+        outcome: 'denied',
+      }),
     );
-    expect(insert.slice(3)).toEqual([false, false, true]);
+    expect(callFor(db.calls, 'INSERT INTO license_record')).toBeUndefined();
   });
 
   it('stores an empty obligation list for a reviewed licence nobody wrote terms for', async () => {
     const { db, service } = setup([
-      [GATE_QUERY, [gateRow({ recorded: true, license_id: 'Vendor-2026', obligations: null })]],
+      [GATE_QUERY, [gateRow({ ...REVIEWED, license_id: 'Vendor-2026', obligations: null })]],
       ['INSERT INTO license_record', []],
     ]);
 
@@ -347,7 +580,7 @@ describe('setHostedService', () => {
         [
           gateRow({
             license_id: 'BSL-1.1',
-            recorded: true,
+            ...REVIEWED,
             hosted_service_enabled: true,
             resale_restricted: true,
             hosted_service_restricted: true,
@@ -377,7 +610,7 @@ describe('setHostedService', () => {
 
   it('writes nothing when the toggle already holds the requested value', async () => {
     const { db, audit, service } = setup([
-      [GATE_QUERY, [gateRow({ recorded: true, hosted_service_enabled: true })]],
+      [GATE_QUERY, [gateRow({ ...REVIEWED, hosted_service_enabled: true })]],
     ]);
 
     const gate = await service.setHostedService(INSTANCE_ID, true, 'admin-1');

@@ -3,6 +3,7 @@ import type {
   DsarRequest,
   LicenseGate,
   LicenseRecord,
+  LicenseReviewRequest,
   MaintenanceWindow,
   PatchRecord,
   PolicyException,
@@ -34,6 +35,12 @@ export interface GovernanceWrites {
 /** Owns licence_record, patch_record, break_glass_session, policy_exception, maintenance_window, dsar_request. */
 export interface GovernanceService {
   licenses(): Promise<LicenseRecord[]>;
+  /** ADR-BE-25: R2 records the review; the actor and timestamp come from the session/server. */
+  recordReview(
+    instanceId: string,
+    request: LicenseReviewRequest,
+    actorId: string,
+  ): Promise<LicenseRecord>;
   setHostedService(instanceId: string, enabled: boolean, actorId: string): Promise<LicenseGate>;
   patches(): Promise<PatchRecord[]>;
   posture(): Promise<PostureSummary>;

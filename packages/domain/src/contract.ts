@@ -76,6 +76,7 @@ import {
   DsarRequestSchema,
   LicenseGateSchema,
   LicenseRecordSchema,
+  LicenseReviewRequestSchema,
   MaintenanceWindowCreateRequestSchema,
   MaintenanceWindowPatchRequestSchema,
   MaintenanceWindowSchema,
@@ -1028,6 +1029,14 @@ const DECLARED_OPERATIONS: readonly DeclaredOperation[] = [
     tag: 'governance',
     response: LicenseGateSchema,
     request: z.object({ enabled: z.boolean() }),
+  }),
+  op({
+    method: 'PUT',
+    path: '/licenses/:instanceId/review',
+    summary: 'Record the auditor review: obligations, restriction flags and evidence.',
+    tag: 'governance',
+    response: LicenseRecordSchema,
+    request: LicenseReviewRequestSchema,
   }),
   op({
     method: 'GET',

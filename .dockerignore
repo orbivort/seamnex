@@ -113,5 +113,5 @@ docker
 **/test-results
 **/.pnpm-store
 
-# docs/adr is prose; docs/openapi.json is COPY'd, so it has to survive the `**/*.md` and docs rules.
-docs/adr
+# Development folders.
+docs/dev-reference

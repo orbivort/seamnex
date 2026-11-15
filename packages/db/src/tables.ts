@@ -520,6 +520,10 @@ export type LicenseRecordRow = {
   hosted_service_enabled: boolean;
   reviewed_by: string | null;
   reviewed_at: Date | null;
+  /** ADR-BE-25: the LICENSE URL or contract id the review was checked against. */
+  upstream_ref: string | null;
+  /** Reviewer note; the audit trail records its length, not its text. */
+  review_note: string | null;
 };
 
 export type PatchRecordRow = {

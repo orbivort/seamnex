@@ -13,10 +13,15 @@ import { at, daysAgo, hoursAgo } from './context';
 import { CATALOG_BY_KEY } from './catalog';
 import { INSTANCES } from './instances';
 
+/**
+ * One deployment is deliberately left unreviewed so the demo always shows the state the register
+ * exists to surface; the restricted n8n deployment is reviewed, so its refusal is the licensing
+ * one rather than the missing-review one.
+ */
+const REVIEW_PENDING_ENTRY = 'D09-01';
+
 export const LICENSES: LicenseRecord[] = INSTANCES.map((instance) => {
-  // A licence that restricts resale/hosted service is exactly the one still waiting for the legal
-  // review: reporting a reviewer and a date for it would make an unreviewed term look signed off.
-  const reviewed = !instance.licenseRestricted;
+  const reviewed = instance.entryKey !== REVIEW_PENDING_ENTRY;
   const terms = licenseTerms(instance.licenseId);
   const restricted =
     instance.licenseRestricted ||
@@ -33,8 +38,14 @@ export const LICENSES: LicenseRecord[] = INSTANCES.map((instance) => {
     ],
     resaleRestricted: restricted,
     hostedServiceRestricted: restricted,
-    reviewedBy: reviewed ? 'Ruth Adler' : null,
+    // The id traces the sign-off back to the audit trail; the register renders the name.
+    reviewedBy: reviewed ? 'usr-ruth-adler' : null,
+    reviewedByName: reviewed ? 'Ruth Adler' : null,
     reviewedAt: reviewed ? daysAgo(20) : null,
+    // ADR-BE-25: a cleared row always carries the artefact the auditor checked it against. The
+    // catalogue reference is text, not a URL, so the mock does not invent a link that 404s.
+    upstreamRef: reviewed ? `Catalogue ${instance.entryKey} · ${instance.licenseId}` : null,
+    reviewNote: reviewed ? 'Verified against the upstream LICENSE file before procurement.' : null,
     status: reviewed ? 'cleared' : 'review_required',
     hostedService: false,
   };

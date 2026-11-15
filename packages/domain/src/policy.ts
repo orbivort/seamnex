@@ -203,6 +203,12 @@ export const POLICY_KEYS: Readonly<Record<string, PolicyKey>> = {
    * hosted-service mode.
    */
   'PUT /licenses/:instanceId/hosted-service': 'license.manage',
+  /**
+   * ADR-BE-25: recording the review is the auditor's act, not the operator's. R2 attests the
+   * terms; R1 decides whether the reviewed configuration may be offered. Sharing one key would
+   * let a single person both justify and grant hosted-service mode.
+   */
+  'PUT /licenses/:instanceId/review': 'license.review',
   'GET /patch-register': 'patch.view',
   'GET /posture': 'posture.view',
   /*

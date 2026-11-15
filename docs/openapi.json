@@ -23263,11 +23263,44 @@
                           }
                         ]
                       },
+                      "reviewedByName": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "reviewedAt": {
                         "anyOf": [
                           {
                             "type": "string",
                             "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "upstreamRef": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "reviewNote": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "minLength": 1
                           },
                           {
                             "type": "null"
@@ -23294,7 +23327,10 @@
                       "resaleRestricted",
                       "hostedServiceRestricted",
                       "reviewedBy",
+                      "reviewedByName",
                       "reviewedAt",
+                      "upstreamRef",
+                      "reviewNote",
                       "status",
                       "hostedService"
                     ],
@@ -23441,6 +23477,273 @@
                     "restricted",
                     "reason",
                     "evaluatedAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/licenses/{instanceId}/review": {
+      "put": {
+        "operationId": "put-licenses-instanceId-review",
+        "summary": "Record the auditor review: obligations, restriction flags and evidence.",
+        "tags": [
+          "governance"
+        ],
+        "parameters": [
+          {
+            "name": "instanceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "licenseId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  },
+                  "obligations": {
+                    "maxItems": 20,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 300
+                    }
+                  },
+                  "resaleRestricted": {
+                    "type": "boolean"
+                  },
+                  "hostedServiceRestricted": {
+                    "type": "boolean"
+                  },
+                  "upstreamRef": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "note": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  },
+                  "acknowledgeUnknownLicence": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "confirmNoObligations": {
+                    "default": false,
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "licenseId",
+                  "obligations",
+                  "resaleRestricted",
+                  "hostedServiceRestricted",
+                  "upstreamRef",
+                  "acknowledgeUnknownLicence",
+                  "confirmNoObligations"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-policy-key": "license.review",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "instanceId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "entryKey": {
+                      "type": "string",
+                      "pattern": "^D(?:[1-9]\\d{0,2}|(?:0[1-9]|[1-9]\\d)-(?:0[1-9]|[1-9]\\d))$"
+                    },
+                    "product": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "licenseId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "obligations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "resaleRestricted": {
+                      "type": "boolean"
+                    },
+                    "hostedServiceRestricted": {
+                      "type": "boolean"
+                    },
+                    "reviewedBy": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "reviewedByName": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "reviewedAt": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "upstreamRef": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "reviewNote": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "cleared",
+                        "review_required"
+                      ]
+                    },
+                    "hostedService": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "instanceId",
+                    "entryKey",
+                    "product",
+                    "licenseId",
+                    "obligations",
+                    "resaleRestricted",
+                    "hostedServiceRestricted",
+                    "reviewedBy",
+                    "reviewedByName",
+                    "reviewedAt",
+                    "upstreamRef",
+                    "reviewNote",
+                    "status",
+                    "hostedService"
                   ],
                   "additionalProperties": false
                 }

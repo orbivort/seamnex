@@ -22,6 +22,7 @@ import {
   PostureSummarySchema,
   RegistryEntrySchema,
 } from '@seamnex/domain';
+import type { LicenseReviewRequest } from '@seamnex/domain';
 import { request } from '../http';
 import { queryKeys } from '../query-keys';
 
@@ -84,6 +85,28 @@ export function useLicenses() {
   return useQuery({
     queryKey: queryKeys.licenses,
     queryFn: ({ signal }) => request('/licenses', { schema: z.array(LicenseRecordSchema), signal }),
+  });
+}
+
+/**
+ * ADR-BE-25: the auditor records the review. The response is the refreshed register row, so the
+ * dialog can close on the server's answer instead of optimistically guessing the new status.
+ */
+export function useRecordLicenseReview(instanceId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (body: LicenseReviewRequest) =>
+      request(`/licenses/${instanceId}/review`, {
+        schema: LicenseRecordSchema,
+        method: 'PUT',
+        body,
+      }),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.licenses });
+      void client.invalidateQueries({ queryKey: queryKeys.instances });
+      void client.invalidateQueries({ queryKey: queryKeys.posture });
+      void client.invalidateQueries({ queryKey: queryKeys.audit });
+    },
   });
 }
 

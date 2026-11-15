@@ -82,6 +82,7 @@ function services() {
       policyExceptions: vi.fn().mockResolvedValue([]),
       dsar: vi.fn().mockResolvedValue([]),
       licenses: vi.fn().mockResolvedValue([]),
+      recordReview: vi.fn().mockResolvedValue({ instanceId: 'i1' }),
       setHostedService: vi.fn().mockResolvedValue({ enabled: true }),
       patches: vi.fn().mockResolvedValue([]),
       posture: vi.fn().mockResolvedValue({}),
@@ -472,6 +473,21 @@ describe('admin handlers', () => {
     });
     expect(s.governance.setHostedService).toHaveBeenCalledWith('i1', true, 'sub-1');
   });
+
+  it('PUT /licenses/:instanceId/review forwards the review with the session actor', async () => {
+    const body = {
+      licenseId: 'AGPL-3.0',
+      obligations: ['Offer the source to network users'],
+      resaleRestricted: false,
+      hostedServiceRestricted: false,
+      upstreamRef: 'https://example.invalid/LICENSE',
+    };
+    await call('PUT /licenses/:instanceId/review', {
+      params: { instanceId: 'i1' },
+      body,
+    });
+    expect(s.governance.recordReview).toHaveBeenCalledWith('i1', body, 'sub-1');
+  });
 });
 
 describe('capacity and registry handlers', () => {
@@ -627,7 +643,7 @@ describe('relay provisioning (ADR-BE-22)', () => {
 
 describe('phase 2 handler registry', () => {
   it('implements every key exactly once', () => {
-    expect(handlers.size).toBe(59);
+    expect(handlers.size).toBe(60);
     expect(new Set(handlers.keys()).size).toBe(handlers.size);
   });
 

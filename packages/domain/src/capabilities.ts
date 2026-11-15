@@ -24,6 +24,7 @@ export const CAPABILITIES = [
   'audit.export',
   'license.view',
   'license.manage',
+  'license.review',
   'capacity.view',
   'metadata.manage',
   'exception.decide',
@@ -153,6 +154,12 @@ export const CAPABILITY_MATRIX = {
    * be able to change the configuration it certifies (AC-44).
    */
   'license.manage': { R1: 'full', R2: 'none', R3: 'none', R4: 'none', R5: 'none', R6: 'none' },
+  /**
+   * ADR-BE-25: the review is the auditor's attestation, not the operator's configuration. R2
+   * records it; R1 acts on it. Keeping the two capabilities on different roles means offering a
+   * product to third parties always takes two people, without a redundant countersignature.
+   */
+  'license.review': { R1: 'none', R2: 'full', R3: 'none', R4: 'none', R5: 'none', R6: 'none' },
   'capacity.view': { R1: 'full', R2: 'full', R3: 'scoped', R4: 'none', R5: 'none', R6: 'none' },
   'metadata.manage': { R1: 'full', R2: 'scoped', R3: 'scoped', R4: 'none', R5: 'none', R6: 'none' },
   /** NFR-4.15: a policy exception needs a second party; the requester (R2) may not decide it. */
@@ -248,6 +255,7 @@ export const MFA_REQUIRED_CAPABILITIES: readonly Capability[] = [
   'identity.manage_users',
   'identity.manage_groups',
   'license.manage',
+  'license.review',
   'metadata.manage',
   'recovery.manage',
   'privacy.manage',
@@ -258,11 +266,18 @@ export const MFA_REQUIRED_CAPABILITIES: readonly Capability[] = [
   'audit.export',
 ];
 
-/** True when this role needs a satisfied second factor to use this capability at all. */
+/**
+ * True when this role needs a satisfied second factor to use this capability at all.
+ *
+ * The capability must also be one the role can use: asking R1 to step up for `license.review`
+ * (R2-only, ADR-BE-25) would be a prompt that can never succeed. Denials stay denials; the factor
+ * is only demanded where it can open the door.
+ */
 export function requiresMfa(role: PlatformRole, capability: Capability): boolean {
   return (
     MFA_REQUIRED_ROLES.includes(role) &&
-    (MFA_REQUIRED_CAPABILITIES as readonly string[]).includes(capability)
+    (MFA_REQUIRED_CAPABILITIES as readonly string[]).includes(capability) &&
+    can(role, capability)
   );
 }
 

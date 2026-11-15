@@ -6,6 +6,7 @@ export * from './state-machines';
 export * from './capabilities';
 export * from './policy';
 export * from './license-terms';
+export * from './license-gate';
 export * from './propagation';
 export * from './capacity';
 export * from './version';

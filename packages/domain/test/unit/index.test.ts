@@ -7,6 +7,7 @@ import * as credentialGranularity from '../../src/credential-granularity';
 import * as enums from '../../src/enums';
 import * as envRules from '../../src/env-rules';
 import * as labels from '../../src/labels';
+import * as licenseGate from '../../src/license-gate';
 import * as licenseTerms from '../../src/license-terms';
 import * as mappingExpression from '../../src/mapping-expression';
 import * as policy from '../../src/policy';
@@ -49,6 +50,7 @@ const MODULES = [
   ['enums', enums],
   ['env-rules', envRules],
   ['labels', labels],
+  ['license-gate', licenseGate],
   ['license-terms', licenseTerms],
   ['mapping-expression', mappingExpression],
   ['policy', policy],

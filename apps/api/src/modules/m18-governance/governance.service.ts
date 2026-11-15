@@ -1,10 +1,11 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { breakGlassStateAt, licenseTerms } from '@seamnex/domain';
+import { breakGlassStateAt, licenseGateVerdict, licenseTerms } from '@seamnex/domain';
 import type {
   BreakGlassSession,
   DsarRequest,
   LicenseGate,
   LicenseRecord,
+  LicenseReviewRequest,
   MaintenanceWindow,
   PatchRecord,
   PolicyException,
@@ -28,6 +29,85 @@ import {
 /** NFR-3.5: a passed restore drill is evidence for one quarter, not forever. */
 const RESTORE_VALID_DAYS = 90;
 
+type LicenseRow = {
+  instance_id: string;
+  entry_key: string;
+  product: string;
+  license_id: string;
+  obligations: unknown;
+  recorded: boolean;
+  resale_restricted: boolean;
+  hosted_service_restricted: boolean;
+  hosted_service_enabled: boolean;
+  reviewed_by: string | null;
+  reviewer_display_name: string | null;
+  reviewer_username: string | null;
+  reviewed_at: Date | null;
+  upstream_ref: string | null;
+  review_note: string | null;
+};
+
+/**
+ * One projection for the list and for the read after a write, so the two cannot describe the same
+ * row differently (the defect that made an unreviewed licence look audited in the first place).
+ */
+const LICENSE_ROW_COLUMNS = `i.id AS instance_id, i.entry_key,
+       coalesce(i.payload->>'product', c.product, i.entry_key) AS product,
+       coalesce(l.license_id, c.license_id, i.payload->>'licenseId', 'unreviewed') AS license_id,
+       coalesce(l.obligations, '[]'::jsonb) AS obligations,
+       (l.instance_id IS NOT NULL) AS recorded,
+       coalesce(l.resale_restricted, false) AS resale_restricted,
+       coalesce(l.hosted_service_restricted, false) AS hosted_service_restricted,
+       coalesce(l.hosted_service_enabled, false) AS hosted_service_enabled,
+       l.reviewed_by, l.reviewed_at, l.upstream_ref, l.review_note,
+       u.display_name AS reviewer_display_name, u.username AS reviewer_username`;
+
+/**
+ * The reviewer is attributed through the identity mirror, not echoed back as the opaque id the
+ * session handed the write path. Left join: a sign-off recorded before the user was synced must
+ * still render, falling back to the id in `toLicenseRecord`.
+ */
+const LICENSE_ROW_FROM = `FROM instance i
+       LEFT JOIN catalog_entry c ON c.key = i.entry_key
+       LEFT JOIN license_record l ON l.instance_id = i.id
+       LEFT JOIN idp_user u ON u.idp_id = l.reviewed_by`;
+
+function toLicenseRecord(row: LicenseRow): LicenseRecord {
+  const terms = licenseTerms(row.license_id);
+  // A review that exists is authoritative: a negotiated commercial licence may lift a default
+  // restriction. Until one exists, the licence table supplies both the obligations and the
+  // restriction flags, so the register states a term instead of an empty cell.
+  const obligations = Array.isArray(row.obligations) ? (row.obligations as string[]) : [];
+  // ADR-BE-25: the database keeps the three evidence columns all-or-nothing; the read requires all
+  // three so a legacy or hand-edited row cannot present itself as cleared.
+  const reviewed =
+    row.reviewed_by !== null && row.reviewed_at !== null && row.upstream_ref !== null;
+  return {
+    instanceId: row.instance_id,
+    entryKey: row.entry_key,
+    product: row.product,
+    licenseId: row.license_id,
+    obligations: obligations.length > 0 ? obligations : [...(terms?.obligations ?? [])],
+    resaleRestricted: row.recorded ? row.resale_restricted : (terms?.resaleRestricted ?? false),
+    hostedServiceRestricted: row.recorded
+      ? row.hosted_service_restricted
+      : (terms?.hostedServiceRestricted ?? false),
+    // The review is evidence: an unreviewed record reports no reviewer and no date rather than
+    // a placeholder name and "today", which made an unreviewed licence look audited.
+    reviewedBy: row.reviewed_by,
+    // The same rule as the workflow owner's: mirror name, then mirror username, then the id — the
+    // last one being the identifier the platform actually holds, not an invented name.
+    reviewedByName: reviewed
+      ? (row.reviewer_display_name ?? row.reviewer_username ?? row.reviewed_by)
+      : null,
+    reviewedAt: row.reviewed_at?.toISOString() ?? null,
+    upstreamRef: row.upstream_ref,
+    reviewNote: row.review_note,
+    status: reviewed ? 'cleared' : 'review_required',
+    hostedService: row.hosted_service_enabled,
+  };
+}
+
 /** M18 read surface plus the one pure-DB write (hosted-service gate). */
 
 @Injectable()
@@ -46,58 +126,174 @@ export class PostgresGovernanceService implements GovernanceService {
    * entirely — and a register that omits a deployment cannot gate it.
    */
   async licenses(): Promise<LicenseRecord[]> {
-    const result = await this.pool.query<{
-      instance_id: string;
-      entry_key: string;
-      product: string;
-      license_id: string;
-      obligations: unknown;
-      recorded: boolean;
-      resale_restricted: boolean;
-      hosted_service_restricted: boolean;
-      hosted_service_enabled: boolean;
-      reviewed_by: string | null;
-      reviewed_at: Date | null;
-    }>(
-      `SELECT i.id AS instance_id, i.entry_key,
-              coalesce(i.payload->>'product', c.product, i.entry_key) AS product,
-              coalesce(l.license_id, c.license_id, i.payload->>'licenseId', 'unreviewed') AS license_id,
-              coalesce(l.obligations, '[]'::jsonb) AS obligations,
-              (l.instance_id IS NOT NULL) AS recorded,
-              coalesce(l.resale_restricted, false) AS resale_restricted,
-              coalesce(l.hosted_service_restricted, false) AS hosted_service_restricted,
-              coalesce(l.hosted_service_enabled, false) AS hosted_service_enabled,
-              l.reviewed_by, l.reviewed_at
-         FROM instance i
-         LEFT JOIN catalog_entry c ON c.key = i.entry_key
-         LEFT JOIN license_record l ON l.instance_id = i.id
+    const result = await this.pool.query<LicenseRow>(
+      `SELECT ${LICENSE_ROW_COLUMNS}
+         ${LICENSE_ROW_FROM}
         WHERE i.deleted_at IS NULL
         ORDER BY product`,
     );
-    return result.rows.map((row) => {
-      const terms = licenseTerms(row.license_id);
-      // A review that exists is authoritative: a negotiated commercial licence may lift a default
-      // restriction. Until one exists, the licence table supplies both the obligations and the
-      // restriction flags, so the register states a term instead of an empty cell.
-      const obligations = Array.isArray(row.obligations) ? (row.obligations as string[]) : [];
-      return {
-        instanceId: row.instance_id,
-        entryKey: row.entry_key,
-        product: row.product,
-        licenseId: row.license_id,
-        obligations: obligations.length > 0 ? obligations : [...(terms?.obligations ?? [])],
-        resaleRestricted: row.recorded ? row.resale_restricted : (terms?.resaleRestricted ?? false),
-        hostedServiceRestricted: row.recorded
-          ? row.hosted_service_restricted
-          : (terms?.hostedServiceRestricted ?? false),
-        // The review is evidence: an unreviewed record reports no reviewer and no date rather than
-        // a placeholder name and "today", which made an unreviewed licence look audited.
-        reviewedBy: row.reviewed_by,
-        reviewedAt: row.reviewed_at?.toISOString() ?? null,
-        status: row.reviewed_at === null ? 'review_required' : 'cleared',
-        hostedService: row.hosted_service_enabled,
-      };
+    return result.rows.map(toLicenseRecord);
+  }
+
+  /**
+   * FR-1.14 / AC-44 / ADR-BE-25: the auditor records the review.
+   *
+   * The reviewer and the timestamp are supplied here, never by the request. A restriction cannot be
+   * recorded while the instance is offered as a service: R2 cannot turn that mode off (that is
+   * `license.manage`), and the review must not leave the platform in the configuration the gate
+   * exists to prevent.
+   */
+  async recordReview(
+    instanceId: string,
+    request: LicenseReviewRequest,
+    actorId: string,
+  ): Promise<LicenseRecord> {
+    if (!isUuid(instanceId)) throw notFound(instanceId);
+
+    const licenseId = request.licenseId.trim();
+    // The contract validates the shape; the service still enforces the business invariants, so a
+    // direct call cannot write a review with no identifier or no evidence behind it.
+    if (licenseId === '') {
+      throw new AppError({
+        code: 'VALIDATION_FAILED',
+        status: 422,
+        detail: 'A licence identifier is required.',
+        fieldErrors: [
+          { field: 'licenseId', code: 'minLength', message: 'At least one character.' },
+        ],
+        remediation: 'Check the upstream LICENSE file and enter its identifier.',
+      });
+    }
+    const upstreamRef = request.upstreamRef.trim();
+    if (upstreamRef === '') {
+      throw new AppError({
+        code: 'VALIDATION_FAILED',
+        status: 422,
+        detail: 'The artefact the review was checked against is required.',
+        fieldErrors: [
+          {
+            field: 'upstreamRef',
+            code: 'minLength',
+            message: 'A URL or a contract id.',
+          },
+        ],
+        remediation: 'Record the upstream LICENSE URL or the commercial contract id.',
+      });
+    }
+    if (request.obligations.length === 0 && !request.confirmNoObligations) {
+      throw new AppError({
+        code: 'VALIDATION_FAILED',
+        status: 422,
+        detail: 'No obligations were supplied.',
+        fieldErrors: [
+          {
+            field: 'obligations',
+            code: 'confirmation_required',
+            message: 'Confirm explicitly when no obligations apply.',
+          },
+        ],
+        remediation: 'Confirm explicitly that no obligations apply, or list them.',
+      });
+    }
+
+    const terms = licenseTerms(licenseId);
+    if (terms === null && !request.acknowledgeUnknownLicence) {
+      throw new AppError({
+        code: 'VALIDATION_FAILED',
+        status: 422,
+        detail: `"${licenseId}" is not a licence the platform knows, so it cannot be reviewed without confirmation.`,
+        fieldErrors: [
+          {
+            field: 'licenseId',
+            code: 'unknown_licence',
+            message:
+              'Check the identifier, or confirm that you reviewed this licence against its LICENSE file or contract.',
+          },
+        ],
+        remediation:
+          'Correct the identifier, or acknowledge the unknown licence before recording it.',
+      });
+    }
+
+    const result = await this.pool.query<LicenseRow>(
+      `SELECT ${LICENSE_ROW_COLUMNS}
+         ${LICENSE_ROW_FROM}
+        WHERE i.id = $1 AND i.deleted_at IS NULL`,
+      [instanceId],
+    );
+    const row = result.rows[0];
+    if (row === undefined) throw notFound(instanceId);
+
+    const restricts = request.resaleRestricted || request.hostedServiceRestricted;
+    if (restricts && row.hosted_service_enabled) {
+      throw new AppError({
+        code: 'STATE_CONFLICT',
+        detail: `${row.product} is currently offered as a hosted service; disable that configuration before recording a restriction.`,
+        remediation:
+          'Ask the platform administrator (R1) to turn hosted-service mode off, then record the review.',
+      });
+    }
+
+    await withTransaction(this.pool, async (tx) => {
+      await this.audit.lockChain(tx);
+      await tx.query(
+        `INSERT INTO license_record
+                (instance_id, license_id, obligations, resale_restricted, hosted_service_restricted,
+                 reviewed_by, reviewed_at, upstream_ref, review_note)
+         VALUES ($1, $2, $3::jsonb, $4, $5, $6, now(), $7, $8)
+         ON CONFLICT (instance_id) DO UPDATE
+            SET license_id = EXCLUDED.license_id,
+                obligations = EXCLUDED.obligations,
+                resale_restricted = EXCLUDED.resale_restricted,
+                hosted_service_restricted = EXCLUDED.hosted_service_restricted,
+                reviewed_by = EXCLUDED.reviewed_by,
+                reviewed_at = EXCLUDED.reviewed_at,
+                upstream_ref = EXCLUDED.upstream_ref,
+                review_note = EXCLUDED.review_note`,
+        [
+          instanceId,
+          licenseId,
+          JSON.stringify(request.obligations),
+          request.resaleRestricted,
+          request.hostedServiceRestricted,
+          actorId,
+          upstreamRef,
+          request.note ?? null,
+        ],
+      );
+      // The note is not copied: a reviewer may quote contract terms, and the trail needs the fact
+      // of the review, not its prose.
+      await this.audit.append(
+        {
+          action: 'license.review.recorded',
+          actorType: 'user',
+          actorId,
+          targetType: 'instance',
+          targetId: instanceId,
+          outcome: 'success',
+          detail: {
+            licenseId,
+            obligations: request.obligations.length,
+            resaleRestricted: request.resaleRestricted,
+            hostedServiceRestricted: request.hostedServiceRestricted,
+            upstreamRef,
+            noteLength: request.note?.length ?? 0,
+            acknowledgedUnknownLicence: terms === null,
+          },
+        },
+        tx,
+      );
     });
+
+    const updated = await this.pool.query<LicenseRow>(
+      `SELECT ${LICENSE_ROW_COLUMNS}
+         ${LICENSE_ROW_FROM}
+        WHERE i.id = $1`,
+      [instanceId],
+    );
+    const fresh = updated.rows[0];
+    if (fresh === undefined) throw notFound(instanceId);
+    return toLicenseRecord(fresh);
   }
 
   /**
@@ -123,7 +319,9 @@ export class PostgresGovernanceService implements GovernanceService {
       resale_restricted: boolean;
       hosted_service_restricted: boolean;
       hosted_service_enabled: boolean;
+      reviewed_by: string | null;
       reviewed_at: Date | null;
+      upstream_ref: string | null;
     }>(
       `SELECT i.entry_key,
               coalesce(i.payload->>'product', c.product, i.entry_key) AS product,
@@ -133,7 +331,7 @@ export class PostgresGovernanceService implements GovernanceService {
               coalesce(l.resale_restricted, false) AS resale_restricted,
               coalesce(l.hosted_service_restricted, false) AS hosted_service_restricted,
               coalesce(l.hosted_service_enabled, false) AS hosted_service_enabled,
-              l.reviewed_at
+              l.reviewed_by, l.reviewed_at, l.upstream_ref
          FROM instance i
          LEFT JOIN catalog_entry c ON c.key = i.entry_key
          LEFT JOIN license_record l ON l.instance_id = i.id
@@ -154,17 +352,21 @@ export class PostgresGovernanceService implements GovernanceService {
     const hostedServiceRestricted = row.recorded
       ? row.hosted_service_restricted
       : (terms?.hostedServiceRestricted ?? false);
-    const restricted = resaleRestricted || hostedServiceRestricted;
-    // A licence in neither the review record nor the licence table has unverified terms: the gate
-    // refuses rather than assuming the permissive answer (C-3).
-    const unknown = !row.recorded && terms === null;
-    const gateReason = unknown
-      ? `No licence terms are recorded for ${row.product} (${licenseId}), so hosted-service mode stays off.`
-      : restricted
-        ? `${row.product} is licensed under ${licenseId}, which does not permit resale or offering it as a hosted service.`
-        : null;
+    const reviewed =
+      row.reviewed_by !== null && row.reviewed_at !== null && row.upstream_ref !== null;
+    // ADR-BE-25: unknown, unreviewed and restricted all fail closed, in that order. The reason is
+    // built in @seamnex/domain so the mock platform refuses with the same sentence.
+    const verdict = licenseGateVerdict({
+      product: row.product,
+      licenseId,
+      terms,
+      recorded: row.recorded,
+      reviewed,
+      resaleRestricted,
+      hostedServiceRestricted,
+    });
 
-    if (enabled && gateReason !== null) {
+    if (enabled && verdict.reason !== null) {
       await this.audit.append({
         action: 'license.hosted_service.denied',
         actorType: 'user',
@@ -176,16 +378,16 @@ export class PostgresGovernanceService implements GovernanceService {
           enabled,
           licenseId,
           recorded: row.recorded,
-          reviewed: row.reviewed_at !== null,
+          reviewed,
           resaleRestricted,
           hostedServiceRestricted,
+          refusal: verdict.code,
         },
       });
       throw new AppError({
-        code: 'LICENCE_RESTRICTED',
-        detail: gateReason,
-        remediation:
-          'Keep the instance for internal use, or complete the licence review and obtain a commercial licence before enabling hosted-service mode.',
+        code: verdict.code ?? 'LICENCE_UNREVIEWED',
+        detail: verdict.reason,
+        ...(verdict.remediation === null ? {} : { remediation: verdict.remediation }),
       });
     }
 
@@ -237,8 +439,8 @@ export class PostgresGovernanceService implements GovernanceService {
     return {
       instanceId,
       hostedService: enabled,
-      restricted,
-      reason: gateReason,
+      restricted: verdict.restricted,
+      reason: verdict.reason,
       evaluatedAt: new Date().toISOString(),
     };
   }

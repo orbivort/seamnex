@@ -320,6 +320,14 @@ export const PROBLEM_CATALOG = {
       'The register records the restriction; hosted-service mode is blocked for this product.',
     slug: 'licence-restricted',
   },
+  /** ADR-BE-25: C-3 requires a review before any hosted-service offering, so this fails closed. */
+  LICENCE_UNREVIEWED: {
+    status: 409,
+    title: 'The licence has not been reviewed',
+    remediation:
+      'Ask an auditor (R2) to record the licence review, then enable hosted-service mode.',
+    slug: 'licence-unreviewed',
+  },
   APPROVAL_REQUIRED: {
     status: 409,
     title: 'A second party must decide this request',

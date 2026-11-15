@@ -14,6 +14,20 @@ the same number through every manifest and the link definitions at the foot of t
 
 ## [Unreleased]
 
+### Added
+
+- **Licence review workflow** (`ADR-BE-25`) — the auditor (R2) records obligations, restriction
+  flags and the upstream LICENSE reference through `PUT /licenses/:instanceId/review`; the register
+  shows the reviewer, date and evidence on every cleared row.
+
+### Changed
+
+- **Hosted-service gate** — an unreviewed licence now refuses
+  `PUT /licenses/:instanceId/hosted-service` (409, audited) instead of being treated as permissive
+  when the licence table already knows the term. The refusal sentence is shared by the API and the
+  mock platform. Migration `0031` resets partial sign-offs and makes reviewer, date and reference
+  all-or-nothing.
+
 ## [0.1.0] - 2026-11-13
 
 Initial release — platform capabilities at the first tag, grouped rather than itemised by commit.

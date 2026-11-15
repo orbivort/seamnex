@@ -1,6 +1,6 @@
 import { http, HttpResponse } from 'msw';
-import { breakGlassStateAt } from '@seamnex/domain';
-import type { BreakGlassSession } from '@seamnex/domain';
+import { breakGlassStateAt, licenseGateVerdict, licenseTerms } from '@seamnex/domain';
+import type { BreakGlassSession, LicenseReviewRequest } from '@seamnex/domain';
 import { at } from '../fixtures/context';
 import { appendAudit, auditProofFor, getState } from '../store';
 import {
@@ -127,14 +127,21 @@ export const governanceHandlers = [
       );
     }
     const enabled = Boolean(body.enabled);
-    const restricted = record.resaleRestricted || record.hostedServiceRestricted;
-    const gateReason = !record.reviewedAt
-      ? `The ${record.licenseId} licence recorded for ${record.product} has not been reviewed, so hosted-service mode stays off.`
-      : restricted
-        ? `${record.product} is licensed under ${record.licenseId}, which does not permit resale or offering it as a hosted service.`
-        : null;
+    const reviewed =
+      record.reviewedBy !== null && record.reviewedAt !== null && record.upstreamRef !== null;
+    // Same builder as the API (ADR-BE-25): unknown, then unreviewed, then restricted.
+    const verdict = licenseGateVerdict({
+      product: record.product,
+      licenseId: record.licenseId,
+      terms: licenseTerms(record.licenseId),
+      recorded: true,
+      reviewed,
+      resaleRestricted: record.resaleRestricted,
+      hostedServiceRestricted: record.hostedServiceRestricted,
+    });
 
-    if (enabled && gateReason !== null) {
+    if (enabled && verdict.reason !== null) {
+      const licensingRefusal = verdict.code === 'LICENCE_RESTRICTED';
       appendAudit({
         action: 'license.hosted_service.denied',
         targetType: 'instance',
@@ -145,11 +152,13 @@ export const governanceHandlers = [
         actor: actorFor(role),
       });
       return problem(
-        403,
-        'LICENCE_RESTRICTED',
-        'The licence does not allow this configuration',
-        gateReason,
-        'Keep the instance for internal use, or complete the licence review and obtain a commercial licence before enabling hosted-service mode.',
+        licensingRefusal ? 403 : 409,
+        verdict.code ?? 'LICENCE_UNREVIEWED',
+        licensingRefusal
+          ? 'The licence does not allow this configuration'
+          : 'The licence has not been reviewed',
+        verdict.reason,
+        verdict.remediation ?? 'Complete the licence review before enabling hosted-service mode.',
       );
     }
     record.hostedService = enabled;
@@ -165,10 +174,135 @@ export const governanceHandlers = [
     return HttpResponse.json({
       instanceId: record.instanceId,
       hostedService: record.hostedService,
-      restricted,
-      reason: gateReason,
+      restricted: verdict.restricted,
+      reason: verdict.reason,
       evaluatedAt: at(0),
     });
+  }),
+
+  /**
+   * ADR-BE-25: the R2 review write. The mirror of `recordReview` — the same two explicit
+   * confirmations, the same state conflict, and the reviewer taken from the role rather than the
+   * body.
+   */
+  http.put('/api/v1/licenses/:instanceId/review', async ({ params, request }) => {
+    const role = roleOf(request);
+    const guard = requireCapability(role, 'license.review');
+    if (guard) return guard;
+    const body = await readBody<Partial<LicenseReviewRequest>>(request);
+    const record = getState().licenses.find(
+      (item) => item.instanceId === String(params.instanceId),
+    );
+    if (!record) {
+      return problem(
+        404,
+        'LICENSE_NOT_FOUND',
+        'Licence record not found',
+        `No licence is recorded for ${String(params.instanceId)}.`,
+        'Refresh the register.',
+      );
+    }
+
+    const licenseId = (body.licenseId ?? '').trim();
+    if (licenseId === '') {
+      return problem(
+        422,
+        'VALIDATION_FAILED',
+        'The review is incomplete',
+        'A licence identifier is required.',
+        'Check the upstream LICENSE file and enter its identifier.',
+        [{ field: 'licenseId', code: 'minLength', message: 'At least one character.' }],
+      );
+    }
+    const terms = licenseTerms(licenseId);
+    if (terms === null && !body.acknowledgeUnknownLicence) {
+      return problem(
+        422,
+        'VALIDATION_FAILED',
+        'The review is incomplete',
+        `"${licenseId}" is not a licence the platform knows, so it cannot be reviewed without confirmation.`,
+        'Correct the identifier, or acknowledge the unknown licence before recording it.',
+        [
+          {
+            field: 'licenseId',
+            code: 'unknown_licence',
+            message: 'Confirm that you reviewed this licence against its LICENSE file or contract.',
+          },
+        ],
+      );
+    }
+
+    const obligations = (Array.isArray(body.obligations) ? body.obligations : [])
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0);
+    if (obligations.length === 0 && !body.confirmNoObligations) {
+      return problem(
+        422,
+        'VALIDATION_FAILED',
+        'The review is incomplete',
+        'No obligations were supplied.',
+        'Confirm explicitly that no obligations apply, or list them.',
+        [
+          {
+            field: 'obligations',
+            code: 'confirmation_required',
+            message: 'Confirm explicitly when no obligations apply.',
+          },
+        ],
+      );
+    }
+
+    const upstreamRef = (body.upstreamRef ?? '').trim();
+    if (upstreamRef === '') {
+      return problem(
+        422,
+        'VALIDATION_FAILED',
+        'The review is incomplete',
+        'The artefact the review was checked against is required.',
+        'Record the upstream LICENSE URL or the commercial contract id.',
+        [
+          {
+            field: 'upstreamRef',
+            code: 'minLength',
+            message: 'At least one character: a URL or a contract id.',
+          },
+        ],
+      );
+    }
+
+    const resaleRestricted = Boolean(body.resaleRestricted);
+    const hostedServiceRestricted = Boolean(body.hostedServiceRestricted);
+    if ((resaleRestricted || hostedServiceRestricted) && record.hostedService) {
+      return problem(
+        409,
+        'STATE_CONFLICT',
+        'The instance is still offered as a hosted service',
+        `${record.product} is currently offered as a hosted service; disable that configuration before recording a restriction.`,
+        'Ask the platform administrator (R1) to turn hosted-service mode off, then record the review.',
+      );
+    }
+
+    const note = (body.note ?? '').trim();
+    record.licenseId = licenseId;
+    record.obligations = obligations;
+    record.resaleRestricted = resaleRestricted;
+    record.hostedServiceRestricted = hostedServiceRestricted;
+    record.reviewedBy = actorFor(role).id;
+    record.reviewedByName = actorFor(role).name;
+    record.reviewedAt = at(0);
+    record.upstreamRef = upstreamRef;
+    record.reviewNote = note === '' ? null : note;
+    record.status = 'cleared';
+    appendAudit({
+      action: 'license.review.recorded',
+      targetType: 'instance',
+      targetId: record.instanceId,
+      targetLabel: `${record.entryKey} ${record.product}`,
+      outcome: 'success',
+      detail: `Reviewed ${licenseId} with ${obligations.length} obligations.`,
+      actor: actorFor(role),
+    });
+    return HttpResponse.json(record);
   }),
 
   http.get('/api/v1/patch-register', ({ request }) => {
