@@ -152,6 +152,38 @@ export class KeycloakAdminClient {
     return (await response.json()) as Record<string, unknown>;
   }
 
+  /**
+   * FR-1.36 — put the exported realm back.
+   *
+   * Restoring the identity provider's database already carries the realm, so this is the fallback for
+   * what a database restore cannot cover: a realm that answered but lost configuration the export
+   * holds (clients, scopes, mappers, flows). `POST /admin/realms` creates; a 409 means it is there
+   * and the update goes to `PUT /admin/realms/{realm}`. Both are idempotent, so a retry repairs a
+   * half-applied import instead of failing on it.
+   *
+   * It cannot bootstrap a provider whose admin token cannot be obtained — `token()` authenticates
+   * against the realm being imported, so a provider with no realm answers nothing here. That case
+   * surfaces as `ADAPTER_UNAVAILABLE` with the operator's instruction rather than a silent no-op,
+   * because FR-1.36 requires a restore that cannot authenticate to be reported failed.
+   *
+   * The document carries client secrets, which is why it is written 0600 by the capture stage and
+   * why nothing here logs the body or the response.
+   */
+  async importRealm(document: Record<string, unknown>): Promise<{ created: boolean }> {
+    // A 409 is "the realm is already there", which is the state the update path expects, not a
+    // refusal: it is the difference between create and converge.
+    const created = await this.adminRequest(
+      'POST',
+      '/realms',
+      document,
+      'Keycloak refused the realm import',
+      [409],
+    );
+    if (created.status !== 409) return { created: true };
+    await this.request('PUT', '', document);
+    return { created: false };
+  }
+
   /** The restore gate's identity check: an admin token proves the realm answers. */
   async realmReachable(): Promise<boolean> {
     try {
@@ -160,6 +192,18 @@ export class KeycloakAdminClient {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * FR-1.36 — drop the cached token so the next check is a real call.
+   *
+   * A restored realm is a different realm with the same name, and a token minted before the restore
+   * can still be inside its lifetime: `realmReachable()` would then answer `true` from the cache
+   * without a single request reaching the provider, which is exactly the false evidence the login
+   * gate exists to prevent.
+   */
+  invalidateToken(): void {
+    this.cached = undefined;
   }
 
   /**
@@ -243,9 +287,32 @@ export class KeycloakAdminClient {
   }
 
   private async request(method: string, path: string, body?: unknown): Promise<Response> {
+    return this.adminRequest(
+      method,
+      `/realms/${this.config.SEAMNEX_KEYCLOAK_REALM}${path}`,
+      body,
+      `Keycloak ${method} ${path} answered`,
+    );
+  }
+
+  /**
+   * One admin call against `/admin`, and the only place a token is attached.
+   *
+   * `importRealm` needs the realm *collection* (`/realms`), which the realm-scoped helper cannot
+   * express; the two share this method so the timeout, the token cache and the failure translation
+   * stay single-valued. `what` is the caller's sentence for a refusal, because "PUT  answered 403" is
+   * not something an operator can act on.
+   */
+  private async adminRequest(
+    method: string,
+    path: string,
+    body?: unknown,
+    what = `Keycloak ${method} ${path} answered`,
+    tolerate: readonly number[] = [],
+  ): Promise<Response> {
     const response = await this.send(
       `${method} ${path}`,
-      `${this.config.SEAMNEX_KEYCLOAK_ADMIN_URL}/admin/realms/${this.config.SEAMNEX_KEYCLOAK_REALM}${path}`,
+      `${this.config.SEAMNEX_KEYCLOAK_ADMIN_URL}/admin${path}`,
       {
         method,
         headers: {
@@ -256,10 +323,10 @@ export class KeycloakAdminClient {
         signal: AbortSignal.timeout(15_000),
       },
     );
-    if (!response.ok) {
+    if (!response.ok && !tolerate.includes(response.status)) {
       throw new AppError({
         code: 'ADAPTER_UNAVAILABLE',
-        detail: `Keycloak ${method} ${path} answered ${response.status}.`,
+        detail: `${what} ${response.status}.`,
         remediation: 'The identity change was not applied; retry after checking the admin client.',
       });
     }

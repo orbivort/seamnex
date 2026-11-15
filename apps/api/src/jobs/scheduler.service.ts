@@ -13,6 +13,7 @@ import type { AppConfig } from '../config/config';
 import { OutboxService } from '../modules/m17-audit/outbox';
 import { AuditAnchorJob } from '../modules/m17-audit/audit-anchor.job';
 import { JobService } from './job.service';
+import { dropExpiredJobLogPartitions, ensurePlatformPartitions } from '../common/db/partitions';
 import { METRICS } from '../common/metrics/metrics';
 import type { Metrics } from '../common/metrics/metrics';
 import { AUDIT_SERVICE, type AuditService } from '../modules/m17-audit/audit.contract';
@@ -253,34 +254,19 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
   /**
    * Partition upkeep. A missing partition is an audit append failure, which refuses a mutation
    * (AD-20) — so this must run ahead of the window, not in reaction to an error.
+   *
+   * The SQL lives in `common/db/partitions` because a platform restore has to repeat it: the restored
+   * database carries only the partitions the dump was taken with.
    */
   async ensurePartitions(): Promise<void> {
-    const today = utcDayStart(new Date());
-
-    for (let offset = 0; offset <= this.config.SEAMNEX_PARTITION_LOOKAHEAD_DAYS; offset += 1) {
-      const from = addDays(today, offset);
-      // The casts are required: an untyped parameter cannot resolve the function overload.
-      await this.pool.query(
-        'SELECT seamnex_ensure_partition($1::text, $2::text, $3::timestamptz, $4::timestamptz)',
-        ['job_log', `job_log_p${formatDay(from)}`, from, addDays(today, offset + 1)],
-      );
+    await ensurePlatformPartitions(this.pool, this.config.SEAMNEX_PARTITION_LOOKAHEAD_DAYS);
+    const dropped = await dropExpiredJobLogPartitions(
+      this.pool,
+      this.config.SEAMNEX_JOB_LOG_RETENTION_DAYS,
+    );
+    for (const partition of dropped) {
+      this.logger.log({ partition }, 'dropped expired job_log partition');
     }
-
-    // Audit partitions are monthly; three months of lookahead is the design's floor.
-    for (let offset = 0; offset <= 2; offset += 1) {
-      const from = addMonths(today, offset);
-      await this.pool.query(
-        'SELECT seamnex_ensure_partition($1::text, $2::text, $3::timestamptz, $4::timestamptz)',
-        [
-          'audit_event',
-          `audit_event_p${from.getUTCFullYear()}${String(from.getUTCMonth() + 1).padStart(2, '0')}`,
-          from,
-          addMonths(today, offset + 1),
-        ],
-      );
-    }
-
-    await this.dropExpiredJobLogPartitions();
   }
 
   /**
@@ -366,49 +352,4 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
       this.metrics.queueDepth.labels('seamnex-jobs', row.state).set(Number(row.count));
     }
   }
-
-  private async dropExpiredJobLogPartitions(): Promise<void> {
-    const result = await this.pool.query<{ partition: string }>(
-      `SELECT child.relname AS partition
-         FROM pg_inherits
-         JOIN pg_class parent ON parent.oid = pg_inherits.inhparent
-         JOIN pg_class child ON child.oid = pg_inherits.inhrelid
-        WHERE parent.relname = 'job_log'`,
-    );
-
-    const cutoff = addDays(utcDayStart(new Date()), -this.config.SEAMNEX_JOB_LOG_RETENTION_DAYS);
-
-    for (const { partition } of result.rows) {
-      const match = /^job_log_p(\d{4})(\d{2})(\d{2})$/.exec(partition);
-      if (match === null) continue;
-      const [, year, month, day] = match;
-      const partitionDate = new Date(`${year}-${month}-${day}T00:00:00.000Z`);
-      if (partitionDate >= cutoff) continue;
-      // Dropped through the definer function: the API role does not own the partition, and must
-      // not hold DDL rights over the log just to enforce retention.
-      await this.pool.query('SELECT seamnex_drop_partition($1::text, $2::text)', [
-        'job_log',
-        partition,
-      ]);
-      this.logger.log({ partition }, 'dropped expired job_log partition');
-    }
-  }
-}
-
-function utcDayStart(date: Date): Date {
-  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
-}
-
-function addDays(date: Date, days: number): Date {
-  return new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
-}
-
-function addMonths(date: Date, months: number): Date {
-  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + months, 1));
-}
-
-function formatDay(date: Date): string {
-  return `${date.getUTCFullYear()}${String(date.getUTCMonth() + 1).padStart(2, '0')}${String(
-    date.getUTCDate(),
-  ).padStart(2, '0')}`;
 }

@@ -311,6 +311,8 @@ export const JOB_KIND_LABELS: Record<JobKind, string> = {
   dsar: 'Privacy request',
   'platform-backup': 'Platform backup',
   'platform-restore': 'Platform restore',
+  // The second half of a platform restore: products, in parallel, after the gate releases.
+  'platform-restore-products': 'Restore products',
   synthetic: 'Synthetic check',
 };
 

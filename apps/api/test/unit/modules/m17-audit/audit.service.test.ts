@@ -316,3 +316,24 @@ describe('exportAnchors', () => {
     expect(db.calls[0]?.sql).toContain("to_char(day, 'YYYY-MM-DD')");
   });
 });
+
+/**
+ * FR-1.36 — the restore compares its own row at the exported head against the exported hash. The
+ * lookup stays in this module because `audit_event` is its table.
+ */
+describe('headHash', () => {
+  it('returns the hash recorded at the sequence', async () => {
+    const { db, service } = setup([['FROM audit_event WHERE seq = $1', [{ hash: 'h42' }]]]);
+
+    await expect(service.headHash('42')).resolves.toBe('h42');
+    // The parameter is cast: an untyped one resolves to text and never matches the bigint column.
+    expect(db.calls[0]?.sql).toContain('$1::bigint');
+    expect(db.calls[0]?.params).toEqual(['42']);
+  });
+
+  it('answers null for a sequence the restored chain does not contain', async () => {
+    const { service } = setup([['FROM audit_event WHERE seq = $1', []]]);
+
+    await expect(service.headHash('999')).resolves.toBeNull();
+  });
+});

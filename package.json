@@ -25,6 +25,7 @@
     "dev:stack": "node scripts/compose.mjs up -d",
     "kc:admin": "node scripts/kc-admin.mjs",
     "kc:check": "node scripts/kc-admin.mjs --check",
+    "restore:platform-db": "node scripts/restore-platform-db.mjs",
     "dev:stack:down": "node scripts/compose.mjs down",
     "dev:stack:logs": "node scripts/compose.mjs logs -f",
     "db:migrate": "pnpm --filter @seamnex/db migrate:up",

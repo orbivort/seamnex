@@ -455,3 +455,68 @@ describe('deleteClient', () => {
     expect(callsOf(fetchMock).some((call) => call.init.method === 'DELETE')).toBe(false);
   });
 });
+
+describe('importRealm', () => {
+  const DOCUMENT = { realm: 'seamnex', clients: [{ clientId: 'console', secret: 'shh' }] };
+
+  it('creates the realm with the document it was given', async () => {
+    const fetchMock = realm({
+      '/admin/realms': (init) =>
+        init.method === 'POST'
+          ? new Response(null, { status: 201 })
+          : new Response(null, { status: 500 }),
+    });
+
+    await expect(new KeycloakAdminClient(makeConfig()).importRealm(DOCUMENT)).resolves.toEqual({
+      created: true,
+    });
+
+    const post = callsOf(fetchMock).find(
+      (call) => call.init.method === 'POST' && !call.url.includes('/token'),
+    );
+    expect(post?.url).toBe('https://idp.example.test/admin/realms');
+    expect(bodyOf(post)).toMatchObject({ realm: 'seamnex' });
+  });
+
+  it('re-applies the document when the realm already exists', async () => {
+    const fetchMock = realm({
+      '/admin/realms': (init) =>
+        init.method === 'POST'
+          ? new Response(null, { status: 409 })
+          : new Response(null, { status: 204 }),
+    });
+
+    await expect(new KeycloakAdminClient(makeConfig()).importRealm(DOCUMENT)).resolves.toEqual({
+      created: false,
+    });
+
+    const put = callsOf(fetchMock).find((call) => call.init.method === 'PUT');
+    // The update addresses the realm that already exists, not the collection.
+    expect(put?.url).toBe('https://idp.example.test/admin/realms/seamnex');
+    expect(bodyOf(put)).toMatchObject({ realm: 'seamnex' });
+  });
+
+  it('translates any other refusal into an operator-readable ADAPTER_UNAVAILABLE', async () => {
+    realm({ '/admin/realms': () => new Response(null, { status: 403 }) });
+
+    await expect(new KeycloakAdminClient(makeConfig()).importRealm(DOCUMENT)).rejects.toMatchObject(
+      {
+        code: 'ADAPTER_UNAVAILABLE',
+        detail: expect.stringContaining('403'),
+      },
+    );
+  });
+
+  it('forgets the cached token so the next check is a real call', async () => {
+    const fetchMock = realm({ '/admin/realms/seamnex/users': () => jsonResponse([]) });
+    const client = new KeycloakAdminClient(makeConfig());
+
+    await client.realmReachable();
+    client.invalidateToken();
+    await client.realmReachable();
+
+    // A restored realm is a different realm with the same name: answering from the cache would be
+    // exactly the false evidence the login gate exists to prevent.
+    expect(callsOf(fetchMock).filter((call) => call.url.includes('/token'))).toHaveLength(2);
+  });
+});

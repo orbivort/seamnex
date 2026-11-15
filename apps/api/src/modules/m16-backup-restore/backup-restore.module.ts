@@ -15,6 +15,11 @@ import { BackupObjectStore } from './s3.client';
  * The Docker client comes from `common/docker`, not from M05: a backup dumps containers, it does not
  * deploy them. `IntegrationModule` is here for the restore gate, which is M07's table, and
  * `SecretsModule` for the root key id the platform manifest records (FR-1.35).
+ *
+ * No renderer: a restore writes a stored render set back on its own host from the `render_set` /
+ * `render_file` rows, using the directory rule the two modules share (`common/compose`). Importing
+ * M03 to re-materialise it would put the backup module downstream of the deployer, which the module
+ * boundary forbids and the restore does not need.
  */
 @Module({
   imports: [JobsModule, DockerModule, IntegrationModule, SecretsModule],

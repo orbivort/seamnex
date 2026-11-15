@@ -10,7 +10,8 @@ import type { AppConfig } from '../../config/config';
 import { requireAdapters } from '../../common/adapters';
 import { AppError } from '../../common/problem/app-error';
 import { ensureDir, writeFileAtomic } from '../../common/fs/files';
-import { join } from 'node:path';
+import { runtimeSecretsPaths } from '../../common/compose/runtime-secrets';
+import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { AUDIT_SERVICE, type AuditService } from '../m17-audit/audit.contract';
 import { SECRETS_SERVICE, type SecretsService } from '../m15-secrets/secrets.contract';
@@ -949,10 +950,14 @@ export class DeploymentPipeline implements OnModuleInit {
     }
     if (Object.keys(values).length === 0) return null;
 
-    const runtimeDir = join(this.config.SEAMNEX_INSTANCE_DATA_DIR, instanceId, 'runtime');
-    ensureDir(runtimeDir);
-    const override = join(runtimeDir, `${renderSet.id}.secrets.yml`);
-    const env = join(runtimeDir, `${renderSet.id}.env`);
+    const paths = runtimeSecretsPaths({
+      dataDir: this.config.SEAMNEX_INSTANCE_DATA_DIR,
+      instanceId,
+      renderSetId: renderSet.id,
+    });
+    ensureDir(dirname(paths.override));
+    const override = paths.override;
+    const env = paths.env;
     const declared = Object.keys(parseServices(renderSet) ?? {});
     const serviceNames = declared.length > 0 ? declared : ['app'];
 
@@ -1028,9 +1033,11 @@ export class DeploymentPipeline implements OnModuleInit {
    * never brought down with a different file list than it was created with.
    */
   private composeProjectFor(instanceId: string, renderSet: RenderSet): ComposeProject {
-    const runtimeDir = join(this.config.SEAMNEX_INSTANCE_DATA_DIR, instanceId, 'runtime');
-    const secretsOverride = join(runtimeDir, `${renderSet.id}.secrets.yml`);
-    const secretsEnv = join(runtimeDir, `${renderSet.id}.env`);
+    const { override: secretsOverride, env: secretsEnv } = runtimeSecretsPaths({
+      dataDir: this.config.SEAMNEX_INSTANCE_DATA_DIR,
+      instanceId,
+      renderSetId: renderSet.id,
+    });
     const hasSecrets = existsSync(secretsOverride) && existsSync(secretsEnv);
     return {
       project: renderSet.composeProject,

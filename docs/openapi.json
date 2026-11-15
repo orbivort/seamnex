@@ -10974,6 +10974,7 @@
                               "dsar",
                               "platform-backup",
                               "platform-restore",
+                              "platform-restore-products",
                               "synthetic"
                             ]
                           },
@@ -11281,6 +11282,7 @@
                         "dsar",
                         "platform-backup",
                         "platform-restore",
+                        "platform-restore-products",
                         "synthetic"
                       ]
                     },
@@ -11785,6 +11787,7 @@
                         "dsar",
                         "platform-backup",
                         "platform-restore",
+                        "platform-restore-products",
                         "synthetic"
                       ]
                     },

@@ -7,6 +7,7 @@ import { AppError } from '../../common/problem/app-error';
 import { ensureDir, safeJoin, sha256, writeFileAtomic } from '../../common/fs/files';
 import { isAbsolute, join } from 'node:path';
 import { stringifyCompose } from '../../common/compose/compose-policy';
+import { renderSetDirectory } from '../../common/compose/render-directory';
 import { parse as parseYaml } from 'yaml';
 import { instanceNetwork, projectName } from '../../common/docker/naming';
 import type { RenderInput, RenderedFile, RenderSet, RendererService } from './renderer.contract';
@@ -172,10 +173,10 @@ export class RenderSetService {
       imageRefs?: string[];
       publishedPorts?: number;
     };
-    const directory = join(
+    // Shared with the restore, which re-materialises a stored set on a host that never deployed it.
+    const directory = renderSetDirectory(
       this.config.SEAMNEX_INSTANCE_DATA_DIR,
       row.instance_id,
-      'render',
       row.id,
     );
     ensureDir(directory);

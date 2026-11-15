@@ -108,4 +108,14 @@ export interface AuditService {
    * its own — a backup reading the chain is not an event the chain needs to hold.
    */
   exportAnchors(): Promise<AuditAnchorExport>;
+
+  /**
+   * The hash recorded at one sequence, and null when the chain has no row there.
+   *
+   * A restore recomputes the chain over the restored range and compares its own row at the exported
+   * head against the exported hash: that comparison is what ties the recomputation to *this* set
+   * instead of to whatever chain happens to be in the database. The query stays here because
+   * `audit_event` is this module's table.
+   */
+  headHash(seq: string): Promise<string | null>;
 }

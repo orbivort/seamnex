@@ -32,7 +32,7 @@ function setup(routes: readonly Route[] = []) {
     ),
   };
   const pipelines = { stepsFor: vi.fn(() => ['Dump databases', 'Encrypt and upload']) };
-  const docker = { start: vi.fn(async (_containerId: string) => undefined) };
+  const config = { SEAMNEX_RESTORE_CONCURRENCY: 6 };
   const service = new PostgresBackupRestoreService(
     db.pool,
     audit as never,
@@ -40,9 +40,9 @@ function setup(routes: readonly Route[] = []) {
     outbox as never,
     jobs as never,
     pipelines as never,
-    docker as never,
+    config as never,
   );
-  return { db, audit, integration, outbox, jobs, pipelines, docker, service };
+  return { db, audit, integration, outbox, jobs, pipelines, config, service };
 }
 
 function backupRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -545,7 +545,7 @@ describe('instance restore', () => {
 
     expect(result).toEqual({ restoreId: 'run-1', jobId: 'job-1' });
     const insert = db.calls.find((call) => call.sql.includes('INSERT INTO restore_run'));
-    expect(insert?.params).toEqual(['bkp-1', 'restore after the incident', 4]);
+    expect(insert?.params).toEqual(['bkp-1', 'restore after the incident', 6]);
     expect(jobs.create).toHaveBeenCalledWith(
       expect.objectContaining({
         kind: 'restore',
@@ -750,6 +750,19 @@ describe('platform restore', () => {
     expect(input).not.toHaveProperty('instanceId');
   });
 
+  it('records the configured restore concurrency on the run the product tier reads', async () => {
+    const { db, service } = setup(restoreRoutes());
+
+    await service.platformRestore('bkp-1', JUSTIFICATION, 'u-1');
+
+    const insert = db.calls.find((call) =>
+      call.sql.includes(
+        'INSERT INTO restore_run (backup_id, phase, state, justification, concurrency)',
+      ),
+    );
+    expect(insert?.params).toEqual(['bkp-1', JUSTIFICATION, 6]);
+  });
+
   it('reports an unusable transaction without compensating for a run that was never created', async () => {
     const { integration, service } = setup(
       restoreRoutes([
@@ -859,11 +872,12 @@ describe('recovery overview', () => {
     platform: readonly Record<string, unknown>[] = [],
   ): Route[] {
     return [
-      ['SELECT * FROM backup ORDER BY started_at DESC LIMIT 25', backups],
+      // The register is platform-only; the second route is the newest finished set, asked
+      // separately so a long register cannot hide it.
+      ["SELECT * FROM backup WHERE kind = 'platform' ORDER BY started_at DESC LIMIT 25", backups],
       ['FROM restore_drill ORDER BY performed_at DESC LIMIT 25', drills],
       ['ORDER BY r.started_at DESC', runs],
-      // Asked separately from the register window, so a busy platform cannot hide its own set.
-      ["SELECT * FROM backup WHERE kind = 'platform'", platform],
+      ["SELECT * FROM backup WHERE kind = 'platform' AND state = 'succeeded'", platform],
       GATE_COUNT_OPEN,
       ['SELECT slug FROM instance', [{ slug: 'crm' }]],
     ];
@@ -892,6 +906,7 @@ describe('recovery overview', () => {
             id: 'bkp-p',
             kind: 'platform',
             instance_id: null,
+            finished_at: new Date('2026-01-01T00:05:00.000Z'),
             manifest: platformManifest(),
           }),
         ],
@@ -901,7 +916,7 @@ describe('recovery overview', () => {
     const overview = await service.recoveryOverview();
 
     expect(overview.backups).toHaveLength(2);
-    // The last successful capture, not the first row.
+    // The newest finished platform set, not the first row and not a product capture.
     expect(overview.lastBackupAt).toBe('2026-01-01T00:05:00.000Z');
     // A restore whose administrative login was proven, not merely a successful backup.
     expect(overview.lastVerifiedRestoreAt).toBe('2026-01-01T01:00:00.000Z');
@@ -990,6 +1005,17 @@ describe('recovery overview', () => {
     expect(first).toMatchObject({ included: false });
   });
 
+  it('keeps product captures out of the platform register', async () => {
+    const { db, service } = setup(overviewRoutes([], [], []));
+
+    await service.recoveryOverview();
+
+    // A product backup has no place on this screen: the restore dialog offered it, `platformRestore()`
+    // refused it with a 422, and a failed product capture sat here as `running · 0 B` for ever
+    // because nothing on this page can settle a product row.
+    expect(db.calls[0]?.sql).toContain("WHERE kind = 'platform'");
+  });
+
   it('reports nothing captured, nothing verified and no audit trail', async () => {
     const { service } = setup(overviewRoutes([], [], []));
 
@@ -1057,10 +1083,10 @@ describe('platform timeline', () => {
 
   function runsOf(row: Record<string, unknown>): Promise<ProjectedRun> {
     const { service } = setup([
-      ['SELECT * FROM backup ORDER BY started_at DESC LIMIT 25', []],
+      ["SELECT * FROM backup WHERE kind = 'platform' ORDER BY started_at DESC LIMIT 25", []],
       ['FROM restore_drill ORDER BY performed_at DESC LIMIT 25', []],
       ['ORDER BY r.started_at DESC', [row]],
-      ["SELECT * FROM backup WHERE kind = 'platform'", []],
+      ["SELECT * FROM backup WHERE kind = 'platform' AND state = 'succeeded'", []],
       GATE_COUNT_OPEN,
     ]);
     return service
@@ -1173,11 +1199,8 @@ describe('platform timeline', () => {
 });
 
 describe('open the gate after an administrative login', () => {
-  const PENDING: Route = ['login_verified_at IS NULL', [{ id: 'run-1' }]];
-  const GATE_UPDATE: Route = [
-    'SET login_verified_at = now()',
-    [{ detail: { stoppedContainers: ['c1', 'c2'] } }],
-  ];
+  const PENDING: Route = ['login_verified_at IS NULL', [{ id: 'run-1', backup_id: 'bkp-p' }]];
+  const GATE_UPDATE: Route = ['SET login_verified_at = now()', []];
 
   it('refuses a caller who cannot manage recovery', async () => {
     const { db, service } = setup([]);
@@ -1199,90 +1222,57 @@ describe('open the gate after an administrative login', () => {
     expect(integration.setAllRoutesGated).not.toHaveBeenCalled();
   });
 
-  it('opens the gate, restarts the stopped products and records both facts', async () => {
-    const { audit, integration, outbox, docker, service } = setup([PENDING, GATE_UPDATE]);
+  it('records the login, opens the gate and queues the product tier instead of completing', async () => {
+    const { audit, db, integration, outbox, jobs, service } = setup([PENDING, GATE_UPDATE]);
 
     const result = await service.openGateAfterLogin('u-1', 'R1');
 
     expect(result.opened).toBe(true);
-    expect(result.reason).toContain('restore run-1 verified by an administrative login; 2/2');
+    expect(result.reason).toContain('verified by an administrative login');
+    expect(result.reason).toContain('job-1');
     expect(integration.setAllRoutesGated).toHaveBeenCalledWith(expect.anything(), false);
     expect(outbox.emit).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ payload: { reason: 'restore-login-verified', gated: false } }),
     );
-    expect(docker.start.mock.calls).toEqual([['c1'], ['c2']]);
-    expect(audit.append).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({ action: 'platform.restore.gate_opened', detail: { role: 'R1' } }),
+    // The login proves the identity provider, not eleven unrestored deployments: the run advances to
+    // the product tier and only that tier's `verify` stage may complete it.
+    expect(db.calls.some((call) => call.sql.includes("state = 'succeeded'"))).toBe(false);
+    expect(db.calls.some((call) => call.sql.includes("phase = 'products'"))).toBe(true);
+    expect(jobs.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'platform-restore-products',
+        payload: expect.objectContaining({ backupId: 'bkp-p', restoreId: 'run-1' }),
+      }),
+    );
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'platform.restore.gate_opened',
+        detail: { role: 'R1', resume: 'platform-restore-products' },
+      }),
       expect.anything(),
     );
-    expect(audit.append).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({
-        action: 'platform.restore.products_started',
-        outcome: 'success',
-        detail: { restarted: 2, stopped: 2 },
-      }),
-    );
   });
 
-  it('reports a partial restart as a failure rather than a completed restore', async () => {
-    const { audit, docker, service } = setup([PENDING, GATE_UPDATE]);
-    docker.start.mockRejectedValueOnce(new Error('no such container'));
+  it('settles the run red when the product tier cannot be queued instead of blocking the next restore', async () => {
+    const { audit, db, jobs, service } = setup([PENDING, GATE_UPDATE, ['detail = detail ||', []]]);
+    jobs.create.mockRejectedValueOnce(new Error('job lane is closed'));
 
     const result = await service.openGateAfterLogin('u-1', 'R1');
 
-    expect(result.reason).toContain('1/2 product container(s) restarted');
-    expect(audit.append).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        action: 'platform.restore.products_started',
-        outcome: 'failure',
-        detail: { restarted: 1, stopped: 2 },
-      }),
-    );
-  });
-
-  it('ignores a stopped-container list that is not a list of ids', async () => {
-    const { audit, docker, service } = setup([
-      PENDING,
-      ['SET login_verified_at = now()', [{ detail: { stoppedContainers: 'c1,c2' } }]],
-    ]);
-
-    const result = await service.openGateAfterLogin('u-1', 'R1');
-
-    expect(docker.start).not.toHaveBeenCalled();
-    expect(audit.append).toHaveBeenCalledTimes(1);
-    expect(result.reason).toContain('0/0 product container(s) restarted');
-  });
-
-  it('keeps only string container ids', async () => {
-    const { docker, service } = setup([
-      PENDING,
-      ['SET login_verified_at = now()', [{ detail: { stoppedContainers: ['c1', 42, 'c2'] } }]],
-    ]);
-
-    await service.openGateAfterLogin('u-1', 'R1');
-
-    expect(docker.start.mock.calls).toEqual([['c1'], ['c2']]);
-  });
-
-  it('treats an update that returns no row as having stopped nothing', async () => {
-    const { docker, service } = setup([PENDING, ['SET login_verified_at = now()', []]]);
-
-    const result = await service.openGateAfterLogin('u-1', 'R1');
-
-    expect(docker.start).not.toHaveBeenCalled();
     expect(result.opened).toBe(true);
-  });
-
-  it('still opens the gate when the restart audit row cannot be written', async () => {
-    const { audit, service } = setup([PENDING, GATE_UPDATE]);
-    audit.append
-      .mockResolvedValueOnce({ seq: '1', hash: 'h' })
-      .mockRejectedValueOnce(new Error('audit chain unavailable'));
-
-    await expect(service.openGateAfterLogin('u-1', 'R1')).resolves.toMatchObject({ opened: true });
+    expect(result.reason).toContain('the product tier could not be queued');
+    expect(result.reason).toContain('The run is failed');
+    const settlement = db.calls.find((call) => call.sql.includes("state = 'failed'"));
+    expect(settlement).toBeDefined();
+    expect(settlement?.params).toEqual(['run-1', 'job lane is closed']);
+    // `failedPhase` names where it stopped, and `productTierError` keeps the queue's own words.
+    expect(String(settlement?.sql)).toContain("'failedPhase', 'products'");
+    expect(String(settlement?.sql)).toContain('productTierError');
+    // A red run with no audit row would be a failure the chain cannot account for.
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'platform.restore.failed', outcome: 'failure' }),
+    );
   });
 });
 

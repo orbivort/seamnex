@@ -633,3 +633,55 @@ describe('housekeeping', () => {
     expect(h.close).toHaveBeenCalledOnce();
   });
 });
+
+describe('restore bookkeeping', () => {
+  it('snapshots the running job and its steps before the database is replaced', async () => {
+    const { db, service } = setup([
+      [
+        'SELECT to_jsonb(j) AS row FROM deployment_job',
+        [{ row: { id: JOB_ID, state: 'running' } }],
+      ],
+      ['SELECT to_jsonb(s) AS row FROM job_step', [{ row: { id: 'step-1', seq: 1 } }]],
+    ]);
+
+    const rows = await service.readLiveControlRows(JOB_ID);
+
+    expect(rows.job).toEqual({ id: JOB_ID, state: 'running' });
+    expect(rows.steps).toEqual([{ id: 'step-1', seq: 1 }]);
+    expect(db.calls[1]?.sql).toContain('ORDER BY s.seq');
+  });
+
+  it('answers 404 when the job the restore was asked to carry is gone', async () => {
+    const { service } = setup([['SELECT to_jsonb(j) AS row FROM deployment_job', []]]);
+
+    await expect(service.readLiveControlRows(JOB_ID)).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('settles the jobs the dump left active, then reinstates the running job and its steps', async () => {
+    const { db, service } = setup([
+      ['RESTORE_REPLACED', { rows: [], rowCount: 2 }],
+      ['INSERT INTO deployment_job', { rows: [], rowCount: 1 }],
+      ['INSERT INTO job_step', { rows: [], rowCount: 1 }],
+    ]);
+    const rows = {
+      job: { id: JOB_ID, state: 'running' },
+      steps: [
+        { id: 'step-1', seq: 1 },
+        { id: 'step-2', seq: 2 },
+      ],
+    };
+
+    await service.reinstateAfterRestore(rows);
+
+    // The index is one-active-per-lane: until the dump's own jobs are closed, the reinstated row
+    // cannot be inserted and the worker loses the job that is performing the restore.
+    expect(db.calls[0]?.sql).toContain("state IN ('queued', 'running')");
+    expect(db.calls.filter((call) => call.sql.includes('INSERT INTO deployment_job'))).toHaveLength(
+      1,
+    );
+    expect(db.calls.filter((call) => call.sql.includes('INSERT INTO job_step'))).toHaveLength(2);
+    expect(db.calls[1]?.params).toEqual([JSON.stringify(rows.job)]);
+    // The snapshot is written back through the table type, so a later column arrives without a list.
+    expect(db.calls[1]?.sql).toContain('jsonb_populate_record(NULL::deployment_job, $1::jsonb)');
+  });
+});

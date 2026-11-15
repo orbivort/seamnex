@@ -168,6 +168,20 @@ export class PostgresAuditService implements AuditService {
     );
   }
 
+  /**
+   * The hash at one sequence, for the restore that has to prove it restored the set it downloaded.
+   *
+   * Read-only and narrow on purpose: a caller that wanted the row's other columns is asking for a
+   * different question, and `audit_event` stays owned by this module either way.
+   */
+  async headHash(seq: string): Promise<string | null> {
+    const result = await this.pool.query<{ hash: string }>(
+      `SELECT hash FROM audit_event WHERE seq = $1::bigint`,
+      [seq],
+    );
+    return result.rows[0]?.hash ?? null;
+  }
+
   async exportAnchors(): Promise<AuditAnchorExport> {
     const anchors = await this.pool.query<{
       day: string;

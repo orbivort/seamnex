@@ -309,6 +309,20 @@ const EnvironmentSchema = z
      */
     SEAMNEX_PLATFORM_DB_URL: z.string().default(''),
     /**
+     * FR-1.36 / AC-30 — the platform database as an **owner** role, used only while a restore runs.
+     *
+     * `DATABASE_URL` and `SEAMNEX_PLATFORM_DB_URL` name the application role, which holds no DDL
+     * rights and cannot write `audit_event` (migration `0010_grants`), so `pg_restore --clean` cannot
+     * run as it. A restore is the one operation that legitimately needs the owner, and it is bounded:
+     * the gate is already closed, a second platform run is refused, and every phase is audited.
+     *
+     * Empty means "the operator will do it": `scripts/restore-platform-db.mjs` performs the same
+     * statement set with credentials the platform never holds, the run records the outstanding step,
+     * and it cannot end `complete` until the operator has done it. The value never reaches argv, a
+     * container environment or a log line — it is written to a 0600 `.pgpass` in the scratch tree.
+     */
+    SEAMNEX_PLATFORM_RESTORE_DB_URL: z.string().default(''),
+    /**
      * 4D.5 — the identity the SSO check signs in as. A test account in the platform realm, never a
      * real user's. The password is a *file path*: the probe reads it per run, so rotating it does
      * not need a restart and the value never appears in process arguments or logs.
@@ -409,6 +423,20 @@ const EnvironmentSchema = z
 
     /** Restore fan-out: the design's floor is 4 and ceiling 12 (4C.4). */
     SEAMNEX_RESTORE_CONCURRENCY: z.coerce.number().int().min(4).max(12).default(4),
+    /**
+     * FR-1.36 — how long the `idp` phase waits for the restored identity provider to answer.
+     *
+     * A restore that cannot authenticate has to be reported `failed` (FR-1.36), so the wait needs a
+     * deadline: without one a Keycloak that never comes back holds a worker slot forever and the
+     * console shows a green "running" run that will never move. Keycloak answers within seconds once
+     * its database is back; the ceiling is generous because a first boot runs the schema migration.
+     */
+    SEAMNEX_RESTORE_IDP_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(30_000)
+      .max(1_800_000)
+      .default(180_000),
     /** Sampler cadence and per-probe timeout (4B.1). */
     SEAMNEX_SAMPLE_INTERVAL_MS: z.coerce.number().int().min(5_000).max(3_600_000).default(30_000),
     SEAMNEX_SAMPLE_CONCURRENCY: z.coerce.number().int().min(1).max(64).default(16),

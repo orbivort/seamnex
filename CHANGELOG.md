@@ -16,6 +16,31 @@ the same number through every manifest and the link definitions at the foot of t
 
 ### Added
 
+- **A platform restore restores** (`FR-1.35`, `FR-1.36`, `AC-30`, `AC-52`, `NFR-3.8`, `NFR-3.9`,
+  `ADR-BE-27`) — the `platform-restore` pipeline now proves the recovery set before the first write
+  (required artefacts present, every stored object matching its recorded digest), restores the identity
+  provider's database and realm first and restarts it, fails the run when the provider never answers,
+  restores the platform database, edge routes and catalogue fallback, and verifies the restored audit
+  chain against the exported anchor. The control-plane database restore needs an owner credential
+  (`SEAMNEX_PLATFORM_RESTORE_DB_URL`, restore-only) because the application role holds no DDL rights;
+  without it the phase records `pnpm restore:platform-db` as an outstanding operator step and the run
+  cannot end `complete`. The restore reinstates the running job's rows and the log/audit partitions
+  the dump replaced, and settles the jobs the dump left active. The administrative login no longer
+  completes the run: it records the login, reopens the gate and queues
+  `platform-restore-products`, which restores each instance from its newest backup — volume archives,
+  **engine dumps**, and the stored render set materialised on this host — at the run's configured
+  concurrency, then fails unless every deployment is running and the identity provider answers. An
+  ordinary instance restore now applies its engine dump too. `scripts/restore-platform-db.mjs`
+  (`pnpm restore:platform-db`) is the clean-host path for operators who will not grant the platform an
+  owner credential.
+- **The product tier's job kind, and the settlement it needed** (`FR-1.36`, `ADR-BE-27`) — migration
+  `0033` widens `deployment_job_kind_check` with `platform-restore-products` and `JOB_KINDS` gains it,
+  without which the tier insert was refused on a real database and the run sat in `products` with
+  nothing running. A tier that still cannot be queued settles the run `failed` with the queue's
+  reason instead of leaving a `running` platform run that blocks every later restore. A failed product
+  capture now settles its own `backup` row (audit `instance.backup.failed`), the Recovery register is
+  platform-only, and volume archives use one compression both ways (`tar -czf`/`tar -xzf`) because the
+  helper's busybox tar has no `--zstd`.
 - **Product data volumes are recorded, measured and captured** (`FR-1.9`, `FR-1.12`, `AC-13`) — a
   deployment now registers the volumes Compose created, under the name the daemon gave them, with the
   catalog's mount path and per-volume quota, and drops the rows whose volume no longer exists. The
