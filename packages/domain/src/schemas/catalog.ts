@@ -141,7 +141,16 @@ export const CatalogEntrySchema = z.object({
   dependencies: z.array(z.enum(SERVICE_ROLES)),
   volumes: z.array(VolumeSpecSchema),
   integration: IntegrationMetadataSchema,
-  owner: z.object({ name: z.string().min(1), team: z.string().min(1) }),
+  /**
+   * The domain owner (FR-4.11). `email` is optional because a catalogue document predating the
+   * break-glass notice fix has none; when it is present the notice is addressed to it, and when it is
+   * absent delivery falls back to the configured alert channels with the owner still named.
+   */
+  owner: z.object({
+    name: z.string().min(1),
+    team: z.string().min(1),
+    email: z.string().min(3).optional(),
+  }),
   notes: z.string().min(1),
   deviation: z.string().optional(),
   verifiedAt: TimestampSchema,

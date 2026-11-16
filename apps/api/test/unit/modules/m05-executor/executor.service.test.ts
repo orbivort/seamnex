@@ -98,8 +98,15 @@ function setup(routes: readonly Route[] = [], options: { readonly dataDir?: stri
   };
   const capacity = { record: vi.fn(async () => null) };
   const audit = { append: vi.fn(async () => undefined) };
-  const docker = { volumeUsageMb: vi.fn(async () => 0) };
-  const config = { SEAMNEX_INSTANCE_DATA_DIR: options.dataDir ?? './temp/instances' };
+  const docker = {
+    volumeUsageMb: vi.fn(async () => 0),
+    containers: vi.fn(async () => []),
+    stats: vi.fn(async () => ({ cpuMilli: 0, memoryMb: 0 })),
+  };
+  const config = {
+    SEAMNEX_INSTANCE_DATA_DIR: options.dataDir ?? './temp/instances',
+    SEAMNEX_USAGE_SAMPLE_RETENTION_DAYS: 30,
+  };
   const service = new PostgresExecutorService(
     db.pool,
     planner as never,
@@ -642,6 +649,78 @@ describe('volume usage', () => {
     await expect(service.recordVolumeUsage()).resolves.toBeUndefined();
 
     expect(db.calls.some((call) => call.sql.includes('UPDATE instance_volume'))).toBe(false);
+  });
+});
+
+describe('instance usage', () => {
+  const containers = (
+    rows: { id: string; state: string; instance?: string }[],
+  ): { id: string; state: string; labels: Record<string, string> }[] =>
+    rows.map((row) => ({
+      id: row.id,
+      state: row.state,
+      labels: row.instance === undefined ? {} : { 'seamnex.instance': row.instance },
+    }));
+
+  it('sums one instance s containers and stores the measured figure with its disk', async () => {
+    const { db, docker, service } = setup([
+      ['FROM instance_volume', [{ instance_id: 'inst-1', used_mb: '3000' }]],
+      ['INSERT INTO instance_usage_sample', []],
+      ['DELETE FROM instance_usage_sample', []],
+    ]);
+    docker.containers.mockResolvedValue(
+      containers([
+        { id: 'c1', state: 'running', instance: 'inst-1' },
+        { id: 'c2', state: 'running', instance: 'inst-1' },
+      ]) as never,
+    );
+    docker.stats
+      .mockResolvedValueOnce({ cpuMilli: 480, memoryMb: 1_200 })
+      .mockResolvedValueOnce({ cpuMilli: 20, memoryMb: 300 });
+
+    await expect(service.recordInstanceUsage()).resolves.toEqual({ sampled: 1 });
+
+    const insert = db.calls.find((call) => call.sql.includes('INSERT INTO instance_usage_sample'));
+    expect(insert?.params).toEqual(['inst-1', 500, 1_500, 3_000, 2]);
+    // FR-4.5: samples are pruned by the same pass that writes them; there is no other writer.
+    expect(db.calls.some((call) => call.sql.includes('DELETE FROM instance_usage_sample'))).toBe(
+      true,
+    );
+  });
+
+  it('writes nothing when every stats read fails, rather than recording zero', async () => {
+    const { db, docker, service } = setup([
+      ['FROM instance_volume', [{ instance_id: 'inst-1', used_mb: '3000' }]],
+    ]);
+    docker.containers.mockResolvedValue(
+      containers([{ id: 'c1', state: 'running', instance: 'inst-1' }]) as never,
+    );
+    docker.stats.mockRejectedValue(new Error('daemon busy'));
+
+    await expect(service.recordInstanceUsage()).resolves.toEqual({ sampled: 0 });
+    expect(db.calls.some((call) => call.sql.includes('INSERT INTO instance_usage_sample'))).toBe(
+      false,
+    );
+  });
+
+  it('ignores stopped containers and containers with no instance label', async () => {
+    const { docker, service } = setup();
+    docker.containers.mockResolvedValue(
+      containers([
+        { id: 'c1', state: 'exited', instance: 'inst-1' },
+        { id: 'c2', state: 'running' },
+      ]) as never,
+    );
+
+    await expect(service.recordInstanceUsage()).resolves.toEqual({ sampled: 0 });
+    expect(docker.stats).not.toHaveBeenCalled();
+  });
+
+  it('survives a container list that fails, and samples nothing', async () => {
+    const { docker, service } = setup();
+    docker.containers.mockRejectedValue(new Error('daemon down'));
+
+    await expect(service.recordInstanceUsage()).resolves.toEqual({ sampled: 0 });
   });
 });
 

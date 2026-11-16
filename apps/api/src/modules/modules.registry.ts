@@ -22,6 +22,9 @@ const PHASES: Record<string, { status: ModuleStatus; phase: string }> = {
   M05: { status: 'implemented', phase: '1 (jobs), 4A (Docker apply)' },
   M15: { status: 'implemented', phase: '1' },
   M17: { status: 'implemented', phase: '1' },
+  // FR-2.6 / AC-45: the profile writer, scrape-target projection and log query are served, so the
+  // contract-only label would now be the false claim.
+  M21: { status: 'implemented', phase: '6 (observability fabric)' },
 };
 
 export function moduleRegistry(manifest: BoundaryManifest = loadBoundaries()): ModuleEntry[] {

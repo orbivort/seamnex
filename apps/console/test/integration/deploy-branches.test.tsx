@@ -582,9 +582,15 @@ describe('field-scoped blockers', () => {
     await toSource();
 
     expect(await screen.findByText('The source pre-flight refuses this entry')).toBeDefined();
-    expect(
-      screen.getByText('The pin could not be checked because the registry was unreachable.'),
-    ).toBeDefined();
+    // The preview is re-asked once the debounced inputs settle, and the step drops its blocker list
+    // while the new answer is in flight: read the message by waiting for it, not once.
+    await waitFor(
+      () =>
+        expect(
+          screen.getByText('The pin could not be checked because the registry was unreachable.'),
+        ).toBeDefined(),
+      { timeout: 5_000 },
+    );
   });
 });
 

@@ -899,6 +899,9 @@ function bgRow(overrides: Row = {}): Row {
     revoked_at: null,
     created_accounts: [],
     retention_reason: null,
+    // FR-4.11: the owner comes from the instance's catalogue entry, resolved in the same query.
+    owner_name: 'Helena Brandt',
+    owner_email: 'helena.brandt@seamnex.local',
     ...overrides,
   };
 }
@@ -919,7 +922,8 @@ describe('breakGlass', () => {
       requester: { id: 'sub-1', name: 'Rita Requester' },
       instanceId: INSTANCE_ID,
       product: 'Mail',
-      domainOwner: 'Platform',
+      domainOwner: 'Helena Brandt',
+      domainOwnerEmail: 'helena.brandt@seamnex.local',
       accessMode: 'read_write',
       justification: 'Investigating the failing nightly job',
       approver: 'Alex Approver',

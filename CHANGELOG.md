@@ -16,6 +16,45 @@ the same number through every manifest and the link definitions at the foot of t
 
 ### Added
 
+- **Every instance is genuinely observed, and the console can show it** (`FR-2.6`, `FR-4.6`, `AC-45`) —
+  M21 was a contract with no implementation while `observability_profile` had been created and left
+  empty, so "we observe every instance" described a table nobody wrote. `PostgresObservabilityService`
+  now derives each entry's profile (dashboards and alert rules, from `payload.observability` or a
+  documented baseline), persists it, and publishes one Prometheus `file_sd` target per instance
+  (`instance-<id>.json`, atomic and idempotent, labels `job`/`instance_id`/`instance_slug`/`entry_key`/
+  `product`) on deploy, on every stop/archive/delete transition and in a boot re-projection pass that
+  also removes targets whose instance is gone. Metrics are rendered by hand from the measured samples at
+  `GET /api/v1/metrics/instances/:id`, behind `SEAMNEX_METRICS_ENABLED` and an optional
+  `SEAMNEX_METRICS_TOKEN`, deliberately not through the prom-client registry, whose doctrine forbids an
+  `instance_id` label. `GET /instances/:id/logs` queries Loki by `{instance="<uuid>"}` with a capped
+  window and line count and returns masked lines, saying logging is not configured when
+  `SEAMNEX_LOKI_URL` is unset rather than showing an empty console. Alloy relabels `seamnex.instance` to
+  `instance`, and Prometheus/Loki retain 30 days. The instance detail page gains an Observability tab
+  with the target state, the profile, retention and a log console. ADR-BE-31.
+- **Capacity reports consumption against configurable thresholds** (`FR-4.5`, `AC-39`) — the board's
+  per-instance rows were the _declared_ deploy shape, so an idle container that reserved 2 GB and used
+  40 MiB looked exactly like one thrashing its limit, and "Thresholds at 75% and 90%" named bands no
+  code read. The status sampler now reads one-shot Docker stats per running container, sums them per
+  `seamnex.instance`, adds the measured volume usage and writes `instance_usage_sample` (pruned at
+  `SEAMNEX_USAGE_SAMPLE_RETENTION_DAYS`); a daemon failure logs and skips instead of writing a zero that
+  would read as "idle". `GET /capacity` keeps the allocated figures and adds
+  `cpuConsumedMilli`/`memoryConsumedMb`/`diskConsumedMb`/`measuredAt` from the newest sample, plus the
+  thresholds in force, which R1 edits in the settings screen (`capacity_cpu_alert_percent` 75,
+  `capacity_memory_alert_percent` 90, `capacity_disk_alert_percent` 85; 50–99). The board prints
+  allocated beside consumed, "not measured" where no fresh sample exists, and draws its bands and
+  summaries from the snapshot, while `notification.evaluate()` raises a deduplicated warning at the
+  threshold and a critical ten points past it — the same numbers the screen shows, from the same read.
+- **The domain owner is told about a break-glass grant and its expiry** (`FR-4.11`, `AC-47`) — the
+  session reported the literal "Platform" as its owner, notices were addressed to nobody, and a grant
+  whose first evaluation pass ran more than ten minutes late was never announced at all.
+  `domainOwner`/`domainOwnerEmail` are now resolved from the instance's catalogue entry (falling back to
+  `Platform` only when the session has no instance), the notice names the owner and the product, and
+  `notification.recipient_name`/`recipient_address` record who it was addressed to, so "the owner was
+  told" is answerable from the row. Delivery targets the enabled email channel matching the owner's
+  mailbox and otherwise falls back to the configured channels while still recording the named owner (a
+  warning is logged that no mailbox is configured). `grant_notified_at`/`expiry_notified_at` mark each
+  announcement, so a transition is announced once whenever it is first observed instead of depending on
+  a look-back window.
 - **A mapping's conversion and missing-value policy are compiled, not just stored** (`FR-5.5`,
   `FR-5.6`) — `transform`, `required`, `onMissing` and `defaultValue` were declared in the contract,
   returned by the API and shown in the ledger, and read by nobody: the compiler emitted a bare

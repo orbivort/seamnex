@@ -12,6 +12,10 @@ import {
   type AlertChannelInput,
   type NotificationService,
 } from '../../modules/m20-notification/notification.contract';
+import {
+  OBSERVABILITY_SERVICE,
+  type ObservabilityService,
+} from '../../modules/m21-observability/observability.contract';
 
 const key = (method: ApiOperation['method'], path: string): string =>
   operationKey({ method, path });
@@ -31,6 +35,7 @@ export class Phase4BHandlers implements OperationGroup {
   constructor(
     @Inject(STATUS_HEALTH_SERVICE) private readonly status: StatusHealthService,
     @Inject(NOTIFICATION_SERVICE) private readonly notifications: NotificationService,
+    @Inject(OBSERVABILITY_SERVICE) private readonly observability: ObservabilityService,
   ) {}
 
   handlers(): ReadonlyMap<string, OperationHandler> {
@@ -39,6 +44,21 @@ export class Phase4BHandlers implements OperationGroup {
         key('GET', '/instances/:id/containers/:cid/logs'),
         async (input) =>
           body(await this.status.containerLogs(param(input, 'id'), param(input, 'cid'), 200)),
+      ],
+      [
+        key('GET', '/instances/:id/observability'),
+        async (input) => body(await this.observability.report(param(input, 'id'))),
+      ],
+      [
+        key('GET', '/instances/:id/logs'),
+        async (input) =>
+          body(
+            await this.observability.logs(param(input, 'id'), {
+              sinceMinutes: integer(input.query.since, 60),
+              limit: integer(input.query.limit, 200),
+              ...(input.query.filter === undefined ? {} : { filter: input.query.filter }),
+            }),
+          ),
       ],
       [key('GET', '/admin/settings/alerts'), async () => body(await this.notifications.channels())],
       [
@@ -70,6 +90,13 @@ function body(value: unknown): OperationResult {
 
 function actor(input: { context: { subject: { idpId: string } } }): string {
   return input.context.subject.idpId;
+}
+
+/** A capped query integer. The service clamps again; this only turns `undefined`/garbage into a default. */
+function integer(value: string | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 function param(input: { params: Readonly<Record<string, string>> }, name: string): string {

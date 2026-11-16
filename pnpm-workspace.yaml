@@ -112,12 +112,3 @@ allowBuilds:
   cpu-features: true
   protobufjs: true
   ssh2: true
-
-minimumReleaseAgeExclude:
-  - '@aws-sdk/client-s3@3.1168.0'
-  - '@nestjs/common@12.5.0'
-  - '@nestjs/core@12.5.0'
-  - '@nestjs/platform-fastify@12.5.0'
-  - bullmq@6.7.6
-  - jsdom@31.0.1
-  - prettier@3.10.1

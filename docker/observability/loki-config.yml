@@ -1,5 +1,6 @@
-# Single-binary Loki for development. Retention is short on purpose: the platform's own audit log,
-# not Loki, is the record of what happened.
+# Single-binary Loki for development. The platform's own audit log, not Loki, is the record of what
+# happened; retention here is the log *query* window the platform promises (NFR-6.7 / AC-45), which
+# is thirty days. The previous 168 h made "queryable per instance" true for a week only.
 auth_enabled: false
 
 server:
@@ -29,7 +30,8 @@ schema_config:
         period: 24h
 
 limits_config:
-  retention_period: 168h
+  # 30 days: the floor `SEAMNEX_OBSERVABILITY_RETENTION_DAYS` is validated against.
+  retention_period: 720h
   reject_old_samples: false
 
 compactor:

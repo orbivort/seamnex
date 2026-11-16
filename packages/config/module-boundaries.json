@@ -82,6 +82,7 @@
         "instance",
         "instance_service",
         "instance_volume",
+        "instance_usage_sample",
         "deployment_job",
         "job_step",
         "job_log"
@@ -294,7 +295,8 @@
       "dir": "m19-capacity",
       "owns": ["capacity_snapshot", "capacity_reservation"],
       "mayImport": [],
-      "reads": ["instance", "instance_status", "catalog_entry"]
+      "$comment": "FR-4.5: `instance_usage_sample` is the measured half of the board. The owner is M05 because it is the module that reads the containers and writes the row; M19 only reads the newest sample per instance.",
+      "reads": ["instance", "instance_status", "catalog_entry", "instance_usage_sample"]
     },
     {
       "id": "M20",
@@ -302,7 +304,15 @@
       "dir": "m20-notification",
       "owns": ["alert_channel", "notification"],
       "mayImport": [],
-      "reads": ["maintenance_window", "break_glass_session", "instance", "instance_status"]
+      "$comment": "FR-4.5 adds the consumption samples (the threshold rule) and `catalog_entry` (FR-4.11: the domain owner the break-glass notice is addressed to). Both are reads; M20 writes only its own two tables.",
+      "reads": [
+        "maintenance_window",
+        "break_glass_session",
+        "instance",
+        "instance_status",
+        "instance_usage_sample",
+        "catalog_entry"
+      ]
     },
     {
       "id": "M21",
@@ -310,7 +320,8 @@
       "dir": "m21-observability",
       "owns": ["observability_profile"],
       "mayImport": ["M01"],
-      "reads": ["catalog_entry"]
+      "$comment": "FR-2.6/AC-45: the profile writer owns `observability_profile`; the report and exposition read the instance read model and the newest consumption sample. `instance` was absent while the module was contract-only, which is how the gap survived review.",
+      "reads": ["catalog_entry", "instance", "instance_usage_sample"]
     },
     {
       "id": "M22",

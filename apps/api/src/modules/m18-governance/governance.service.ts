@@ -654,20 +654,30 @@ export class PostgresGovernanceService implements GovernanceService {
       revoked_at: Date | null;
       created_accounts: unknown;
       retention_reason: string | null;
+      owner_name: string | null;
+      owner_email: string | null;
     }>(
       /*
        * The identities are resolved to something a person can read. The register previously showed
        * a raw `idp_id` under "Approver", and the requester was not on the screen at all — which is
        * the one fact an approver needs before deciding.
+       *
+       * The domain owner comes from the affected instance's catalogue entry (FR-4.11), because that
+       * is the party the grant and expiry notices are addressed to. A session with no instance, or
+       * an entry that declares no owner, is platform-scoped and falls back to "Platform" rather than
+       * inventing a person.
        */
       `SELECT b.id, b.requester, b.instance_id, coalesce(i.payload->>'product', i.entry_key) AS product,
               b.access_mode, b.justification, b.approver, b.self_approved, b.state, b.created_at,
               b.granted_at, b.expires_at, b.revoked_at, b.created_accounts, b.retention_reason,
               coalesce(ru.display_name, ru.username, b.requester) AS requester_name,
               CASE WHEN b.approver IS NULL THEN NULL
-                   ELSE coalesce(au.display_name, au.username, b.approver) END AS approver_name
+                   ELSE coalesce(au.display_name, au.username, b.approver) END AS approver_name,
+              c.payload #>> '{owner,name}' AS owner_name,
+              c.payload #>> '{owner,email}' AS owner_email
          FROM break_glass_session b
          LEFT JOIN instance i ON i.id = b.instance_id
+         LEFT JOIN catalog_entry c ON c.key = i.entry_key
          LEFT JOIN idp_user ru ON ru.idp_id = b.requester
          LEFT JOIN idp_user au ON au.idp_id = b.approver
         ORDER BY b.created_at DESC`,
@@ -677,9 +687,8 @@ export class PostgresGovernanceService implements GovernanceService {
       requester: { id: row.requester, name: row.requester_name },
       instanceId: row.instance_id ?? row.id,
       product: row.product ?? 'Platform',
-      // The elevation records the approver, never a domain owner; the screen says so instead of
-      // presenting the approver as the owner of the domain.
-      domainOwner: 'Platform',
+      domainOwner: row.owner_name ?? 'Platform',
+      domainOwnerEmail: row.owner_email ?? null,
       accessMode: row.access_mode as BreakGlassSession['accessMode'],
       justification: row.justification,
       approver: row.approver_name,

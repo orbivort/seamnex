@@ -167,6 +167,7 @@ const breakGlassSession = {
   instanceId: 'inst_01',
   product: 'ERPNext',
   domainOwner: 'Core Operations',
+  domainOwnerEmail: 'core.operations@example.test',
   accessMode: 'read_only',
   justification: 'The product is down and the admin UI is unreachable through SSO.',
   approver: null,

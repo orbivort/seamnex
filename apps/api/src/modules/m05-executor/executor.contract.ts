@@ -111,4 +111,10 @@ export interface ExecutorService {
    * `instance_volume`.
    */
   recordVolumeUsage(): Promise<void>;
+  /**
+   * FR-4.5 — measures each running instance's CPU and memory from its containers and stores one
+   * `instance_usage_sample`. Same boundary rule as the two above: the sampler owns the cadence, M05
+   * owns the containers and the table.
+   */
+  recordInstanceUsage(): Promise<{ sampled: number }>;
 }

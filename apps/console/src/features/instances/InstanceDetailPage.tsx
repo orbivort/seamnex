@@ -52,6 +52,7 @@ import { EnvironmentTab } from './tabs/EnvironmentTab';
 import { ExportsTab } from './tabs/ExportsTab';
 import { IntegrationTab } from './tabs/IntegrationTab';
 import { JobsTab } from './tabs/JobsTab';
+import { ObservabilityTab } from './tabs/ObservabilityTab';
 import { OverviewTab } from './tabs/OverviewTab';
 
 type DialogKind = LifecycleAction | null;
@@ -135,6 +136,12 @@ export function InstanceDetailPage() {
    * disagree — and so no role without the grant ever mounts the panel's query.
    */
   const canReadEnv = can(session.role, 'instance.env');
+  /**
+   * FR-2.6 — the telemetry tab is the same reach as the container log drawer: both routes bind to
+   * `instance.view_logs`. A role without it sees no tab rather than a tab whose every panel is a
+   * guaranteed 403.
+   */
+  const canReadTelemetry = can(session.role, 'instance.view_logs');
 
   /**
    * A whole-screen gate, not a region — but only when there is nothing to render. `isError` is also
@@ -412,6 +419,7 @@ export function InstanceDetailPage() {
         tabs={[
           { value: 'overview', label: 'Overview' },
           { value: 'containers', label: 'Containers' },
+          ...(canReadTelemetry ? [{ value: 'observability', label: 'Observability' }] : []),
           ...(canReadEnv ? [{ value: 'env', label: 'Environment' }] : []),
           { value: 'drift', label: 'Drift' },
           { value: 'backups', label: 'Backups' },
@@ -428,6 +436,11 @@ export function InstanceDetailPage() {
         <TabPanel value="containers" className="pt-3">
           <ContainersTab instance={data} />
         </TabPanel>
+        {canReadTelemetry ? (
+          <TabPanel value="observability" className="pt-3">
+            <ObservabilityTab instance={data} />
+          </TabPanel>
+        ) : null}
         {/*
           `keepMounted` on this panel only: it is the one tab that holds typed-but-unapplied input.
           Radix otherwise unmounts it on switch, which is why the draft had to be rescued into a

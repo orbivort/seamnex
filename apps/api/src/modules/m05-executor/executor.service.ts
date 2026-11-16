@@ -180,6 +180,95 @@ export class PostgresExecutorService implements ExecutorService {
     }
   }
 
+  /**
+   * FR-4.5 / AC-39 — per-instance consumption, measured from the containers themselves.
+   *
+   * The capacity board used to label the deploy request's declared shape as "usage", so an idle
+   * container that reserved 2 GB and held 40 MiB was indistinguishable from one at its limit. This
+   * pass sums the daemon's own counters per instance and writes one sample per cycle.
+   *
+   * Three rules it must not break:
+   *   - **no daemon, no row.** A failed `stats` call skips the instance instead of writing `0`, which
+   *     would turn "unknown" into "idle" — the exact false claim this work removes.
+   *   - **only running containers.** A stopped product holds no CPU, and its last sample is what the
+   *     board should keep showing until a new one arrives.
+   *   - **disk comes from `instance_volume`.** The volume walk is the platform's only measurement of
+   *     file data (FR-1.9), so summing it here is reuse, not a second definition.
+   */
+  async recordInstanceUsage(): Promise<{ sampled: number }> {
+    const containers = await this.docker
+      .containers(['seamnex.instance'], true)
+      .catch((error: unknown) => {
+        this.logger.warn(
+          `container list failed; no usage sample taken: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return [];
+      });
+
+    const byInstance = new Map<string, string[]>();
+    for (const container of containers) {
+      const instanceId = container.labels['seamnex.instance'];
+      if (instanceId === undefined || container.state !== 'running') continue;
+      const list = byInstance.get(instanceId) ?? [];
+      list.push(container.id);
+      byInstance.set(instanceId, list);
+    }
+    if (byInstance.size === 0) return { sampled: 0 };
+
+    const volumes = await this.pool.query<{ instance_id: string; used_mb: string }>(
+      `SELECT instance_id, COALESCE(SUM(used_mb), 0)::text AS used_mb
+         FROM instance_volume
+        GROUP BY instance_id`,
+    );
+    const diskByInstance = new Map(
+      volumes.rows.map((row) => [row.instance_id, Number(row.used_mb)]),
+    );
+
+    let sampled = 0;
+    for (const [instanceId, containerIds] of byInstance) {
+      let cpuMilli = 0;
+      let memoryMb = 0;
+      let measured = 0;
+      for (const containerId of containerIds) {
+        // One call per container: a single stats read is a few milliseconds, and the batch size is
+        // bounded by the number of containers the platform itself created.
+        const stats = await this.docker.stats(containerId).catch((error: unknown) => {
+          this.logger.warn(
+            `stats for container ${containerId} failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return null;
+        });
+        if (stats === null) continue;
+        cpuMilli += stats.cpuMilli;
+        memoryMb += stats.memoryMb;
+        measured += 1;
+      }
+      if (measured === 0) continue;
+
+      await this.pool.query(
+        `INSERT INTO instance_usage_sample (instance_id, cpu_milli, memory_mb, disk_mb, containers)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [instanceId, cpuMilli, memoryMb, diskByInstance.get(instanceId) ?? 0, measured],
+      );
+      sampled += 1;
+    }
+
+    if (sampled > 0) await this.pruneUsageSamples();
+    return { sampled };
+  }
+
+  /**
+   * Retention for the samples. One `DELETE` per pass that inserted something, which is why it is
+   * not a scheduled job of its own: the table has no other writer.
+   */
+  private async pruneUsageSamples(): Promise<void> {
+    const days = this.config.SEAMNEX_USAGE_SAMPLE_RETENTION_DAYS;
+    await this.pool.query(
+      `DELETE FROM instance_usage_sample WHERE sampled_at < now() - ($1 || ' days')::interval`,
+      [String(days)],
+    );
+  }
+
   deploy(input: DeployInput): Promise<DeployResult> {
     return this.lifecycleService.deploy(input);
   }

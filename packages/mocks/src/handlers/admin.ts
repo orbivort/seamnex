@@ -243,6 +243,17 @@ export const adminHandlers = [
     if (typeof body.restoreConcurrency === 'number') {
       settings.restoreConcurrency = Math.min(12, Math.max(4, body.restoreConcurrency));
     }
+    // FR-4.5: the thresholds the capacity board draws and the alert pass enforces are the same three
+    // numbers, so the mock clamps them the way the API schema does (50–99 %).
+    for (const field of [
+      'capacityCpuAlertPercent',
+      'capacityMemoryAlertPercent',
+      'capacityDiskAlertPercent',
+    ] as const) {
+      if (typeof body[field] === 'number') {
+        settings[field] = Math.min(99, Math.max(50, Math.round(body[field])));
+      }
+    }
     settings.updatedAt = at(0);
     settings.updatedBy = 'Sofia Almeida';
     refreshCapacity(getState());

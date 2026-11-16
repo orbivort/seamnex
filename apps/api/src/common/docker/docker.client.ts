@@ -32,6 +32,25 @@ export type VolumeSummary = {
 /** A container joined to a network: the daemon keys attachments by container id, not by name. */
 export type NetworkEndpoint = { readonly id: string; readonly name: string };
 
+/**
+ * The subset of the Engine's stats payload this client reads.
+ *
+ * Declared here rather than taken from `dockerode`'s types because the library marks most counters
+ * optional and some as `any`; a narrow local shape is what makes the CPU delta readable and testable.
+ */
+type DockerStats = {
+  cpu_stats?: {
+    cpu_usage?: { total_usage?: number; percpu_usage?: number[] };
+    system_cpu_usage?: number;
+    online_cpus?: number;
+  };
+  precpu_stats?: {
+    cpu_usage?: { total_usage?: number };
+    system_cpu_usage?: number;
+  };
+  memory_stats?: { usage?: number; stats?: Record<string, number> };
+};
+
 export type ComposeProject = {
   readonly project: string;
   readonly directory: string;
@@ -258,6 +277,39 @@ export class DockerEngineClient {
   async inspect(containerId: string): Promise<Docker.ContainerInspectInfo> {
     this.guard();
     return this.docker.getContainer(containerId).inspect();
+  }
+
+  /**
+   * FR-4.5 — one container's measured CPU and memory, as a single snapshot.
+   *
+   * The arithmetic is the one `docker stats --no-stream` uses: CPU is the delta between the sample
+   * and the daemon's previous one, scaled by the number of online CPUs, and memory is the working set
+   * (`usage` minus inactive page cache) rather than the cgroup's high-water total. Reporting `usage`
+   * alone made every product look as if it were holding its page cache forever.
+   *
+   * Returns `null` when the daemon answers without usable counters — a container that has just
+   * started has no delta yet. `null` is not zero: the caller must not write `0` and call it measured.
+   */
+  async stats(containerId: string): Promise<{ cpuMilli: number; memoryMb: number } | null> {
+    this.guard();
+    const raw = (await this.docker
+      .getContainer(containerId)
+      .stats({ stream: false })) as unknown as DockerStats | undefined;
+    if (raw?.cpu_stats === undefined || raw.memory_stats === undefined) return null;
+
+    const cpuDelta =
+      (raw.cpu_stats.cpu_usage?.total_usage ?? 0) - (raw.precpu_stats?.cpu_usage?.total_usage ?? 0);
+    const systemDelta =
+      (raw.cpu_stats.system_cpu_usage ?? 0) - (raw.precpu_stats?.system_cpu_usage ?? 0);
+    const online = raw.cpu_stats.online_cpus ?? raw.cpu_stats.cpu_usage?.percpu_usage?.length ?? 1;
+    const cpuMilli =
+      systemDelta > 0 && cpuDelta > 0 ? Math.round((cpuDelta / systemDelta) * online * 1000) : 0;
+
+    const usage = raw.memory_stats.usage ?? 0;
+    const inactive =
+      raw.memory_stats.stats?.inactive_file ?? raw.memory_stats.stats?.total_inactive_file ?? 0;
+    const memoryMb = Math.max(0, Math.round((usage - inactive) / (1024 * 1024)));
+    return { cpuMilli, memoryMb };
   }
 
   /** Masked by the caller: this returns raw output, and the log pipeline masks on write. */

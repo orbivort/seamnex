@@ -4,6 +4,7 @@ import { GovernanceModule } from '../modules/m18-governance/governance.module';
 import { CatalogRepositoryModule } from '../modules/m22-catalog-repository/catalog-repo.module';
 import { RelayModule } from '../modules/m24-sign-in-relay/relay.module';
 import { WorkflowModule } from '../modules/m13-workflow/workflow.module';
+import { ObservabilityModule } from '../modules/m21-observability/observability.module';
 import { JobService } from './job.service';
 import { JobQueryService } from './job-query.service';
 import { JobStreamService } from './job-stream';
@@ -40,6 +41,9 @@ import { SyntheticPipeline } from './synthetic-pipeline';
     CatalogRepositoryModule,
     RelayModule,
     WorkflowModule,
+    // FR-2.6: the scrape-target projection is repeatable platform work, so its cadence lives in the
+    // scheduler; M21 owns the file and the profile writer.
+    ObservabilityModule,
   ],
   providers: [
     JobService,

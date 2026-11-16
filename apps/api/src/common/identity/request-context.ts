@@ -88,10 +88,13 @@ export function runWithContext<T>(context: RequestContext, fn: () => T): T {
   );
 }
 
-/** The four probe/document paths of ADR-BE-06; they never resolve an identity. */
+/** The probe/document paths of ADR-BE-06; they never resolve an identity. */
 export function isAnonymousPath(path: string): boolean {
   const withoutQuery = path.split('?')[0] ?? path;
-  return ANONYMOUS_PATHS.has(withoutQuery);
+  if (ANONYMOUS_PATHS.has(withoutQuery)) return true;
+  // FR-2.6: the per-instance exposition is scraped, so its path carries an instance id and cannot be
+  // a fixed set member. The prefix is narrow — one controller route, no session, aggregate numbers.
+  return /^\/api\/v1\/metrics\/instances\/[^/]+$/.test(withoutQuery);
 }
 
 const ANONYMOUS_PATHS = new Set([

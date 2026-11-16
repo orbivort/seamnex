@@ -15,9 +15,11 @@ import {
   InstanceExportListSchema,
   RelayProvisionReportSchema,
   InstanceListSchema,
+  InstanceLogsSchema,
   InstancePlanSchema,
   InstanceStatusSchema,
   JobAcceptedSchema,
+  ObservabilityReportSchema,
 } from '@seamnex/domain';
 import { openDownload, request, type DownloadHandle } from '../http';
 import { queryKeys } from '../query-keys';
@@ -176,6 +178,47 @@ export function useContainerLogs(instanceId: string, containerId: string | null)
         signal,
       }),
     enabled: instanceId.length > 0 && containerId !== null,
+  });
+}
+
+/**
+ * FR-2.6 / AC-45 — what the platform observes about this instance.
+ *
+ * One query feeds the whole tab: profile, target state and log availability are one server answer,
+ * so the tab cannot show a target that exists beside a log panel that claims the store is missing.
+ */
+export function useInstanceObservability(id: string) {
+  return useQuery({
+    queryKey: [...queryKeys.instance(id), 'observability'] as const,
+    queryFn: ({ signal }) =>
+      request(`/instances/${id}/observability`, { schema: ObservabilityReportSchema, signal }),
+    enabled: id.length > 0,
+    // The scheduler republishes targets every minute; a tab left open is how an operator watches one
+    // appear after a deploy.
+    refetchOnWindowFocus: true,
+  });
+}
+
+/**
+ * FR-4.6 — the platform log query for one instance.
+ *
+ * Keyed on the applied filter, not on every keystroke: a log query is a Loki round trip and a typed
+ * search term is not a reason to make one per character. `enabled` keeps a role that may read logs
+ * but a deployment without a log store from firing a query whose answer cannot change.
+ */
+export function useInstanceLogs(
+  id: string,
+  query: { since: number; limit: number; filter: string },
+  options: { enabled?: boolean } = {},
+) {
+  const params = new URLSearchParams({ since: String(query.since), limit: String(query.limit) });
+  if (query.filter.trim().length > 0) params.set('filter', query.filter.trim());
+  return useQuery({
+    queryKey: [...queryKeys.instance(id), 'logs', query] as const,
+    queryFn: ({ signal }) =>
+      request(`/instances/${id}/logs?${params.toString()}`, { schema: InstanceLogsSchema, signal }),
+    enabled: id.length > 0 && (options.enabled ?? true),
+    placeholderData: keepPreviousData,
   });
 }
 

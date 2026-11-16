@@ -1,0 +1,133 @@
+{
+  "uid": "seamnex-instance-overview",
+  "title": "Instance overview",
+  "tags": ["seamnex", "per-instance"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "instance",
+        "label": "Instance",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "seamnex-prometheus" },
+        "query": "label_values(seamnex_instance_up, instance_slug)",
+        "includeAll": false,
+        "multi": false,
+        "refresh": 2
+      },
+      {
+        "name": "instance_id",
+        "label": "Instance id",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "seamnex-prometheus" },
+        "query": "label_values(seamnex_instance_up{instance_slug=\"$instance\"}, instance_id)",
+        "includeAll": false,
+        "multi": false,
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Ready",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "targets": [{ "refId": "A", "expr": "seamnex_instance_up{instance_slug=\"$instance\"}" }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "CPU consumed / declared",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "seamnex_instance_cpu_millicores{instance_slug=\"$instance\"} / clamp_min(seamnex_instance_cpu_limit_millicores{instance_slug=\"$instance\"}, 1)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.75 },
+              { "color": "red", "value": 0.9 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Memory consumed",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "targets": [
+        { "refId": "A", "expr": "seamnex_instance_memory_mb{instance_slug=\"$instance\"}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "decmbytes" } }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Volume disk consumed",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "targets": [
+        { "refId": "A", "expr": "seamnex_instance_disk_mb{instance_slug=\"$instance\"}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "decmbytes" } }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "CPU millicores",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "targets": [
+        { "refId": "A", "expr": "seamnex_instance_cpu_millicores{instance_slug=\"$instance\"}" },
+        {
+          "refId": "B",
+          "expr": "seamnex_instance_cpu_limit_millicores{instance_slug=\"$instance\"}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Memory against its limit",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "targets": [
+        { "refId": "A", "expr": "seamnex_instance_memory_mb{instance_slug=\"$instance\"}" },
+        { "refId": "B", "expr": "seamnex_instance_memory_limit_mb{instance_slug=\"$instance\"}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "decmbytes" } }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Volume disk against its quota",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [
+        { "refId": "A", "expr": "seamnex_instance_disk_mb{instance_slug=\"$instance\"}" },
+        { "refId": "B", "expr": "seamnex_instance_disk_quota_mb{instance_slug=\"$instance\"}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "decmbytes" } }
+    },
+    {
+      "id": 8,
+      "type": "logs",
+      "title": "Logs",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "loki", "uid": "seamnex-loki" },
+      "targets": [{ "refId": "A", "expr": "{instance=\"$instance_id\"}" }]
+    }
+  ]
+}

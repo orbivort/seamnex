@@ -32,5 +32,6 @@ export * from './schemas/field-discovery';
 export * from './schemas/governance';
 export * from './schemas/capacity';
 export * from './schemas/registry';
+export * from './schemas/observability';
 export * from './schemas/recovery';
 export * from './schemas/privacy';

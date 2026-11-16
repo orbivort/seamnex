@@ -195,7 +195,13 @@ export const BreakGlassSessionSchema = z.object({
   requester: z.object({ id: IdSchema, name: z.string().min(1) }),
   instanceId: IdSchema,
   product: z.string().min(1),
+  /**
+   * Resolved from the affected instance's catalogue entry (`payload.owner`), not a placeholder:
+   * FR-4.11 makes the domain owner the party the grant and expiry notices are addressed to.
+   */
   domainOwner: z.string().min(1),
+  /** The owner's mailbox when the entry records one; `null` when delivery falls back to the channels. */
+  domainOwnerEmail: z.string().min(1).nullable(),
   accessMode: z.enum(ACCESS_MODES),
   justification: z.string().min(1),
   approver: z.string().nullable(),

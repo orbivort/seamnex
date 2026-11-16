@@ -108,7 +108,8 @@
   },
   "owner": {
     "name": "Platform Administrator",
-    "team": "Platform Operations"
+    "team": "Platform Operations",
+    "email": "platform-ops@seamnex.local"
   },
   "notes": "No-code custom entities absorb SMB variance without forking. SMTP relay verified during onboarding.",
   "verifiedAt": "2026-11-01T01:00:00Z"

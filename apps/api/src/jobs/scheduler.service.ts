@@ -41,6 +41,10 @@ import {
   ENVIRONMENT_DRIFT,
   type EnvironmentDriftService,
 } from '../modules/m22-catalog-repository/environment-drift.contract';
+import {
+  OBSERVABILITY_SERVICE,
+  type ObservabilityService,
+} from '../modules/m21-observability/observability.contract';
 import { AppError } from '../common/problem/app-error';
 import { RunMirrorService } from '../modules/m13-workflow/run-mirror.service';
 import { WorkflowAuthoringService } from '../modules/m13-workflow/authoring.service';
@@ -64,6 +68,7 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
   private lastRelaySweepAt = 0;
   private lastDriftSweepAt = 0;
   private lastCredentialSweepAt = 0;
+  private lastScrapeReconcileAt = 0;
   /** `instanceId → epoch ms` of the last repair request, so one drift cannot queue a loop of jobs. */
   private readonly driftRepairs = new Map<string, number>();
 
@@ -143,6 +148,14 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
     @Optional()
     @Inject(WorkflowAuthoringService)
     private readonly workflows?: WorkflowAuthoringService,
+    /**
+     * FR-2.6 / AC-45 — the scrape-target projection. A target is a file Prometheus watches, so the
+     * thing that must be repeated is keeping that directory equal to the set of live instances:
+     * published after a deploy, removed after a delete. Optional like the other passes.
+     */
+    @Optional()
+    @Inject(OBSERVABILITY_SERVICE)
+    private readonly observability?: ObservabilityService,
   ) {}
 
   /**
@@ -166,6 +179,7 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
       ['workflow mirror', this.runMirror],
       ['workflow credentials', this.workflows],
       ['environment drift', this.drift],
+      ['observability scrapes', this.observability],
     ]
       .filter(([, dependency]) => dependency === undefined)
       .map(([name]) => name);
@@ -227,6 +241,7 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
       await this.sampleQueueDepth();
       await this.expireBreakGlass();
       await this.evaluateNotifications();
+      await this.reconcileScrapeTargets();
       await this.tickBackupSchedules();
       await this.reconcileIdentityNetworks();
       await this.sweepRelayAccounts();
@@ -318,6 +333,27 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
       this.logger.log(
         { sent: result.sent, suppressed: result.suppressed },
         'notifications evaluated',
+      );
+    }
+  }
+
+  /**
+   * FR-2.6 — the scrape targets, reconciled against the live portfolio.
+   *
+   * A minute is the cadence because the alternative is a target that outlives its instance: a
+   * deleted instance's file would keep Prometheus scraping a 404 and reporting the platform's own
+   * series as down. `writeTarget` skips unchanged content, so the usual pass costs N reads.
+   */
+  private async reconcileScrapeTargets(): Promise<void> {
+    if (this.observability === undefined) return;
+    const now = Date.now();
+    if (now - this.lastScrapeReconcileAt < 60_000) return;
+    this.lastScrapeReconcileAt = now;
+    const result = await this.observability.reconcile();
+    if (result.written > 0 || result.removed > 0) {
+      this.logger.log(
+        { written: result.written, removed: result.removed },
+        'scrape targets reconciled',
       );
     }
   }

@@ -85,6 +85,16 @@ x-api-environment: &api-environment
   SEAMNEX_PRODUCT_URL_SCHEME: ${SEAMNEX_PRODUCT_URL_SCHEME:-http}
   SEAMNEX_PRODUCT_URL_PORT: ${SEAMNEX_PRODUCT_URL_PORT:-8020}
   SEAMNEX_TRAEFIK_DYNAMIC_DIR: /etc/traefik/dynamic
+  # FR-2.6 / AC-45. M21 writes one `file_sd` target per instance here; Prometheus mounts the same
+  # directory read-only. The scrape address is the API's compose name, not `localhost`: Prometheus
+  # resolves it on `seamnex-control`, which is the only network both services share.
+  SEAMNEX_PROMETHEUS_TARGETS_DIR: /var/lib/seamnex/prometheus-targets
+  SEAMNEX_PROMETHEUS_SCRAPE_TARGET: ${SEAMNEX_PROMETHEUS_SCRAPE_TARGET:-api:8080}
+  SEAMNEX_PROMETHEUS_URL: ${SEAMNEX_PROMETHEUS_URL:-http://prometheus:9090}
+  # FR-4.6. Pointing at the in-network Loki is what makes the platform log query real; with the
+  # `observability` profile down the query answers 503 and the console says so, rather than showing
+  # an empty log that reads as "the product is quiet".
+  SEAMNEX_LOKI_URL: ${SEAMNEX_LOKI_URL:-http://loki:3100}
   # The edge joins each instance network when a route is published, so `http://<slug>:<port>` in the
   # router resolves. The name is the compose container name, which is stable for this file.
   SEAMNEX_EDGE_CONTAINER: ${SEAMNEX_EDGE_CONTAINER:-seamnex-dev-traefik-1}
@@ -184,6 +194,8 @@ x-api-volumes: &api-volumes
   - ../temp/instances:/var/lib/seamnex/instances
   - ../temp/backups:/var/lib/seamnex/backups
   - ../temp/age:/var/lib/seamnex/age
+  # FR-2.6: shared with Prometheus, which mounts it read-only. Created by `ensureRuntimeDirs`.
+  - ../temp/prometheus-targets:/var/lib/seamnex/prometheus-targets
   # Read-write: 4A.8 commits `instances/<slug>/instance.yaml` here before a job may apply. The
   # container runs as `node` (uid 1000) while the mount root is owned by the host, so the
   # `instances/` subdirectory is created by `scripts/dev.mjs` and `scripts/compose.mjs`
@@ -786,12 +798,16 @@ services:
     profiles: [observability]
     command:
       - --config.file=/etc/prometheus/prometheus.yml
-      - --storage.tsdb.retention.time=15d
+      # 30 days, matching the log retention the platform promises (NFR-6.7 / AC-45). 15 days made
+      # "queryable per instance" expire half-way through the promised window.
+      - --storage.tsdb.retention.time=30d
     ports:
       - '127.0.0.1:9090:9090'
     volumes:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      # The `file_sd` directory M21 writes. Read-only here: Prometheus never writes a target.
+      - ../temp/prometheus-targets:/etc/prometheus/targets:ro
       - promdata:/prometheus
     networks: [seamnex-control, seamnex-obs]
     healthcheck:

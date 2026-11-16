@@ -147,6 +147,9 @@ export function useUpdateSettings() {
       request('/admin/settings', { schema: PlatformSettingsSchema, method: 'PUT', body }),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.settings });
+      // FR-4.5: the snapshot echoes the capacity thresholds it was judged with, so a saved
+      // threshold must not leave a board drawing the previous bands.
+      void client.invalidateQueries({ queryKey: queryKeys.capacity });
     },
   });
 }

@@ -1300,15 +1300,21 @@ export class GovernanceWritesService implements GovernanceWrites {
       product: string | null;
       requester_name: string;
       approver_name: string | null;
+      owner_name: string | null;
+      owner_email: string | null;
     }>(
       /* The same product label the list uses: a UUID in this field made the POST response disagree
-         with the row the screen then rendered. */
+         with the row the screen then rendered. The owner is resolved the same way the list does it,
+         so the create response and the register cannot name two different parties (FR-4.11). */
       `SELECT b.*, coalesce(i.payload->>'product', i.entry_key) AS product,
               coalesce(ru.display_name, ru.username, b.requester) AS requester_name,
               CASE WHEN b.approver IS NULL THEN NULL
-                   ELSE coalesce(au.display_name, au.username, b.approver) END AS approver_name
+                   ELSE coalesce(au.display_name, au.username, b.approver) END AS approver_name,
+              c.payload #>> '{owner,name}' AS owner_name,
+              c.payload #>> '{owner,email}' AS owner_email
          FROM break_glass_session b
          LEFT JOIN instance i ON i.id = b.instance_id
+         LEFT JOIN catalog_entry c ON c.key = i.entry_key
          LEFT JOIN idp_user ru ON ru.idp_id = b.requester
          LEFT JOIN idp_user au ON au.idp_id = b.approver
         WHERE b.id = $1`,
@@ -1322,8 +1328,8 @@ export class GovernanceWritesService implements GovernanceWrites {
       requester: { id: row.requester, name: row.requester_name },
       instanceId: row.instance_id ?? '',
       product: row.product ?? 'Platform',
-      // The owner relation is not recorded on the elevation; `approver` is not the owner.
-      domainOwner: 'Platform',
+      domainOwner: row.owner_name ?? 'Platform',
+      domainOwnerEmail: row.owner_email ?? null,
       accessMode: row.access_mode as BreakGlassSession['accessMode'],
       justification: row.justification,
       approver: row.approver_name,

@@ -114,6 +114,14 @@ export const PlatformSettingsSchema = z.object({
   sessionAbsoluteHours: z.number().int().positive(),
   metadataReviewDays: z.number().int().positive(),
   auditRetentionDays: z.number().int().positive(),
+  /**
+   * FR-4.5 alerting thresholds, as a percentage of the declared shape (CPU, memory) or of the volume
+   * quota (disk). They are settings rather than environment constants because the requirement says
+   * "configurable", and the capacity board renders the same three numbers the alert pass enforces.
+   */
+  capacityCpuAlertPercent: z.number().int().min(50).max(99),
+  capacityMemoryAlertPercent: z.number().int().min(50).max(99),
+  capacityDiskAlertPercent: z.number().int().min(50).max(99),
   updatedAt: TimestampSchema,
   updatedBy: z.string().min(1),
 });

@@ -27,6 +27,7 @@ import {
   StatusPill,
   buttonVariants,
   defineColumns,
+  rulerBands,
 } from '@seamnex/ui';
 import { cn, formatNumber, formatRelative } from '@seamnex/utils';
 import { AsyncPanel, QueryError } from '@seamnex/shell';
@@ -91,6 +92,9 @@ function admissionFor(data: CapacitySnapshot) {
     oversubscriptionFactor: data.oversubscriptionFactor,
   });
 }
+
+/** Fallback bands for a snapshot persisted before the thresholds became configurable (FR-4.5). */
+const DEFAULT_THRESHOLDS = { cpuPercent: 75, memoryPercent: 90, diskPercent: 85 } as const;
 
 /**
  * Every cell reads only its row, so the array is a module constant — and because it is, filtering
@@ -419,6 +423,7 @@ export function OverviewPage() {
               >
                 {(data) => {
                   const verdict = admissionFor(data);
+                  const thresholds = data.thresholds ?? DEFAULT_THRESHOLDS;
                   return (
                     <>
                       <CapacityRuler
@@ -426,18 +431,21 @@ export function OverviewPage() {
                         used={verdict.used.cpu}
                         total={verdict.limits.cpu}
                         unit="vCPU"
+                        thresholds={rulerBands(thresholds.cpuPercent)}
                       />
                       <CapacityRuler
                         label="Memory"
                         used={verdict.used.memoryMb / 1024}
                         total={verdict.limits.memoryMb / 1024}
                         unit="GB"
+                        thresholds={rulerBands(thresholds.memoryPercent)}
                       />
                       <CapacityRuler
                         label="Disk"
                         used={verdict.used.diskMb / 1024}
                         total={verdict.limits.diskMb / 1024}
                         unit="GB"
+                        thresholds={rulerBands(thresholds.diskPercent)}
                       />
                       <p className="flex items-start gap-1.5 border-t border-line pt-2 text-micro leading-relaxed text-faint">
                         <CircleSlash className="mt-0.5 size-3 shrink-0" aria-hidden />

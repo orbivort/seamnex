@@ -57,6 +57,7 @@ import { NotificationModule } from './modules/m20-notification/notification.modu
 import { BackupRestoreModule } from './modules/m16-backup-restore/backup-restore.module';
 import { RelayModule } from './modules/m24-sign-in-relay/relay.module';
 import { WorkflowEgressModule } from './modules/m25-workflow-egress/workflow-egress.module';
+import { ObservabilityModule } from './modules/m21-observability/observability.module';
 
 /**
  * The single composition root (ADR-BE-03). This is the only file allowed to see more than one
@@ -99,6 +100,7 @@ import { WorkflowEgressModule } from './modules/m25-workflow-egress/workflow-egr
     BackupRestoreModule,
     RelayModule,
     WorkflowEgressModule,
+    ObservabilityModule,
   ],
   providers: [
     RouteTableService,

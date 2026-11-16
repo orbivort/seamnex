@@ -206,7 +206,11 @@ function setMaintenance(state: MockState, instanceId: string, windowId: string):
 
 /** Keeps the admission board in step with the live portfolio. */
 export function refreshCapacity(state: MockState): void {
-  state.capacity = buildCapacity(state.instances, state.settings.oversubscriptionFactor);
+  state.capacity = buildCapacity(state.instances, state.settings.oversubscriptionFactor, {
+    cpuPercent: state.settings.capacityCpuAlertPercent,
+    memoryPercent: state.settings.capacityMemoryAlertPercent,
+    diskPercent: state.settings.capacityDiskAlertPercent,
+  });
 }
 
 export function applyScenario(state: MockState, scenario: Scenario): MockState {

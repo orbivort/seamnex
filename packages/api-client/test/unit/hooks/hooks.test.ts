@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AdminCredentialSchema,
+  InstanceLogsSchema,
   NodeFieldsSchema,
   NodeSampleSchema,
+  ObservabilityReportSchema,
   RelayProvisionReportSchema,
 } from '@seamnex/domain';
 import { queryKeys } from '../../../src/query-keys';
@@ -24,6 +26,7 @@ const recorded = vi.hoisted(() => ({
     queryFn?: (ctx: { signal?: AbortSignal | undefined; pageParam?: unknown }) => unknown;
     enabled?: boolean;
     retry?: boolean;
+    refetchOnWindowFocus?: boolean;
     refetchInterval?: number | false | ((query: { state: { data: unknown } }) => number | false);
   }[],
   mutations: [] as {
@@ -686,6 +689,71 @@ describe('instance administration hooks', () => {
       { queryKey: queryKeys.identitySync },
       { queryKey: queryKeys.audit },
     ]);
+  });
+});
+
+describe('instance observability and logs', () => {
+  it('reads the whole observability tab as one answer, and re-reads it on a tab switch', async () => {
+    hooks['useInstanceObservability']?.('inst-crm');
+    hooks['useInstanceObservability']?.('');
+
+    // Profile, target state and log availability are one server answer; splitting the key would let
+    // the tab show a target beside a log panel that claims the store is missing.
+    expect(recorded.queries.map((query) => query.queryKey)).toEqual([
+      [...queryKeys.instance('inst-crm'), 'observability'],
+      [...queryKeys.instance(''), 'observability'],
+    ]);
+    expect(recorded.queries.map((query) => query.enabled)).toEqual([true, false]);
+    // The scheduler republishes targets every minute; the tab is how an operator watches one appear.
+    expect(recorded.queries.map((query) => query.refetchOnWindowFocus)).toEqual([true, true]);
+
+    await recorded.queries[0]?.queryFn?.({ signal: undefined });
+
+    expect(recorded.request).toHaveBeenCalledWith('/instances/inst-crm/observability', {
+      schema: ObservabilityReportSchema,
+      signal: undefined,
+    });
+  });
+
+  it('sends the applied log filter only, and gates the read on the role and the instance', async () => {
+    const applied = { since: 900, limit: 200, filter: '' };
+
+    hooks['useInstanceLogs']?.('inst-crm', { since: 900, limit: 200, filter: '  error  ' });
+    hooks['useInstanceLogs']?.('inst-crm', applied);
+    hooks['useInstanceLogs']?.('inst-crm', applied, { enabled: false });
+    hooks['useInstanceLogs']?.('inst-crm', applied, { enabled: true });
+    hooks['useInstanceLogs']?.('', applied);
+
+    // The key carries the whole filter, so a superseded query can never be served as the current
+    // one; the typing itself is not in the key, which is what makes the search a round trip per
+    // applied filter rather than per keystroke.
+    expect(recorded.queries[0]?.queryKey).toEqual([
+      ...queryKeys.instance('inst-crm'),
+      'logs',
+      { since: 900, limit: 200, filter: '  error  ' },
+    ]);
+    // A role that may not read logs, or a deployment with no log store, must not fire the query.
+    expect(recorded.queries.map((query) => query.enabled)).toEqual([
+      true,
+      true,
+      false,
+      true,
+      false,
+    ]);
+
+    await recorded.queries[0]?.queryFn?.({ signal: undefined });
+    // The surrounding whitespace of a typed term is not part of the pattern the store searches for.
+    expect(recorded.request).toHaveBeenLastCalledWith(
+      '/instances/inst-crm/logs?since=900&limit=200&filter=error',
+      { schema: InstanceLogsSchema, signal: undefined },
+    );
+
+    await recorded.queries[1]?.queryFn?.({ signal: undefined });
+    // An empty filter is the absence of a parameter, not `filter=`.
+    expect(recorded.request).toHaveBeenLastCalledWith(
+      '/instances/inst-crm/logs?since=900&limit=200',
+      { schema: InstanceLogsSchema, signal: undefined },
+    );
   });
 });
 

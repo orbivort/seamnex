@@ -94,6 +94,7 @@ import {
   PostureSummarySchema,
 } from './schemas/governance';
 import { CapacitySnapshotSchema, ForecastPointSchema } from './schemas/capacity';
+import { InstanceLogsSchema, ObservabilityReportSchema } from './schemas/observability';
 import {
   AlertChannelSchema,
   AlertTestResultSchema,
@@ -696,6 +697,46 @@ const DECLARED_OPERATIONS: readonly DeclaredOperation[] = [
     summary: 'Recent container logs, retrievable without host shell access (AC-29).',
     tag: 'instances',
     response: ContainerLogListSchema,
+  }),
+  /**
+   * FR-2.6 / AC-45 — what the platform observes about this instance, without an operator opening
+   * Grafana by hand: the entry's dashboard/rule profile, the scrape target's state, and whether the
+   * log store can answer a per-instance query.
+   */
+  op({
+    method: 'GET',
+    path: '/instances/:id/observability',
+    summary: 'Per-instance observability profile, scrape target and log availability (AC-45).',
+    tag: 'instances',
+    response: ObservabilityReportSchema,
+  }),
+  /**
+   * FR-4.6 — the platform's own log query, scoped to one instance and masked before it leaves the
+   * process. `since` and `limit` are capped by configuration, not by the caller.
+   */
+  op({
+    method: 'GET',
+    path: '/instances/:id/logs',
+    summary: 'Queryable per-instance logs from the platform log store (FR-4.6).',
+    tag: 'instances',
+    query: [
+      {
+        name: 'since',
+        type: 'integer',
+        description: 'Minutes of history to query; capped by the platform.',
+      },
+      {
+        name: 'limit',
+        type: 'integer',
+        description: 'Newest N lines; capped by the platform.',
+      },
+      {
+        name: 'filter',
+        type: 'string',
+        description: 'Literal substring filter, applied as a line filter rather than a selector.',
+      },
+    ],
+    response: InstanceLogsSchema,
   }),
   /**
    * FR-1.13 / AC-20 — the portable exports this instance has produced, newest first.

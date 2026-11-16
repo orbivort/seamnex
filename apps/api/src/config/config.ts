@@ -212,6 +212,35 @@ const EnvironmentSchema = z
       .default('info'),
     SEAMNEX_JOB_STREAM_MAX: z.coerce.number().int().min(1).max(10_000).default(100),
     SEAMNEX_METRICS_ENABLED: booleanish.default(true),
+    /**
+     * FR-2.6 / AC-45 — per-instance observability.
+     *
+     * `SEAMNEX_PROMETHEUS_TARGETS_DIR` is the `file_sd` directory Prometheus watches. Empty is the
+     * honest default: no directory means the platform cannot publish a target, and the instance
+     * screen says so instead of showing a target nothing scrapes.
+     */
+    SEAMNEX_PROMETHEUS_TARGETS_DIR: z.string().default(''),
+    /** `host:port` Prometheus uses to reach this API. */
+    SEAMNEX_PROMETHEUS_SCRAPE_TARGET: z.string().min(1).default('seamnex-api:8080'),
+    SEAMNEX_PROMETHEUS_URL: z.string().default(''),
+    /** Loki's base URL. Empty means only the live container stream is available. */
+    SEAMNEX_LOKI_URL: z.string().default(''),
+    /**
+     * NFR-6.7 / AC-45: log history the platform promises to be queryable. Thirty days is the floor
+     * rather than a tuning default — a shorter promise is the one the review rejected.
+     */
+    SEAMNEX_OBSERVABILITY_RETENTION_DAYS: z.coerce.number().int().min(30).max(3_650).default(30),
+    /** Caps on a log query, so one caller cannot ask the control plane to page a month of history. */
+    SEAMNEX_LOG_QUERY_MAX_MINUTES: z.coerce.number().int().min(1).max(10_080).default(1_440),
+    SEAMNEX_LOG_QUERY_MAX_LINES: z.coerce.number().int().min(1).max(10_000).default(500),
+    /**
+     * Optional bearer token for the per-instance exposition. Anonymous like `/metrics` (a scraper
+     * has no session), but a deployment that exposes the API beyond the scrape network can require
+     * a shared secret instead of turning metrics off.
+     */
+    SEAMNEX_METRICS_TOKEN: z.string().default(''),
+    /** Days of `instance_usage_sample` kept for the capacity board's "measured" figures. */
+    SEAMNEX_USAGE_SAMPLE_RETENTION_DAYS: z.coerce.number().int().min(1).max(365).default(30),
     SEAMNEX_SCHEDULER_INTERVAL_MS: z.coerce
       .number()
       .int()
@@ -819,6 +848,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     SEAMNEX_SOURCE_MIRROR_DIR: resolveFromRepoRoot(parsed.data.SEAMNEX_SOURCE_MIRROR_DIR),
     SEAMNEX_INSTANCE_DATA_DIR: resolveFromRepoRoot(parsed.data.SEAMNEX_INSTANCE_DATA_DIR),
     SEAMNEX_TRAEFIK_DYNAMIC_DIR: resolveFromRepoRoot(parsed.data.SEAMNEX_TRAEFIK_DYNAMIC_DIR),
+    // Empty stays empty: resolving it would invent a directory the operator never configured, and
+    // the service treats "" as "not configured" on purpose.
+    SEAMNEX_PROMETHEUS_TARGETS_DIR:
+      parsed.data.SEAMNEX_PROMETHEUS_TARGETS_DIR.length === 0
+        ? ''
+        : resolveFromRepoRoot(parsed.data.SEAMNEX_PROMETHEUS_TARGETS_DIR),
     SEAMNEX_BACKUP_TMP_DIR: resolveFromRepoRoot(parsed.data.SEAMNEX_BACKUP_TMP_DIR),
     SEAMNEX_AGE_IDENTITY_FILE: resolveFromRepoRoot(parsed.data.SEAMNEX_AGE_IDENTITY_FILE),
     isProduction: parsed.data.NODE_ENV === 'production',

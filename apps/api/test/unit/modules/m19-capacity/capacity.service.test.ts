@@ -66,6 +66,8 @@ function setup(routes: Parameters<typeof fakeDb>[0] = []) {
   );
   const service = new PostgresCapacityService(db.pool, {
     SEAMNEX_INSTANCE_DATA_DIR: '/var/lib/seamnex',
+    // FR-4.5: a sample is fresh for two sampling intervals.
+    SEAMNEX_CAPACITY_SAMPLE_INTERVAL_MS: 60_000,
   } as unknown as AppConfig);
   return { db, service };
 }
@@ -99,7 +101,7 @@ describe('snapshot', () => {
   it('measures and records one when nothing has been recorded yet', async () => {
     const { db, service } = setup([
       [SNAPSHOT_SELECT, []],
-      ['FROM settings WHERE key', [{ value: 2 }]],
+      ['FROM settings', [{ key: 'oversubscription_factor', value: 2 }]],
       [LEDGER, [{ cpu_milli: '2000', memory_mb: '4096', disk_mb: '20480' }]],
       [
         'FROM instance i',
@@ -131,6 +133,9 @@ describe('snapshot', () => {
     // The ledger, not the host total, is what "allocated" means.
     expect(snapshot.allocated).toEqual({ cpuCores: 2, memoryMb: 4_096, diskMb: 20_480 });
     expect(snapshot.oversubscriptionFactor).toBe(2);
+    // FR-4.5: the thresholds are echoed in the snapshot so the board can draw the bands an R3 holder
+    // cannot read from `settings`.
+    expect(snapshot.thresholds).toEqual({ cpuPercent: 75, memoryPercent: 90, diskPercent: 85 });
     expect(snapshot.instanceUsage).toEqual([
       {
         instanceId: 'inst-1',
@@ -142,6 +147,8 @@ describe('snapshot', () => {
         memoryMb: 4_096,
         diskMb: 20_480,
         diskQuotaMb: 20_480,
+        // No sample exists, so the consumed figures are absent and `measuredAt` is null — never 0.
+        measuredAt: null,
       },
       {
         // An instance that has not been given a shape yet is listed at zero, labelled by its entry
@@ -155,6 +162,7 @@ describe('snapshot', () => {
         memoryMb: 0,
         diskMb: 0,
         diskQuotaMb: 0,
+        measuredAt: null,
       },
     ]);
     expect(snapshot.forecast).toHaveLength(14);
@@ -186,7 +194,7 @@ describe('record', () => {
 
   it('measures the instance-data volume before falling back to the working directory', async () => {
     const { db, service } = setup([
-      ['FROM settings WHERE key', []],
+      ['FROM settings', []],
       [LEDGER, []],
       ['FROM instance i', []],
       ['INSERT INTO capacity_snapshot', []],
@@ -202,6 +210,60 @@ describe('record', () => {
     expect(db.calls.some((call) => call.sql.includes('INSERT INTO capacity_snapshot'))).toBe(true);
   });
 
+  it('reports measured consumption beside the declared shape, and drops a stale sample', async () => {
+    const now = Date.now();
+    const { service } = setup([
+      ['FROM settings', []],
+      [LEDGER, []],
+      [
+        'FROM instance i',
+        [
+          {
+            id: 'inst-1',
+            entry_key: 'D01-01',
+            product: 'EspoCRM',
+            slug: 'crm',
+            state: 'ready',
+            resources: { cpu: 2, memoryMb: 4_096, diskMb: 20_480 },
+            sampled_at: new Date(now - 30_000),
+            cpu_milli: 480,
+            memory_mb: 1_200,
+            disk_mb: 3_000,
+            containers: 2,
+          },
+          {
+            id: 'inst-2',
+            entry_key: 'D01-01',
+            product: 'EspoCRM',
+            slug: 'stale',
+            state: 'ready',
+            resources: { cpu: 2, memoryMb: 4_096, diskMb: 20_480 },
+            sampled_at: new Date(now - 60 * 60_000),
+            cpu_milli: 1_900,
+            memory_mb: 3_900,
+            disk_mb: 19_000,
+            containers: 2,
+          },
+        ],
+      ],
+      ['INSERT INTO capacity_snapshot', []],
+    ]);
+
+    const snapshot = await service.record();
+
+    expect(snapshot?.instanceUsage[0]).toMatchObject({
+      cpuCores: 2,
+      cpuConsumedMilli: 480,
+      memoryConsumedMb: 1_200,
+      diskConsumedMb: 3_000,
+      measuredAt: new Date(now - 30_000).toISOString(),
+    });
+    // A two-hour-old sample is not "current usage"; the board must show nothing rather than a figure
+    // that stopped being true.
+    expect(snapshot?.instanceUsage[1]?.cpuConsumedMilli).toBeUndefined();
+    expect(snapshot?.instanceUsage[1]?.measuredAt).toBeNull();
+  });
+
   it('returns null when no filesystem can be measured', async () => {
     const { service } = setup();
     h.statfsSync.mockImplementation(() => {
@@ -213,7 +275,7 @@ describe('record', () => {
 
   it('accepts a numeric oversubscription factor stored as text, and refuses an unusable one', async () => {
     const { service } = setup([
-      ['FROM settings WHERE key', [{ value: '1.5' }]],
+      ['FROM settings', [{ key: 'oversubscription_factor', value: '1.5' }]],
       [LEDGER, []],
       ['FROM instance i', []],
       ['INSERT INTO capacity_snapshot', []],
@@ -225,7 +287,7 @@ describe('record', () => {
   it('falls back to the documented factor when the stored value is nonsense', async () => {
     for (const value of ['lots', 0.5, null]) {
       const { service } = setup([
-        ['FROM settings WHERE key', [{ value }]],
+        ['FROM settings', [{ key: 'oversubscription_factor', value }]],
         [LEDGER, []],
         ['FROM instance i', []],
         ['INSERT INTO capacity_snapshot', []],
@@ -295,7 +357,7 @@ describe('admit', () => {
   it('probes the host when no snapshot has been recorded', async () => {
     const { service } = setup([
       [SNAPSHOT_SELECT, []],
-      ['FROM settings WHERE key', []],
+      ['FROM settings', []],
       [LEDGER, []],
     ]);
 

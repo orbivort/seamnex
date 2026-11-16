@@ -5,6 +5,7 @@ import { catalogHandlers } from './catalog';
 import { governanceHandlers } from './governance';
 import { instanceHandlers } from './instances';
 import { jobHandlers } from './jobs';
+import { observabilityHandlers } from './observability';
 import { phase4Handlers } from './phase4';
 import { portalHandlers } from './portal';
 import { privacyHandlers } from './privacy';
@@ -24,6 +25,7 @@ export const handlers = [
   ...portalHandlers,
   ...catalogHandlers,
   ...instanceHandlers,
+  ...observabilityHandlers,
   ...jobHandlers,
   ...workflowHandlers,
   ...governanceHandlers,

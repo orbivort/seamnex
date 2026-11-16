@@ -175,6 +175,13 @@ export const POLICY_KEYS: Readonly<Record<string, PolicyKey>> = {
   'GET /instances/:id/exports': 'instance.lifecycle',
   'GET /instances/:id/exports/:exportId/archive': 'instance.lifecycle',
   'GET /instances/:id/containers/:cid/logs': 'instance.view_logs',
+  /*
+   * FR-2.6 / FR-4.6: reading what the platform observes about an instance is the same reach as
+   * reading its logs — an operator who may see the log lines may see the profile that describes
+   * them. No new matrix row, so §5.2 is untouched.
+   */
+  'GET /instances/:id/observability': 'instance.view_logs',
+  'GET /instances/:id/logs': 'instance.view_logs',
   'POST /instances/:id/backups': 'instance.backup',
   'PUT /instances/:id/backup-schedule': 'instance.backup',
   'POST /backups/:id/verify': 'instance.backup',

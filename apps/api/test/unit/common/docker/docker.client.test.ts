@@ -29,6 +29,7 @@ const h = vi.hoisted(() => {
     stop: vi.fn(),
     restart: vi.fn(),
     remove: vi.fn(),
+    stats: vi.fn(),
   });
   return {
     options,
@@ -856,5 +857,94 @@ describe('demultiplex', () => {
 
   it('returns an empty string for an empty buffer', () => {
     expect(demultiplex(Buffer.alloc(0))).toBe('');
+  });
+});
+
+describe('volumes without a listing', () => {
+  it('reports no volumes when the daemon omits the array', async () => {
+    // `Volumes` is optional in the Engine's response; reading `.map` on it would crash a backup.
+    h.listVolumes.mockResolvedValueOnce({});
+
+    await expect(
+      makeClient().volumes(['com.docker.compose.project=seamnex-shop']),
+    ).resolves.toEqual([]);
+  });
+});
+
+describe('stats', () => {
+  it('answers null when the daemon omits cpu counters', async () => {
+    // A container that has just started has no delta; `null` is "not measured", not "idle".
+    h.container.stats.mockResolvedValueOnce({});
+
+    await expect(makeClient().stats('c1')).resolves.toBeNull();
+  });
+
+  it('answers null when the daemon omits memory counters', async () => {
+    h.container.stats.mockResolvedValueOnce({ cpu_stats: { cpu_usage: { total_usage: 1 } } });
+
+    await expect(makeClient().stats('c1')).resolves.toBeNull();
+  });
+
+  it('answers null when the daemon returns no payload at all', async () => {
+    h.container.stats.mockResolvedValueOnce(undefined);
+
+    await expect(makeClient().stats('c1')).resolves.toBeNull();
+  });
+
+  it('computes the same snapshot docker stats reports', async () => {
+    h.container.stats.mockResolvedValueOnce({
+      cpu_stats: {
+        cpu_usage: { total_usage: 2_000_000 },
+        system_cpu_usage: 10_000_000,
+        online_cpus: 2,
+      },
+      precpu_stats: {
+        cpu_usage: { total_usage: 1_000_000 },
+        system_cpu_usage: 8_000_000,
+      },
+      memory_stats: {
+        usage: 300 * 1024 * 1024,
+        stats: { inactive_file: 50 * 1024 * 1024 },
+      },
+    });
+
+    // cpu: 1e6 / 2e6 * 2 cpus * 1000; memory: working set, not the cgroup total.
+    await expect(makeClient().stats('c1')).resolves.toEqual({ cpuMilli: 1_000, memoryMb: 250 });
+    expect(h.container.stats).toHaveBeenCalledWith({ stream: false });
+  });
+
+  it('falls back to the per-cpu count and the legacy inactive counter', async () => {
+    h.container.stats.mockResolvedValueOnce({
+      cpu_stats: {
+        cpu_usage: { total_usage: 500, percpu_usage: [1, 2, 3] },
+      },
+      memory_stats: {
+        usage: 10 * 1024 * 1024,
+        stats: { total_inactive_file: 2 * 1024 * 1024 },
+      },
+    });
+
+    // No previous sample means no system delta, so CPU reads 0 rather than a fabricated ratio.
+    await expect(makeClient().stats('c1')).resolves.toEqual({ cpuMilli: 0, memoryMb: 8 });
+  });
+
+  it('treats absent counters as zero and assumes one cpu', async () => {
+    h.container.stats.mockResolvedValueOnce({
+      cpu_stats: { system_cpu_usage: 1_000_000 },
+      precpu_stats: { system_cpu_usage: 0 },
+      memory_stats: {},
+    });
+
+    await expect(makeClient().stats('c1')).resolves.toEqual({ cpuMilli: 0, memoryMb: 0 });
+  });
+
+  it('reads a previous sample that carries no system counter', async () => {
+    h.container.stats.mockResolvedValueOnce({
+      cpu_stats: { cpu_usage: { total_usage: 2_000 }, system_cpu_usage: 5_000 },
+      precpu_stats: { cpu_usage: { total_usage: 1_000 } },
+      memory_stats: { usage: 0, stats: { inactive_file: 0 } },
+    });
+
+    await expect(makeClient().stats('c1')).resolves.toEqual({ cpuMilli: 200, memoryMb: 0 });
   });
 });

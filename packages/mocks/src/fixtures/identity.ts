@@ -367,6 +367,9 @@ export const PLATFORM_SETTINGS: PlatformSettings = {
   sessionAbsoluteHours: 12,
   metadataReviewDays: 90,
   auditRetentionDays: 400,
+  capacityCpuAlertPercent: 75,
+  capacityMemoryAlertPercent: 90,
+  capacityDiskAlertPercent: 85,
   updatedAt: daysAgo(12),
   updatedBy: 'Sofia Almeida',
 };

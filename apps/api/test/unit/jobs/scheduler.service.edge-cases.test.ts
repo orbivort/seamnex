@@ -14,6 +14,7 @@ const CONFIG = {
   SEAMNEX_PARTITION_LOOKAHEAD_DAYS: 1,
   SEAMNEX_IDP_RECONCILE_INTERVAL_MS: 600_000,
   SEAMNEX_JOB_LOG_RETENTION_DAYS: 30,
+  SEAMNEX_WORKFLOW_CREDENTIAL_SWEEP_INTERVAL_MS: 3_600_000,
 } as unknown as AppConfig;
 
 const ROUTES: Parameters<typeof fakeDb>[0] = [
@@ -43,6 +44,13 @@ function setup(routes: Parameters<typeof fakeDb>[0] = ROUTES) {
   const integration = { reconcileIdentityNetworks: vi.fn(async () => undefined) };
   const governance = { expireOverdueBreakGlass: vi.fn(async () => [] as { id: string }[]) };
   const pipelines = { stepsFor: vi.fn(() => ['resolve', 'render', 'plan', 'apply', 'record']) };
+  const workflows = { rotateDueCredentials: vi.fn(async () => ({ rotated: 0, skipped: 0 })) };
+  const observability = {
+    reconcile: vi.fn(async (): Promise<{ written: number; removed: number }> => ({
+      written: 0,
+      removed: 0,
+    })),
+  };
 
   const service = new SchedulerService(
     db.pool,
@@ -57,8 +65,22 @@ function setup(routes: Parameters<typeof fakeDb>[0] = ROUTES) {
     backups as never,
     integration as never,
     governance as never,
+    undefined,
+    undefined,
+    undefined,
+    workflows as never,
+    observability as never,
   );
-  return { db, jobs, notifications, backups, integration, service };
+  return {
+    db,
+    jobs,
+    notifications,
+    backups,
+    integration,
+    workflows,
+    observability,
+    service,
+  };
 }
 
 beforeEach(() => {
@@ -123,5 +145,56 @@ describe('a pass that owns its failure', () => {
     await expect(service.tick()).resolves.toBeUndefined();
 
     expect(jobs.reapIdempotencyKeys).toHaveBeenCalledOnce();
+  });
+
+  it('stringifies a non-Error rotation failure and reports nothing rotated', async () => {
+    const { workflows, backups, service } = setup();
+    // A CLI helper can reject with a bare string; the pass logs it and reports zero, not `undefined`.
+    workflows.rotateDueCredentials.mockRejectedValueOnce('broker down');
+
+    await expect(service.tick()).resolves.toBeUndefined();
+
+    expect(backups.tickSchedules).toHaveBeenCalledOnce();
+  });
+
+  it('logs a rotation that actually rotated something', async () => {
+    const { workflows, service } = setup();
+    workflows.rotateDueCredentials.mockResolvedValueOnce({ rotated: 2, skipped: 1 });
+
+    await service.tick();
+
+    expect(workflows.rotateDueCredentials).toHaveBeenCalledOnce();
+  });
+});
+
+describe('scrape-target reconciliation cadence', () => {
+  it('reconciles once a minute and reports the written and removed counts', async () => {
+    const { observability, service } = setup();
+    observability.reconcile.mockResolvedValueOnce({ written: 2, removed: 1 });
+
+    await service.tick();
+    expect(observability.reconcile).toHaveBeenCalledOnce();
+
+    // A second pass inside the minute is the same reconcile, not another directory walk.
+    await service.tick();
+    expect(observability.reconcile).toHaveBeenCalledOnce();
+
+    vi.setSystemTime(new Date('2026-03-04T09:01:01.000Z'));
+    await service.tick();
+    expect(observability.reconcile).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports a failing reconcile without leaving the pass locked', async () => {
+    const { observability, jobs, service } = setup();
+    observability.reconcile.mockRejectedValueOnce(new Error('targets directory is read-only'));
+
+    await expect(service.tick()).resolves.toBeUndefined();
+
+    // The error is logged and the pass ends; the flag is cleared so the next interval can try again.
+    expect(jobs.reapIdempotencyKeys).toHaveBeenCalledOnce();
+    observability.reconcile.mockResolvedValueOnce({ written: 0, removed: 0 });
+    vi.setSystemTime(new Date('2026-03-04T09:01:01.000Z'));
+    await expect(service.tick()).resolves.toBeUndefined();
+    expect(observability.reconcile).toHaveBeenCalledTimes(2);
   });
 });

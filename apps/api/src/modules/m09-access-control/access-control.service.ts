@@ -20,6 +20,9 @@ const SETTING_KEYS: Record<string, keyof PlatformSettings> = {
   session_absolute_hours: 'sessionAbsoluteHours',
   audit_retention_days: 'auditRetentionDays',
   metadata_review_days: 'metadataReviewDays',
+  capacity_cpu_alert_percent: 'capacityCpuAlertPercent',
+  capacity_memory_alert_percent: 'capacityMemoryAlertPercent',
+  capacity_disk_alert_percent: 'capacityDiskAlertPercent',
 };
 
 const FIELD_TO_KEY = new Map(Object.entries(SETTING_KEYS).map(([key, field]) => [field, key]));
@@ -32,6 +35,11 @@ const DEFAULTS = {
   sessionAbsoluteHours: 12,
   metadataReviewDays: 90,
   auditRetentionDays: 420,
+  // FR-4.5. Memory is the axis a container hits first under load, so it alerts highest; disk sits in
+  // between because a volume fills slowly enough to be acted on.
+  capacityCpuAlertPercent: 75,
+  capacityMemoryAlertPercent: 90,
+  capacityDiskAlertPercent: 85,
 } as const;
 
 @Injectable()

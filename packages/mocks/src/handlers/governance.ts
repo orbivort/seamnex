@@ -384,6 +384,7 @@ export const governanceHandlers = [
       instanceId: instance.id,
       product: `${instance.entryKey} ${instance.product}`,
       domainOwner: instance.domainOwner.name,
+      domainOwnerEmail: instance.domainOwner.email ?? null,
       accessMode: body.accessMode,
       justification: body.justification,
       approver: null,

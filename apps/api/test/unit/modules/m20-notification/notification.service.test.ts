@@ -22,6 +22,8 @@ function setup(routes: Parameters<typeof fakeDb>[0] = []) {
     SEAMNEX_MAILPIT_URL: 'http://mailpit.test',
     SEAMNEX_NOTIFY_FROM: 'platform@example.test',
     SEAMNEX_NOTIFY_DEDUPE_MINUTES: 30,
+    // FR-4.5: a usage sample is "fresh" for two sampling intervals; the fixture clock is now.
+    SEAMNEX_CAPACITY_SAMPLE_INTERVAL_MS: 60_000,
   } as unknown as AppConfig;
   const service = new PostgresNotificationService(db.pool, config, audit as never);
   return { db, audit, service };
@@ -152,6 +154,10 @@ describe('notify', () => {
       'b',
       'suppressed',
       'maintenance window mw-1 (platform)',
+      // FR-4.11: an unaddressed notice records no recipient; the columns exist so an addressed one
+      // is distinguishable from a broadcast in the alert history.
+      null,
+      null,
     ]);
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -340,6 +346,8 @@ describe('evaluate', () => {
         ],
       ],
       ['AS present', [{ present: true }]],
+      ['FROM settings', []],
+      ['instance_usage_sample', []],
       ['FROM break_glass_session', []],
     ]);
 
@@ -360,6 +368,8 @@ describe('evaluate', () => {
         ],
       ],
       ['SELECT EXISTS', [{ present: false }]],
+      ['FROM settings', []],
+      ['instance_usage_sample', []],
       ['FROM maintenance_window', []],
       ['INSERT INTO notification', [{ id: 'n1' }]],
       [
@@ -376,25 +386,31 @@ describe('evaluate', () => {
     expect(result.sent).toBe(2);
   });
 
-  it('notifies an active break-glass grant with its expiry', async () => {
+  it('raises a capacity warning when consumption crosses the configured threshold', async () => {
     stubFetch(() => new Response(null, { status: 200 }));
     const { db, service } = setup([
       ['FROM instance_status s', []],
       ['SELECT EXISTS', [{ present: false }]],
       [
-        'FROM break_glass_session',
+        'FROM settings',
+        [
+          { key: 'capacity_cpu_alert_percent', value: 75 },
+          { key: 'capacity_memory_alert_percent', value: 90 },
+          { key: 'capacity_disk_alert_percent', value: 85 },
+        ],
+      ],
+      [
+        'instance_usage_sample',
         [
           {
-            id: 'abcdef123456',
-            state: 'active',
-            instance_id: 'i1',
-            expires_at: new Date('2026-01-01T00:00:00Z'),
-          },
-          {
-            id: '999999999999',
-            state: 'expired',
-            instance_id: null,
-            expires_at: null,
+            id: 'i1',
+            slug: 'crm',
+            resources: { cpu: 1, memoryMb: 2_000, diskMb: 10_000 },
+            sampled_at: new Date(),
+            cpu_milli: 800,
+            memory_mb: 500,
+            disk_mb: 100,
+            containers: 2,
           },
         ],
       ],
@@ -405,30 +421,40 @@ describe('evaluate', () => {
         [{ id: 'c1', type: 'webhook', target: 'https://h.test', enabled: true }],
       ],
       ['UPDATE notification', []],
+      ['FROM break_glass_session', []],
     ]);
 
     const result = await service.evaluate();
 
-    expect(result.sent).toBe(2);
-    const inserts = db.calls.filter((call) => call.sql.includes('INSERT INTO notification'));
-    expect(inserts.map((call) => call.params[1])).toEqual([
-      'Break-glass access granted (abcdef12)',
-      'Break-glass access expired (99999999)',
-    ]);
-    expect(String(inserts[0]?.params[2])).toContain('active until 2026-01-01T00:00:00.000Z');
-    expect(String(inserts[1]?.params[2])).toContain(
-      'has expired and its product account was revoked',
-    );
+    expect(result.sent).toBe(1);
+    const insert = db.calls.find((call) => call.sql.includes('INSERT INTO notification'));
+    // FR-4.5: the subject is quantised per instance and axis, so the dedupe window works across
+    // samples rather than being defeated by a percentage that moves every cycle.
+    expect(insert?.params[1]).toBe('Capacity: crm CPU above 75%');
+    expect(insert?.params[0]).toBe('warning');
+    expect(String(insert?.params[2])).toContain('800 of 1000 millicores (80 %)');
   });
 
-  it('describes an active grant with no recorded expiry', async () => {
+  it('raises a critical capacity alert ten points past the threshold', async () => {
     stubFetch(() => new Response(null, { status: 200 }));
     const { db, service } = setup([
       ['FROM instance_status s', []],
       ['SELECT EXISTS', [{ present: false }]],
+      ['FROM settings', [{ key: 'capacity_memory_alert_percent', value: 80 }]],
       [
-        'FROM break_glass_session',
-        [{ id: 'abcdef123456', state: 'active', instance_id: null, expires_at: null }],
+        'instance_usage_sample',
+        [
+          {
+            id: 'i1',
+            slug: 'crm',
+            resources: { cpu: 1, memoryMb: 1_000, diskMb: 10_000 },
+            sampled_at: new Date(),
+            cpu_milli: 0,
+            memory_mb: 950,
+            disk_mb: 0,
+            containers: 1,
+          },
+        ],
       ],
       ['FROM maintenance_window', []],
       ['INSERT INTO notification', [{ id: 'n1' }]],
@@ -437,12 +463,199 @@ describe('evaluate', () => {
         [{ id: 'c1', type: 'webhook', target: 'https://h.test', enabled: true }],
       ],
       ['UPDATE notification', []],
+      ['FROM break_glass_session', []],
+    ]);
+
+    await service.evaluate();
+
+    const insert = db.calls.find((call) => call.sql.includes('INSERT INTO notification'));
+    expect(insert?.params[0]).toBe('critical');
+    expect(insert?.params[1]).toBe('Capacity: crm memory above 80%');
+  });
+
+  it('ignores a usage sample that is older than two sampling intervals', async () => {
+    stubFetch(() => new Response(null, { status: 200 }));
+    const { db, service } = setup([
+      ['FROM instance_status s', []],
+      ['SELECT EXISTS', [{ present: false }]],
+      ['FROM settings', []],
+      [
+        'instance_usage_sample',
+        [
+          {
+            id: 'i1',
+            slug: 'crm',
+            resources: { cpu: 1, memoryMb: 1_000, diskMb: 10_000 },
+            sampled_at: new Date(Date.now() - 60 * 60_000),
+            cpu_milli: 999,
+            memory_mb: 999,
+            disk_mb: 999,
+            containers: 1,
+          },
+        ],
+      ],
+      ['FROM break_glass_session', []],
+    ]);
+
+    const result = await service.evaluate();
+
+    expect(result).toEqual({ sent: 0, suppressed: 0 });
+    expect(db.calls.some((call) => call.sql.includes('INSERT INTO notification'))).toBe(false);
+  });
+
+  it('addresses a break-glass grant and expiry to the domain owner', async () => {
+    stubFetch(() => new Response(null, { status: 200 }));
+    const { db, service } = setup([
+      ['FROM instance_status s', []],
+      ['SELECT EXISTS', [{ present: false }]],
+      ['FROM settings', []],
+      ['instance_usage_sample', []],
+      [
+        'FROM break_glass_session',
+        [
+          {
+            id: 'abcdef123456',
+            state: 'active',
+            instance_id: 'i1',
+            expires_at: new Date('2026-01-01T00:00:00Z'),
+            product: 'Seamnex CRM',
+            owner_name: 'Helena Brandt',
+            owner_email: 'helena.brandt@seamnex.local',
+          },
+          {
+            id: '999999999999',
+            state: 'expired',
+            instance_id: null,
+            expires_at: null,
+            product: null,
+            owner_name: null,
+            owner_email: null,
+          },
+        ],
+      ],
+      ['FROM maintenance_window', []],
+      ['INSERT INTO notification', [{ id: 'n1' }]],
+      [
+        'FROM alert_channel WHERE enabled',
+        [{ id: 'c2', type: 'email', target: 'helena.brandt@seamnex.local', enabled: true }],
+      ],
+      ['UPDATE notification', []],
+      ['UPDATE break_glass_session', []],
+    ]);
+
+    const result = await service.evaluate();
+
+    expect(result.sent).toBe(2);
+    const inserts = db.calls.filter((call) => call.sql.includes('INSERT INTO notification'));
+    expect(inserts.map((call) => call.params[1])).toEqual([
+      'Break-glass access granted on Seamnex CRM (abcdef12)',
+      'Break-glass access expired on the platform (99999999)',
+    ]);
+    // The addressee is on the row, not only in the prose.
+    expect(inserts[0]?.params[5]).toBe('Helena Brandt');
+    expect(inserts[0]?.params[6]).toBe('helena.brandt@seamnex.local');
+    expect(String(inserts[0]?.params[2])).toContain('domain owner, Helena Brandt');
+    expect(String(inserts[0]?.params[2])).toContain('active until 2026-01-01T00:00:00.000Z');
+    expect(String(inserts[1]?.params[2])).toContain(
+      'has expired and its product account was revoked',
+    );
+    // Each announced transition is marked, so a later pass cannot repeat it.
+    const marks = db.calls.filter((call) => call.sql.includes('UPDATE break_glass_session'));
+    expect(marks.map((call) => call.sql)).toEqual([
+      expect.stringContaining('grant_notified_at'),
+      expect.stringContaining('expiry_notified_at'),
+    ]);
+  });
+
+  it('describes an active grant with no recorded expiry', async () => {
+    stubFetch(() => new Response(null, { status: 200 }));
+    const { db, service } = setup([
+      ['FROM instance_status s', []],
+      ['SELECT EXISTS', [{ present: false }]],
+      ['FROM settings', []],
+      ['instance_usage_sample', []],
+      [
+        'FROM break_glass_session',
+        [
+          {
+            id: 'abcdef123456',
+            state: 'active',
+            instance_id: null,
+            expires_at: null,
+            product: null,
+            owner_name: null,
+            owner_email: null,
+          },
+        ],
+      ],
+      ['FROM maintenance_window', []],
+      ['INSERT INTO notification', [{ id: 'n1' }]],
+      [
+        'FROM alert_channel WHERE enabled',
+        [{ id: 'c1', type: 'webhook', target: 'https://h.test', enabled: true }],
+      ],
+      ['UPDATE notification', []],
+      ['UPDATE break_glass_session', []],
     ]);
 
     await service.evaluate();
 
     const insert = db.calls.find((call) => call.sql.includes('INSERT INTO notification'));
     expect(String(insert?.params[2])).toContain('an unrecorded time');
+  });
+});
+
+describe('delivery addressing', () => {
+  it('sends an addressed notice only through the owner s channel', async () => {
+    const fetchMock = stubFetch(() => new Response(null, { status: 200 }));
+    const { service } = setup([
+      ['FROM maintenance_window', []],
+      ['INSERT INTO notification', [{ id: 'n1' }]],
+      [
+        'FROM alert_channel WHERE enabled',
+        [
+          { id: 'c1', type: 'email', target: 'ops@example.test', enabled: true },
+          { id: 'c2', type: 'email', target: 'Owner@Example.test', enabled: true },
+        ],
+      ],
+      ['UPDATE notification', []],
+    ]);
+
+    await service.notify({
+      severity: 'critical',
+      subject: 's',
+      body: 'b',
+      recipient: { name: 'Owner', email: 'owner@example.test' },
+    });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toMatchObject({ To: [{ Email: 'Owner@Example.test' }] });
+  });
+
+  it('falls back to every enabled channel when no channel targets the owner', async () => {
+    const fetchMock = stubFetch(() => new Response(null, { status: 200 }));
+    const { service } = setup([
+      ['FROM maintenance_window', []],
+      ['INSERT INTO notification', [{ id: 'n1' }]],
+      [
+        'FROM alert_channel WHERE enabled',
+        [
+          { id: 'c1', type: 'webhook', target: 'https://h.test', enabled: true },
+          { id: 'c2', type: 'email', target: 'ops@example.test', enabled: true },
+        ],
+      ],
+      ['UPDATE notification', []],
+    ]);
+
+    await service.notify({
+      severity: 'critical',
+      subject: 's',
+      body: 'b',
+      recipient: { name: 'Owner', email: 'owner@example.test' },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
 

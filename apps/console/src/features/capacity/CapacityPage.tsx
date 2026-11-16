@@ -2,7 +2,7 @@ import { useMemo, type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { ArrowUpRight, Gauge } from 'lucide-react';
 import { useCapacity, useCapacityForecast } from '@seamnex/api-client';
-import type { InstanceCapacity } from '@seamnex/domain';
+import type { CapacityThresholds, InstanceCapacity } from '@seamnex/domain';
 import { admissionVerdict } from '@seamnex/domain';
 import {
   Badge,
@@ -19,66 +19,152 @@ import {
   SplitLayout,
   Stat,
   defineColumns,
+  rulerBands,
 } from '@seamnex/ui';
-import { formatDateTime } from '@seamnex/utils';
+import { cn, formatDateTime, formatRelative } from '@seamnex/utils';
 import { AsyncPanel, QueryError } from '@seamnex/shell';
 
+/** Fallback bands when a snapshot predates the configurable thresholds. */
+const DEFAULT_THRESHOLDS: CapacityThresholds = {
+  cpuPercent: 75,
+  memoryPercent: 90,
+  diskPercent: 85,
+};
+
 /**
- * Module scope: the ledger cells read only their row, and the identity cell is the one that carries
- * the row link (see `capacityRowLink`), which is why it has no `hideBelow`.
+ * The colour a measured figure earns, against the threshold the platform alerts at (FR-4.5).
+ *
+ * Ten points past the threshold is the same step the alert pass escalates at, so a red cell on this
+ * board and a critical notification describe the same condition.
  */
-const CAPACITY_COLUMNS = defineColumns<InstanceCapacity>([
-  {
-    id: 'key',
-    header: 'Key',
-    nowrap: true,
-    cell: (row) => (
-      <span className="font-mono text-micro font-semibold text-muted">{row.entryKey}</span>
-    ),
-  },
-  {
-    id: 'product',
-    header: 'Instance',
-    primary: true,
-    cell: (row) => (
-      <>
-        {row.product}
-        <span className="ml-1.5 font-mono text-micro text-faint">{row.slug}</span>
-      </>
-    ),
-  },
-  {
-    id: 'state',
-    header: 'State',
-    hideBelow: 'md',
-    cell: (row) => <span className="text-meta text-muted">{row.state}</span>,
-  },
-  {
-    id: 'cpu',
-    header: 'CPU',
-    align: 'right',
+function consumptionTone(percent: number | undefined, threshold: number): string {
+  if (percent === undefined) return 'text-faint';
+  if (percent >= threshold + 10) return 'text-danger';
+  if (percent >= threshold) return 'text-warning-strong';
+  return 'text-muted';
+}
+
+/**
+ * Allocated versus consumed (FR-4.5).
+ *
+ * The pair lives in one cell with the measured figure on the second line: two numeric columns per
+ * axis would be six numbers across a table that already carries a name, so the reader loses the one
+ * comparison the table exists for. `not measured` is a word, not a dash-and-zero — an absent sample
+ * and an idle product are different facts.
+ */
+function capacityColumns(thresholds: CapacityThresholds) {
+  const axis = (
+    id: string,
+    header: string,
+    allocated: (row: InstanceCapacity) => string,
+    consumed: (row: InstanceCapacity) => string | undefined,
+    percentOf: (row: InstanceCapacity) => number | undefined,
+    threshold: number,
+    hideBelow?: 'sm' | 'md' | 'lg',
+  ) => ({
+    id,
+    header,
+    align: 'right' as const,
     mono: true,
-    cell: (row) => <span className="text-meta text-text">{row.cpuCores} vCPU</span>,
-  },
-  {
-    id: 'memory',
-    header: 'Memory',
-    align: 'right',
-    hideBelow: 'sm',
-    mono: true,
-    cell: (row) => (
-      <span className="text-meta text-text">{(row.memoryMb / 1024).toFixed(1)} GB</span>
+    ...(hideBelow === undefined ? {} : { hideBelow }),
+    cell: (row: InstanceCapacity) => {
+      const percent = percentOf(row);
+      return (
+        <span className="block">
+          <span className="block text-meta text-text">{allocated(row)}</span>
+          <span className={cn('block text-micro', consumptionTone(percent, threshold))}>
+            {percent === undefined
+              ? 'not measured'
+              : `${consumed(row) ?? '—'} used · ${Math.round(percent)} %`}
+          </span>
+        </span>
+      );
+    },
+  });
+
+  return defineColumns<InstanceCapacity>([
+    {
+      id: 'key',
+      header: 'Key',
+      nowrap: true,
+      cell: (row) => (
+        <span className="font-mono text-micro font-semibold text-muted">{row.entryKey}</span>
+      ),
+    },
+    {
+      id: 'product',
+      header: 'Instance',
+      primary: true,
+      cell: (row) => (
+        <>
+          {row.product}
+          <span className="ml-1.5 font-mono text-micro text-faint">{row.slug}</span>
+        </>
+      ),
+    },
+    {
+      id: 'state',
+      header: 'State',
+      hideBelow: 'md',
+      cell: (row) => <span className="text-meta text-muted">{row.state}</span>,
+    },
+    axis(
+      'cpu',
+      'CPU',
+      (row) => `${row.cpuCores} vCPU`,
+      (row) =>
+        row.cpuConsumedMilli === undefined
+          ? undefined
+          : `${(row.cpuConsumedMilli / 1000).toFixed(2)} vCPU`,
+      (row) =>
+        row.cpuConsumedMilli === undefined || row.cpuCores <= 0
+          ? undefined
+          : (row.cpuConsumedMilli / (row.cpuCores * 1000)) * 100,
+      thresholds.cpuPercent,
     ),
-  },
-  {
-    id: 'disk',
-    header: 'Disk',
-    align: 'right',
-    hideBelow: 'lg',
-    mono: true,
-    cell: (row) => <span className="text-meta text-text">{(row.diskMb / 1024).toFixed(0)} GB</span>,
-  },
-]);
+    axis(
+      'memory',
+      'Memory',
+      (row) => `${(row.memoryMb / 1024).toFixed(1)} GB`,
+      (row) =>
+        row.memoryConsumedMb === undefined
+          ? undefined
+          : `${(row.memoryConsumedMb / 1024).toFixed(1)} GB`,
+      (row) =>
+        row.memoryConsumedMb === undefined || row.memoryMb <= 0
+          ? undefined
+          : (row.memoryConsumedMb / row.memoryMb) * 100,
+      thresholds.memoryPercent,
+      'sm',
+    ),
+    axis(
+      'disk',
+      'Disk',
+      (row) => `${(row.diskMb / 1024).toFixed(0)} GB`,
+      (row) =>
+        row.diskConsumedMb === undefined
+          ? undefined
+          : `${(row.diskConsumedMb / 1024).toFixed(1)} GB`,
+      (row) =>
+        row.diskConsumedMb === undefined || row.diskQuotaMb <= 0
+          ? undefined
+          : (row.diskConsumedMb / row.diskQuotaMb) * 100,
+      thresholds.diskPercent,
+      'lg',
+    ),
+    {
+      id: 'measured',
+      header: 'Measured',
+      align: 'right',
+      hideBelow: 'xl',
+      cell: (row) => (
+        <span className="text-micro text-faint">
+          {row.measuredAt ? formatRelative(row.measuredAt) : 'no sample'}
+        </span>
+      ),
+    },
+  ]);
+}
 
 const capacityRowKey = (row: InstanceCapacity) => row.instanceId;
 
@@ -96,6 +182,24 @@ export function CapacityPage() {
   const capacity = useCapacity();
   const forecast = useCapacityForecast();
   const snapshot = capacity.data;
+
+  /**
+   * The bands the board draws and the thresholds the alert pass reads are the same three numbers,
+   * carried in the snapshot (FR-4.5). Keyed on primitives so a new snapshot object does not rebuild
+   * every cell while the figures it describes are unchanged.
+   */
+  const cpuThreshold = snapshot?.thresholds?.cpuPercent ?? DEFAULT_THRESHOLDS.cpuPercent;
+  const memoryThreshold = snapshot?.thresholds?.memoryPercent ?? DEFAULT_THRESHOLDS.memoryPercent;
+  const diskThreshold = snapshot?.thresholds?.diskPercent ?? DEFAULT_THRESHOLDS.diskPercent;
+  const columns = useMemo(
+    () =>
+      capacityColumns({
+        cpuPercent: cpuThreshold,
+        memoryPercent: memoryThreshold,
+        diskPercent: diskThreshold,
+      }),
+    [cpuThreshold, memoryThreshold, diskThreshold],
+  );
 
   /*
    * The rulers must read on the scale the verdict was computed with (CL-09), exactly as the
@@ -224,7 +328,7 @@ export function CapacityPage() {
                 <PanelHeader
                   eyebrow="Admission"
                   title="Rulers"
-                  description={`Thresholds at 75% and 90%. Allocation plus the platform reserve, against the admission limit; CPU caps may oversubscribe ${data.oversubscriptionFactor}×.`}
+                  description={`Allocation plus the platform reserve against the admission limit; CPU caps may oversubscribe ${data.oversubscriptionFactor}×. Per-instance alerts fire at CPU ${data.thresholds?.cpuPercent ?? DEFAULT_THRESHOLDS.cpuPercent} %, memory ${data.thresholds?.memoryPercent ?? DEFAULT_THRESHOLDS.memoryPercent} % and disk ${data.thresholds?.diskPercent ?? DEFAULT_THRESHOLDS.diskPercent} % of the declared shape.`}
                 />
                 <div className="space-y-4 p-4">
                   {admission ? (
@@ -234,18 +338,21 @@ export function CapacityPage() {
                         used={admission.used.cpu}
                         total={admission.limits.cpu}
                         unit="vCPU"
+                        thresholds={rulerBands(cpuThreshold)}
                       />
                       <CapacityRuler
                         label="Memory"
                         used={admission.used.memoryMb / 1024}
                         total={admission.limits.memoryMb / 1024}
                         unit="GB"
+                        thresholds={rulerBands(memoryThreshold)}
                       />
                       <CapacityRuler
                         label="Disk"
                         used={admission.used.diskMb / 1024}
                         total={admission.limits.diskMb / 1024}
                         unit="GB"
+                        thresholds={rulerBands(diskThreshold)}
                       />
                     </>
                   ) : null}
@@ -319,11 +426,17 @@ export function CapacityPage() {
             <Panel>
               <PanelHeader
                 eyebrow="Per instance"
-                title="Allocation ledger"
-                description="Reserved resources per deployment; stopped instances keep their reservation until deleted."
+                title="Allocation and consumption"
+                description="Top line: the resources reserved per deployment; stopped instances keep their reservation until deleted. Second line: what the running containers actually use, measured by the status sampler."
               />
+              <p className="border-b border-line px-4 py-2 text-micro leading-relaxed text-faint">
+                Alert bands: CPU {cpuThreshold} %, memory {memoryThreshold} %, disk {diskThreshold}{' '}
+                % of the declared shape. A figure past the band is amber, ten points past it is red
+                — the same step the platform escalates at. “not measured” means no fresh sample, not
+                idle.
+              </p>
               <DataTable
-                columns={CAPACITY_COLUMNS}
+                columns={columns}
                 rows={data.instanceUsage}
                 rowKey={capacityRowKey}
                 renderRowLink={capacityRowLink}

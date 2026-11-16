@@ -31,6 +31,10 @@ export function ensureRuntimeDirs(root, log = () => {}) {
     join('temp', 'age'),
     join('temp', 'traefik', 'dynamic'),
     join('temp', 'catalog-repo', 'instances'),
+    // FR-2.6: the `file_sd` directory M21 writes and Prometheus watches. Created on the host for the
+    // same reason as the others — a Docker-created mount root is owned by root, so the API's `mkdir`
+    // would fail and no instance would ever be scraped.
+    join('temp', 'prometheus-targets'),
   ];
   const created = [];
   const empty = [];

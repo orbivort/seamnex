@@ -1,4 +1,9 @@
-import type { CapacitySnapshot, ForecastPoint, Instance } from '@seamnex/domain';
+import type {
+  CapacitySnapshot,
+  CapacityThresholds,
+  ForecastPoint,
+  Instance,
+} from '@seamnex/domain';
 import { admissionVerdict } from '@seamnex/domain';
 import { at, daysAgo } from './context';
 import { PLATFORM_SETTINGS } from './identity';
@@ -14,6 +19,11 @@ export const CAPACITY_RESERVE = { cpuCores: 4, memoryMb: 10_240, diskMb: 102_400
 export function buildCapacity(
   instances: Instance[],
   oversubscriptionFactor: number,
+  thresholds: CapacityThresholds = {
+    cpuPercent: PLATFORM_SETTINGS.capacityCpuAlertPercent,
+    memoryPercent: PLATFORM_SETTINGS.capacityMemoryAlertPercent,
+    diskPercent: PLATFORM_SETTINGS.capacityDiskAlertPercent,
+  },
 ): CapacitySnapshot {
   const allocated = instances.reduce(
     (totals, instance) => ({
@@ -76,6 +86,7 @@ export function buildCapacity(
     diskPath: '/var/lib/seamnex/instances',
     diskAvailableMb: CAPACITY_HOST.diskMb - allocated.diskMb,
     memoryAvailableMb: CAPACITY_HOST.memoryMb - allocated.memoryMb,
+    thresholds,
     instanceUsage: instances.map((instance) => ({
       instanceId: instance.id,
       entryKey: instance.entryKey,
@@ -86,6 +97,20 @@ export function buildCapacity(
       memoryMb: instance.resources.memoryMb,
       diskMb: instance.resources.diskMb,
       diskQuotaMb: instance.resources.diskMb,
+      /*
+       * Measured figures, as the sampler would report them: a running product idles well below its
+       * declared shape, which is exactly the difference the board now has to show. Anything not
+       * running has no sample at all — the three figures are omitted rather than zeroed, because
+       * the board prints "not measured" for an absent sample and "0 % used" for a real zero.
+       */
+      ...(instance.state === 'ready' || instance.state === 'degraded'
+        ? {
+            cpuConsumedMilli: Math.round(instance.resources.cpu * 1000 * 0.35),
+            memoryConsumedMb: Math.round(instance.resources.memoryMb * 0.45),
+            diskConsumedMb: Math.round(instance.resources.diskMb * 0.28),
+            measuredAt: at(-2),
+          }
+        : { measuredAt: null }),
     })),
     verdict: {
       admissible: verdict.admissible,

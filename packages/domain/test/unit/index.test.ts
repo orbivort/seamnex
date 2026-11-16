@@ -29,6 +29,7 @@ import * as governanceSchema from '../../src/schemas/governance';
 import * as identitySchema from '../../src/schemas/identity';
 import * as instanceSchema from '../../src/schemas/instance';
 import * as jobSchema from '../../src/schemas/job';
+import * as observabilitySchema from '../../src/schemas/observability';
 import * as portalSchema from '../../src/schemas/portal';
 import * as privacySchema from '../../src/schemas/privacy';
 import * as recoverySchema from '../../src/schemas/recovery';
@@ -77,6 +78,7 @@ const MODULES = [
   ['schemas/identity', identitySchema],
   ['schemas/instance', instanceSchema],
   ['schemas/job', jobSchema],
+  ['schemas/observability', observabilitySchema],
   ['schemas/portal', portalSchema],
   ['schemas/privacy', privacySchema],
   ['schemas/recovery', recoverySchema],

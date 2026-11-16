@@ -1,5 +1,9 @@
 // Single log collector (FR-2.6): Alloy reads Docker's log stream and forwards to Loki. No
 // per-product agent, which is what keeps the operator effort bounded.
+//
+// `instance` is the label the platform queries by (FR-4.6). Every container the platform creates
+// carries `seamnex.instance` — the sampler already relies on it — but the collector used to drop it,
+// so per-instance logs were only reachable by guessing container names in Grafana.
 
 discovery.docker "containers" {
   host             = "unix:///var/run/docker.sock"
@@ -13,6 +17,12 @@ discovery.relabel "seamnex_containers" {
     source_labels = ["__meta_docker_container_name"]
     regex         = "/(.*)"
     target_label  = "container"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_seamnex_instance"]
+    regex         = "(.+)"
+    target_label  = "instance"
   }
 
   rule {
