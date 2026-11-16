@@ -43,6 +43,7 @@ import {
 } from '../modules/m22-catalog-repository/environment-drift.contract';
 import { AppError } from '../common/problem/app-error';
 import { RunMirrorService } from '../modules/m13-workflow/run-mirror.service';
+import { WorkflowAuthoringService } from '../modules/m13-workflow/authoring.service';
 import { PipelineRegistry } from './pipeline-registry';
 
 /**
@@ -62,6 +63,7 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
   private lastIdentityReconcileAt = 0;
   private lastRelaySweepAt = 0;
   private lastDriftSweepAt = 0;
+  private lastCredentialSweepAt = 0;
   /** `instanceId → epoch ms` of the last repair request, so one drift cannot queue a loop of jobs. */
   private readonly driftRepairs = new Map<string, number>();
 
@@ -133,6 +135,14 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
     @Optional()
     @Inject(ENVIRONMENT_DRIFT)
     private readonly drift?: EnvironmentDriftService,
+    /**
+     * NFR-4.14 — a live workflow's credential must not expire under it. M13 owns the mint, n8n and the
+     * compiled definition; this pass owns only the cadence, exactly as the backup schedule does.
+     * Optional: a process without the workflow module still has jobs to schedule.
+     */
+    @Optional()
+    @Inject(WorkflowAuthoringService)
+    private readonly workflows?: WorkflowAuthoringService,
   ) {}
 
   /**
@@ -154,6 +164,7 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
       ['integration', this.integration],
       ['sign-in relay', this.relayAccounts],
       ['workflow mirror', this.runMirror],
+      ['workflow credentials', this.workflows],
       ['environment drift', this.drift],
     ]
       .filter(([, dependency]) => dependency === undefined)
@@ -219,6 +230,7 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
       await this.tickBackupSchedules();
       await this.reconcileIdentityNetworks();
       await this.sweepRelayAccounts();
+      await this.rotateWorkflowCredentials();
       await this.reconcileDrift();
     } catch (error) {
       this.logger.error(
@@ -351,6 +363,39 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
         'sign-in relay account sweep failed',
       );
     });
+  }
+
+  /**
+   * NFR-4.14 — re-issue workflow credentials before they expire.
+   *
+   * Its own interval rather than the scheduler pass: a rotation is a mint, an n8n credential, a push
+   * and a commit per workflow, and doing that every minute would put several network round trips on
+   * the platform's most frequent timer for a change that is due once a quarter.
+   */
+  private async rotateWorkflowCredentials(): Promise<void> {
+    const workflows = this.workflows;
+    if (workflows === undefined) return;
+    const now = Date.now();
+    if (
+      now - this.lastCredentialSweepAt <
+      this.config.SEAMNEX_WORKFLOW_CREDENTIAL_SWEEP_INTERVAL_MS
+    ) {
+      return;
+    }
+    this.lastCredentialSweepAt = now;
+    const result = await workflows.rotateDueCredentials().catch((error: unknown) => {
+      this.logger.error(
+        { err: error instanceof Error ? error.message : String(error) },
+        'workflow credential rotation pass failed',
+      );
+      return { rotated: 0, skipped: 0 };
+    });
+    if (result.rotated > 0 || result.skipped > 0) {
+      this.logger.log(
+        { rotated: result.rotated, skipped: result.skipped },
+        'workflow credentials rotated',
+      );
+    }
   }
 
   /**

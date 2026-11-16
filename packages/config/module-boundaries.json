@@ -212,8 +212,8 @@
         "workflow_approval",
         "field_snapshot"
       ],
-      "$comment": "FR-5.9 needs two facts this module does not own: the live role bindings (M09) and the break-glass elevations an R1 write leans on (M18). Both are read through their contracts.",
-      "mayImport": ["M09", "M12", "M14", "M18"],
+      "$comment": "FR-5.9 needs two facts this module does not own: the live role bindings (M09) and the break-glass elevations an R1 write leans on (M18). Both are read through their contracts. FR-5.8 adds one more edge: the owner failure alert is delivered by M20, through its interface (ADR-BE-30).",
+      "mayImport": ["M09", "M12", "M14", "M18", "M20"],
       "reads": ["instance", "credential_scope", "catalog_entry", "idp_user", "registry_snapshot"]
     },
     {

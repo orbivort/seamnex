@@ -16,6 +16,46 @@ the same number through every manifest and the link definitions at the foot of t
 
 ### Added
 
+- **A mapping's conversion and missing-value policy are compiled, not just stored** (`FR-5.5`,
+  `FR-5.6`) — `transform`, `required`, `onMissing` and `defaultValue` were declared in the contract,
+  returned by the API and shown in the ledger, and read by nobody: the compiler emitted a bare
+  dereference, so a mapping the author asked to convert a date or to refuse an empty required field
+  activated, ran, and sent the unconverted value. `packages/domain` now publishes a closed catalogue
+  of seventeen conversions (text, number/whole number, yes/no, ISO date and date-time, currency
+  minor↔major, mass, length, temperature) and `mappedValueExpression` compiles one body expression
+  that handles the missing case first — `fail` throws on the node, `skip` omits the parameter,
+  `default` substitutes a value typed as the conversion's output — while a mapping that declares
+  nothing still compiles to the byte-identical `={{ $json.path }}` it always did. Activation refuses
+  `UNKNOWN_TRANSFORM` (naming the allowed conversions), `MISSING_DEFAULT_VALUE`,
+  `INVALID_DEFAULT_VALUE` and, for the first time, `MISSING_REQUIRED_FIELD` when the product publishes
+  a required field that nothing maps. The mapping drawer's body preview is now the compiler's own
+  output, and saving a mapping no longer discards the four fields. ADR-BE-29.
+- **A workflow retries a step, tells its owner when it keeps failing, and keeps a finite history**
+  (`FR-5.7`, `FR-5.8`, `AC-27`) — compiled nodes carry `retryOnFail`/`maxTries`/`waitBetweenTries`
+  and `onError: stopWorkflow` (`SEAMNEX_WORKFLOW_RETRY_MAX_TRIES`, `SEAMNEX_WORKFLOW_RETRY_WAIT_MS`),
+  and the run history reports the attempts n8n actually made instead of the constant `1`: the mirror
+  reads `resultData.runData` — one entry per try — and writes the count to
+  `workflow_run_node.attempt`. After `SEAMNEX_WORKFLOW_FAILURE_ALERT_THRESHOLD` consecutive failed
+  runs the owner is alerted through M20, once per milestone, severity escalating from the second, with
+  the workflow, the run, the failing step and n8n's capped error sentence, and the alert is recorded as
+  `workflow.run.alerted` even when no channel could be reached. Run history is retained for
+  `SEAMNEX_WORKFLOW_RUN_RETENTION_DAYS` (90, never below the required 30) and a failed run for twice
+  that, because the failed-run queue is what an operator replays; a run whose outcome was never
+  mirrored is never deleted. A rollback procedure for a write workflow — disable, confirm nothing in
+  flight, revoke the scope, export the run history, correct the records in the product, then fix and
+  replay — is written down in ADR-BE-30, which also records that n8n's retry wait is fixed and that
+  the exponential part of FR-5.7's "backoff" is not implemented.
+- **Workflow credentials are rotated before they expire, and minted from a CSPRNG** (`NFR-4.14`) — a
+  scope lives 90 days and nothing re-issued it, so a live workflow began answering 401 on day 90 and
+  stayed that way until a human re-activated it. A scheduler pass now finds the newest live scope of
+  each product that expires within `SEAMNEX_WORKFLOW_CREDENTIAL_ROTATE_BEFORE_DAYS`, mints a new
+  generation (`mint({ rotate: true })`, which bypasses the reuse path with a per-generation
+  idempotency key), creates the n8n credentials, pushes the definition, commits against a
+  compare-and-set on `workflow.current_version_id`, and only then revokes the old scopes and deletes
+  the old credentials — a race with an activation abandons the rotation and cleans up instead of
+  pointing the definition at tokens no scope recognises. An already-expired token is inside the window
+  and heals on the next pass. Broker and integration secrets are now drawn from `randomBytes(32)`
+  rather than `Math.random()`, whose output is not entropy. ADR-BE-30.
 - **Pre-flight refuses with the blocker, before anything starts** (`FR-1.11`, `FR-1.23`, `AC-07`) —
   `POST /instances/preview` now returns a `blockers` list — each entry a `code`, the `field` or fact it
   refers to, a sentence and whether it blocks — and `admissible` is false while any of them does. The

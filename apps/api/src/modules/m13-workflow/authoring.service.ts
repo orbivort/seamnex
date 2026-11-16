@@ -1,8 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { Inject, Injectable, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import {
+  defaultValueProblem,
   isCredentialGranularity,
-  mappingExpression,
+  isMappingTransform,
+  mappedValueExpression,
+  normaliseTransform,
+  transformNames,
   WORKFLOW_EXPORT_API_VERSION,
   workflowIneligibilityReason,
   writeIneligibilityReason,
@@ -55,6 +59,15 @@ import {
 
 /** Matches the broker's own ceiling: an active version's credential lives 90 days. */
 const NINETY_DAYS = 90 * 24 * 60 * 60;
+
+/**
+ * NFR-4.14 — how many workflows one rotation pass may re-issue.
+ *
+ * Each rotation is a mint, an n8n credential, a push and a commit, so the batch is small on purpose:
+ * the pass runs hourly, the lead window is a week, and a bounded batch keeps one slow product from
+ * turning a scheduler tick into a multi-minute operation.
+ */
+const ROTATION_BATCH = 10;
 
 type Ir = {
   trigger: WorkflowTrigger;
@@ -124,6 +137,8 @@ type EgressProduct = {
  */
 @Injectable()
 export class WorkflowAuthoringService {
+  private readonly logger = new Logger('workflow-credentials');
+
   constructor(
     @Inject(PG_POOL) private readonly pool: Pool,
     @Inject(AUDIT_SERVICE) private readonly audit: AuditService,
@@ -609,7 +624,13 @@ export class WorkflowAuthoringService {
       const plan = await this.egressPlan(version.ir);
       const tokens = await this.mintEgress(workflow, plan.products, version.id);
       const credentials = await this.issueCredentials(workflow, version, plan.products, tokens);
-      const document = compile(workflow, version.ir, plan.addresses, credentials);
+      const document = compile(
+        workflow,
+        version.ir,
+        plan.addresses,
+        credentials,
+        this.retryPolicy(),
+      );
       // The recorded id, when there is one, is what makes a re-activation an update rather than a
       // second n8n workflow; the name search only covers a definition that has never been pushed.
       const compiledId = await this.n8n.upsert(
@@ -1103,6 +1124,7 @@ export class WorkflowAuthoringService {
      * snapshot only. No product call happens during validation — a schema read that timed out would
      * otherwise turn every validation into a slow, flaky operation.
      */
+    issues.push(...mappingSemanticsIssues(ir));
     await this.checkMappingFields(ir, issues);
 
     /**
@@ -1227,7 +1249,12 @@ export class WorkflowAuthoringService {
     for (const node of ir.nodes) {
       if (node.mode !== 'write') continue;
       if (node.entryKey === null || node.operation === null) continue;
-      if (mappingsFor(ir, node).length === 0) continue;
+      /*
+       * A write node with **no** mappings is included on purpose: `EMPTY_MAPPINGS` warns about it, but
+       * a product that publishes required fields will refuse the write, and that is an error the
+       * snapshot can prove. `mappingFieldIssues` skips the node when no schema is available, so an
+       * unmapped draft with an offline product still produces one warning, not two.
+       */
       try {
         const instanceId = await this.egressInstance(node.entryKey, 'write');
         targets.push({ node, instanceId, operation: node.operation });
@@ -1343,6 +1370,20 @@ export class WorkflowAuthoringService {
   }
 
   /**
+   * FR-5.7 — the retry policy this process compiles with.
+   *
+   * Read at compile time, not stored in the version: the ceiling is an operational limit like the
+   * egress timeout, and an operator who lowers it must not have to re-activate every workflow for the
+   * change to apply. A re-activation is what recompiles; nothing else pretends to.
+   */
+  private retryPolicy(): RetryPolicy {
+    return {
+      maxTries: this.config.SEAMNEX_WORKFLOW_RETRY_MAX_TRIES,
+      waitMs: this.config.SEAMNEX_WORKFLOW_RETRY_WAIT_MS,
+    };
+  }
+
+  /**
    * 4E.3 minting, one scope per product the version touches.
    *
    * A scope is a **set** of operations, so two nodes on the same product share one row and one token.
@@ -1445,6 +1486,186 @@ export class WorkflowAuthoringService {
       credentials.set(product.entryKey, id);
     }
     return credentials;
+  }
+
+  /**
+   * NFR-4.14 — re-issues the scopes of active workflows that expire within the lead window.
+   *
+   * Called by the scheduler pass. "Due" means the **newest live scope of a product** expires within
+   * `SEAMNEX_WORKFLOW_CREDENTIAL_ROTATE_BEFORE_DAYS`, so an already-expired row is healed on the next
+   * pass (a workflow must not 401 until a human re-activates it) and a workflow that was just rotated
+   * is not a candidate again — the comparison is against the newest row, not any expiring one, which
+   * is what stops a failed revoke from causing a rotation per pass.
+   *
+   * A failure is per workflow: one product that cannot mint must not stop the rest of the batch.
+   */
+  async rotateDueCredentials(
+    limit = ROTATION_BATCH,
+  ): Promise<{ rotated: number; skipped: number }> {
+    if (!this.n8n.ready()) return { rotated: 0, skipped: 0 };
+    const candidates = await this.pool.query<{ id: string }>(
+      `SELECT DISTINCT w.id
+         FROM workflow w
+         JOIN credential_scope s ON s.workflow_id = w.id
+        WHERE w.state = 'active'
+          AND w.current_version_id IS NOT NULL
+          AND s.revoked_at IS NULL
+          AND s.token_hash IS NOT NULL
+          AND (s.version_id IS NULL OR s.version_id = w.current_version_id)
+          AND s.expires_at < now() + make_interval(days => $1)
+          AND s.issued_at = (
+                SELECT max(n.issued_at) FROM credential_scope n
+                 WHERE n.workflow_id = s.workflow_id
+                   AND n.instance_id = s.instance_id
+                   AND n.revoked_at IS NULL)
+        ORDER BY w.id
+        LIMIT $2`,
+      [this.config.SEAMNEX_WORKFLOW_CREDENTIAL_ROTATE_BEFORE_DAYS, limit],
+    );
+
+    let rotated = 0;
+    let skipped = 0;
+    for (const row of candidates.rows) {
+      try {
+        if (await this.rotateWorkflowCredentials(row.id)) rotated += 1;
+        else skipped += 1;
+      } catch (error) {
+        skipped += 1;
+        const detail = errorMessage(error);
+        this.logger.warn(
+          { workflowId: row.id, err: detail },
+          'workflow credential rotation failed',
+        );
+        await this.audit
+          .append({
+            action: 'workflow.credentials.rotation_failed',
+            actorType: 'system',
+            actorId: 'credential-rotation',
+            targetType: 'workflow',
+            targetId: row.id,
+            outcome: 'failure',
+            detail: { message: detail },
+          })
+          .catch(() => undefined);
+      }
+    }
+    return { rotated, skipped };
+  }
+
+  /**
+   * One workflow: mint new tokens, put them in n8n, push the definition, then retire the old ones.
+   *
+   * The order is the safety property, and it is activation's order for the same reason: a new token
+   * that never reaches n8n is an orphan row, a new credential without a new token is a definition
+   * that fails on its first egress, and revoking before the push would leave a live workflow
+   * unauthorised for the length of a network round trip.
+   */
+  private async rotateWorkflowCredentials(workflowId: string): Promise<boolean> {
+    const workflow = await this.load(workflowId);
+    const version = await this.currentVersion(workflowId);
+    const plan = await this.egressPlan(version.ir);
+
+    const oldScopes: { id: string }[] = [];
+    for (const product of plan.products) {
+      oldScopes.push(...(await this.liveScopes(workflow.id, product.entryKey)));
+    }
+
+    /*
+     * A per-generation idempotency key. The unique index on `credential_scope.idempotency_key` rejects
+     * a second row for one key, so a rotation that reused the activation key would collide with the
+     * scope it is replacing — and the broker's reuse path would hand back the very token being retired.
+     *
+     * A UUID rather than the clock: two rotations of one workflow within the same second would share a
+     * timestamp, and the second would then read back the first one's row.
+     */
+    const generation = randomUUID();
+    const tokens = new Map<string, string>();
+    const minted: string[] = [];
+    for (const product of plan.products) {
+      const scope = await this.broker.mint({
+        instanceId: product.instanceId,
+        workflowId: workflow.id,
+        operations: product.operations,
+        mode: product.mode,
+        ttlSeconds: NINETY_DAYS,
+        rotate: true,
+        idempotencyKey: `${workflow.id}:${version.id}:${product.entryKey}:${product.mode}:rotate:${generation}`,
+      });
+      tokens.set(product.entryKey, scope.token);
+      minted.push(scope.scopeId);
+    }
+
+    const credentials = await this.issueCredentials(workflow, version, plan.products, tokens);
+    const document = compile(workflow, version.ir, plan.addresses, credentials, this.retryPolicy());
+    await this.n8n.upsert(workflow.id, document, true, version.compiled_n8n_id);
+
+    if (!(await this.commitRotation(workflowId, version, credentials))) {
+      /*
+       * A new version landed while this rotation was pushing, so the definition now belongs to an
+       * activation that has its own credentials. Retire what this pass created and leave the
+       * definition alone: the new version's activation already wrote the one it intends to use.
+       */
+      for (const scopeId of minted) {
+        await this.broker.revoke(scopeId, 'credential-rotation').catch(() => undefined);
+      }
+      for (const credentialId of credentials.values()) {
+        await this.n8n.removeCredential(credentialId).catch(() => undefined);
+      }
+      return false;
+    }
+
+    const live = new Set(credentials.values());
+    for (const credentialId of Object.values(version.n8n_credentials ?? {})) {
+      if (live.has(credentialId)) continue;
+      await this.n8n.removeCredential(credentialId).catch(() => undefined);
+    }
+    for (const scope of oldScopes) {
+      await this.broker.revoke(scope.id, 'credential-rotation').catch(() => undefined);
+    }
+    return true;
+  }
+
+  /**
+   * Records the rotation, but only if the version it rotated is still the current one.
+   *
+   * The compare-and-set is the whole concurrency answer: an activation that bumped the version
+   * between the mint and the push owns the definition now, and writing this pass's credentials map
+   * over it would point the compiled workflow at tokens no scope recognises.
+   */
+  private async commitRotation(
+    workflowId: string,
+    version: VersionRow,
+    credentials: ReadonlyMap<string, string>,
+  ): Promise<boolean> {
+    return withTransaction(this.pool, async (tx) => {
+      await this.audit.lockChain(tx);
+      const current = await tx.query<{ current_version_id: string | null }>(
+        `SELECT current_version_id FROM workflow WHERE id = $1`,
+        [workflowId],
+      );
+      if (current.rows[0]?.current_version_id !== version.id) return false;
+      await tx.query(`UPDATE workflow_version SET n8n_credentials = $2 WHERE id = $1`, [
+        version.id,
+        JSON.stringify(Object.fromEntries(credentials)),
+      ]);
+      await this.audit.append(
+        {
+          action: 'workflow.credentials.rotated',
+          actorType: 'system',
+          actorId: 'credential-rotation',
+          targetType: 'workflow',
+          targetId: workflowId,
+          outcome: 'success',
+          detail: {
+            versionId: version.id,
+            entryKeys: [...credentials.keys()],
+            reason: 'scope within the rotation window (NFR-4.14)',
+          },
+        },
+        tx,
+      );
+      return true;
+    });
   }
 
   /** The operations one instance publishes, with the endpoint each of them is called at. */
@@ -2008,12 +2229,24 @@ export type EgressAddress = {
   readonly method: string;
 };
 
+/**
+ * FR-5.7 — bounded retries per step.
+ *
+ * The defaults are the compiler's own, so a definition compiled without a configured policy still
+ * retries: an operator who never sets the knobs gets the behaviour the requirement asks for, and a
+ * test can pin the emitted node without building a config object.
+ */
+export type RetryPolicy = { readonly maxTries: number; readonly waitMs: number };
+
+export const DEFAULT_RETRY_POLICY: RetryPolicy = { maxTries: 3, waitMs: 5_000 };
+
 /** IR → n8n workflow JSON. One httpRequest node per IR node, one webhook or schedule trigger. */
 export function compile(
   workflow: Workflow,
   ir: Ir,
   addresses: ReadonlyMap<string, EgressAddress>,
   credentials: ReadonlyMap<string, string> = new Map(),
+  retry: RetryPolicy = DEFAULT_RETRY_POLICY,
 ): Record<string, unknown> {
   const nodes = ir.nodes.map((entry) => {
     /**
@@ -2034,9 +2267,13 @@ export function compile(
      */
     const bodyParameters = body.map((mapping) => ({
       name: mapping.to,
-      // The path rule is shared with the console preview: a bracket path (`["first name"]`) must not
-      // become `$json.["first name"]`, which n8n only rejects when it evaluates the expression.
-      value: `=${mappingExpression(mapping.from)}`,
+      /*
+       * FR-5.5: the value is the mapping, not just its path. `mappedValueExpression` applies the
+       * declared conversion and the missing-value policy, and returns exactly `={{ $json.path }}`
+       * for a mapping that declares neither — the path rule is shared with the console preview, so a
+       * bracket path (`["first name"]`) never becomes `$json.["first name"]`.
+       */
+      value: mappedValueExpression(mapping),
     }));
     const address = addresses.get(entry.id);
     if (address === undefined) {
@@ -2087,6 +2324,19 @@ export function compile(
           : {}),
       },
       ...(credentialId === undefined ? {} : { credentials: credentials_ }),
+      /*
+       * FR-5.7 — bounded retries for a transient failure, and a hard stop once they are spent.
+       *
+       * Retrying here rather than by re-running the whole workflow is deliberate: a re-run would
+       * repeat every step, including the writes that already landed. n8n's node retry re-sends the
+       * one request that failed, and `waitBetweenTries` is a fixed wait — the fixed form is the
+       * primitive the engine offers, recorded as a deviation in ADR-BE-30 rather than faked with a
+       * sequence of nodes this compiler does not own.
+       */
+      retryOnFail: retry.maxTries > 1,
+      ...(retry.maxTries > 1 ? { maxTries: retry.maxTries, waitBetweenTries: retry.waitMs } : {}),
+      // Never continue past a failed write: the run's later nodes assume the earlier one succeeded.
+      onError: 'stopWorkflow',
     };
   });
 
@@ -2337,10 +2587,10 @@ export function mappingFieldIssues(
   for (const target of targets) {
     const row = snapshots.get(snapshotKey(target.instanceId, target.operation));
     const mappings = mappingsFor(ir, target.node);
-    // Nothing is sent for a node without mappings; `EMPTY_MAPPINGS` already speaks for it, and a
-    // second warning about an unknown schema would be noise on every unmapped draft node.
-    if (mappings.length === 0) continue;
     if (row === undefined || row.status !== 'available') {
+      // Nothing is sent for a node without mappings; `EMPTY_MAPPINGS` already speaks for it, and a
+      // second warning about an unknown schema would be noise on every unmapped draft node.
+      if (mappings.length === 0) continue;
       issues.push(
         issue(
           target.node.id,
@@ -2354,6 +2604,29 @@ export function mappingFieldIssues(
     }
     const known = fieldsOf(row.fields);
     const accepted = new Set(known.map((field) => field.name));
+    /*
+     * FR-5.6 "completeness of required mappings": the product published the list and marked a field
+     * required, so a write that omits it is one the product will refuse on the first run — after
+     * activation succeeded. This is an error only here, where the knowledge exists; a snapshot that
+     * is missing or unavailable never produces it (ADR-BE-24 §2).
+     */
+    const written = new Set(mappings.map((mapping) => mapping.to));
+    const uncovered = known.filter((field) => field.required && !written.has(field.name));
+    if (uncovered.length > 0) {
+      issues.push(
+        issue(
+          target.node.id,
+          'error',
+          'MISSING_REQUIRED_FIELD',
+          `Node "${target.node.label}" sends no value for ${uncovered
+            .map((field) => `"${field.name}"`)
+            .join(
+              ', ',
+            )}, which ${target.node.entryKey ?? 'the product'} "${target.operation}" requires.`,
+          'Map the required field(s), or remove the operation and pick one the step can satisfy.',
+        ),
+      );
+    }
     const unknown = mappings.filter((mapping) => !accepted.has(mapping.to));
     if (unknown.length === 0) continue;
     const example = known
@@ -2375,6 +2648,57 @@ export function mappingFieldIssues(
           : `Use a field the operation publishes (${example}${known.length > 6 ? ', …' : ''}), then validate again.`,
       ),
     );
+  }
+  return issues;
+}
+
+/**
+ * FR-5.5 — a declared conversion or missing-value policy has to be one the compiler can emit.
+ *
+ * Exported and pure for the same reason as `mappingFieldIssues`: the rule is the contract. The
+ * platform owns the transform catalogue, so an unrecognised name is an error — the same "strict where
+ * the platform has knowledge" rule ADR-BE-24 §2 applies to target fields. A prose value
+ * (`currency → EUR`) is documentation; it compiled to nothing before this check existed, and the
+ * product silently received the unconverted value.
+ *
+ * Read nodes are not inspected: a read node sends no body, so its mappings are authoring notes the
+ * compiler never reads, and refusing activation over them would block a definition that runs.
+ */
+export function mappingSemanticsIssues(ir: Ir): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const allowed = transformNames().join(', ');
+  for (const node of ir.nodes) {
+    if (node.mode !== 'write') continue;
+    for (const mapping of mappingsFor(ir, node)) {
+      const transform = normaliseTransform(mapping.transform);
+      if (transform !== null && !isMappingTransform(transform)) {
+        issues.push(
+          issue(
+            node.id,
+            'error',
+            'UNKNOWN_TRANSFORM',
+            // Quoted as the author wrote it: they have to recognise the value to correct it, and the
+            // catalogue's own comparison is case-insensitive.
+            `Node "${node.label}" converts "${mapping.to}" with "${(mapping.transform ?? '').trim()}", which the platform cannot apply.`,
+            `Use one of: ${allowed}. A description of the conversion is not a conversion.`,
+          ),
+        );
+        // The default's type depends on the conversion, so it is judged only once that is known.
+        continue;
+      }
+      const problem = defaultValueProblem(mapping);
+      if (problem === null) continue;
+      const blank = (mapping.defaultValue ?? '').trim().length === 0;
+      issues.push(
+        issue(
+          node.id,
+          'error',
+          blank ? 'MISSING_DEFAULT_VALUE' : 'INVALID_DEFAULT_VALUE',
+          problem,
+          "Set a default in the target field's own units, or choose a different handling for a missing value.",
+        ),
+      );
+    }
   }
   return issues;
 }

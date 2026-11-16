@@ -532,6 +532,36 @@ const EnvironmentSchema = z
      */
     SEAMNEX_WORKFLOW_SAMPLE_RETENTION_DAYS: z.coerce.number().int().min(1).max(365).default(30),
     /**
+     * FR-5.7 — bounded retries per step. `1` disables retrying; the wait is n8n's fixed delay between
+     * attempts, the only backoff shape its node-level retry offers (ADR-BE-30).
+     */
+    SEAMNEX_WORKFLOW_RETRY_MAX_TRIES: z.coerce.number().int().min(1).max(10).default(3),
+    SEAMNEX_WORKFLOW_RETRY_WAIT_MS: z.coerce.number().int().min(1_000).max(60_000).default(5_000),
+    /**
+     * FR-5.8 — how many consecutive failed runs of one workflow reach the owner before an alert is
+     * queued, and how many days of run history are kept. The floor is 30 days because the requirement
+     * states a 30-day minimum; a failed run is kept for twice the window, since the failed-run queue
+     * is the artefact an operator inspects and replays.
+     */
+    SEAMNEX_WORKFLOW_FAILURE_ALERT_THRESHOLD: z.coerce.number().int().min(1).max(20).default(3),
+    SEAMNEX_WORKFLOW_RUN_RETENTION_DAYS: z.coerce.number().int().min(30).max(365).default(90),
+    /**
+     * NFR-4.14 — re-issue a workflow's credential this many days before it expires, and how often the
+     * pass looks. The lead must outlast an outage of the scheduler, so the floor is a day.
+     */
+    SEAMNEX_WORKFLOW_CREDENTIAL_ROTATE_BEFORE_DAYS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(30)
+      .default(7),
+    SEAMNEX_WORKFLOW_CREDENTIAL_SWEEP_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .min(60_000)
+      .max(24 * 60 * 60 * 1_000)
+      .default(60 * 60 * 1_000),
+    /**
      * The platform's own ceiling on a cached product session. The product has no TTL enabled today
      * (`session_ttl_enabled` is false), so without this the cached cookie would outlive the
      * entitlement that justified it. The ADR's prerequisite (`OPENPROJECT_SESSION__TTL__ENABLED`)

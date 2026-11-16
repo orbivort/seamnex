@@ -114,8 +114,55 @@ describe('toFieldMappings', () => {
     const { result } = renderHook(() => useMappingDraft(STORED));
 
     expect(toFieldMappings(result.current.rows)).toEqual([
-      { from: 'lead.consentSource', to: 'consentSource', transform: null },
+      {
+        from: 'lead.consentSource',
+        to: 'consentSource',
+        transform: null,
+        required: false,
+        defaultValue: null,
+      },
     ]);
     expect(Object.hasOwn(result.current.rows[0] ?? {}, 'id')).toBe(true);
+  });
+
+  /**
+   * FR-5.5 — the save used to rebuild each row as `{from, to, transform}`, so the first save after
+   * an import discarded `required`, `onMissing` and `defaultValue` and the definition silently lost
+   * the missing-value policy its author set.
+   */
+  it('carries the conversion and the missing-value policy through a save', () => {
+    const { result } = renderHook(() =>
+      useMappingDraft(
+        node([
+          {
+            from: 'lead.amount',
+            to: 'budget',
+            transform: 'number',
+            required: true,
+            onMissing: 'default',
+            defaultValue: '0',
+          },
+        ]),
+      ),
+    );
+
+    expect(toFieldMappings(result.current.rows)).toEqual([
+      {
+        from: 'lead.amount',
+        to: 'budget',
+        transform: 'number',
+        required: true,
+        onMissing: 'default',
+        defaultValue: '0',
+      },
+    ]);
+    // Nothing was edited, so opening the drawer and pressing save must not look like a change.
+    expect(result.current.dirty).toBe(false);
+  });
+
+  it('omits `onMissing` when the row declares none, because the contract takes no null there', () => {
+    const { result } = renderHook(() => useMappingDraft(STORED));
+
+    expect(toFieldMappings(result.current.rows)[0]).not.toHaveProperty('onMissing');
   });
 });

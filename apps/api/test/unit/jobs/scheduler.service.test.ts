@@ -19,6 +19,7 @@ const CONFIG = {
   SEAMNEX_JOB_LOG_RETENTION_DAYS: 30,
   SEAMNEX_DRIFT_INTERVAL_MS: 300_000,
   SEAMNEX_DRIFT_REPAIR_COOLDOWN_MS: 3_600_000,
+  SEAMNEX_WORKFLOW_CREDENTIAL_SWEEP_INTERVAL_MS: 3_600_000,
 } as unknown as AppConfig;
 
 function setup(options: { omit?: readonly string[]; routes?: Parameters<typeof fakeDb>[0] } = {}) {
@@ -77,6 +78,9 @@ function setup(options: { omit?: readonly string[]; routes?: Parameters<typeof f
       };
   // The repair queues the same stage list an operator's reconfigure uses.
   const pipelines = { stepsFor: vi.fn(() => ['resolve', 'render', 'plan', 'apply', 'record']) };
+  const workflows = omit.has('workflow')
+    ? undefined
+    : { rotateDueCredentials: vi.fn(async () => ({ rotated: 0, skipped: 0 })) };
 
   const service = new SchedulerService(
     db.pool,
@@ -94,6 +98,7 @@ function setup(options: { omit?: readonly string[]; routes?: Parameters<typeof f
     relayAccounts as never,
     undefined,
     drift as never,
+    workflows as never,
   );
   return {
     db,
@@ -108,6 +113,7 @@ function setup(options: { omit?: readonly string[]; routes?: Parameters<typeof f
     relayAccounts,
     drift,
     pipelines,
+    workflows,
     metrics,
     set,
     unsent,
@@ -233,6 +239,33 @@ describe('the pass', () => {
     outbox.dispatchBatch.mockRejectedValueOnce('outbox down');
 
     await expect(service.tick()).resolves.toBeUndefined();
+  });
+
+  /**
+   * NFR-4.14 — the rotation is a mint, a credential, a push and a commit per workflow, so it runs on
+   * its own interval rather than on every scheduler pass.
+   */
+  it('rotates workflow credentials on its own interval, not on every pass', async () => {
+    const { workflows, service } = setup({ routes: FULL_ROUTES });
+
+    await service.tick();
+    expect(workflows?.rotateDueCredentials).toHaveBeenCalledOnce();
+
+    await service.tick();
+    expect(workflows?.rotateDueCredentials).toHaveBeenCalledOnce();
+
+    vi.setSystemTime(new Date('2026-03-04T10:00:01.000Z'));
+    await service.tick();
+    expect(workflows?.rotateDueCredentials).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the pass going when a rotation fails', async () => {
+    const { workflows, outbox, service } = setup({ routes: FULL_ROUTES });
+    workflows?.rotateDueCredentials.mockRejectedValueOnce(new Error('broker down'));
+
+    await expect(service.tick()).resolves.toBeUndefined();
+    // The passes after it still ran: one product that cannot mint must not stop the platform.
+    expect(outbox.dispatchBatch).toHaveBeenCalledOnce();
   });
 
   it('anchors once per day, not once per pass', async () => {

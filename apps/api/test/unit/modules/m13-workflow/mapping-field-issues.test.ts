@@ -102,4 +102,58 @@ describe('mappingFieldIssues', () => {
 
     expect(issues).toEqual([]);
   });
+
+  /**
+   * FR-5.6 "completeness of required mappings". The product published the list and marked the field
+   * required, so the write is one it will refuse — discovered at activation instead of on the first
+   * run, after the definition was reported as live.
+   */
+  it('refuses a write that leaves a required field unmapped', () => {
+    const issues = mappingFieldIssues(
+      irWith('emailAddress'),
+      TARGETS,
+      new Map([
+        [
+          KEY,
+          {
+            status: 'available',
+            fields: [
+              { name: 'emailAddress', required: true },
+              { name: 'lastName', required: true },
+            ],
+          },
+        ],
+      ]),
+    );
+
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({
+      code: 'MISSING_REQUIRED_FIELD',
+      severity: 'error',
+      nodeId: NODE,
+    });
+    expect(issues[0]?.message).toContain('"lastName"');
+    // The mapped one is not named: the message says what is missing, not everything the product takes.
+    expect(issues[0]?.message).not.toContain('"emailAddress"');
+  });
+
+  it('refuses a write whose node maps nothing when the product requires fields', () => {
+    const issues = mappingFieldIssues(
+      {
+        trigger: {},
+        nodes: [WRITE_NODE],
+        edges: [{ id: 'e1', source: 'a', target: NODE, mappings: [] }],
+      } as never,
+      TARGETS,
+      new Map([[KEY, { status: 'available', fields: [{ name: 'emailAddress', required: true }] }]]),
+    );
+
+    expect(issues[0]).toMatchObject({ code: 'MISSING_REQUIRED_FIELD', severity: 'error' });
+  });
+
+  it('never turns a missing schema into a required-field error', () => {
+    const issues = mappingFieldIssues(irWith('emailAddress'), TARGETS, new Map());
+
+    expect(issues.map((entry) => entry.code)).toEqual(['FIELD_SCHEMA_UNAVAILABLE']);
+  });
 });

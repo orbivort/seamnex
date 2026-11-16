@@ -222,6 +222,15 @@ export class N8nClient {
       durationMs: number;
       records: number;
       error: string | null;
+      /**
+       * How many attempts n8n made of this node, `1` when it succeeded first time.
+       *
+       * `runData[node]` is an array with one entry per try — n8n appends rather than overwrites when
+       * a node is retried — so this is the observed count, not a setting. Reading only the last entry
+       * (as the mirror used to) left `workflow_run_node.attempt` at `1` for a step that had been
+       * retried twice, which is what made FR-5.7's retry claim unverifiable (ISSUE-23).
+       */
+      tries: number;
       /** The first output item's `json`, as n8n already returned it. Unredacted; the mirror redacts. */
       sample: Record<string, unknown> | null;
     }[];
@@ -260,6 +269,7 @@ export class N8nClient {
         durationMs: typeof last.executionTime === 'number' ? last.executionTime : 0,
         records: items.length,
         error: errorText(last.error),
+        tries: Math.max(1, runs.length),
         // FR-5.5: the item is already in the `includeData=true` payload this method requests to
         // count records, so capturing it adds no call. Only the first one: the mapper needs a path
         // to exist, not every row.

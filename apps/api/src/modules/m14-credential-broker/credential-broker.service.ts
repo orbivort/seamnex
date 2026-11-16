@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import {
   workflowIneligibilityReason,
@@ -44,6 +44,7 @@ export class BrokeredCredentialService implements CredentialBrokerService {
     mode: 'read' | 'write';
     ttlSeconds: number;
     idempotencyKey?: string;
+    rotate?: boolean;
   }): Promise<{
     scopeId: string;
     secretRef: string;
@@ -57,8 +58,11 @@ export class BrokeredCredentialService implements CredentialBrokerService {
      * request by version and entry, and the token already handed to n8n stays valid. The plaintext is
      * therefore *opened* from the secret store on that path — the same value, audited as a read —
      * rather than generated again and left as an orphaned credential in n8n.
+     *
+     * A rotation (`rotate: true`) skips this deliberately: its whole purpose is a new value, and the
+     * caller compensates with a per-generation key so the unique index accepts the row.
      */
-    const existing = await this.existingScope(input);
+    const existing = input.rotate === true ? null : await this.existingScope(input);
     if (existing !== null) {
       const token = await this.secrets.open(
         existing.secret_ref,
@@ -408,12 +412,19 @@ export function tokenDigest(token: string): string {
   return createHash('sha256').update(token, 'utf8').digest('hex');
 }
 
+/**
+ * A broker token's random half.
+ *
+ * `Math.random()` is a predictably seeded PRNG, not a secret source: 24 bytes drawn from it are not
+ * 24 bytes of entropy, and a token that authorises writes to a product must be unguessable
+ * (NFR-4.14). `randomBytes` is the platform's CSPRNG, and the same rule the trigger ingress already
+ * applies to its own token.
+ *
+ * 32 bytes: the token arrives in an `Authorization` header on every egress call, so it is sized to be
+ * far beyond brute force rather than to be short.
+ */
 function cryptoRandom(): string {
-  return Array.from({ length: 24 }, () =>
-    Math.floor(Math.random() * 256)
-      .toString(16)
-      .padStart(2, '0'),
-  ).join('');
+  return randomBytes(32).toString('hex');
 }
 
 /**

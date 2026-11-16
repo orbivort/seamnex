@@ -3,6 +3,13 @@ import type { Workflow, WorkflowExport, WorkflowRun, WorkflowState } from '@seam
 export const WORKFLOW_SERVICE = Symbol('seamnex.m13.workflow');
 
 /**
+ * Not every capability here is a route. `WorkflowAuthoringService.rotateDueCredentials` (NFR-4.14)
+ * re-issues expiring scopes on the scheduler's interval and is deliberately absent from this
+ * interface: it has no HTTP surface, and giving it one would let a caller rotate a workflow's
+ * credential as an authoring action rather than as platform upkeep.
+ */
+
+/**
  * The declared filters of `GET /workflows`. Every value is already validated against the contract
  * (closed state set, integer query types) before it reaches the service; the service only enforces
  * the ranges the OpenAPI description promises.

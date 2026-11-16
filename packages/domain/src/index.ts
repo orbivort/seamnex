@@ -18,6 +18,7 @@ export * from './contract';
 export * from './compose-rules';
 export * from './env-rules';
 export * from './mapping-expression';
+export * from './mapping-transform';
 export * from './schemas/auth';
 export * from './schemas/common';
 export * from './schemas/catalog';

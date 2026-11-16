@@ -313,6 +313,8 @@ function harness(overrides: Route[] = [], discovery?: unknown, samples?: unknown
   };
   const n8n = {
     assertReady: vi.fn(),
+    // Rotation asks whether n8n is configured before it mints anything (NFR-4.14).
+    ready: vi.fn(() => true),
     upsert: vi.fn(async () => 'n8n-workflow-1'),
     deactivate: vi.fn(async () => undefined),
     trigger: vi.fn(async () => 'n8n-execution-1'),
@@ -330,7 +332,15 @@ function harness(overrides: Route[] = [], discovery?: unknown, samples?: unknown
     })),
     revoke: vi.fn(async () => undefined),
   };
-  const config = { SEAMNEX_BROKER_URL: 'http://broker.test' };
+  // Activation reads the retry policy from config (FR-5.7), so the fake carries the real defaults
+  // rather than `undefined`, which would compile every node with retries disabled.
+  const config = {
+    SEAMNEX_BROKER_URL: 'http://broker.test',
+    SEAMNEX_WORKFLOW_RETRY_MAX_TRIES: 3,
+    SEAMNEX_WORKFLOW_RETRY_WAIT_MS: 5_000,
+    // NFR-4.14: the rotation lead window the pass queries with.
+    SEAMNEX_WORKFLOW_CREDENTIAL_ROTATE_BEFORE_DAYS: 7,
+  };
   /**
    * FR-5.9's gate, allowed by default: these tests are about the authoring behaviour behind it, and
    * the rule itself is proved in `workflow-authority.service.test.ts` plus the domain matrix. A test
@@ -721,6 +731,123 @@ describe('compile', () => {
         ],
       },
     });
+  });
+
+  /**
+   * FR-5.7 — a transient failure is retried, and the run stops once the attempts are spent. The
+   * wait is fixed because that is the only shape n8n's node-level retry offers (ADR-BE-30).
+   */
+  it('gives every step a bounded retry and stops the run when it is exhausted', async () => {
+    const { service } = harness();
+    const workflow = await service.load(WORKFLOW_ID);
+
+    const document = compile(workflow, healthyIr(), ADDRESSES, CREDENTIALS, {
+      maxTries: 4,
+      waitMs: 7_500,
+    });
+    const [, read, write] = document.nodes as Record<string, unknown>[];
+
+    for (const node of [read, write]) {
+      expect(node).toMatchObject({
+        retryOnFail: true,
+        maxTries: 4,
+        waitBetweenTries: 7_500,
+        onError: 'stopWorkflow',
+      });
+    }
+    // The trigger is not an HTTP step: retrying a schedule changes nothing.
+    expect((document.nodes as Record<string, unknown>[])[0]?.retryOnFail).toBeUndefined();
+  });
+
+  it('compiles a single attempt when retries are switched off', async () => {
+    const { service } = harness();
+    const workflow = await service.load(WORKFLOW_ID);
+
+    const document = compile(workflow, healthyIr(), ADDRESSES, CREDENTIALS, {
+      maxTries: 1,
+      waitMs: 5_000,
+    });
+
+    expect((document.nodes as Record<string, unknown>[])[1]).toMatchObject({ retryOnFail: false });
+    expect((document.nodes as Record<string, unknown>[])[1]).not.toHaveProperty('maxTries');
+  });
+
+  /**
+   * FR-5.5 — the four mapping fields reach the body. `transform` converts the value, and the
+   * missing-value policy decides what happens when the source item has no such field.
+   */
+  it('compiles a declared conversion into the body value', async () => {
+    const { service } = harness();
+    const workflow = await service.load(WORKFLOW_ID);
+
+    const document = compile(
+      workflow,
+      {
+        trigger: scheduleTrigger(),
+        nodes: [readNode(), writeNode({ mappings: [] })],
+        edges: [
+          edge(NODE_READ, NODE_WRITE, [
+            { from: 'contact.amount', to: 'budget', transform: 'number' },
+          ]),
+        ],
+      },
+      ADDRESSES,
+      CREDENTIALS,
+    );
+    const write = (document.nodes as Record<string, unknown>[])[2] as {
+      parameters: { bodyParameters: { parameters: { name: string; value: string }[] } };
+    };
+
+    expect(write.parameters.bodyParameters.parameters).toEqual([
+      {
+        name: 'budget',
+        value:
+          "={{ ($json.contact.amount ?? '') === '' ? $json.contact.amount : Number($json.contact.amount) }}",
+      },
+    ]);
+  });
+
+  it('fails the step when a required mapping has no value', async () => {
+    const { service } = harness();
+    const workflow = await service.load(WORKFLOW_ID);
+
+    const document = compile(
+      workflow,
+      {
+        trigger: scheduleTrigger(),
+        nodes: [readNode(), writeNode({ mappings: [] })],
+        edges: [
+          edge(NODE_READ, NODE_WRITE, [
+            { from: 'contact.email', to: 'email', transform: null, required: true },
+          ]),
+        ],
+      },
+      ADDRESSES,
+      CREDENTIALS,
+    );
+    const write = (document.nodes as Record<string, unknown>[])[2] as {
+      parameters: { bodyParameters: { parameters: { value: string }[] } };
+    };
+
+    expect(write.parameters.bodyParameters.parameters[0]?.value).toContain('throw new Error');
+    expect(write.parameters.bodyParameters.parameters[0]?.value).toContain(
+      'Missing required value',
+    );
+  });
+
+  /** A mapping that opted into nothing must not be re-pointed by a version bump. */
+  it('keeps an opted-out mapping byte-identical to the expression it always compiled to', async () => {
+    const { service } = harness();
+    const workflow = await service.load(WORKFLOW_ID);
+
+    const document = compile(workflow, healthyIr(), ADDRESSES, CREDENTIALS);
+    const write = (document.nodes as Record<string, unknown>[])[2] as {
+      parameters: { bodyParameters: { parameters: { name: string; value: string }[] } };
+    };
+
+    expect(write.parameters.bodyParameters.parameters).toEqual([
+      { name: 'email', value: '={{ $json.contact.email }}' },
+    ]);
   });
 });
 
@@ -3023,6 +3150,129 @@ describe('dispatchTriggerRun', () => {
       detail: expect.stringContaining('no compiled n8n definition'),
     });
     expect(statement(db, 'INSERT INTO workflow_run (')).toBeUndefined();
+  });
+});
+
+/**
+ * NFR-4.14 — a live workflow's scope expires after 90 days, so something has to replace it while it
+ * is still working. Without this pass a running workflow simply started returning 401 on day 90 and
+ * stayed that way until a human re-activated it.
+ */
+describe('rotateDueCredentials', () => {
+  const OLD_SCOPE = scopeRow();
+  const LIVE_VERSION = versionRow({ n8n_credentials: { 'D02-01': 'cred-old' } });
+
+  /** Everything a rotation of the healthy definition issues, in the order it issues them. */
+  function rotationRoutes(overrides: Route[] = []): Route[] {
+    return [
+      ...overrides,
+      route('SELECT DISTINCT w.id', [{ id: WORKFLOW_ID }]),
+      route('JOIN workflow_version v ON v.id = w.current_version_id', [LIVE_VERSION]),
+      route('SELECT current_version_id FROM workflow', [{ current_version_id: VERSION_ID }]),
+      route('UPDATE workflow_version SET n8n_credentials', []),
+    ];
+  }
+
+  it('re-issues the scope, repoints the definition and retires the token it replaced', async () => {
+    const { db, n8n, broker, audit, service } = harness(rotationRoutes());
+
+    await expect(service.rotateDueCredentials()).resolves.toEqual({ rotated: 1, skipped: 0 });
+
+    // A rotation must bypass the reuse path, or it would hand back the very token it is replacing.
+    expect(broker.mint).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rotate: true,
+        workflowId: WORKFLOW_ID,
+        idempotencyKey: expect.stringContaining(':rotate:'),
+      }),
+    );
+    // Activation is re-issued, not created: the definition keeps the id it already has.
+    expect(n8n.upsert).toHaveBeenCalledWith(WORKFLOW_ID, expect.anything(), true, null);
+
+    const recorded = statement(db, 'UPDATE workflow_version SET n8n_credentials');
+    expect(recorded?.params?.[0]).toBe(VERSION_ID);
+    expect(String(recorded?.params?.[1])).toContain('cred-D02-01');
+
+    // Only after the commit does the old token die: a revoked scope is a workflow that 401s.
+    expect(broker.revoke).toHaveBeenCalledWith(OLD_SCOPE.id, 'credential-rotation');
+    expect(n8n.removeCredential).toHaveBeenCalledWith('cred-old');
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'workflow.credentials.rotated',
+        targetId: WORKFLOW_ID,
+        detail: expect.objectContaining({ versionId: VERSION_ID }),
+      }),
+      expect.anything(),
+    );
+  });
+
+  it('looks for the newest scope of each product, so one pass cannot rotate twice', async () => {
+    const { db, service } = harness(rotationRoutes());
+
+    await service.rotateDueCredentials();
+
+    const candidate = statement(db, 'SELECT DISTINCT w.id');
+    // The lead window is the configured number of days before expiry…
+    expect(candidate?.params?.[0]).toBe(7);
+    expect(candidate?.params?.[1]).toBe(10);
+    // …and "newest live row per product" is what stops a failed revoke from re-arming the workflow.
+    expect(candidate?.sql).toContain('SELECT max(n.issued_at) FROM credential_scope n');
+    expect(candidate?.sql).toContain("w.state = 'active'");
+  });
+
+  it('does nothing when no scope is inside the window', async () => {
+    const { n8n, broker, service } = harness(rotationRoutes([route('SELECT DISTINCT w.id', [])]));
+
+    await expect(service.rotateDueCredentials()).resolves.toEqual({ rotated: 0, skipped: 0 });
+    expect(broker.mint).not.toHaveBeenCalled();
+    expect(n8n.upsert).not.toHaveBeenCalled();
+  });
+
+  it('does nothing when n8n is not configured, rather than minting tokens nothing can hold', async () => {
+    const { db, n8n, broker, service } = harness(rotationRoutes());
+    // Without a URL there is nowhere to put the new credential, so the pass must not start.
+    n8n.ready.mockReturnValue(false);
+
+    await expect(service.rotateDueCredentials()).resolves.toEqual({ rotated: 0, skipped: 0 });
+
+    expect(broker.mint).not.toHaveBeenCalled();
+    expect(db.calls.some((call) => call.sql.includes('SELECT DISTINCT w.id'))).toBe(false);
+  });
+
+  /**
+   * The race: an activation bumps `current_version_id` while this pass is pushing. Committing the
+   * rotation would point the new definition at tokens bound to the version it replaced.
+   */
+  it('abandons the rotation when the version moved under it, and cleans up what it minted', async () => {
+    const { db, n8n, broker, service } = harness(
+      rotationRoutes([
+        route('SELECT current_version_id FROM workflow', [{ current_version_id: 'other-version' }]),
+      ]),
+    );
+
+    await expect(service.rotateDueCredentials()).resolves.toEqual({ rotated: 0, skipped: 1 });
+
+    expect(statement(db, 'UPDATE workflow_version SET n8n_credentials')).toBeUndefined();
+    expect(broker.revoke).toHaveBeenCalledWith('scope-1', 'credential-rotation');
+    expect(n8n.removeCredential).toHaveBeenCalledWith('cred-D01-01');
+  });
+
+  it('keeps the batch going when one workflow cannot be rotated, and leaves a failure trail', async () => {
+    const { audit, broker, service } = harness(
+      rotationRoutes([route('SELECT DISTINCT w.id', [{ id: WORKFLOW_ID }, { id: WORKFLOW_ID }])]),
+    );
+    // The second workflow's mint fails: one product that cannot issue must not stop the others.
+    broker.mint.mockRejectedValueOnce(new Error('broker unavailable'));
+
+    await expect(service.rotateDueCredentials()).resolves.toEqual({ rotated: 1, skipped: 1 });
+
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'workflow.credentials.rotation_failed',
+        outcome: 'failure',
+        detail: expect.objectContaining({ message: 'broker unavailable' }),
+      }),
+    );
   });
 });
 

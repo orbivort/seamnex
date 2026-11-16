@@ -13,6 +13,7 @@ import { CredentialBrokerModule } from '../m14-credential-broker/credential-brok
 import { WorkflowEgressModule } from '../m25-workflow-egress/workflow-egress.module';
 import { AccessControlModule } from '../m09-access-control/access-control.module';
 import { GovernanceModule } from '../m18-governance/governance.module';
+import { NotificationModule } from '../m20-notification/notification.module';
 
 @Module({
   // M25 owns the only hardened path to a product, so field discovery reads the schema through it
@@ -20,7 +21,17 @@ import { GovernanceModule } from '../m18-governance/governance.module';
   //
   // m09 supplies the live role bindings and m18 the break-glass read: FR-5.9's rule needs both, and
   // neither module depends on this one, so the edges are one-way.
-  imports: [CredentialBrokerModule, WorkflowEgressModule, AccessControlModule, GovernanceModule],
+  //
+  // M20 delivers the failure alert FR-5.8 asks for. It is imported here, not globally, so the edge is
+  // declared: the mirror raises the alert through the interface, and a process that does not host
+  // delivery simply does not raise one (ADR-BE-30).
+  imports: [
+    CredentialBrokerModule,
+    WorkflowEgressModule,
+    AccessControlModule,
+    GovernanceModule,
+    NotificationModule,
+  ],
   providers: [
     N8nClient,
     RunMirrorService,

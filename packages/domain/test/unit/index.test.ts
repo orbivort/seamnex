@@ -12,6 +12,7 @@ import * as labels from '../../src/labels';
 import * as licenseGate from '../../src/license-gate';
 import * as licenseTerms from '../../src/license-terms';
 import * as mappingExpression from '../../src/mapping-expression';
+import * as mappingTransform from '../../src/mapping-transform';
 import * as policy from '../../src/policy';
 import * as propagation from '../../src/propagation';
 import * as routes from '../../src/routes';
@@ -58,6 +59,7 @@ const MODULES = [
   ['license-gate', licenseGate],
   ['license-terms', licenseTerms],
   ['mapping-expression', mappingExpression],
+  ['mapping-transform', mappingTransform],
   ['policy', policy],
   ['propagation', propagation],
   ['routes', routes],

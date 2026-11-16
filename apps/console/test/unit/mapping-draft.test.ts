@@ -125,4 +125,18 @@ describe('bodyPreview', () => {
     expect(preview).toEqual({ firstName: '{{ $json["first name"] }}' });
     expect(bodyPreview([mapping('$', 'payload')]).includes('$json.')).toBe(false);
   });
+
+  /**
+   * FR-5.5 — the preview is derived from the compiler's own function, so a conversion or a missing
+   * guard the author set is visible here rather than only in a failed run.
+   */
+  it('shows the conversion and the guard the compiler will emit', () => {
+    const preview = JSON.parse(
+      bodyPreview([{ from: 'lead.amount', to: 'budget', transform: 'number', required: true }]),
+    );
+
+    expect(preview.budget).toContain('Number($json.lead.amount)');
+    expect(preview.budget).toContain('throw new Error');
+    expect(preview.budget.startsWith('{{ ')).toBe(true);
+  });
 });

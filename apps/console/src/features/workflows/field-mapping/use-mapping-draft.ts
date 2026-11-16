@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { mappingExpression } from '@seamnex/domain';
+import { mappedValueExpression } from '@seamnex/domain';
 import type { FieldDescriptor, FieldMapping, WorkflowNode } from '@seamnex/domain';
 
 export type RowIssue = { readonly from: string | null; readonly to: string | null };
@@ -23,19 +23,43 @@ const nextRowId = (): string => {
 const toDraftRow = (mapping: FieldMapping): DraftRow => ({ ...mapping, id: nextRowId() });
 const toDraftRows = (mappings: readonly FieldMapping[]): DraftRow[] => mappings.map(toDraftRow);
 
-/** The rows as the API stores them: the id is a rendering concern, not part of the definition. */
+/**
+ * The rows as the API stores them: the id is a rendering concern, not part of the definition.
+ *
+ * FR-5.5 — everything `FieldMappingSchema` declares is carried, not just the two sides. This used to
+ * rebuild each row as `{from, to, transform}`, so saving a mapping silently discarded `required`,
+ * `onMissing` and `defaultValue`: an imported definition lost its missing-value policy the first
+ * time anyone opened the drawer and pressed save.
+ */
 export function toFieldMappings(rows: readonly DraftRow[]): FieldMapping[] {
-  return rows.map(({ from, to, transform }) => ({ from, to, transform }));
+  return rows.map(toWireMapping);
+}
+
+function toWireMapping(mapping: FieldMapping): FieldMapping {
+  return {
+    from: mapping.from,
+    to: mapping.to,
+    transform: mapping.transform,
+    // Sent explicitly so the stored value stops depending on which client wrote the row; `onMissing`
+    // is omitted when absent because the contract's enum does not accept `null`.
+    required: mapping.required ?? false,
+    ...(mapping.onMissing === undefined || mapping.onMissing === null
+      ? {}
+      : { onMissing: mapping.onMissing }),
+    defaultValue: mapping.defaultValue ?? null,
+  };
 }
 
 /**
  * What a save would store, as text.
  *
  * Both the "dirty" comparison and the confirmation message go through it, so an id — or the key
- * order of the object the API returned — can never make an unchanged draft look edited.
+ * order of the object the API returned — can never make an unchanged draft look edited. It reads the
+ * same normalised shape the save sends, so a row fetched without a `required` key compares equal to
+ * the same row after a round trip.
  */
 export function serializeRows(rows: readonly DraftRow[] | readonly FieldMapping[]): string {
-  return JSON.stringify(rows.map(({ from, to, transform }) => ({ from, to, transform })));
+  return JSON.stringify(rows.map(toWireMapping));
 }
 
 /**
@@ -155,8 +179,12 @@ export function requiredCoverage(
 }
 
 /**
- * The compiled body, as the platform will send it: the compiler turns each mapping into
- * `{{ $json.<from> }}` and the product receives it under `<to>`.
+ * The compiled body, as the platform will send it.
+ *
+ * FR-5.5 — the preview goes through the same function the compiler uses (`mappedValueExpression`),
+ * so a row with a conversion or a missing-value guard reads the way it will run. Deriving the text
+ * from `mappingExpression` alone meant the preview showed `{{ $json.amount }}` for a row that sends
+ * `Number($json.amount)`, and the guard the author set was invisible until the run.
  *
  * A row with one side still empty is left out: the preview is a claim about what will be sent, and
  * `{{ $json. }}` is neither what the author means nor something the save would accept.
@@ -167,7 +195,9 @@ export function bodyPreview(rows: readonly FieldMapping[]): string {
     const to = row.to.trim();
     const from = row.from.trim();
     if (to.length === 0 || from.length === 0) continue;
-    body[to] = mappingExpression(from);
+    // The compiler prefixes the value with `=` to make n8n treat it as an expression; the preview
+    // shows the expression itself, which is what the author is reading.
+    body[to] = mappedValueExpression({ ...row, to, from }).replace(/^=/, '');
   }
   return JSON.stringify(body, null, 2);
 }

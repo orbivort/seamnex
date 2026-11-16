@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { Inject, Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import type { IntegrationCheck, InstanceRoute } from '@seamnex/domain';
 import type { Pool } from 'pg';
@@ -954,10 +955,13 @@ function authModeOf(value: string): 'native' | 'fa_header' | 'fa_delegated' | 'f
 }
 
 function randomSecret(): string {
-  // 32 bytes of entropy, hex-encoded; the value is stored in M15 and never logged.
-  return Array.from({ length: 32 }, () =>
-    Math.floor(Math.random() * 256)
-      .toString(16)
-      .padStart(2, '0'),
-  ).join('');
+  /*
+   * 32 bytes of real entropy, hex-encoded; the value is stored in M15 and never logged.
+   *
+   * The comment said "32 bytes of entropy" while the code drew them from `Math.random()`, whose output
+   * is reproducible from a few observations — the same defect the credential broker and the trigger
+   * ingress carried (NFR-4.14). This is a secret a product's SSO client is configured with, so it is
+   * the one place where a predictable value would hand out the integration.
+   */
+  return randomBytes(32).toString('hex');
 }
