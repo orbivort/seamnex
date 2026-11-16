@@ -202,6 +202,23 @@ the same number through every manifest and the link definitions at the foot of t
 
 ### Fixed
 
+- **An event can start a workflow, and a poll actually polls** (`FR-5.4`, `NFR-2.8`, `AC-26`) — the
+  delivery URL a registration printed was served by nothing, `accept()` had no route to reach it, and a
+  delivery that did arrive started no run: event-driven start was documented and unreachable. `POST
+/trigger/:token` is now a declared, anonymous operation, authenticated by the endpoint's HMAC over the
+  **exact bytes** received (the route table tees the stream for the operations that declare
+  `rawBody: true`) and throttled on its own bucket; a valid, unique delivery starts the bound workflow
+  through `WorkflowAuthoringService.dispatchTriggerRun`, which reuses the run pipeline, keys the run on
+  the delivery id so a retrying sender cannot execute twice, and attributes it to the endpoint rather
+  than to a person. The delivery row records `forwarded` or `failed` with the measured
+  event-to-execution latency, a signed delivery to an endpoint with no binding is refused with
+  `STATE_CONFLICT` instead of being acknowledged, and every authentication failure answers one
+  indistinguishable `401`. `poll` compiles to an n8n interval schedule at `minimumIntervalMinutes`
+  instead of a webhook node waiting for an event the product cannot send, validation refuses to
+  activate a polling definition without an interval or a scheduled one without a cron, and the console
+  gained a Trigger tab where all four modes and their parameters are edited (the trigger is a versioned
+  definition, so a save asks for re-validation and re-activation). Endpoint tokens are now drawn from
+  the CSPRNG rather than `Math.random()`.
 - **An upgrade applies the version the operator confirmed** (`FR-1.7`, `AC-06`) — the handler passed
   the confirmed version into `renderSetId`, so the job was handed a rollback selector and never knew
   what had been approved: the audit trail could not name it. The read model compounded it by deriving

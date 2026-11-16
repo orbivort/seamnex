@@ -8,16 +8,19 @@ import type { Capability } from './capabilities';
  * resolves each operation through this table at module load and throws when one is missing
  * (`scripts/check-route-policy.ts` turns the same check into a CI gate).
  *
- * `auth.sign_in` and `auth.session.read` are reserved keys rather than capabilities: they describe
- * the two operations that establish or describe a session, which no role matrix can grant.
+ * `auth.sign_in`, `auth.session.read` and `trigger.delivery` are reserved keys rather than
+ * capabilities: they describe the operations that establish a session or admit a machine delivery,
+ * none of which a role matrix can grant. A delivery is authenticated by the endpoint's HMAC, not by
+ * a role — no human holds it and no role may be given it.
  */
-export type ReservedPolicyKey = 'auth.sign_in' | 'auth.session.read';
+export type ReservedPolicyKey = 'auth.sign_in' | 'auth.session.read' | 'trigger.delivery';
 
 export type PolicyKey = Capability | ReservedPolicyKey;
 
 export const RESERVED_POLICY_KEYS: readonly ReservedPolicyKey[] = [
   'auth.sign_in',
   'auth.session.read',
+  'trigger.delivery',
 ];
 
 export function isReservedPolicyKey(key: PolicyKey): key is ReservedPolicyKey {
@@ -27,8 +30,16 @@ export function isReservedPolicyKey(key: PolicyKey): key is ReservedPolicyKey {
 /**
  * The only operations that may be reached without a session. The route-policy check asserts this
  * list is exactly the set of `anonymous` operations, so it cannot grow silently.
+ *
+ * `POST /trigger/:token` belongs here for the same reason as sign-in: the caller has no session to
+ * present. Its authentication is the per-endpoint HMAC over the raw body, verified before anything
+ * is written, and a refusal is a single indistinguishable 401.
  */
-export const ANONYMOUS_OPERATIONS: readonly string[] = ['POST /auth/session', 'GET /auth/session'];
+export const ANONYMOUS_OPERATIONS: readonly string[] = [
+  'POST /auth/session',
+  'GET /auth/session',
+  'POST /trigger/:token',
+];
 
 /**
  * Resources a scoped grant may be resolved against. `self` covers a member acting on their own
@@ -78,7 +89,7 @@ const SCOPE_RULES: Partial<Record<Capability, ScopeRule>> = {
 };
 
 export function scopeRuleFor(key: PolicyKey): ScopeRule {
-  if (key === 'auth.session.read' || key === 'auth.sign_in') return 'self';
+  if (isReservedPolicyKey(key)) return 'self';
   return SCOPE_RULES[key] ?? 'platform';
 }
 
@@ -297,6 +308,8 @@ export const POLICY_KEYS: Readonly<Record<string, PolicyKey>> = {
   // Session surface (anonymous by declaration; the reserved keys never resolve through the matrix)
   'GET /auth/session': 'auth.session.read',
   'POST /auth/session': 'auth.sign_in',
+  // Machine surface: authenticated by the endpoint's HMAC, admitted by `ANONYMOUS_OPERATIONS`.
+  'POST /trigger/:token': 'trigger.delivery',
 };
 
 /**

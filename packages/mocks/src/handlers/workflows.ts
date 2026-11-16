@@ -190,6 +190,9 @@ export const workflowHandlers = [
               label: `Poll ${source.product}`,
               config: 'every 15 minutes',
               timezone: null,
+              // FR-5.4: the interval is stated, not implied by the summary string — the panel and
+              // the compiler both read this field, and a missing one blocks activation.
+              minimumIntervalMinutes: 15,
             }
           : triggerType === 'manual'
             ? {

@@ -59,6 +59,7 @@ import { NodeFieldsSchema, NodeSampleSchema } from './schemas/field-discovery';
 import {
   CredentialScopeCreateRequestSchema,
   CredentialScopeMintResultSchema,
+  TriggerDeliveryReceiptSchema,
   TriggerEndpointCreateRequestSchema,
   TriggerEndpointListSchema,
   TriggerEndpointSchema,
@@ -196,8 +197,18 @@ export type DeclaredOperation = {
    * `ANONYMOUS_OPERATIONS` by the route-policy check.
    */
   anonymous?: true;
-  /** Contract-driven throttling (ADR-BE-05 / deliverable 3.2). Only sign-in declares it. */
-  rateLimit?: { bucket: 'auth'; limit: number; windowSeconds: number };
+  /**
+   * The handler needs the exact bytes that arrived, not the parsed document: a webhook signature
+   * is computed over the wire form, so re-serialising the parsed body would change key order and
+   * whitespace and never match. Capturing is per-route — a global body parser would change error
+   * handling for every JSON route in the product.
+   */
+  rawBody?: true;
+  /**
+   * Contract-driven throttling (ADR-BE-05 / deliverable 3.2). Sign-in uses `auth`; the anonymous
+   * delivery ingress uses its own bucket so a noisy product cannot exhaust the sign-in budget.
+   */
+  rateLimit?: { bucket: 'auth' | 'trigger'; limit: number; windowSeconds: number };
 };
 
 /**
@@ -241,6 +252,14 @@ const WorkflowDraftRequestSchema = z.object({
   sourceInstanceId: z.string().min(1),
   targetInstanceId: z.string().min(1),
 });
+
+/**
+ * The delivery payload is the product's event, not a platform document: the platform authenticates
+ * it and forwards it without interpreting a single field, so the only thing the contract can
+ * truthfully require is a JSON object. A top-level array or scalar is refused rather than silently
+ * accepted, because a sender cannot tell the difference afterwards.
+ */
+const TriggerDeliveryBodySchema = z.record(z.string(), z.unknown());
 
 /**
  * FR-2.14: every fact onboarding has to verify, not just the two that were convenient to store.
@@ -817,6 +836,31 @@ const DECLARED_OPERATIONS: readonly DeclaredOperation[] = [
     summary: 'Revoke a trigger endpoint and release its token hash.',
     tag: 'instances',
     noContent: true,
+    consumer: 'external',
+  }),
+
+  /**
+   * FR-5.4 / NFR-2.8: the delivery ingress. The opaqueness of the URL token is *not* the
+   * authentication — an unknown token, an inactive endpoint, a missing signature and a wrong
+   * signature are one indistinguishable `401`, so the route cannot be used to enumerate
+   * endpoints. The HMAC over the raw body is the authentication, which is why no session is
+   * required and no role matrix applies: a sending product holds no platform account.
+   *
+   * Headers: `x-seamnex-signature` (hex HMAC-SHA256 over the exact bytes) and an optional
+   * `x-seamnex-delivery-id`; without one the id is derived from the body hash, so a retrying
+   * sender that changes nothing is still recognised as a duplicate.
+   */
+  op({
+    method: 'POST',
+    path: '/trigger/:token',
+    summary:
+      'Accept a signed product event, start the bound workflow once, and answer with a receipt (FR-5.4).',
+    tag: 'workflows',
+    response: TriggerDeliveryReceiptSchema,
+    request: TriggerDeliveryBodySchema,
+    anonymous: true,
+    rawBody: true,
+    rateLimit: { bucket: 'trigger', limit: 120, windowSeconds: 60 },
     consumer: 'external',
   }),
 

@@ -424,7 +424,7 @@ export function WorkflowsPage() {
             label="Trigger"
             required
             htmlFor="wf-trigger"
-            hint="The type is recorded here. The definition carries the cron, timezone or polling interval, which the platform writes and `PUT /workflows/:id/trigger` changes."
+            hint="Starting mode. The cron and timezone, or the polling interval, are set on the workflow's Trigger tab once it exists."
           >
             <Select
               id="wf-trigger"

@@ -94,6 +94,13 @@ type VersionRow = {
 type ValidationPass = { issues: ValidationIssue[]; checkedAt: Date };
 
 /**
+ * Who a run is attributed to. A run is started either by a person or by a signed delivery, and the
+ * audit trail has to say which: an `actorType: 'user'` row naming `trigger:<endpoint>` would claim a
+ * human did something no human did.
+ */
+type RunActor = { readonly type: 'user' | 'service'; readonly id: string };
+
+/**
  * A discovered operation, reduced to what the draft needs: the id the IR stores and the label the
  * canvas shows. `mode` decides which node may take it — a read op cannot bind a write node.
  */
@@ -787,7 +794,7 @@ export class WorkflowAuthoringService {
         workflow,
         version,
         'manual',
-        actorId,
+        { type: 'user', id: actorId },
         null,
         idempotencyKey,
         authority.elevations,
@@ -801,6 +808,58 @@ export class WorkflowAuthoringService {
       detail: `Unknown workflow action "${action}".`,
       remediation: 'Use validate, activate, disable, duplicate or run.',
     });
+  }
+
+  /**
+   * FR-5.4 / NFR-2.8: a signed delivery starts the workflow it is bound to.
+   *
+   * Two independent de-duplications protect this path. The delivery row is unique on
+   * `(endpoint, delivery_id)`, so a retrying sender never gets past `accept()`; and the run's
+   * idempotency key is derived from the same delivery id, so a process that dies between the two
+   * steps produces one execution, not two. Neither can be substituted for the other: the first is
+   * the sender's contract, the second is the platform's own crash safety.
+   *
+   * Deliberately **not** routed through `assertPermitted`: there is no human on this request, and
+   * the authority to write through these targets was asserted when the definition was created,
+   * modified and activated. The remaining FR-5.9 gap (write targets are not re-checked against the
+   * current holder of the role at run time) is ISSUE-04's scope; this method must not appear to
+   * close it, which is why the run is attributed to the endpoint and not to a person.
+   */
+  async dispatchTriggerRun(input: {
+    workflowId: string;
+    endpointId: string;
+    deliveryId: string;
+  }): Promise<WorkflowRun> {
+    const workflow = await this.load(input.workflowId);
+    if (workflow.state !== 'active') {
+      throw new AppError({
+        code: 'STATE_CONFLICT',
+        detail: `Workflow ${workflow.name} is ${workflow.state}; a delivery only starts an active workflow.`,
+        remediation: 'Activate the workflow, or revoke the endpoint that points at it.',
+      });
+    }
+
+    const version = await this.currentVersion(input.workflowId);
+    // Checked before the run row exists: a run that cannot be handed to n8n is not evidence, it is
+    // a row the operator has to clean up.
+    this.n8n.assertReady();
+    if (version.compiled_n8n_id === null) {
+      throw new AppError({
+        code: 'STATE_CONFLICT',
+        detail: `Workflow ${workflow.name} has no compiled n8n definition, so the delivery cannot execute.`,
+        remediation: 'Activate the workflow (which compiles and pushes it), then deliver again.',
+      });
+    }
+
+    return this.startRun(
+      workflow,
+      version,
+      'webhook',
+      { type: 'service', id: `trigger:${input.endpointId}` },
+      null,
+      // Prefixed so a sender-chosen id can never collide with a caller's `Idempotency-Key`.
+      `trigger:${input.deliveryId}`,
+    );
   }
 
   /** FR-5.7: replay keyed on (COALESCE(replay_of, run_id), node_id, operation) so a retry cannot duplicate. */
@@ -829,7 +888,7 @@ export class WorkflowAuthoringService {
       workflow,
       version,
       run.trigger as WorkflowRun['trigger'],
-      actorId,
+      { type: 'user', id: actorId },
       runId,
       undefined,
       authority.elevations,
@@ -1045,6 +1104,37 @@ export class WorkflowAuthoringService {
      * otherwise turn every validation into a slow, flaky operation.
      */
     await this.checkMappingFields(ir, issues);
+
+    /**
+     * FR-5.4: the two trigger modes that need a stated parameter now refuse to activate without one.
+     *
+     * A `poll` trigger with no interval used to compile to a webhook node — a workflow that claimed
+     * to poll and never did. The compiler can only honour an interval that exists, so the missing
+     * value is an error here, where it can be fixed with a field, rather than a default invented at
+     * compile time that nobody chose and no screen shows.
+     */
+    if (ir.trigger.type === 'poll' && (ir.trigger.minimumIntervalMinutes ?? 0) < 1) {
+      issues.push(
+        issue(
+          null,
+          'error',
+          'TRIGGER_INTERVAL_MISSING',
+          'This workflow polls a product but states no minimum interval.',
+          'Set the polling interval in minutes on the Trigger tab; a product without an event mechanism cannot start the workflow otherwise.',
+        ),
+      );
+    }
+    if (ir.trigger.type === 'schedule' && (ir.trigger.cron ?? '').trim().length === 0) {
+      issues.push(
+        issue(
+          null,
+          'error',
+          'TRIGGER_CRON_MISSING',
+          'This workflow is scheduled but states no cron expression.',
+          'Set the cron expression (and its timezone) on the Trigger tab.',
+        ),
+      );
+    }
 
     const checkedAt = new Date();
     const valid = issues.every((entry) => entry.severity !== 'error');
@@ -1426,7 +1516,7 @@ export class WorkflowAuthoringService {
     workflow: Workflow,
     version: VersionRow,
     trigger: WorkflowRun['trigger'],
-    actorId: string,
+    actor: RunActor,
     replayOf: string | null,
     idempotencyKey?: string,
     /** FR-5.9 — the elevations the caller's authority leaned on, recorded on the run's own row. */
@@ -1466,8 +1556,8 @@ export class WorkflowAuthoringService {
       await this.audit.append(
         {
           action: replayOf === null ? 'workflow.run.started' : 'workflow.run.replayed',
-          actorType: 'user',
-          actorId,
+          actorType: actor.type,
+          actorId: actor.id,
           targetType: 'workflow_run',
           targetId: id,
           outcome: 'success',
@@ -2000,22 +2090,7 @@ export function compile(
     };
   });
 
-  const triggerType =
-    ir.trigger.type === 'schedule' ? 'n8n-nodes-base.scheduleTrigger' : 'n8n-nodes-base.webhook';
-  const triggerNode = {
-    name: 'Trigger',
-    type: triggerType,
-    typeVersion: triggerType.endsWith('webhook') ? 2 : 1.2,
-    position: [-260, 0],
-    parameters:
-      ir.trigger.type === 'schedule'
-        ? {
-            rule: {
-              interval: [{ field: 'cronExpression', expression: ir.trigger.cron ?? '0 2 * * *' }],
-            },
-          }
-        : { path: workflow.id, httpMethod: 'POST' },
-  };
+  const triggerNode = triggerNodeFor(workflow.id, ir.trigger);
 
   return {
     /*
@@ -2029,6 +2104,80 @@ export function compile(
     connections: connectionMap(ir),
     settings: { executionOrder: 'v1', timezone: ir.trigger.timezone ?? 'UTC' },
     staticData: { irHash: workflow.irHash },
+  };
+}
+
+/** The schedule `triggerFor` writes when the author picks `schedule`; kept identical to it. */
+const DEFAULT_SCHEDULE_CRON = '0 2 * * *';
+
+/**
+ * The interval used only when an existing definition says `poll` without a value — a row written
+ * before this rule existed. Validation blocks such a definition from (re)activating, so the fallback
+ * keeps an already-compiled workflow runnable instead of silently turning it into a webhook again.
+ */
+const DEFAULT_POLL_MINUTES = 15;
+
+type TriggerNode = {
+  name: string;
+  type: string;
+  typeVersion: number;
+  position: number[];
+  parameters: Record<string, unknown>;
+};
+
+/**
+ * FR-5.4: the trigger the execution engine actually gets.
+ *
+ * - `schedule` → a cron schedule, evaluated in the workflow's timezone (the document's `settings`).
+ * - `poll` → an **interval** schedule at the stated minimum. This is the poller: the previous
+ *   compiler emitted a webhook node for `poll`, so a workflow for a product with no event mechanism
+ *   waited for a delivery that product could never send, and `minimumIntervalMinutes` was read by
+ *   nobody.
+ * - `webhook` and `manual` → the webhook node. `manual` must keep it: `N8nClient.trigger` starts a
+ *   run by POSTing to `/webhook/<path>`, and n8n has no other run endpoint.
+ */
+function triggerNodeFor(workflowId: string, trigger: WorkflowTrigger): TriggerNode {
+  if (trigger.type === 'schedule') {
+    return {
+      name: 'Trigger',
+      type: 'n8n-nodes-base.scheduleTrigger',
+      typeVersion: 1.2,
+      position: [-260, 0],
+      parameters: {
+        rule: {
+          interval: [
+            { field: 'cronExpression', expression: trigger.cron ?? DEFAULT_SCHEDULE_CRON },
+          ],
+        },
+      },
+    };
+  }
+
+  if (trigger.type === 'poll') {
+    return {
+      name: 'Trigger',
+      type: 'n8n-nodes-base.scheduleTrigger',
+      typeVersion: 1.2,
+      position: [-260, 0],
+      parameters: {
+        rule: {
+          interval: [
+            {
+              field: 'minutes',
+              minutesInterval: trigger.minimumIntervalMinutes ?? DEFAULT_POLL_MINUTES,
+            },
+          ],
+        },
+      },
+    };
+  }
+
+  return {
+    name: 'Trigger',
+    type: 'n8n-nodes-base.webhook',
+    typeVersion: 2,
+    position: [-260, 0],
+    parameters: { path: workflowId, httpMethod: 'POST' },
   };
 }
 

@@ -17,19 +17,23 @@ import {
  * no scope rule, is a build failure rather than a runtime 403.
  */
 describe('policy keys', () => {
-  it('reserves exactly the two session operations', () => {
-    expect(RESERVED_POLICY_KEYS).toEqual(['auth.sign_in', 'auth.session.read']);
+  it('reserves exactly the session and delivery keys', () => {
+    expect(RESERVED_POLICY_KEYS).toEqual(['auth.sign_in', 'auth.session.read', 'trigger.delivery']);
     expect(isReservedPolicyKey('auth.sign_in')).toBe(true);
     expect(isReservedPolicyKey('auth.session.read')).toBe(true);
+    expect(isReservedPolicyKey('trigger.delivery')).toBe(true);
     expect(isReservedPolicyKey('portal.launch')).toBe(false);
   });
 
   it('declares the anonymous surface explicitly', () => {
     expect(ANONYMOUS_OPERATIONS).toContain('POST /auth/session');
     expect(ANONYMOUS_OPERATIONS).toContain('GET /auth/session');
+    expect(ANONYMOUS_OPERATIONS).toContain('POST /trigger/:token');
     // Session establishment is not a capability any role matrix could grant.
     expect(POLICY_KEYS['POST /auth/session']).toBe('auth.sign_in');
     expect(POLICY_KEYS['GET /auth/session']).toBe('auth.session.read');
+    // A delivery is authenticated by the endpoint's HMAC, which no role holds.
+    expect(POLICY_KEYS['POST /trigger/:token']).toBe('trigger.delivery');
   });
 
   it('never names an any-of operation that the single-key table does not know', () => {

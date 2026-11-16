@@ -18,7 +18,7 @@ describe('route policy (ADR-BE-05, deliverable 3.4)', () => {
     }
   });
 
-  it('names only declared capabilities or the two reserved session keys', () => {
+  it('names only declared capabilities or a reserved key', () => {
     const invalid = API_OPERATIONS.filter(
       (operation) =>
         !isReservedPolicyKey(operation.policyKey) && !capabilities.has(operation.policyKey),
@@ -26,7 +26,7 @@ describe('route policy (ADR-BE-05, deliverable 3.4)', () => {
     expect(invalid).toEqual([]);
   });
 
-  it('pins the anonymous allowlist to the two session operations', () => {
+  it('pins the anonymous allowlist to the declared anonymous operations', () => {
     const anonymous = API_OPERATIONS.filter((operation) => operation.anonymous === true).map(
       operationKey,
     );
@@ -39,16 +39,19 @@ describe('route policy (ADR-BE-05, deliverable 3.4)', () => {
     expect(orphans).toEqual([]);
   });
 
-  it('uses reserved keys only where the session surface declares them', () => {
+  it('uses reserved keys only where the session or machine surface declares them', () => {
     const reserved = RESERVED_POLICY_KEYS as readonly string[];
     const users = API_OPERATIONS.filter((operation) => reserved.includes(operation.policyKey)).map(
       operationKey,
     );
+    // `trigger.delivery` joins them: a signed product event is authenticated by the endpoint's
+    // HMAC, which no role holds, so no capability could stand in for it.
     expect(users.sort()).toEqual([
       'GET /auth/session',
       'GET /me',
       'POST /auth/session',
       'POST /me/logout',
+      'POST /trigger/:token',
     ]);
   });
 
@@ -90,5 +93,16 @@ describe('route policy (ADR-BE-05, deliverable 3.4)', () => {
       (operation) => operationKey(operation) === 'POST /auth/session',
     );
     expect(signIn?.rateLimit).toEqual({ bucket: 'auth', limit: 10, windowSeconds: 300 });
+  });
+
+  it('throttles the anonymous delivery ingress on its own bucket', () => {
+    const delivery = API_OPERATIONS.find(
+      (operation) => operationKey(operation) === 'POST /trigger/:token',
+    );
+
+    // A separate bucket: a noisy product must not be able to exhaust the sign-in allowance.
+    expect(delivery?.rateLimit).toEqual({ bucket: 'trigger', limit: 120, windowSeconds: 60 });
+    // The handler needs the bytes the signature covers, not the parsed document.
+    expect(delivery?.rawBody).toBe(true);
   });
 });

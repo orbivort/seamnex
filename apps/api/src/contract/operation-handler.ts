@@ -16,6 +16,12 @@ export type OperationInput = {
   /** The `prefix: true` query family, keyed by declaration name (`env` → `{MAIL_HOST: …}`). */
   readonly families: Readonly<Record<string, Readonly<Record<string, string>>>>;
   readonly body: unknown;
+  /**
+   * The bytes the request arrived with, captured only for an operation that declares
+   * `rawBody: true` (webhook signatures). `null` everywhere else, so no handler can mistake the
+   * absence of a capture for an empty body.
+   */
+  readonly rawBody: Buffer | null;
   readonly headers: Readonly<Record<string, string | string[] | undefined>>;
   /** Parsed request cookies; only the platform's own two names are read. */
   readonly cookies: Readonly<Record<string, string>>;

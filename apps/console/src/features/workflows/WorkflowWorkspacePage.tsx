@@ -47,6 +47,7 @@ import { usePageCrumb } from '../../page-crumb';
 import { QueryError } from '@seamnex/shell';
 import { WorkflowCanvas } from './WorkflowCanvas';
 import { RUN_POLL_INTERVAL_MS, WorkflowRunsPanel } from './WorkflowRuns';
+import { WorkflowTriggerPanel } from './WorkflowTriggerPanel';
 
 /** The header's "last run" badge is part of the run's state, so it must settle with the table. */
 const LAST_RUN_IN_FLIGHT = new Set<WorkflowRun['state']>(['queued', 'running', 'waiting_approval']);
@@ -458,6 +459,7 @@ export function WorkflowWorkspacePage() {
         onValueChange={setTab}
         tabs={[
           { value: 'canvas', label: 'Canvas' },
+          { value: 'trigger', label: 'Trigger' },
           { value: 'runs', label: 'Runs' },
         ]}
       >
@@ -499,6 +501,14 @@ export function WorkflowWorkspacePage() {
               </p>
             </Grid>
           </Panel>
+        </TabPanel>
+        <TabPanel value="trigger" className="pt-3">
+          {/*
+            FR-5.4: the header already shows the trigger as a badge; this is where it is edited.
+            The panel owns its own mutation and notice so a save cannot be mistaken for the
+            activate/validate banner that belongs to the header above.
+          */}
+          <WorkflowTriggerPanel key={data.id} workflow={data} canWrite={canWrite} />
         </TabPanel>
         <TabPanel value="runs" className="pt-3">
           <Panel inset>

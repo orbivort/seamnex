@@ -19,6 +19,7 @@ function services() {
       setTrigger: vi.fn().mockResolvedValue({ id: 'w1' }),
       replay: vi.fn().mockResolvedValue({ id: 'r2' }),
       decideApproval: vi.fn().mockResolvedValue({ id: 'r1' }),
+      dispatchTriggerRun: vi.fn().mockResolvedValue({ id: 'run-1', state: 'running' }),
     },
     broker: {
       mint: vi.fn().mockResolvedValue({ scopeId: 'cs1', secret: 's' }),
@@ -28,9 +29,21 @@ function services() {
       list: vi.fn().mockResolvedValue([]),
       register: vi.fn().mockResolvedValue({ id: 't1' }),
       remove: vi.fn().mockResolvedValue(undefined),
+      accept: vi.fn(),
+      recordOutcome: vi.fn().mockResolvedValue(undefined),
     },
   };
 }
+
+/** A signed, bound delivery, as `accept` answers one. */
+const ACCEPTED = {
+  accepted: true,
+  reason: 'accepted',
+  endpointId: 't1',
+  instanceId: 'i1',
+  workflowId: 'w1',
+  deliveryId: 'delivery-1',
+};
 
 beforeEach(() => {
   s = services();
@@ -147,7 +160,7 @@ describe('triggers and credential scopes', () => {
     expect(result).toEqual({ kind: 'body', body: [] });
   });
 
-  it('POST /instances/:id/triggers registers with or without a workflow', async () => {
+  it('POST /instances/:id/triggers registers the endpoint against its workflow', async () => {
     await call('POST /instances/:id/triggers', {
       params: { id: 'i1' },
       body: { eventName: 'push', workflowId: 'w1' },
@@ -157,12 +170,6 @@ describe('triggers and credential scopes', () => {
       { eventName: 'push', workflowId: 'w1' },
       'sub-1',
     );
-
-    await call('POST /instances/:id/triggers', {
-      params: { id: 'i1' },
-      body: { eventName: 'push' },
-    });
-    expect(s.triggers.register).toHaveBeenLastCalledWith('i1', { eventName: 'push' }, 'sub-1');
   });
 
   it('DELETE /instances/:id/triggers/:triggerId revokes and answers 204', async () => {
@@ -229,9 +236,165 @@ describe('triggers and credential scopes', () => {
   });
 });
 
+describe('trigger delivery ingress', () => {
+  const delivery = (overrides = {}) =>
+    call('POST /trigger/:token', {
+      params: { token: 'path-token' },
+      rawBody: Buffer.from('{"order":1}', 'utf8'),
+      headers: { 'x-seamnex-signature': 'sig', 'x-seamnex-delivery-id': 'delivery-1' },
+      ...overrides,
+    });
+
+  it('starts the bound workflow once and answers with the run it created', async () => {
+    s.triggers.accept.mockResolvedValue(ACCEPTED);
+
+    const result = await delivery();
+
+    // The raw bytes, not the parsed body: that is what the signature covers.
+    expect(s.triggers.accept).toHaveBeenCalledWith({
+      endpointToken: 'path-token',
+      rawBody: Buffer.from('{"order":1}', 'utf8'),
+      signature: 'sig',
+      deliveryId: 'delivery-1',
+    });
+    expect(s.authoring.dispatchTriggerRun).toHaveBeenCalledWith({
+      workflowId: 'w1',
+      endpointId: 't1',
+      deliveryId: 'delivery-1',
+    });
+    expect(result).toEqual({
+      kind: 'body',
+      body: { accepted: true, reason: 'accepted', workflowId: 'w1', runId: 'run-1' },
+    });
+    expect(s.triggers.recordOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({ state: 'forwarded', runId: 'run-1', endpointId: 't1' }),
+    );
+  });
+
+  it('acknowledges a duplicate without starting a second run', async () => {
+    s.triggers.accept.mockResolvedValue({
+      ...ACCEPTED,
+      accepted: false,
+      reason: 'duplicate delivery',
+    });
+
+    const result = await delivery();
+
+    expect(s.authoring.dispatchTriggerRun).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      kind: 'body',
+      body: {
+        accepted: false,
+        reason: 'duplicate delivery',
+        workflowId: 'w1',
+        runId: null,
+      },
+    });
+  });
+
+  it.each([
+    ['unknown endpoint', 'an unknown token'],
+    ['missing signature', 'no signature'],
+    ['signature mismatch', 'a wrong signature'],
+  ])('answers one indistinguishable 401 for %s', async (reason) => {
+    s.triggers.accept.mockResolvedValue({
+      accepted: false,
+      reason,
+      endpointId: null,
+      instanceId: null,
+      workflowId: null,
+      deliveryId: 'delivery-1',
+    });
+
+    const error = (await delivery().catch((caught: unknown) => caught)) as {
+      code: string;
+      detail: string;
+    };
+
+    expect(error.code).toBe('UNAUTHORIZED');
+    // One message for all three causes: the caller cannot tell an endpoint exists from the answer.
+    expect(error.detail).toBe('The delivery could not be authenticated.');
+    expect(s.authoring.dispatchTriggerRun).not.toHaveBeenCalled();
+  });
+
+  it('reports an unbound endpoint only to a caller that signed the delivery', async () => {
+    s.triggers.accept.mockResolvedValue({
+      ...ACCEPTED,
+      accepted: false,
+      reason: 'unbound endpoint',
+      workflowId: null,
+    });
+
+    await expect(delivery()).rejects.toMatchObject({ code: 'STATE_CONFLICT' });
+    expect(s.authoring.dispatchTriggerRun).not.toHaveBeenCalled();
+  });
+
+  it('records a failed dispatch and rethrows the actionable refusal', async () => {
+    s.triggers.accept.mockResolvedValue(ACCEPTED);
+    s.authoring.dispatchTriggerRun.mockRejectedValue(
+      Object.assign(new Error('Workflow lead sync is disabled.'), {
+        code: 'STATE_CONFLICT',
+        detail: 'Workflow lead sync is disabled.',
+      }),
+    );
+
+    await expect(delivery()).rejects.toMatchObject({ code: 'STATE_CONFLICT' });
+    expect(s.triggers.recordOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({ state: 'failed', runId: null }),
+    );
+  });
+
+  it('treats a blank or repeated signature header as absent', async () => {
+    s.triggers.accept.mockResolvedValue({
+      ...ACCEPTED,
+      accepted: false,
+      reason: 'missing signature',
+      workflowId: null,
+    });
+
+    await delivery({
+      headers: { 'x-seamnex-signature': ['', '  '], 'x-seamnex-delivery-id': '' },
+    }).catch(() => undefined);
+
+    expect(s.triggers.accept).toHaveBeenCalledWith(
+      expect.objectContaining({ signature: null, deliveryId: null }),
+    );
+  });
+
+  it('answers the original refusal even when the delivery record cannot be written', async () => {
+    s.triggers.accept.mockResolvedValue(ACCEPTED);
+    s.authoring.dispatchTriggerRun.mockRejectedValue(new Error('n8n is unreachable'));
+    s.triggers.recordOutcome.mockRejectedValue(new Error('audit append failed'));
+
+    // A failed bookkeeping write must not replace the reason the delivery did not execute.
+    await expect(delivery()).rejects.toThrow('n8n is unreachable');
+  });
+
+  it('records a non-Error refusal by its own text', async () => {
+    s.triggers.accept.mockResolvedValue(ACCEPTED);
+    s.authoring.dispatchTriggerRun.mockRejectedValue('timed out');
+
+    await expect(delivery()).rejects.toBe('timed out');
+    expect(s.triggers.recordOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({ state: 'failed', detail: 'timed out' }),
+    );
+  });
+
+  it('does not answer "accepted" for a run the engine refused', async () => {
+    s.triggers.accept.mockResolvedValue(ACCEPTED);
+    s.authoring.dispatchTriggerRun.mockResolvedValue({ id: 'run-9', state: 'failed' });
+
+    await expect(delivery()).rejects.toMatchObject({ code: 'UNAVAILABLE' });
+    expect(s.triggers.recordOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({ state: 'failed', runId: 'run-9' }),
+    );
+  });
+});
+
 describe('phase 4e registry', () => {
   it('implements every 4E operation, including the two field-discovery reads', () => {
-    // 15 authoring operations + the field list and the node sample the mapping workbench reads.
-    expect(handlers.size).toBe(17);
+    // 15 authoring operations + the field list and the node sample the mapping workbench reads
+    // + the delivery ingress that starts the bound workflow.
+    expect(handlers.size).toBe(18);
   });
 });

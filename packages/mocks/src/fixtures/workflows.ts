@@ -353,6 +353,9 @@ export const WORKFLOWS: Workflow[] = [
       label: 'D02-01 Mautic — segment `MQL`',
       config: 'Every 15 minutes',
       timezone: 'Europe/Berlin',
+      // FR-5.4: the interval the summary already states, as the field the compiler reads. Without
+      // it the prototype would show a polling workflow whose polling interval is missing.
+      minimumIntervalMinutes: 15,
     },
     writeTargets: [{ entryKey: 'D01-01', product: 'EspoCRM', mode: 'write' }],
     nodes: [

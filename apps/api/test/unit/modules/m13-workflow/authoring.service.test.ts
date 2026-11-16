@@ -591,6 +591,91 @@ describe('compile', () => {
     expect(webhook.settings).toEqual({ executionOrder: 'v1', timezone: 'Europe/Berlin' });
   });
 
+  /**
+   * FR-5.4: `poll` is a poller, not a webhook waiting for an event a product cannot send. The
+   * interval the author states is the one the engine runs at — before this, `minimumIntervalMinutes`
+   * was written to the IR and read by nothing.
+   */
+  it('compiles a poll trigger into an interval schedule at the stated minimum', async () => {
+    const { service } = harness();
+    const workflow = await service.load(WORKFLOW_ID);
+
+    const document = compile(
+      workflow,
+      {
+        trigger: {
+          type: 'poll',
+          label: 'Poll Mautic',
+          config: 'every 5 minute(s)',
+          timezone: 'Europe/Berlin',
+          minimumIntervalMinutes: 5,
+        },
+        nodes: [],
+        edges: [],
+      },
+      ADDRESSES,
+      CREDENTIALS,
+    );
+
+    const [trigger] = document.nodes as Record<string, unknown>[];
+    expect(trigger).toMatchObject({
+      type: 'n8n-nodes-base.scheduleTrigger',
+      typeVersion: 1.2,
+      parameters: { rule: { interval: [{ field: 'minutes', minutesInterval: 5 }] } },
+    });
+    expect(document.settings).toEqual({ executionOrder: 'v1', timezone: 'Europe/Berlin' });
+  });
+
+  it('keeps a poll definition compiled when a legacy row states no interval', async () => {
+    const { service } = harness();
+    const workflow = await service.load(WORKFLOW_ID);
+
+    // Written before the interval was required. Validation blocks re-activation, but an already
+    // compiled workflow must keep running rather than silently reverting to a webhook node.
+    const document = compile(
+      workflow,
+      {
+        trigger: { type: 'poll', label: 'Poll', config: 'poll', timezone: null },
+        nodes: [],
+        edges: [],
+      },
+      ADDRESSES,
+      CREDENTIALS,
+    );
+
+    expect((document.nodes as Record<string, unknown>[])[0]).toMatchObject({
+      type: 'n8n-nodes-base.scheduleTrigger',
+      parameters: { rule: { interval: [{ field: 'minutes', minutesInterval: 15 }] } },
+    });
+  });
+
+  it('keeps manual on the webhook node, because that is how a run is started', async () => {
+    const { service } = harness();
+    const workflow = await service.load(WORKFLOW_ID);
+
+    const document = compile(
+      workflow,
+      {
+        trigger: {
+          type: 'manual',
+          label: 'Manual',
+          config: 'run from the console',
+          timezone: null,
+        },
+        nodes: [],
+        edges: [],
+      },
+      ADDRESSES,
+      CREDENTIALS,
+    );
+
+    // `N8nClient.trigger` POSTs /webhook/<path>; replacing this node would break Run now.
+    expect((document.nodes as Record<string, unknown>[])[0]).toMatchObject({
+      type: 'n8n-nodes-base.webhook',
+      parameters: { path: WORKFLOW_ID, httpMethod: 'POST' },
+    });
+  });
+
   it('refuses a node the plan has no address for, instead of emitting a relative URL', async () => {
     const { service } = harness();
     const workflow = await service.load(WORKFLOW_ID);
@@ -2817,6 +2902,127 @@ describe('decideApproval', () => {
       expect.objectContaining({ action: 'workflow.approval.reject' }),
       db.client,
     );
+  });
+});
+
+// ---- trigger configuration and delivery dispatch ------------------------------------------------
+
+/**
+ * FR-5.4: the two modes that need a stated parameter are refused at validation, where the author
+ * can fix them, instead of at compile time where a default would have to be invented.
+ */
+describe('action: validate trigger configuration', () => {
+  const withTrigger = (trigger: WorkflowTrigger): Route =>
+    route('JOIN workflow_version v ON v.id = w.current_version_id', [
+      versionRow({ ir: { ...healthyIr(), trigger } }),
+    ]);
+
+  it('blocks a polling workflow that states no interval', async () => {
+    const { value } = await validate([
+      withTrigger({ type: 'poll', label: 'Poll Mautic', config: 'poll', timezone: null }),
+    ]);
+
+    expect(value.valid).toBe(false);
+    expect(value.issues).toEqual([
+      expect.objectContaining({
+        code: 'TRIGGER_INTERVAL_MISSING',
+        severity: 'error',
+        nodeId: null,
+      }),
+    ]);
+  });
+
+  it('accepts a polling workflow that states its minimum interval', async () => {
+    const { value } = await validate([
+      withTrigger({
+        type: 'poll',
+        label: 'Poll Mautic',
+        config: 'every 15 minute(s)',
+        timezone: null,
+        minimumIntervalMinutes: 15,
+      }),
+    ]);
+
+    expect(value.issues).toEqual([]);
+    expect(value.valid).toBe(true);
+  });
+
+  it('blocks a scheduled workflow that states no cron expression', async () => {
+    const { value } = await validate([withTrigger({ ...scheduleTrigger(), cron: null })]);
+
+    expect(value.valid).toBe(false);
+    expect(value.issues).toEqual([
+      expect.objectContaining({ code: 'TRIGGER_CRON_MISSING', severity: 'error', nodeId: null }),
+    ]);
+  });
+});
+
+describe('dispatchTriggerRun', () => {
+  const INPUT = { workflowId: WORKFLOW_ID, endpointId: 't1', deliveryId: 'delivery-1' };
+
+  const live = (overrides: Route[] = []): Route[] => [
+    ...overrides,
+    route('LEFT JOIN idp_user', [workflowRow({ state: 'active' })]),
+    compiledVersion,
+  ];
+
+  it('starts one run, keyed by the delivery and attributed to the endpoint', async () => {
+    const { db, audit, n8n, service } = harness(live());
+
+    const run = await service.dispatchTriggerRun(INPUT);
+
+    const insert = statement(db, 'INSERT INTO workflow_run (');
+    expect(insert?.params.slice(0, 3)).toEqual([WORKFLOW_ID, VERSION_ID, 'webhook']);
+    // The delivery id is the idempotency key: a sender that retries cannot execute twice.
+    expect(String(insert?.params[3])).toBe(`trigger:delivery-1:${VERSION_ID}`);
+    expect(n8n.trigger).toHaveBeenCalledWith('n8n-workflow-1', WORKFLOW_ID);
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'workflow.run.started',
+        actorType: 'service',
+        actorId: 'trigger:t1',
+      }),
+      db.client,
+    );
+    expect(run.id).toBe(RUN_ID);
+  });
+
+  it('does not consult the human write-authority gate', async () => {
+    const { authority, service } = harness(live());
+
+    await service.dispatchTriggerRun(INPUT);
+
+    // ISSUE-04 is open: there is no human on a delivery, so FR-5.9 cannot be applied here and this
+    // service must not look as if it had.
+    expect(authority.assertPermitted).not.toHaveBeenCalled();
+  });
+
+  it.each(['draft', 'validated', 'disabled'])(
+    'refuses a %s workflow without creating a run',
+    async (state) => {
+      const { db, service } = harness([
+        route('LEFT JOIN idp_user', [workflowRow({ state })]),
+        compiledVersion,
+      ]);
+
+      await expect(service.dispatchTriggerRun(INPUT)).rejects.toMatchObject({
+        code: 'STATE_CONFLICT',
+      });
+      expect(statement(db, 'INSERT INTO workflow_run (')).toBeUndefined();
+    },
+  );
+
+  it('refuses a version that was never compiled, before writing a run', async () => {
+    const { db, service } = harness([
+      route('LEFT JOIN idp_user', [workflowRow({ state: 'active' })]),
+      route('JOIN workflow_version v ON v.id = w.current_version_id', [versionRow()]),
+    ]);
+
+    await expect(service.dispatchTriggerRun(INPUT)).rejects.toMatchObject({
+      code: 'STATE_CONFLICT',
+      detail: expect.stringContaining('no compiled n8n definition'),
+    });
+    expect(statement(db, 'INSERT INTO workflow_run (')).toBeUndefined();
   });
 });
 

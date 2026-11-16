@@ -46,6 +46,7 @@ export function operationInput(
     query: {},
     families: {},
     body: undefined,
+    rawBody: null,
     headers: {},
     cookies: {},
     context: testContext(),

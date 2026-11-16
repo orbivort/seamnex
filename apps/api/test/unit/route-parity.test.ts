@@ -63,11 +63,17 @@ describe.skipIf(skipReason !== false)('contract ↔ route parity', () => {
     expect(OPERATION_KEYS.size).toBeGreaterThanOrEqual(116);
   });
 
-  it('mounts exactly the two declared anonymous session operations', () => {
+  it('mounts exactly the declared anonymous operations', () => {
+    // Session establishment and the signed delivery ingress: the two surfaces a caller reaches with
+    // no platform session. The delivery is authenticated by its endpoint HMAC, not by a role.
     const anonymous = API_OPERATIONS.filter((operation) => operation.anonymous === true).map(
       operationKey,
     );
-    expect(anonymous.sort()).toEqual(['GET /auth/session', 'POST /auth/session']);
+    expect(anonymous.sort()).toEqual([
+      'GET /auth/session',
+      'POST /auth/session',
+      'POST /trigger/:token',
+    ]);
   });
 
   it('mounts nothing undeclared under the product prefix', () => {

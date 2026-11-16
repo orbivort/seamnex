@@ -20,6 +20,7 @@ import { deferredProblem } from './deferred-operations';
 import { OperationGuardChain } from './guards/operation-guard.chain';
 import type { OperationResult } from './operation-handler';
 import { OperationHandlers } from './operation-handlers';
+import { captureRawBody, rawBodyOf } from './raw-body';
 
 /**
  * Deliverable 2.1 — the route table is the contract.
@@ -66,6 +67,11 @@ export class RouteTableService implements OnModuleInit {
       server.route({
         method: operation.method,
         url: `/${API_PREFIX}${operation.path}`,
+        /*
+         * The hook is attached per route, and only where the contract says the handler needs the
+         * bytes: a global parser would change body handling for every JSON operation.
+         */
+        ...(operation.rawBody === true ? { preParsing: captureRawBody() } : {}),
         handler: (request, reply) => this.handle(operation, key, request, reply),
       });
       mounted += 1;
@@ -106,6 +112,7 @@ export class RouteTableService implements OnModuleInit {
           query: input.query,
           families: input.families,
           body: input.body,
+          rawBody: operation.rawBody === true ? rawBodyOf(request) : null,
           headers: request.headers,
           cookies,
           context,
