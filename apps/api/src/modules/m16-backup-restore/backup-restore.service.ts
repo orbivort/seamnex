@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { CAPABILITY_MATRIX, type PlatformRole } from '@seamnex/domain';
 import type {
   Backup,
@@ -20,6 +20,10 @@ import {
   type IntegrationService,
 } from '../m07-integration/integration.contract';
 import { OUTBOX_SERVICE, type Outbox } from '../m17-audit/audit.contract';
+import {
+  ACCESS_CONTROL_SERVICE,
+  type AccessControlService,
+} from '../m09-access-control/access-control.contract';
 import { JobService } from '../../jobs/job.service';
 import { PipelineRegistry } from '../../jobs/pipeline-registry';
 import { describeArtefact, readPlatformManifest } from './platform-manifest';
@@ -188,8 +192,19 @@ export class PostgresBackupRestoreService implements BackupRestoreService {
     @Inject(OUTBOX_SERVICE) private readonly outbox: Outbox,
     @Inject(JobService) private readonly jobs: JobService,
     @Inject(PipelineRegistry) private readonly pipelines: PipelineRegistry,
-    /** `SEAMNEX_RESTORE_CONCURRENCY` is recorded on the run: the product tier reads the row, not the environment. */
+    /**
+     * The fan-out is recorded on the run and the product tier reads the row, not the environment.
+     *
+     * NFR-3.9 / DD-15: the operator's setting is the authority, because the console offers it and an
+     * operator who raises it expects the next restore to use it. `SEAMNEX_RESTORE_CONCURRENCY` is
+     * the fallback for a host whose settings row cannot be read — never a silent default that
+     * contradicts what the settings screen shows.
+     */
     @Inject(APP_CONFIG) private readonly config: AppConfig,
+    /** M09 owns `settings`; optional so a graph without the module still takes the environment value. */
+    @Optional()
+    @Inject(ACCESS_CONTROL_SERVICE)
+    private readonly access?: AccessControlService,
   ) {}
 
   async backups(instanceId: string): Promise<Backup[]> {
@@ -277,10 +292,12 @@ export class PostgresBackupRestoreService implements BackupRestoreService {
         remediation: 'Use the platform restore endpoint for a platform-tier backup.',
       });
     }
+    const fanOut = await this.restoreConcurrency();
     const run = await this.pool.query<{ id: string }>(
-      `INSERT INTO restore_run (backup_id, phase, state, justification, concurrency)
-       VALUES ($1, 'preparing', 'running', $2, $3) RETURNING id`,
-      [backupId, justification, this.config.SEAMNEX_RESTORE_CONCURRENCY],
+      `INSERT INTO restore_run (backup_id, phase, state, justification, concurrency, detail)
+       VALUES ($1, 'preparing', 'running', $2, $3, jsonb_build_object('concurrencySource', $4::text))
+       RETURNING id`,
+      [backupId, justification, fanOut.value, fanOut.source],
     );
     const restoreId = run.rows[0]?.id;
     if (restoreId === undefined) throw internal('The restore run was not created.');
@@ -289,6 +306,34 @@ export class PostgresBackupRestoreService implements BackupRestoreService {
       restoreId,
     });
     return { restoreId, jobId: job };
+  }
+
+  /**
+   * NFR-3.9 / DD-15 — the fan-out a new run gets, and where it came from.
+   *
+   * The stored setting wins, because that is the number the operator changed in the console; the
+   * environment value is the fallback for a host whose settings cannot be read. Recording the source
+   * on the run is what makes "the setting was honoured" checkable after the fact instead of assumed.
+   */
+  private async restoreConcurrency(): Promise<{
+    value: number;
+    source: 'settings' | 'environment';
+  }> {
+    if (this.access !== undefined) {
+      try {
+        const { settings } = await this.access.settings();
+        return { value: clampRestoreConcurrency(settings.restoreConcurrency), source: 'settings' };
+      } catch (error) {
+        this.logger.warn(
+          { err: error instanceof Error ? error.message : String(error) },
+          'restore concurrency: settings are unreadable, so the environment value is used',
+        );
+      }
+    }
+    return {
+      value: clampRestoreConcurrency(this.config.SEAMNEX_RESTORE_CONCURRENCY),
+      source: 'environment',
+    };
   }
 
   async restoreDrill(instanceId: string, actorId: string): Promise<RestoreDrill> {
@@ -391,6 +436,9 @@ export class PostgresBackupRestoreService implements BackupRestoreService {
       });
     }
 
+    // Read before the gate closes: the settings document is M09's, and the transaction below holds
+    // the audit chain and the route gate — a settings read has no business inside it.
+    const fanOut = await this.restoreConcurrency();
     let restoreId: string | null = null;
     try {
       restoreId = await withTransaction(this.pool, async (tx) => {
@@ -406,9 +454,10 @@ export class PostgresBackupRestoreService implements BackupRestoreService {
           payload: { reason: 'platform-restore', gated: true },
         });
         const run = await tx.query<{ id: string }>(
-          `INSERT INTO restore_run (backup_id, phase, state, justification, concurrency)
-           VALUES ($1, 'preparing', 'running', $2, $3) RETURNING id`,
-          [backupId, justification, this.config.SEAMNEX_RESTORE_CONCURRENCY],
+          `INSERT INTO restore_run (backup_id, phase, state, justification, concurrency, detail)
+           VALUES ($1, 'preparing', 'running', $2, $3, jsonb_build_object('concurrencySource', $4::text))
+           RETURNING id`,
+          [backupId, justification, fanOut.value, fanOut.source],
         );
         return run.rows[0]?.id ?? null;
       });
@@ -847,6 +896,23 @@ function internal(detail: string): AppError {
     detail,
     remediation: 'Retry; nothing was applied.',
   });
+}
+
+/**
+ * DD-15 — the design's floor and ceiling for a portfolio restore.
+ *
+ * The database trigger bounds the setting and the config schema bounds the environment, so this is
+ * a third guard rather than the first: a value that reached here from a restored dump written before
+ * either bound existed must not be able to make the run serial or over-subscribe the host.
+ */
+const RESTORE_CONCURRENCY_FLOOR = 4;
+const RESTORE_CONCURRENCY_CEILING = 12;
+
+function clampRestoreConcurrency(value: number): number {
+  return Math.min(
+    RESTORE_CONCURRENCY_CEILING,
+    Math.max(RESTORE_CONCURRENCY_FLOOR, Math.trunc(value)),
+  );
 }
 
 function cadenceOf(schedule: string): 'off' | 'daily' | 'weekly' | 'monthly' {

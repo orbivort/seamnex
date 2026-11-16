@@ -18,7 +18,11 @@ import {
 
 type JobInput = Record<string, unknown>;
 
-function setup(routes: readonly Route[] = []) {
+/**
+ * `access` is optional so the default fixtures exercise the environment fallback. A scope that cares
+ * about NFR-3.9's fan-out passes the M09 stub explicitly.
+ */
+function setup(routes: readonly Route[] = [], access?: { settings: () => Promise<unknown> }) {
   const db = fakeDb(routes);
   const audit = {
     lockChain: vi.fn(async () => undefined),
@@ -41,8 +45,14 @@ function setup(routes: readonly Route[] = []) {
     jobs as never,
     pipelines as never,
     config as never,
+    access as never,
   );
-  return { db, audit, integration, outbox, jobs, pipelines, config, service };
+  return { db, audit, integration, outbox, jobs, pipelines, config, access, service };
+}
+
+/** What M09 answers for the fan-out setting. */
+function settingsOf(restoreConcurrency: number) {
+  return { settings: vi.fn(async () => ({ settings: { restoreConcurrency }, etag: 'e-1' })) };
 }
 
 function backupRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -535,17 +545,14 @@ describe('instance restore', () => {
   it('records the restore run and queues it at the configured concurrency', async () => {
     const { db, jobs, service } = setup([
       ['SELECT * FROM backup WHERE id = $1', [backupRow()]],
-      [
-        'INSERT INTO restore_run (backup_id, phase, state, justification, concurrency)',
-        [{ id: 'run-1' }],
-      ],
+      ['INSERT INTO restore_run', [{ id: 'run-1' }]],
     ]);
 
     const result = await service.restore('bkp-1', 'restore after the incident', 'user-1');
 
     expect(result).toEqual({ restoreId: 'run-1', jobId: 'job-1' });
     const insert = db.calls.find((call) => call.sql.includes('INSERT INTO restore_run'));
-    expect(insert?.params).toEqual(['bkp-1', 'restore after the incident', 6]);
+    expect(insert?.params).toEqual(['bkp-1', 'restore after the incident', 6, 'environment']);
     expect(jobs.create).toHaveBeenCalledWith(
       expect.objectContaining({
         kind: 'restore',
@@ -555,10 +562,61 @@ describe('instance restore', () => {
     );
   });
 
+  it('uses the operator setting rather than the environment value, and records the source', async () => {
+    const { db, service } = setup(
+      [
+        ['SELECT * FROM backup WHERE id = $1', [backupRow()]],
+        ['INSERT INTO restore_run', [{ id: 'run-1' }]],
+      ],
+      settingsOf(9),
+    );
+
+    await service.restore('bkp-1', 'restore after the incident', 'user-1');
+
+    const insert = db.calls.find((call) => call.sql.includes('INSERT INTO restore_run'));
+    // NFR-3.9 / DD-15: the console shows 9, so the run has to fan out at 9.
+    expect(insert?.params).toEqual(['bkp-1', 'restore after the incident', 9, 'settings']);
+    expect(String(insert?.sql)).toContain("'concurrencySource'");
+  });
+
+  it.each([
+    [1, 4],
+    [40, 12],
+  ])('clamps a stored setting of %i to the design’s %i', async (stored, expected) => {
+    const { db, service } = setup(
+      [
+        ['SELECT * FROM backup WHERE id = $1', [backupRow()]],
+        ['INSERT INTO restore_run', [{ id: 'run-1' }]],
+      ],
+      settingsOf(stored),
+    );
+
+    await service.restore('bkp-1', 'restore after the incident', 'user-1');
+
+    const insert = db.calls.find((call) => call.sql.includes('INSERT INTO restore_run'));
+    expect(insert?.params[2]).toBe(expected);
+  });
+
+  it('falls back to the environment value when the setting cannot be read', async () => {
+    const { db, service } = setup(
+      [
+        ['SELECT * FROM backup WHERE id = $1', [backupRow()]],
+        ['INSERT INTO restore_run', [{ id: 'run-1' }]],
+      ],
+      { settings: vi.fn(async () => Promise.reject(new Error('settings are unreadable'))) },
+    );
+
+    await service.restore('bkp-1', 'restore after the incident', 'user-1');
+
+    const insert = db.calls.find((call) => call.sql.includes('INSERT INTO restore_run'));
+    // A restore must not be refused because the console's setting is temporarily unreadable.
+    expect(insert?.params).toEqual(['bkp-1', 'restore after the incident', 6, 'environment']);
+  });
+
   it('refuses when the restore run was not created', async () => {
     const { service } = setup([
       ['SELECT * FROM backup WHERE id = $1', [backupRow()]],
-      ['INSERT INTO restore_run (backup_id, phase, state, justification, concurrency)', []],
+      ['INSERT INTO restore_run', []],
     ]);
 
     await expect(
@@ -665,10 +723,7 @@ describe('platform restore', () => {
       ...overrides,
       ['SELECT * FROM backup WHERE id = $1', [backupRow({ kind: 'platform', instance_id: null })]],
       ["r.state = 'running'", []],
-      [
-        'INSERT INTO restore_run (backup_id, phase, state, justification, concurrency)',
-        [{ id: 'run-9' }],
-      ],
+      ['INSERT INTO restore_run', [{ id: 'run-9' }]],
     ];
   }
 
@@ -755,20 +810,21 @@ describe('platform restore', () => {
 
     await service.platformRestore('bkp-1', JUSTIFICATION, 'u-1');
 
-    const insert = db.calls.find((call) =>
-      call.sql.includes(
-        'INSERT INTO restore_run (backup_id, phase, state, justification, concurrency)',
-      ),
-    );
-    expect(insert?.params).toEqual(['bkp-1', JUSTIFICATION, 6]);
+    const insert = db.calls.find((call) => call.sql.includes('INSERT INTO restore_run'));
+    expect(insert?.params).toEqual(['bkp-1', JUSTIFICATION, 6, 'environment']);
+  });
+
+  it('fans the portfolio out at the operator’s setting, not the environment floor', async () => {
+    const { db, service } = setup(restoreRoutes(), settingsOf(11));
+
+    await service.platformRestore('bkp-1', JUSTIFICATION, 'u-1');
+
+    const insert = db.calls.find((call) => call.sql.includes('INSERT INTO restore_run'));
+    expect(insert?.params).toEqual(['bkp-1', JUSTIFICATION, 11, 'settings']);
   });
 
   it('reports an unusable transaction without compensating for a run that was never created', async () => {
-    const { integration, service } = setup(
-      restoreRoutes([
-        ['INSERT INTO restore_run (backup_id, phase, state, justification, concurrency)', []],
-      ]),
-    );
+    const { integration, service } = setup(restoreRoutes([['INSERT INTO restore_run', []]]));
 
     await expect(service.platformRestore('bkp-1', JUSTIFICATION, 'u-1')).rejects.toMatchObject({
       code: 'INTERNAL_ERROR',

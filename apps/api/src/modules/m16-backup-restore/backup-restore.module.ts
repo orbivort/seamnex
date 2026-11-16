@@ -3,6 +3,7 @@ import { DockerModule } from '../../common/docker/docker.module';
 import { StorageModule } from '../../common/storage/storage.module';
 import { JobsModule } from '../../jobs/jobs.module';
 import { IntegrationModule } from '../m07-integration/integration.module';
+import { AccessControlModule } from '../m09-access-control/access-control.module';
 import { SecretsModule } from '../m15-secrets/secrets.module';
 import { AgeEncryptor } from './age';
 import { BACKUP_RESTORE_SERVICE } from './backup-restore.contract';
@@ -22,7 +23,16 @@ import { PostgresBackupRestoreService } from './backup-restore.service';
  * boundary forbids and the restore does not need.
  */
 @Module({
-  imports: [JobsModule, DockerModule, IntegrationModule, SecretsModule, StorageModule],
+  // `AccessControlModule` is here for one read: NFR-3.9's fan-out is the operator's setting, so a
+  // restore asks M09 rather than defaulting to an environment value the settings screen contradicts.
+  imports: [
+    JobsModule,
+    DockerModule,
+    IntegrationModule,
+    AccessControlModule,
+    SecretsModule,
+    StorageModule,
+  ],
   providers: [
     AgeEncryptor,
     BackupRunnerService,

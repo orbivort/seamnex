@@ -7,6 +7,7 @@ import { WorkflowModule } from '../modules/m13-workflow/workflow.module';
 import { ObservabilityModule } from '../modules/m21-observability/observability.module';
 import { JobService } from './job.service';
 import { JobQueryService } from './job-query.service';
+import { JobRetryService } from './job-retry.service';
 import { JobStreamService } from './job-stream';
 import { JobWorker } from './job.worker';
 import { PipelineRegistry } from './pipeline-registry';
@@ -49,6 +50,7 @@ import { SyntheticPipeline } from './synthetic-pipeline';
     JobService,
     JobQueryService,
     JobStreamService,
+    JobRetryService,
     PipelineRegistry,
     SyntheticPipeline,
     JobWorker,
@@ -58,6 +60,7 @@ import { SyntheticPipeline } from './synthetic-pipeline';
     JobService,
     JobQueryService,
     JobStreamService,
+    JobRetryService,
     PipelineRegistry,
     JobWorker,
     SchedulerService,

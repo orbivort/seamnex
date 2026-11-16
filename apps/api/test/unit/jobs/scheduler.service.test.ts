@@ -36,6 +36,10 @@ function setup(options: { omit?: readonly string[]; routes?: Parameters<typeof f
     reapIdempotencyKeys: vi.fn(async () => 0),
     create: vi.fn(async () => ({ job: { id: 'job-drift-1' }, created: true })),
   };
+  // NFR-6.5: the retry pass runs on this cadence; its own suite pins the policy.
+  const retries = {
+    tick: vi.fn(async () => ({ scheduled: 0, skipped: 0, abandoned: 0 })),
+  };
   const outbox = { dispatchBatch: vi.fn(async (): Promise<void> => undefined) };
   const anchor = { run: vi.fn(async () => undefined) };
   const audit = omit.has('audit') ? undefined : { append: vi.fn(async () => undefined) };
@@ -91,6 +95,7 @@ function setup(options: { omit?: readonly string[]; routes?: Parameters<typeof f
     CONFIG,
     metrics as never,
     jobs as never,
+    retries as never,
     pipelines as never,
     outbox as never,
     anchor as never,
@@ -109,6 +114,7 @@ function setup(options: { omit?: readonly string[]; routes?: Parameters<typeof f
   return {
     db,
     jobs,
+    retries,
     outbox,
     anchor,
     audit,
@@ -185,6 +191,7 @@ describe('the pass', () => {
     const {
       db,
       jobs,
+      retries,
       outbox,
       anchor,
       notifications,
@@ -199,6 +206,7 @@ describe('the pass', () => {
 
     expect(outbox.dispatchBatch).toHaveBeenCalledOnce();
     expect(jobs.redispatchQueued).toHaveBeenCalledOnce();
+    expect(retries.tick).toHaveBeenCalledOnce();
     expect(jobs.reapIdempotencyKeys).toHaveBeenCalledOnce();
     expect(anchor.run).toHaveBeenCalledOnce();
     expect(governance?.expireOverdueBreakGlass).toHaveBeenCalledOnce();
@@ -230,6 +238,17 @@ describe('the pass', () => {
 
     release?.();
     await first;
+  });
+
+  it('keeps a failing retry pass out of the pass that follows it', async () => {
+    const { retries, db, service } = setup({ routes: FULL_ROUTES });
+    retries.tick.mockRejectedValueOnce(new Error('candidate query failed'));
+
+    await expect(service.tick()).resolves.toBeUndefined();
+
+    // Partition upkeep runs after the retry pass: an outage in the retry policy must not be what
+    // makes every audited mutation fail closed.
+    expect(db.calls.some((call) => call.sql.includes('seamnex_ensure_partition'))).toBe(true);
   });
 
   it('resets the guard after a failed pass', async () => {

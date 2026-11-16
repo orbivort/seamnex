@@ -33,6 +33,9 @@ function setup(routes: Parameters<typeof fakeDb>[0] = ROUTES) {
     redispatchQueued: vi.fn(async () => 0),
     reapIdempotencyKeys: vi.fn(async () => 0),
   };
+  const retries = {
+    tick: vi.fn(async () => ({ scheduled: 0, skipped: 0, abandoned: 0 })),
+  };
   const outbox = { dispatchBatch: vi.fn(async (): Promise<void> => undefined) };
   const anchor = { run: vi.fn(async () => undefined) };
   const audit = { append: vi.fn(async () => undefined) };
@@ -57,6 +60,7 @@ function setup(routes: Parameters<typeof fakeDb>[0] = ROUTES) {
     CONFIG,
     metrics as never,
     jobs as never,
+    retries as never,
     pipelines as never,
     outbox as never,
     anchor as never,

@@ -12,6 +12,7 @@ import { APP_CONFIG } from '../config/config.module';
 import type { AppConfig } from '../config/config';
 import { OutboxService } from '../modules/m17-audit/outbox';
 import { AuditAnchorJob } from '../modules/m17-audit/audit-anchor.job';
+import { JobRetryService } from './job-retry.service';
 import { JobService } from './job.service';
 import {
   dropExpiredAuditEventPartitions,
@@ -86,6 +87,11 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     @Inject(METRICS) private readonly metrics: Metrics,
     @Inject(JobService) private readonly jobs: JobService,
+    /**
+     * NFR-6.5 — the retry and abandonment pass. Same module, always present: a process that creates
+     * jobs must also be able to say which failed ones deserve another attempt.
+     */
+    @Inject(JobRetryService) private readonly retries: JobRetryService,
     /** The stage list of each kind; a drift repair queues the same `reconfigure` an operator would. */
     @Inject(PipelineRegistry) private readonly pipelines: PipelineRegistry,
     @Inject(OutboxService) private readonly outbox: OutboxService,
@@ -253,6 +259,7 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
     try {
       await this.outbox.dispatchBatch();
       await this.jobs.redispatchQueued();
+      await this.retryFailedJobs();
       await this.jobs.reapIdempotencyKeys();
       await this.anchorOncePerDay();
       await this.ensurePartitions();
@@ -647,6 +654,26 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
       outcome: 'success',
       detail,
     });
+  }
+
+  /**
+   * NFR-6.5 — one retry pass per tick.
+   *
+   * Guarded like the other optional passes: the retry policy is important, but a failure inside it
+   * must never cost the partition upkeep that follows, which is what keeps audited mutations alive.
+   */
+  private async retryFailedJobs(): Promise<void> {
+    try {
+      const result = await this.retries.tick();
+      if (result.scheduled > 0 || result.abandoned > 0) {
+        this.logger.log(result, 'job retry pass settled failures');
+      }
+    } catch (error) {
+      this.logger.error(
+        { err: error instanceof Error ? error.message : String(error) },
+        'job retry pass failed; failed jobs keep their state',
+      );
+    }
   }
 
   /** 4C.1: due backups are started by the runner, on the scheduler's cadence. */

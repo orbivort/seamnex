@@ -203,6 +203,27 @@ describe('process', () => {
     });
   });
 
+  it('marks a dropped socket JOB_TRANSIENT, which is what the retry pass looks for', async () => {
+    const stages = [
+      {
+        step: 'resolve',
+        run: vi.fn(async () => {
+          throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+        }),
+      },
+    ];
+    const { jobs, worker } = setup({ stages, failureHandler: vi.fn(async () => undefined) });
+    worker.start();
+
+    await expect(processor()(bullJob())).rejects.toThrow('socket hang up');
+
+    expect(jobs.transition).toHaveBeenLastCalledWith(
+      'job-1',
+      'failed',
+      expect.objectContaining({ errorCode: 'JOB_TRANSIENT' }),
+    );
+  });
+
   it('uses the problem code of an AppError', async () => {
     const stages = [
       {

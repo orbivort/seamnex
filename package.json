@@ -17,6 +17,8 @@
     }
   },
   "scripts": {
+    "bootstrap": "node scripts/bootstrap.mjs",
+    "bootstrap:check": "node scripts/bootstrap.mjs --check",
     "dev": "node scripts/dev.mjs",
     "dev:web": "turbo run dev",
     "dev:portal": "pnpm --filter @seamnex/portal dev",

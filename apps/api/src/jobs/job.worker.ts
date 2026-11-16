@@ -6,6 +6,8 @@ import { JOB_QUEUE_NAME } from './job-lane';
 import { JobService } from './job.service';
 import { canTransitionJob } from './job-state';
 import { PipelineRegistry, type PipelineContext, type PipelineStage } from './pipeline-registry';
+import { jobContext, settlePipelineFailure } from './job-context';
+import { jobErrorCode } from './job-failure';
 import { AppError } from '../common/problem/app-error';
 
 type Payload = { jobId: string; lane: string; kind: string; manual?: boolean };
@@ -93,13 +95,13 @@ export class JobWorker implements OnApplicationShutdown {
     await this.jobs.transition(jobId, 'running', { actorId: 'deploy-worker' });
     await this.jobs.appendLog(jobId, 'system', `job ${current.kind} started`);
 
-    const context = this.contextFor(
+    const context = jobContext(this.jobs, {
       jobId,
-      current.kind,
-      current.instance_id,
-      current.requested_by,
-      current.payload,
-    );
+      kind: current.kind,
+      instanceId: current.instance_id,
+      requestedBy: current.requested_by,
+      payload: current.payload,
+    });
 
     try {
       await this.execute(context, current.kind);
@@ -107,7 +109,7 @@ export class JobWorker implements OnApplicationShutdown {
       const message = failureText(error);
       await this.jobs.appendLog(jobId, 'stderr', message).catch(() => undefined);
 
-      await this.settleFailure(current.kind, context, error);
+      await settlePipelineFailure(this.pipelines, current.kind, context, error);
 
       // A cancelled job cannot become failed (`cancelled` is terminal). Transitioning anyway threw
       // a second error that replaced the real one, so the guard is the transition table itself.
@@ -115,34 +117,13 @@ export class JobWorker implements OnApplicationShutdown {
       if (latest !== undefined && canTransitionJob(latest.state, 'failed')) {
         await this.jobs
           .transition(jobId, 'failed', {
-            errorCode: error instanceof AppError ? error.code : 'JOB_FAILED',
+            errorCode: jobErrorCode(error),
             errorDetail: message,
             actorId: 'deploy-worker',
           })
           .catch(() => undefined);
       }
       throw error;
-    }
-  }
-
-  /**
-   * The owning module settles its own resource after a failed job. Best effort: a handler failure
-   * must never replace the job's real error, and a failed job must still be recorded as failed.
-   */
-  private async settleFailure(
-    kind: string,
-    context: PipelineContext,
-    cause?: unknown,
-  ): Promise<void> {
-    const handler = this.pipelines.failureHandler(kind);
-    if (handler === undefined) return;
-    try {
-      await handler(context, cause);
-    } catch (error) {
-      this.logger.error(
-        { jobId: context.jobId, kind, err: error instanceof Error ? error.message : String(error) },
-        'failure handler failed; the job is still marked failed',
-      );
     }
   }
 
@@ -164,25 +145,7 @@ export class JobWorker implements OnApplicationShutdown {
         'job cancelled; the instance state is settled so it can be redeployed',
       )
       .catch(() => undefined);
-    await this.settleFailure(kind, context);
-  }
-
-  private contextFor(
-    jobId: string,
-    kind: string,
-    instanceId: string | null,
-    requestedBy: string | null | undefined,
-    payload: Record<string, unknown>,
-  ): PipelineContext {
-    return {
-      jobId,
-      instanceId: instanceId ?? '',
-      actorId: requestedBy ?? 'deploy-worker',
-      action: typeof payload.action === 'string' ? payload.action : kind,
-      payload,
-      log: (stream, line) => this.jobs.appendLog(jobId, stream, line).then(() => undefined),
-      cancelled: async () => (await this.jobs.get(jobId)).state === 'cancelled',
-    };
+    await settlePipelineFailure(this.pipelines, kind, context);
   }
 
   private async execute(context: PipelineContext, kind: string): Promise<void> {

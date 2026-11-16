@@ -109,7 +109,7 @@ export function SettingsPage() {
                 <Field
                   label="Restore concurrency"
                   htmlFor="restore-conc"
-                  hint="Floor 4, ceiling 12. Parallel restores are authorised separately."
+                  hint="Floor 4, ceiling 12. Applies to the next restore; a running one keeps the value it started with. Parallel restores are authorised separately."
                 >
                   <Input
                     id="restore-conc"

@@ -251,6 +251,35 @@ const EnvironmentSchema = z
     SEAMNEX_PARTITION_LOOKAHEAD_DAYS: z.coerce.number().int().min(1).max(180).default(9),
     SEAMNEX_JOB_LOG_RETENTION_DAYS: z.coerce.number().int().min(1).max(3_650).default(30),
     /**
+     * NFR-6.5 — how a transiently failed job is retried (ADR-BE-34).
+     *
+     * A retry is a new job, so the cap is per chain and the wait doubles from `BACKOFF_MS` up to
+     * `MAX_DELAY_MS`: an outage that lasts an hour must not become sixty attempts. `1` disables
+     * automatic retry, which is the honest setting for a host that would rather see every failure.
+     */
+    SEAMNEX_JOB_RETRY_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(3),
+    SEAMNEX_JOB_RETRY_BACKOFF_MS: z.coerce.number().int().min(1_000).max(3_600_000).default(60_000),
+    SEAMNEX_JOB_RETRY_MAX_DELAY_MS: z.coerce
+      .number()
+      .int()
+      .min(1_000)
+      .max(86_400_000)
+      .default(900_000),
+    /** How many candidates one pass examines, so a backlog cannot hold the scheduler pass open. */
+    SEAMNEX_JOB_RETRY_BATCH: z.coerce.number().int().min(1).max(200).default(25),
+    /**
+     * A `running` job with no log line, no running step and no transition for this long is settled
+     * `failed` with `JOB_ABANDONED`: the worker that held it is gone, and the lane would otherwise
+     * stay blocked for ever. It has to exceed the longest silent stage — a `pg_restore` writes
+     * nothing while it runs — so the floor is 15 minutes and the default an hour.
+     */
+    SEAMNEX_JOB_STALE_AFTER_MS: z.coerce
+      .number()
+      .int()
+      .min(900_000)
+      .max(21_600_000)
+      .default(3_600_000),
+    /**
      * ADR-BE-09 D5: the catalogue working tree. A development default keeps `pnpm dev` working
      * without cloning; production sets it explicitly (ADR-BE-08).
      */

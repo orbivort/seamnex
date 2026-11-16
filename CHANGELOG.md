@@ -16,6 +16,23 @@ the same number through every manifest and the link definitions at the foot of t
 
 ### Added
 
+- **A host install is one idempotent command, and a runbook that can be measured** (`NFR-6.2`,
+  `NFR-6.3`, `S-9`, `AC-19`, ISSUE-32) — the repository documented three development modes and no
+  install path, so "a clean host becomes a working platform through a single documented bootstrap" had
+  nothing behind it. `pnpm bootstrap` now installs the workspace from the frozen lockfile, creates
+  `.env` only when absent, writes the root key and Keycloak credential files if missing, brings up the
+  stack through `scripts/compose.mjs` (schema, services, realm import, admin-client reconcile), seeds
+  the identity mirror and default catalogue, and verifies `/api/v1/readyz` with the dependencies it
+  reports; `pnpm bootstrap:check` repeats the checks without changing anything. It never rotates a
+  credential, overwrites `.env` or deletes a volume, so a failed step is repaired by re-running it.
+  Its posture pass names the things a working install can still be wrong about: the example database
+  password, `AUTH_PROVIDER=stub`, a loose root-key mode, a missing root key or Keycloak admin-client
+  secret, a `pnpm` drifting from the pinned minor, and a `PORT` that no longer matches the published
+  mapping.
+  `docs/dev-reference/operations/bootstrap.md` is the procedure: prerequisites, the ports the install
+  binds, a timing budget inside the requirement's sixty minutes, the AC-19 verification checklist, the
+  re-run and recovery table, and an explicit list of what it does not install (TLS, production
+  identities, a hosted console, AC-37's console bootstrap-review screen). ADR-BE-35.
 - **Every instance is genuinely observed, and the console can show it** (`FR-2.6`, `FR-4.6`, `AC-45`) —
   M21 was a contract with no implementation while `observability_profile` had been created and left
   empty, so "we observe every instance" described a table nobody wrote. `PostgresObservabilityService`
@@ -281,6 +298,35 @@ the same number through every manifest and the link definitions at the foot of t
 
 ### Fixed
 
+- **A transient job failure retries itself, and a dead worker no longer blocks its instance** (`NFR-6.5`,
+  ISSUE-31) — every queued job carried `attempts: 1` and nothing above the queue retried it, so a
+  registry restart became an operator task, and a worker that died mid-stage left its row `running` for
+  ever with the one-active-per-instance index refusing every later action. Retry is now a platform
+  object rather than a queue option: the scheduler queues a **successor** job (`payload.retryOf`,
+  `attempt`) for failures classified transient (`UNAVAILABLE`, `ADAPTER_UNAVAILABLE`,
+  `REPOSITORY_UNAVAILABLE`, `AUTH_PROVIDER_UNAVAILABLE`, `SECRET_UNAVAILABLE`, `RATE_LIMITED`, or a
+  socket errno recorded as `JOB_TRANSIENT` through the cause chain), bounded by
+  `SEAMNEX_JOB_RETRY_MAX_ATTEMPTS` and spaced by exponential backoff up to
+  `SEAMNEX_JOB_RETRY_MAX_DELAY_MS`. A deploy/reconfigure/upgrade/rollback is only retried while its
+  `apply` stage has not started — the boundary is resolved from `PipelineRegistry`, because
+  `job_step.name` holds the display label — and restores and `dsar` are never retried automatically. A
+  `running` job with no log line, step or transition for `SEAMNEX_JOB_STALE_AFTER_MS` is settled
+  `failed` with `JOB_ABANDONED` after the owning module's failure handler runs, so a `restore_run` no
+  longer hangs on a lost worker. The attempt bound is a candidate predicate as well as a per-row
+  check, because the pass reads oldest-first: without it a handful of exhausted jobs would occupy
+  every batch for ever and no newer failure would be examined. Both ends of a chain carry a `system`
+  log line (`Retried automatically after job …`, `Retry queued automatically: job …`), so the console
+  shows the retry as the platform's action rather than a second operator's. Audited as
+  `job.retry.scheduled`, counted as `seamnex_job_retries_total{outcome}`. BullMQ's `attempts` stays
+  `1`, stated in code and ADR-BE-34.
+- **A restore fans out at the operator's setting, not an environment default** (`NFR-3.9`, `AC-52`,
+  `DD-15`, ISSUE-33) — `settings.restore_concurrency` was validated, stored, bounded by a trigger and
+  drawn in the settings screen, and both `restore_run` inserts used `SEAMNEX_RESTORE_CONCURRENCY`
+  instead, so an operator who raised the fan-out changed nothing. Both the instance restore and the
+  portfolio restore now read the stored setting (clamped 4–12, the environment value as the fallback
+  when settings cannot be read) and record the source in `restore_run.detail.concurrencySource`, which
+  is what makes "the setting was honoured" checkable afterwards. The parallel product tier itself was
+  already implemented and is unchanged.
 - **The guest can use the portal in live mode** (`FR-3.3`, `FR-3.5`, `AC-35`, ISSUE-28) — `/me/launcher`
   and `/portal/products/:slug` were bound to `portal.view_entitlements`, whose R6 cell in §5.2 is
   `none`, so the one surface the guest role exists for answered `403` while mock mode hid the defect.

@@ -31,6 +31,21 @@ pnpm mocks:init        # generates the MSW worker into both apps (not committed)
 `pnpm mocks:init` is required on a clean clone: the generated service worker is deliberately not
 committed.
 
+### Install on a host
+
+`pnpm dev` is the developer loop. For a host that should actually run the platform, use the one
+documented bootstrap:
+
+```bash
+pnpm bootstrap          # installs the workspace, brings up the stack, seeds data, verifies readiness
+pnpm bootstrap:check    # verifies an existing install; changes nothing
+```
+
+It is idempotent: a second run converges instead of duplicating, and it never rotates a credential or
+overwrites `.env`. The step-by-step procedure, the timing budget, the verification checklist, the
+recovery paths and the list of what this install does **not** do (TLS, production identities, a hosted
+console) are in [`docs/dev-reference/operations/bootstrap.md`](docs/dev-reference/operations/bootstrap.md).
+
 ## Usage
 
 Three modes; `pnpm dev` and `pnpm dev:stack` both bind `:8080`, so run one or the other.
@@ -87,6 +102,8 @@ change.
 | Command                                    | Effect                                                                      |
 | ------------------------------------------ | --------------------------------------------------------------------------- |
 | `pnpm dev:web`                             | Both SPAs against the in-browser mock API                                   |
+| `pnpm bootstrap`                           | Installs or repairs a host; ends with `/readyz` verified                    |
+| `pnpm bootstrap:check`                     | Verifies an existing install without changing anything                      |
 | `pnpm dev`                                 | Datastores, migrations, seed data, then portal, console and API             |
 | `pnpm dev:stack`                           | The platform in Compose; add `--profile observability` for metrics and logs |
 | `pnpm dev:stack:down`                      | Stops the Compose stack                                                     |
@@ -99,6 +116,8 @@ change.
 
 - [`docs/openapi.json`](docs/openapi.json) — generated OpenAPI document for `/api/v1`, produced from
   `packages/domain/src/contract.ts`.
+- [`docs/dev-reference/operations/bootstrap.md`](docs/dev-reference/operations/bootstrap.md) — the host
+  install runbook, and what the install deliberately does not do.
 
 ## Contributing
 

@@ -485,6 +485,9 @@ export class JobService implements OnApplicationShutdown {
         },
         {
           jobId: queueJobId(job.lane, job.id),
+          // One attempt, on purpose: a BullMQ retry re-enters `process()` from the first stage, and a
+          // pipeline that failed at `apply` must never be replayed that way. Retries are a platform
+          // object instead — a new job referencing this one, classified and bounded (ADR-BE-34).
           attempts: 1,
           removeOnComplete: 500,
           removeOnFail: 1_000,
