@@ -71,20 +71,29 @@ describe('queryKeys', () => {
     expect(otherValue).not.toEqual(first);
   });
 
-  it('keys the deploy preview on the size as well as the slug', () => {
+  it('keys the deploy preview on the size, the slug and the environment', () => {
     const resources = { cpu: 1, memoryMb: 1024, diskMb: 1024 };
-    const first = queryKeys.deployPreview('D01-01', 'crm', 'production', resources);
+    const first = queryKeys.deployPreview('D01-01', 'crm', 'production', resources, {});
 
-    expect(first).toEqual(['instances', 'preview', 'D01-01', 'crm', 'production', resources]);
-    expect(queryKeys.deployPreview('D01-01', 'crm', 'production', undefined)).toEqual([
+    expect(first).toEqual(['instances', 'preview', 'D01-01', 'crm', 'production', resources, {}]);
+    expect(queryKeys.deployPreview('D01-01', 'crm', 'production', undefined, {})).toEqual([
       'instances',
       'preview',
       'D01-01',
       'crm',
       'production',
       null,
+      {},
     ]);
-    expect(queryKeys.deployPreview('D01-01', 'other', 'production', resources)).not.toEqual(first);
+    expect(queryKeys.deployPreview('D01-01', 'other', 'production', resources, {})).not.toEqual(
+      first,
+    );
+    // The pre-flight plans the overrides it is given, so typing a required secret has to be a
+    // different question: an answer about the environment before it was typed otherwise stays
+    // cached, with its `required` blockers, for the life of the step.
+    expect(
+      queryKeys.deployPreview('D01-01', 'crm', 'production', resources, { DB_PASSWORD: 'x' }),
+    ).not.toEqual(first);
   });
 
   it('exposes the list roots the invalidation calls target', () => {

@@ -598,7 +598,7 @@ describe('deploy preview gating', () => {
     expect(recorded.queries.map((query) => query.enabled)).toEqual([false, false, true]);
     // The profile is part of the key, so a staging verdict cannot be rendered as production's.
     expect(recorded.queries[2]?.queryKey).toEqual(
-      queryKeys.deployPreview('D01-01', 'crm', 'production', undefined),
+      queryKeys.deployPreview('D01-01', 'crm', 'production', undefined, {}),
     );
   });
 });

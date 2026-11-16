@@ -284,6 +284,24 @@ export function useDeployWizard(entryKey: string): DeployWizard {
 
   const update = (patch: Partial<WizardValues>) => {
     setDraft((current) => ({ ...current, ...patch }));
+    /*
+     * An error is a verdict on the value that was on screen when the check ran, and only `next()`
+     * and `submit()` ever re-run that check. Kept as it was, "A value is required." stood beside
+     * the password the operator had just typed — the field looked refused while holding a value,
+     * and the only way to learn otherwise was another click. Editing a field retires the verdict
+     * that named it; the next Continue publishes a new one.
+     */
+    setErrors((current) => {
+      const touched = new Set<string>();
+      for (const [name, value] of Object.entries(patch.env ?? {})) {
+        if ((values.env[name] ?? '') !== value) touched.add(`env.${name}`);
+      }
+      if (patch.slug !== undefined) touched.add('slug');
+      if (patch.resources !== undefined) touched.add('resources');
+      if (patch.profileKey !== undefined) touched.add('profile');
+      const next = Object.entries(current).filter(([key]) => !touched.has(key));
+      return next.length === Object.keys(current).length ? current : Object.fromEntries(next);
+    });
   };
 
   const typedOverrides = useMemo(() => {
@@ -319,10 +337,17 @@ export function useDeployWizard(entryKey: string): DeployWizard {
   );
 
   /**
-   * The preview is a read keyed on what it answers about. The two debounced inputs keep typing
-   * from issuing one request per keystroke; `useDeployPreview` cancels a superseded request and
-   * keys the cache on the slug and the size, so an answer for a discarded input cannot be shown
-   * as the current verdict.
+   * The preview is a read keyed on what it answers about. The debounced inputs keep typing from
+   * issuing one request per keystroke; `useDeployPreview` cancels a superseded request and keys
+   * the cache on every input, so an answer for a discarded input cannot be shown as the current
+   * verdict.
+   *
+   * `envOverrides` belongs to that input: the pre-flight plans the environment it is given and
+   * reports a `required` blocker per unresolved variable. Asked without the operator's values, it
+   * answered about an environment nobody was deploying — four required secrets were "missing" in
+   * a form that held all four, and `next()` copied those blockers into field errors that no
+   * amount of typing could clear. Same map `submit()` sends, so the verdict and the request judge
+   * one environment.
    */
   const previewSlug = useDebouncedValue(values.slug, 400);
   const previewResources = useDebouncedValue(values.resources, 400);
@@ -332,8 +357,9 @@ export function useDeployWizard(entryKey: string): DeployWizard {
       slug: previewSlug,
       ...(values.profileKey === '' ? {} : { profile: values.profileKey }),
       resources: previewResources,
+      ...(Object.keys(debouncedOverrides).length === 0 ? {} : { envOverrides: debouncedOverrides }),
     }),
-    [entryKey, previewSlug, values.profileKey, previewResources],
+    [entryKey, previewSlug, values.profileKey, previewResources, debouncedOverrides],
   );
   const preview = useDeployPreview(previewInput, entry.data !== undefined);
   const deploy = useDeploy();

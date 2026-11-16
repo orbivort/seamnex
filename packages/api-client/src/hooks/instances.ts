@@ -229,6 +229,7 @@ export function useDeployPreview(input: DeployInput, enabled = true) {
       input.slug,
       input.profile ?? '',
       input.resources,
+      input.envOverrides ?? {},
     ),
     queryFn: ({ signal }) =>
       request('/instances/preview', {

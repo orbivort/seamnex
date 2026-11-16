@@ -17,13 +17,19 @@ export const queryKeys = {
   /**
    * The deploy wizard's admission verdict. Keyed on every input the answer depends on, so an
    * answer for a previous slug or size cannot be rendered as the current verdict.
+   *
+   * The environment overrides are part of the question: the pre-flight plans them, so an answer
+   * for the environment before a required secret was typed is not an answer about the one the
+   * operator is about to deploy. Leaving them out of the key served the first answer for ever,
+   * and its `required` blockers outlived every value that fixed them.
    */
   deployPreview: (
     entryKey: string,
     slug: string,
     profile: string,
     resources: { cpu: number; memoryMb: number; diskMb: number } | undefined,
-  ) => ['instances', 'preview', entryKey, slug, profile, resources ?? null] as const,
+    envOverrides: Record<string, string>,
+  ) => ['instances', 'preview', entryKey, slug, profile, resources ?? null, envOverrides] as const,
   instanceStatus: (id: string) => ['instances', id, 'status'] as const,
   containers: (id: string) => ['instances', id, 'containers'] as const,
   instanceEnv: (id: string) => ['instances', id, 'env'] as const,
