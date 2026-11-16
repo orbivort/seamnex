@@ -192,6 +192,20 @@ export class Phase4AHandlers implements OperationGroup {
             backupJobId = backup.jobId;
           }
 
+          /*
+           * FR-1.7: `version` means the confirmed upgrade target, not a render-set id.
+           *
+           * The two were conflated: the dialog's delta was dropped and the value was handed to the
+           * rollback resolver, which expected a render-set hash. Rollback keeps its own meaning of
+           * the field, because that is the only action for which it addresses a render set.
+           */
+          const versionField =
+            body_.version === undefined
+              ? {}
+              : action === 'rollback'
+                ? { renderSetId: body_.version }
+                : { targetVersion: body_.version };
+
           const result = await this.executor.lifecycle({
             instanceId,
             action,
@@ -199,7 +213,7 @@ export class Phase4AHandlers implements OperationGroup {
             ...(body_.dataRetention === undefined ? {} : { dataRetention: body_.dataRetention }),
             ...(body_.justification === undefined ? {} : { justification: body_.justification }),
             ...(backupJobId === undefined ? {} : { backupJobId }),
-            ...(body_.version === undefined ? {} : { renderSetId: body_.version }),
+            ...versionField,
           });
           return { kind: 'accepted', jobId: result.jobId };
         },

@@ -60,6 +60,18 @@ export interface IdentitySyncService {
     requesterIdpId: string,
   ): Promise<AccessRequest>;
   /**
+   * FR-1.26 / §5.2: R3 asks R1 for a profile change instead of writing one.
+   *
+   * The request is an ordinary `access_request` of kind `instance_param` whose target names the
+   * profile, so it lands in the queue an administrator already works from. There is no second
+   * approval mechanism for one capability.
+   */
+  requestProfileChange(
+    key: string,
+    justification: string,
+    requesterIdpId: string,
+  ): Promise<AccessRequest>;
+  /**
    * Owns `access_request`. Locks the row and applies the decision inside the caller's transaction,
    * so the state change commits with the audit row that records it.
    *

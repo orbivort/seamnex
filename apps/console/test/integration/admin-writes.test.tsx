@@ -43,6 +43,9 @@ describe('identity sync cycle', () => {
             groups: 8,
             changes: 2,
             p95LatencyMs: 91_000,
+            // AC-48 is the change → applied interval; the mirror write above is a separate figure.
+            p95PropagationMs: 42_000,
+            propagationSamples: 2,
             errors: ['D09-01 OpenProject: group mapping cache miss'],
             state: 'partial',
           },
@@ -59,6 +62,7 @@ describe('identity sync cycle', () => {
 
     expect(await screen.findByText('Sync sync-7750 partial')).toBeDefined();
     expect(screen.getByText(/group mapping cache miss/)).toBeDefined();
-    expect(screen.getByText(/2 change\(s\) propagated in 91 s/)).toBeDefined();
+    expect(screen.getByText(/propagation p95 42 s over 2 sample\(s\)/)).toBeDefined();
+    expect(screen.getByText(/mirror write p95 91 s/)).toBeDefined();
   });
 });

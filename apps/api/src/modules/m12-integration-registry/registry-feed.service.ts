@@ -6,6 +6,7 @@ import {
   type OnModuleInit,
 } from '@nestjs/common';
 import {
+  VERIFIED_FACT_KEYS,
   canonicalVersion,
   isCredentialGranularity,
   isWorkflowEligible,
@@ -13,6 +14,7 @@ import {
   type CredentialGranularity,
   type OperationsResponse,
   type RegistryEntry,
+  type VerifiedFactKey,
 } from '@seamnex/domain';
 import type { Pool } from 'pg';
 import { PG_POOL } from '../../database/database.module';
@@ -139,10 +141,15 @@ export class RegistryFeedService implements OnApplicationBootstrap, OnModuleInit
       guarantee_class: RegistryEntry['guaranteeClass'] | null;
       auth_method: string | null;
       credential_granularity: string;
+      api_base_url: string | null;
+      slo_supported: boolean | null;
+      verified_facts: string[] | null;
       operation_inventory: unknown;
       event_modes: unknown;
       document_operations: unknown;
       document_event_modes: unknown;
+      document_api_base_url: string | null;
+      document_slo_supported: string | null;
       verified_at: Date | null;
       next_review_at: Date | null;
       product: string | null;
@@ -155,10 +162,15 @@ export class RegistryFeedService implements OnApplicationBootstrap, OnModuleInit
               seamnex_effective_granularity(i.id) AS credential_granularity,
               coalesce(m.guarantee_class_verified, c.guarantee_class) AS guarantee_class,
               coalesce(m.auth_method, c.payload->>'authMethod') AS auth_method,
+              m.api_base_url,
+              m.slo_supported,
+              m.verified_facts,
               m.operation_inventory,
               m.event_modes,
               c.payload #> '{integration,operationInventory}' AS document_operations,
               c.payload #> '{integration,eventModes}' AS document_event_modes,
+              c.payload #>> '{integration,apiBaseUrl}' AS document_api_base_url,
+              c.payload->>'sloSupported' AS document_slo_supported,
               coalesce(m.verified_at, CASE WHEN c.payload #>> '{integration,verifiedAt}' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
                                            THEN (c.payload #>> '{integration,verifiedAt}')::timestamptz END) AS verified_at,
               coalesce(m.next_review_at, CASE WHEN c.payload #>> '{integration,nextReviewAt}' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
@@ -186,6 +198,18 @@ export class RegistryFeedService implements OnApplicationBootstrap, OnModuleInit
       const stale =
         verifiedAt === null ||
         Date.now() - verifiedAt.getTime() > this.config.SEAMNEX_REGISTRY_STALE_DAYS * 86_400_000;
+      /*
+       * AC-41/AC-50: which of the served facts onboarding actually verified.
+       *
+       * The projection used to coalesce a verified column with the document and stamp one
+       * `verifiedAt` over the result, so a never-verified operation inventory was served beside the
+       * verified granularity as though both had been checked. The facts list is what lets a consumer
+       * (and the console) tell them apart, and it is why `verified_facts` exists as a column rather
+       * than being inferred: the JSONB defaults are `[]`/`none`, which look like answers.
+       */
+      const verifiedFacts = (row.verified_facts ?? []).filter(isVerifiedFactKey);
+      const verified = new Set(verifiedFacts);
+
       const projected: RegistryEntry & { operations: unknown; eventModes: unknown } = {
         instanceId: row.instance_id,
         entryKey: row.entry_key,
@@ -193,18 +217,28 @@ export class RegistryFeedService implements OnApplicationBootstrap, OnModuleInit
         slug: row.slug,
         route: row.host ?? '',
         version: canonicalVersion(declaredVersion) ?? 'unpinned',
-        apiBaseUrl: row.host === null ? '' : `https://${row.host}`,
+        // A verified base URL wins over the derived route: onboarding recorded the address the
+        // product actually answers on, which is not always the public host.
+        apiBaseUrl:
+          verified.has('apiBaseUrl') && row.api_base_url !== null
+            ? row.api_base_url
+            : (row.document_api_base_url ?? (row.host === null ? '' : `https://${row.host}`)),
         authMethod: row.auth_method ?? 'oidc',
         guaranteeClass: row.guarantee_class ?? 'native',
         // The verified inventory, falling back to the entry document: the canvas discovers operations
         // here (FR-5.2), and an empty list made every product look like it had none.
-        operations: (row.operation_inventory ??
-          row.document_operations ??
-          []) as RegistryEntry['operations'],
-        eventModes: (row.event_modes ??
-          row.document_event_modes ??
-          []) as RegistryEntry['eventModes'],
+        operations: (verified.has('operations') && row.operation_inventory !== null
+          ? row.operation_inventory
+          : (row.document_operations ?? [])) as RegistryEntry['operations'],
+        eventModes: (verified.has('eventModes') && row.event_modes !== null
+          ? row.event_modes
+          : (row.document_event_modes ?? [])) as RegistryEntry['eventModes'],
+        sloSupported:
+          verified.has('sloSupported') && row.slo_supported !== null
+            ? row.slo_supported
+            : row.document_slo_supported === 'true',
         credentialGranularity: granularity,
+        verifiedFacts,
         writeEligible: isWriteEligible(granularity),
         workflowEligible: isWorkflowEligible(granularity),
         owner: row.owner ?? 'platform',
@@ -242,6 +276,16 @@ export class RegistryFeedService implements OnApplicationBootstrap, OnModuleInit
 }
 
 /** A stored value that is not one of the three members is a declarable-granularity failure. */
+/**
+ * A stored fact name that the contract still knows.
+ *
+ * The column is free text, so a name written by an older build must be dropped rather than served:
+ * the console would otherwise print a "verified" chip for a fact it cannot render.
+ */
+function isVerifiedFactKey(value: string): value is VerifiedFactKey {
+  return (VERIFIED_FACT_KEYS as readonly string[]).includes(value);
+}
+
 function asGranularity(value: string): CredentialGranularity {
   return isCredentialGranularity(value) ? value : 'none';
 }

@@ -27,6 +27,8 @@ export const CAPABILITIES = [
   'license.review',
   'capacity.view',
   'metadata.manage',
+  'profile.manage',
+  'profile.request',
   'exception.request',
   'exception.decide',
   'alert.configure',
@@ -163,6 +165,14 @@ export const CAPABILITY_MATRIX = {
   'license.review': { R1: 'none', R2: 'full', R3: 'none', R4: 'none', R5: 'none', R6: 'none' },
   'capacity.view': { R1: 'full', R2: 'full', R3: 'scoped', R4: 'none', R5: 'none', R6: 'none' },
   'metadata.manage': { R1: 'full', R2: 'scoped', R3: 'scoped', R4: 'none', R5: 'none', R6: 'none' },
+  /**
+   * FR-1.26: environment profiles are managed by R1. The matrix says `none` for R3 rather than
+   * `scoped` on purpose: a `scoped` grant with a `request` rule is satisfied by the PDP, which
+   * would let a domain owner write a profile directly. R3 gets `profile.request` instead — a
+   * request the platform stores and R1 decides, the same shape as every other approval flow.
+   */
+  'profile.manage': { R1: 'full', R2: 'none', R3: 'none', R4: 'none', R5: 'none', R6: 'none' },
+  'profile.request': { R1: 'none', R2: 'none', R3: 'full', R4: 'none', R5: 'none', R6: 'none' },
   /**
    * NFR-4.15: "R1 request approved by a second party under the FR-4.11 rule". Filing and deciding are
    * two capabilities so the request is visible in the matrix as an act of its own — the requester

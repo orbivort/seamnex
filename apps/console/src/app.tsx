@@ -76,6 +76,10 @@ const MaintenancePage = lazyScreen(
 const PrivacyPage = lazyScreen(() => import('./features/governance/PrivacyPage'), 'PrivacyPage');
 const RecoveryPage = lazyScreen(() => import('./features/governance/RecoveryPage'), 'RecoveryPage');
 const GroupsPage = lazyScreen(() => import('./features/admin/GroupsPage'), 'GroupsPage');
+const EnvironmentProfilesPage = lazyScreen(
+  () => import('./features/admin/EnvironmentProfilesPage'),
+  'EnvironmentProfilesPage',
+);
 const IdentitySyncPage = lazyScreen(
   () => import('./features/admin/IdentitySyncPage'),
   'IdentitySyncPage',
@@ -258,6 +262,16 @@ function Shell() {
               <RequireFullCapability capability="identity.manage_users">
                 <IdentitySyncPage />
               </RequireFullCapability>,
+            )}
+          />
+          <Route
+            path="admin/environment-profiles"
+            element={screen(
+              // FR-1.26: R1 writes profiles, R3 may read them and file a change request. Both
+              // grants are `full` on their own capability, so the guard admits exactly those two.
+              <RequireAnyCapability capabilities={['profile.manage', 'profile.request']}>
+                <EnvironmentProfilesPage />
+              </RequireAnyCapability>,
             )}
           />
           <Route

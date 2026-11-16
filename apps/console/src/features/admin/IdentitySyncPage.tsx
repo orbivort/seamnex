@@ -33,16 +33,27 @@ const RUN_TONE: Record<SyncRun['state'], 'positive' | 'caution' | 'danger'> = {
 };
 
 /**
- * The target verdict, not just the number.
+ * AC-48's target, judged only against a measured propagation.
  *
- * An aborted cycle has no samples, so its p95 is a literal 0 — a green `0 ms / 300 s` on a run that
- * mirrored nobody is the opposite of evidence, so a failed run cannot pass the target it never
- * measured.
+ * `p95LatencyMs` is the mirror write — how long the directory upserts took — and it was doing duty
+ * as the five-minute figure. Those are different intervals: a cycle can mirror in 84 s and still
+ * leave every product entitlement pending. The pass/fail verdict now needs a sample count, and a run
+ * that measured nothing cannot pass a target it never observed.
  */
-function latencyTone(run: SyncRun | undefined): 'positive' | 'caution' | 'danger' {
+function propagationTone(run: SyncRun | undefined): 'positive' | 'caution' | 'danger' {
   if (run === undefined) return 'caution';
   if (run.state === 'failed') return 'danger';
-  return run.p95LatencyMs <= LATENCY_TARGET_MS ? 'positive' : 'caution';
+  if (run.p95PropagationMs === null || run.propagationSamples === 0) return 'caution';
+  return run.p95PropagationMs <= LATENCY_TARGET_MS ? 'positive' : 'caution';
+}
+
+/** "not measured" is a distinct statement from "0 ms", and the screen says which one applies. */
+function propagationLabel(run: SyncRun | undefined): string {
+  if (run === undefined) return 'not measured';
+  if (run.p95PropagationMs === null || run.propagationSamples === 0) {
+    return 'no membership change measured';
+  }
+  return `${formatLatency(run.p95PropagationMs)} over ${run.propagationSamples} change(s)`;
 }
 
 export function IdentitySyncPage() {
@@ -70,8 +81,8 @@ export function IdentitySyncPage() {
         }
         meta={
           <>
-            <Badge tone={latencyTone(latest)} size="sm">
-              p95 {latest ? formatLatency(latest.p95LatencyMs) : '—'} / 300 s
+            <Badge tone={propagationTone(latest)} size="sm">
+              propagation {propagationLabel(latest)}
             </Badge>
             <Tag mono>
               {latest?.users ?? 0} users · {latest?.groups ?? 0} groups
@@ -87,8 +98,11 @@ export function IdentitySyncPage() {
             tone={RUN_TONE[start.data.state]}
             title={`Sync ${start.data.id} ${start.data.state}`}
           >
-            {start.data.changes} change(s) propagated in {formatLatency(start.data.p95LatencyMs)}{' '}
-            p95.
+            {start.data.propagationSamples === 0
+              ? `No membership change was measured, so this cycle does not evidence the five-minute target. Mirror write p95 ${formatLatency(start.data.p95LatencyMs)}.`
+              : `${start.data.changes} change(s); propagation p95 ${formatLatency(
+                  start.data.p95PropagationMs ?? 0,
+                )} over ${start.data.propagationSamples} sample(s); mirror write p95 ${formatLatency(start.data.p95LatencyMs)}.`}
             {start.data.errors.length > 0 ? ` ${start.data.errors.join(' · ')}` : ''}
           </Callout>
         </div>
@@ -96,17 +110,29 @@ export function IdentitySyncPage() {
 
       <div className="mb-3 grid grid-cols-2 gap-3 xl:grid-cols-4">
         <Panel inset>
-          <Stat label="Sync cycles" value={runs.data?.length ?? '—'} hint="retained evidence" />
-        </Panel>
-        <Panel inset>
           <Stat label="Changes (last)" value={latest?.changes ?? '—'} hint="membership deltas" />
         </Panel>
         <Panel inset>
           <Stat
-            label="p95 latency"
+            label="Propagation p95"
+            value={
+              latest === undefined || latest.p95PropagationMs === null
+                ? 'Not measured'
+                : formatLatency(latest.p95PropagationMs)
+            }
+            tone={propagationTone(latest)}
+            hint={
+              latest === undefined || latest.propagationSamples === 0
+                ? 'no change to measure · target ≤ 5 min'
+                : `${latest.propagationSamples} change(s) · target ≤ 5 min`
+            }
+          />
+        </Panel>
+        <Panel inset>
+          <Stat
+            label="Mirror write p95"
             value={latest ? formatLatency(latest.p95LatencyMs) : '—'}
-            tone={latencyTone(latest)}
-            hint="target ≤ 5 minutes"
+            hint="directory upserts · not the AC-48 figure"
           />
         </Panel>
         <Panel inset>
@@ -128,7 +154,11 @@ export function IdentitySyncPage() {
       </div>
 
       <Panel>
-        <PanelHeader eyebrow="Evidence" title="Recent sync runs" />
+        <PanelHeader
+          eyebrow="Evidence"
+          title="Recent sync runs"
+          description={`${runs.data?.length ?? 0} retained cycle(s). Propagation is measured from the membership change to the applied entitlement.`}
+        />
         <AsyncPanel
           query={runs}
           loading={
@@ -177,8 +207,14 @@ export function IdentitySyncPage() {
                       </p>
                     ) : null}
                   </div>
-                  <div className="flex items-center gap-2">
-                    <Tag mono>p95 {formatLatency(run.p95LatencyMs)}</Tag>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge tone={propagationTone(run)} size="sm">
+                      propagation{' '}
+                      {run.p95PropagationMs === null
+                        ? 'not measured'
+                        : formatLatency(run.p95PropagationMs)}
+                    </Badge>
+                    <Tag mono>mirror {formatLatency(run.p95LatencyMs)}</Tag>
                     <StatusPill tone={RUN_TONE[run.state]} label={run.state} size="sm" />
                   </div>
                 </li>

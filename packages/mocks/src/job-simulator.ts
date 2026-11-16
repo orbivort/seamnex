@@ -122,6 +122,19 @@ function finishJob(job: Job, failed: boolean): void {
         delete state.statuses[instance.id];
       }
     } else {
+      /**
+       * FR-1.7: a successful upgrade applies the catalogue pin, so the instance afterwards reports
+       * that version as the one running and has nothing newer to offer. Leaving the old version in
+       * place made the demo contradict the job it had just reported as succeeded.
+       */
+      if (job.kind === 'upgrade') {
+        const pinned = state.catalog.find((item) => item.key === instance.entryKey)?.upstream
+          .latestVersion;
+        if (pinned !== undefined) {
+          instance.currentVersion = pinned;
+          instance.availableVersion = null;
+        }
+      }
       instance.state = 'ready';
       instance.ready = true;
       instance.stateReason = null;

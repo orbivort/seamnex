@@ -113,10 +113,42 @@ export const phase4Handlers = [
       diskMb: Math.round(outcome.used.diskMb),
     };
 
+    const slugAvailable = !state.instances.some((instance) => instance.slug === body.slug);
+    /*
+     * FR-1.11: the demo data answers with the same blocker list the API computes, not only a
+     * capacity verdict. A preview that reports `admissible: false` without naming the fact that
+     * failed is a progress bar; the wizard renders these rows on the step that can fix them.
+     */
+    const blockers: DeployPreview['blockers'] = [
+      ...(slugAvailable
+        ? []
+        : [
+            {
+              code: 'route_conflict' as const,
+              field: 'slug',
+              message: `The slug "${body.slug ?? ''}" is already published by another deployment.`,
+              blocking: true,
+            },
+          ]),
+      ...(outcome.admissible
+        ? []
+        : [
+            {
+              code: 'capacity' as const,
+              field: 'resources',
+              message: `${outcome.headline} ${outcome.detail}`.trim(),
+              blocking: true,
+            },
+          ]),
+    ];
+
+    const admissible = blockers.length === 0;
     const preview: DeployPreview = {
-      admissible: outcome.admissible,
-      headline: outcome.headline,
-      detail: outcome.detail,
+      admissible,
+      headline: admissible ? 'Ready to deploy' : (blockers[0]?.message ?? outcome.headline),
+      detail: admissible
+        ? 'Capacity, route, variables, secrets and policy were checked.'
+        : (blockers[0]?.message ?? outcome.detail),
       shortfall: {
         cpuMilli: Math.max(0, Math.round((outcome.used.cpu - outcome.limits.cpu) * 1000)),
         memoryMb: Math.max(0, usedMb.memoryMb - limitsMb.memoryMb),
@@ -129,8 +161,11 @@ export const phase4Handlers = [
        * `espocrm.seamnex.local` — two different hosts for the one action being confirmed.
        */
       routeHost: `${body.slug ?? 'new-instance'}.${PLATFORM_DOMAIN}`,
-      slugAvailable: !state.instances.some((instance) => instance.slug === body.slug),
+      slugAvailable,
       policyVerdict: 'allowed',
+      policyEvaluatedAt: at(0),
+      policySource: 'local_evaluation',
+      blockers,
       warnings: [],
       evaluatedAt: at(0),
     };

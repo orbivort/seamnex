@@ -151,6 +151,45 @@ describe('the upgrade dialog', () => {
     expect(accepted.instanceId).toBe('inst-crm');
   });
 
+  it('reports a catalogue pin that moved while the dialog was open', async () => {
+    // FR-1.7 / AC-06: the confirmed version is a promise about the pin. When the pin moved, the
+    // server refuses instead of silently re-resolving, and the operator is told which two versions
+    // disagree — the dialog's version and the catalogue's.
+    server.use(
+      http.post('/api/v1/instances/:id/upgrade', () =>
+        HttpResponse.json(
+          {
+            type: 'https://platform.seamnex.local/problems/state_conflict',
+            title: 'The catalogue pin moved',
+            status: 409,
+            code: 'STATE_CONFLICT',
+            detail: 'You confirmed 10.0.11, but the catalogue now pins 10.0.12.',
+            remediation: 'Re-open the upgrade dialog: the version and the render set have changed.',
+            correlationId: 'corr-1',
+            timestamp: '2026-02-01T00:00:00.000Z',
+          },
+          { status: 409 },
+        ),
+      ),
+    );
+
+    openAs('R1', '/instances/inst-crm');
+    render(<App />);
+    await screen.findByRole('heading', { name: 'EspoCRM' });
+    const queued = getState().jobs.length;
+
+    fireEvent.click(screen.getByRole('button', { name: 'Upgrade' }));
+    const dialog = await screen.findByRole('dialog');
+    await within(dialog).findByText('pre-upgrade backup');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Run upgrade' }));
+
+    expect(
+      await screen.findByText(/You confirmed 10\.0\.11, but the catalogue now pins 10\.0\.12\./),
+    ).toBeDefined();
+    // Nothing was queued: a refusal is not a job that failed later.
+    expect(getState().jobs).toHaveLength(queued);
+  });
+
   it('names the current version when the target version is no longer offered', async () => {
     // The dialog can outlive the catalog revision it was opened against: a poll can take the
     // available version away while the plan stays open. The "to" tag must fall back to the version

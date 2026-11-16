@@ -41,6 +41,32 @@ export const EventModeSchema = z.object({
   minimumIntervalMinutes: z.number().int().positive().optional(),
 });
 
+/**
+ * FR-2.4: where the platform pushes a subject's product role when the product has no identity client
+ * that reads the directory itself.
+ *
+ * It is declared by the entry at onboarding rather than guessed: the platform never invents an admin
+ * API path, and an entry that does not declare one is never pushed to — its entitlements stay
+ * `pending` with the reason recorded instead of pretending `applied`.
+ */
+export const RolePushSchema = z.object({
+  /** Absolute path below the instance origin, e.g. `/api/users/roles`. */
+  path: z
+    .string()
+    .min(1)
+    .refine((value) => value.startsWith('/'), 'path must start with "/"'),
+  /**
+   * Only POST is accepted because the push runs from a `busybox` helper container, whose `wget`
+   * cannot issue arbitrary methods. A `method` field that silently fell back to POST would be a
+   * configuration lie.
+   */
+  method: z.literal('POST').default('POST'),
+  /** Field name the product expects the role in; defaults to the common `role`. */
+  roleField: z.string().min(1).default('role'),
+  /** `secret` name in the instance scope holding the product admin API token. */
+  secretName: z.string().min(1),
+});
+
 /** FR-1.1 integration attributes, verified at onboarding (FR-2.14). */
 export const IntegrationMetadataSchema = z.object({
   apiBaseUrl: z.string().min(1),
@@ -51,6 +77,15 @@ export const IntegrationMetadataSchema = z.object({
   credentialGranularity: z.enum(CREDENTIAL_GRANULARITIES),
   sessionMaxMinutes: z.number().int().positive(),
   sloSupported: z.boolean(),
+  /**
+   * FR-2.4: the role a product grants when someone is given plain access to it.
+   *
+   * It is declared rather than hard-coded `member` so a product whose baseline role is `User` or
+   * `Viewer` can say so; the direct-grant path and the requestable-product list both read it.
+   */
+  defaultProductRole: z.string().min(1).optional(),
+  /** Optional: only an entry whose product exposes a role-assignment API declares one. */
+  rolePush: RolePushSchema.optional(),
   verifiedBy: z.string().min(1),
   verifiedAt: TimestampSchema,
   nextReviewAt: TimestampSchema,
@@ -314,6 +349,70 @@ export const EnvProfileSchema = z.object({
   ),
 });
 
+/**
+ * FR-1.26: profiles are "named, reusable overridable set[s] of values scoped to a deployment
+ * target", managed by R1. The key is what an instance pins itself to (`instance.profile_key`), so it
+ * is constrained here rather than by whatever an operator types.
+ */
+export const ENV_PROFILE_KEY_PATTERN = /^[a-z][a-z0-9_-]{1,31}$/;
+
+export const EnvProfileCreateRequestSchema = z.object({
+  key: z
+    .string()
+    .regex(
+      ENV_PROFILE_KEY_PATTERN,
+      'Use 2–32 characters: a lowercase letter followed by lowercase letters, digits, "-" or "_".',
+    ),
+  name: z.string().min(1),
+  target: z.enum(['production', 'staging']),
+});
+
+/** At least one mutable field per request; an empty PATCH would re-sign the row without a change. */
+export const EnvProfilePatchRequestSchema = z
+  .object({
+    name: z.string().min(1).optional(),
+    target: z.enum(['production', 'staging']).optional(),
+  })
+  .refine((value) => value.name !== undefined || value.target !== undefined, {
+    message: 'Specify a name or a target.',
+  });
+
+/**
+ * One profile value. Exactly one source: a plaintext value for a non-secret variable, or a
+ * `secret` reference for a secret-typed one — the database's
+ * `env_profile_value_single_source` CHECK enforces the same rule, this refuses it with a field
+ * error instead of a constraint violation.
+ */
+export const EnvProfileValueWriteSchema = z
+  .object({
+    varName: z.string().min(1),
+    value: z.string().nullable().optional(),
+    secretRef: z.string().min(1).nullable().optional(),
+  })
+  .superRefine((entry, ctx) => {
+    const hasValue = typeof entry.value === 'string';
+    const hasSecret = typeof entry.secretRef === 'string';
+    if (hasValue === hasSecret) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['value'],
+        message: hasValue
+          ? 'Provide either a value or a secret reference, not both.'
+          : 'Provide a value, or a secret reference for a secret variable.',
+      });
+    }
+  });
+
+/** The list replaces the profile's values wholesale, so a removal is expressible. */
+export const EnvProfileValuesRequestSchema = z.object({
+  values: z.array(EnvProfileValueWriteSchema),
+});
+
+export const EnvProfileDeleteResponseSchema = z.object({
+  key: z.string().min(1),
+  deleted: z.boolean(),
+});
+
 /** FR-1.30: import an existing `.env` or Compose environment into the declared schema. */
 export const EnvImportRequestSchema = z.object({
   source: z.enum(['dotenv', 'compose']),
@@ -422,6 +521,7 @@ export type EnvImportResult = z.infer<typeof EnvImportResultSchema>;
 export type CatalogReloadResult = z.infer<typeof CatalogReloadResultSchema>;
 export type IntegrationMetadata = z.infer<typeof IntegrationMetadataSchema>;
 export type Operation = z.infer<typeof OperationSchema>;
+export type EventMode = z.infer<typeof EventModeSchema>;
 export type EnvSchemaVar = z.infer<typeof EnvSchemaVarSchema>;
 export type EnvPlanValue = z.infer<typeof EnvPlanValueSchema>;
 export type EnvPlan = z.infer<typeof EnvPlanSchema>;

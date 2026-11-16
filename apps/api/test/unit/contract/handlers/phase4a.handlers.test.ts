@@ -231,13 +231,16 @@ describe('POST /instances/:id/:action', () => {
     });
 
     expect(s.backups.createInstanceBackup).toHaveBeenCalledWith('i1', 'sub-1');
+    // FR-1.7/AC-06: the confirmed version travels as `targetVersion`. It used to be mis-mapped to
+    // `renderSetId`, which is a rollback selector, so the job never knew what the operator
+    // confirmed and the audit trail could not name it.
     expect(s.executor.lifecycle).toHaveBeenCalledWith({
       instanceId: 'i1',
       action: 'upgrade',
       actorId: 'sub-1',
       backupJobId: 'job-backup',
       dataRetention: 'keep',
-      renderSetId: '2.0.0',
+      targetVersion: '2.0.0',
     });
   });
 

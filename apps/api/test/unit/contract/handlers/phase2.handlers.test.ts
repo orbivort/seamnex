@@ -673,7 +673,9 @@ describe('relay provisioning (ADR-BE-22)', () => {
 
 describe('phase 2 handler registry', () => {
   it('implements every key exactly once', () => {
-    expect(handlers.size).toBe(60);
+    // 60 originally, plus the five FR-1.26 profile operations (create, patch, values, delete and
+    // the request-only change path).
+    expect(handlers.size).toBe(65);
     expect(new Set(handlers.keys()).size).toBe(handlers.size);
   });
 

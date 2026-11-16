@@ -9,6 +9,7 @@ import { IntegrationModule } from '../m07-integration/integration.module';
 import { SecretsModule } from '../m15-secrets/secrets.module';
 import { DeploymentPipeline } from './pipeline';
 import { InstanceLifecycleService } from './lifecycle.service';
+import { PreflightService } from './preflight.service';
 import { EXECUTOR_SERVICE } from './executor.contract';
 import { PostgresExecutorService } from './executor.service';
 
@@ -25,6 +26,7 @@ import { PostgresExecutorService } from './executor.service';
   ],
   providers: [
     DeploymentPipeline,
+    PreflightService,
     InstanceLifecycleService,
     { provide: EXECUTOR_SERVICE, useClass: PostgresExecutorService },
   ],

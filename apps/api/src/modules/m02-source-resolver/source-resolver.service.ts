@@ -30,6 +30,7 @@ import { evaluateDockerfile } from '../../common/compose/dockerfile-policy';
 import { emptyPolicy, type SourcePolicyResult } from '../../common/compose/policy-result';
 import { evaluateComposeText } from '../../common/compose/source-policy';
 import type {
+  PolicyPreview,
   ResolveInput,
   ResolvedSource,
   ResolvedSourceFile,
@@ -172,6 +173,81 @@ export class FilesystemSourceResolver implements SourceResolverService {
 
   evaluate(composeContent: string, waived: readonly ComposeRule[]): ComposePolicyResult {
     return evaluateCompose(parseCompose(composeContent), new Set(waived));
+  }
+
+  async previewPolicy(entryKey: string): Promise<PolicyPreview> {
+    const entry = await this.entry(entryKey);
+    const waivers = await this.waivers(entry.key);
+
+    const vendored = join(this.mirrorRoot(), entry.key);
+    if (existsSync(vendored)) {
+      const detected = detect(vendored);
+      try {
+        const policy =
+          detected.composeFile !== null
+            ? evaluateComposeText(
+                readFileSync(detected.composeFile, 'utf8'),
+                new Set(waivers.rules),
+              )
+            : detected.dockerfilePath !== null
+              ? evaluateDockerfile(
+                  readFileSync(detected.dockerfilePath, 'utf8'),
+                  new Set(waivers.rules),
+                )
+              : null;
+        if (policy !== null) {
+          return {
+            verdict: policy.verdict,
+            violations: policy.violations.map((violation) => ({
+              rule: violation.rule,
+              service: violation.service,
+            })),
+            evaluatedAt: new Date().toISOString(),
+            source: 'local_evaluation',
+            reason: null,
+          };
+        }
+      } catch {
+        // An unreadable vendored tree is not a verdict; fall through to the scaffold and then to
+        // `unknown` rather than reporting a policy result nothing produced.
+      }
+    }
+
+    const scaffold = await this.scaffoldDraft(entry.key);
+    if (scaffold !== null) {
+      /*
+       * The draft's files are a list, not a map. Enumerating them as a record turned each path into
+       * an array index and each body into `''`, so the preview evaluated an empty compose file and
+       * reported the verdict of nothing — the pre-flight said "allowed" for a draft whose real
+       * content had never been read.
+       */
+      const files = scaffold.files.map((file) => ({
+        path: file.path,
+        content: file.content,
+        sha256: '',
+      }));
+      const policy = this.evaluateScaffold(files, waivers.rules);
+      return {
+        verdict: policy.verdict,
+        violations: policy.violations.map((violation) => ({
+          rule: violation.rule,
+          service: violation.service,
+        })),
+        evaluatedAt: new Date().toISOString(),
+        source: 'local_evaluation',
+        reason: null,
+      };
+    }
+
+    return {
+      verdict: 'unknown',
+      violations: [],
+      evaluatedAt: null,
+      source: 'none',
+      reason:
+        'The source is fetched at deployment time and no local copy exists, so the policy cannot be ' +
+        'evaluated before admission. The job evaluates it before applying anything.',
+    };
   }
 
   async confirmScaffold(
@@ -330,12 +406,15 @@ export class FilesystemSourceResolver implements SourceResolverService {
    * revision is the first line of `SOURCE_REVISION` when the operator supplied one, otherwise a
    * content hash of the tree, so "what was deployed" is still provable without the git host.
    */
+  /** Where vendored trees live; `previewPolicy` reads it without copying. */
+  private mirrorRoot(): string {
+    return this.config.SEAMNEX_SOURCE_MIRROR_DIR.length > 0
+      ? this.config.SEAMNEX_SOURCE_MIRROR_DIR
+      : join(this.config.SEAMNEX_CATALOG_REPO_PATH, 'upstream');
+  }
+
   private mirror(entryKey: string, directory: string): { url: string; revision: string } | null {
-    const root =
-      this.config.SEAMNEX_SOURCE_MIRROR_DIR.length > 0
-        ? this.config.SEAMNEX_SOURCE_MIRROR_DIR
-        : join(this.config.SEAMNEX_CATALOG_REPO_PATH, 'upstream');
-    const source = join(root, entryKey);
+    const source = join(this.mirrorRoot(), entryKey);
     if (!existsSync(source)) return null;
 
     cpSync(source, directory, { recursive: true });

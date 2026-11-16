@@ -78,7 +78,11 @@ function setup(routes: readonly Route[] = []) {
     lockChain: vi.fn(async (_tx: unknown) => undefined),
     append: vi.fn(async (_entry: unknown, _tx?: unknown) => ({ seq: '1', hash: 'h' })),
   };
-  const secrets = { put: vi.fn(async () => ({ id: 'sec-1' })) };
+  const secrets = {
+    put: vi.fn(async () => ({ id: 'sec-1' })),
+    describe: vi.fn(async (secretId: string) => ({ id: secretId, masked: '••••••••' })),
+    open: vi.fn(async () => 'secret-value'),
+  };
   const renderSets = {
     render: vi.fn(async (input: RenderInput) => renderSetFor(input.instanceId)),
     applied: vi.fn(async (instanceId: string) => renderSetFor(instanceId)),
@@ -237,12 +241,14 @@ describe('profiles', () => {
         [
           {
             key: 'production',
+            name: 'production',
             target: 'production',
             updated_by: null,
             updated_at: new Date('2026-01-02T03:04:05.000Z'),
           },
           {
             key: 'staging',
+            name: 'staging',
             target: 'staging',
             updated_by: 'bob',
             updated_at: new Date('2026-02-03T00:00:00.000Z'),
@@ -470,9 +476,16 @@ describe('plan', () => {
 
     expect(shown(plan.values)).toEqual([
       ['PUBLIC_URL', 'http://new', 'instance', false, true],
-      ['REDIS_URL', 'redis://p', 'profile', false, false],
+      // AC-51: `none` rejects a profile value as well, so the declaration's default wins and the
+      // operator is told to fix the profile rather than the field.
+      ['REDIS_URL', 'redis://a', 'default', false, false],
     ]);
+    // The profile value is refused, but it does not change what the instance already runs: the
+    // recreate flag belongs to the value actually applied.
     expect(plan.requiresRecreate).toBe(true);
+    expect(plan.fieldErrors).toContainEqual(
+      expect.objectContaining({ field: 'REDIS_URL', code: 'ceiling' }),
+    );
   });
 
   it('answers an empty plan — not a missing one — for an entry that declares no variables', async () => {
@@ -1229,5 +1242,390 @@ describe('applySchemas', () => {
     expect(result.applied).toEqual(
       changed === 0 ? [] : [{ key: ENTRY, added: 0, changed: 1, removed: 0 }],
     );
+  });
+});
+
+/**
+ * FR-1.26 / AC-51 — who owns a profile, and what a profile may say.
+ *
+ * A profile is cross-entry state an operator edits by hand, so every write is validated against the
+ * *declarations* rather than against the screen that sent it: a variable no entry declares, one every
+ * entry caps at `none`, a secret pointed at a plaintext value and a plaintext value pointed at a
+ * secret are all refused before anything is stored. A delete that an instance depends on is refused
+ * with the instance names, because the FK would otherwise surface as a 500.
+ */
+function profileRow(overrides: Row = {}): Row {
+  return {
+    key: 'production',
+    name: 'Production',
+    target: 'production',
+    updated_by: 'alice',
+    updated_at: new Date('2026-02-01T00:00:00.000Z'),
+    ...overrides,
+  };
+}
+
+/** The two reads `profileOrThrow` issues; `values` decides what the profile carries. */
+function profileRoutes(row: Row | null, values: Row[] = []): Route[] {
+  return [
+    ['FROM env_profile ORDER BY key', row === null ? [] : [row]],
+    ['FROM env_profile_value', values],
+  ];
+}
+
+describe('profile administration (FR-1.26 / AC-51)', () => {
+  it('refuses a duplicate key as a field error on the key, not as a constraint violation', async () => {
+    const { audit, service } = setup([
+      ['SELECT 1 FROM env_profile WHERE key', [{ present: true }]],
+    ]);
+
+    await expect(
+      service.createProfile({ key: 'production', name: 'Production', target: 'production' }, ACTOR),
+    ).rejects.toMatchObject({
+      code: 'STATE_CONFLICT',
+      fieldErrors: [{ field: 'key', code: 'duplicate' }],
+    });
+    expect(audit.append).not.toHaveBeenCalled();
+  });
+
+  it('creates a profile and audits the facts it was created with', async () => {
+    const { audit, db, service } = setup([
+      ['SELECT 1 FROM env_profile WHERE key', []],
+      ['INSERT INTO env_profile (key', []],
+      ...profileRoutes(profileRow()),
+    ]);
+
+    const created = await service.createProfile(
+      { key: 'production', name: 'Production', target: 'production' },
+      ACTOR,
+    );
+
+    expect(created).toMatchObject({ key: 'production', name: 'Production', values: [] });
+    expect(
+      db.calls.find((call) => call.sql.includes('INSERT INTO env_profile (key'))?.params,
+    ).toEqual(['production', 'Production', 'production', ACTOR]);
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'profile.created',
+        actorId: ACTOR,
+        targetId: 'production',
+        detail: { key: 'production', name: 'Production', target: 'production' },
+      }),
+      expect.anything(),
+    );
+  });
+
+  it('leaves an unchanged profile alone instead of re-signing it', async () => {
+    const { audit, db, service } = setup(profileRoutes(profileRow()));
+
+    const patched = await service.patchProfile('production', { name: 'Production' }, 'bob');
+
+    expect(patched.key).toBe('production');
+    expect(db.calls.some((call) => call.sql.includes('UPDATE env_profile SET name'))).toBe(false);
+    expect(audit.append).not.toHaveBeenCalled();
+  });
+
+  it('records a rename with the values it replaced', async () => {
+    // The read before the write and the read after it must differ, or the patch is a no-op.
+    let reads = 0;
+    const { audit, db, service } = setup([
+      [
+        'FROM env_profile ORDER BY key',
+        () => {
+          reads += 1;
+          return [reads === 1 ? profileRow() : profileRow({ name: 'Production EU' })];
+        },
+      ],
+      ['FROM env_profile_value', []],
+      ['UPDATE env_profile SET name', []],
+    ]);
+
+    const patched = await service.patchProfile('production', { name: 'Production EU' }, 'bob');
+
+    expect(patched.name).toBe('Production EU');
+    expect(
+      db.calls.find((call) => call.sql.includes('UPDATE env_profile SET name'))?.params,
+    ).toEqual(['production', 'Production EU', 'production', 'bob']);
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'profile.updated',
+        detail: {
+          key: 'production',
+          before: { name: 'Production', target: 'production' },
+          after: { name: 'Production EU', target: 'production' },
+        },
+      }),
+      expect.anything(),
+    );
+  });
+
+  it('moves the target of a profile without touching its values', async () => {
+    const { service } = setup([...profileRoutes(profileRow({ target: 'staging' }))]);
+
+    await expect(
+      service.patchProfile('production', { target: 'staging' }, 'bob'),
+    ).resolves.toMatchObject({
+      target: 'staging',
+    });
+  });
+
+  it('names a profile that does not exist instead of creating it by accident', async () => {
+    const { service } = setup(profileRoutes(null));
+
+    await expect(service.patchProfile('gone', { name: 'x' }, ACTOR)).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+      detail: 'No environment profile "gone".',
+    });
+  });
+
+  it('replaces the value list and audits variable names only', async () => {
+    const { audit, db, service } = setup([
+      [
+        'array_agg(DISTINCT override_ceiling)',
+        [{ name: 'ADMIN_EMAIL', ceilings: ['profile_and_instance'], secret: false }],
+      ],
+      ['DELETE FROM env_profile_value', []],
+      ['INSERT INTO env_profile_value', []],
+      ['UPDATE env_profile SET updated_by', []],
+      ...profileRoutes(profileRow(), [
+        {
+          profile_key: 'production',
+          var_name: 'ADMIN_EMAIL',
+          value_enc: Buffer.from('ops@x'),
+          secret_ref: null,
+        },
+      ]),
+    ]);
+
+    const saved = await service.replaceProfileValues(
+      'production',
+      [{ varName: 'ADMIN_EMAIL', value: 'ops@x' }],
+      ACTOR,
+    );
+
+    expect(saved.values).toEqual([{ varName: 'ADMIN_EMAIL', value: 'ops@x', secretRef: null }]);
+    const insert = db.calls.find((call) => call.sql.includes('INSERT INTO env_profile_value'));
+    expect(insert?.params).toEqual(['production', 'ADMIN_EMAIL', Buffer.from('ops@x'), null]);
+    // Names, never values: the audit chain is not the place to copy a credential-adjacent setting.
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'profile.values_replaced',
+        detail: { key: 'production', variables: ['ADMIN_EMAIL'] },
+      }),
+      expect.anything(),
+    );
+  });
+
+  it('points a secret variable at a stored secret and stores no value', async () => {
+    const { db, secrets, service } = setup([
+      ...profileRoutes(profileRow()),
+      [
+        'array_agg(DISTINCT override_ceiling)',
+        [{ name: 'DB_PASSWORD', ceilings: ['profile_and_instance'], secret: true }],
+      ],
+      ['DELETE FROM env_profile_value', []],
+      ['INSERT INTO env_profile_value', []],
+      ['UPDATE env_profile SET updated_by', []],
+      ...profileRoutes(profileRow()),
+    ]);
+
+    await service.replaceProfileValues(
+      'production',
+      [{ varName: 'DB_PASSWORD', secretRef: 'sec-9' }],
+      ACTOR,
+    );
+
+    const insert = db.calls.find((call) => call.sql.includes('INSERT INTO env_profile_value'));
+    expect(insert?.params).toEqual(['production', 'DB_PASSWORD', null, 'sec-9']);
+    // The reference has to resolve now; discovering it at apply time would be a failed deployment.
+    expect(secrets.describe).toHaveBeenCalledWith('sec-9');
+  });
+
+  it('refuses every value the declarations cannot accept, in one response', async () => {
+    const { db, service } = setup([
+      ...profileRoutes(profileRow()),
+      [
+        'array_agg(DISTINCT override_ceiling)',
+        [
+          { name: 'LOCKED', ceilings: ['none', 'none'], secret: false },
+          { name: 'DB_PASSWORD', ceilings: ['profile_and_instance'], secret: true },
+          { name: 'ADMIN_EMAIL', ceilings: ['profile_and_instance'], secret: false },
+        ],
+      ],
+    ]);
+
+    const failure = service.replaceProfileValues(
+      'production',
+      [
+        { varName: 'GHOST', value: 'x' },
+        { varName: 'ADMIN_EMAIL', value: 'a' },
+        { varName: 'ADMIN_EMAIL', value: 'b' },
+        { varName: 'LOCKED', value: 'x' },
+        { varName: 'DB_PASSWORD', value: 'plaintext' },
+        { varName: 'DB_PASSWORD', secretRef: '' },
+      ],
+      ACTOR,
+    );
+
+    await expect(failure).rejects.toMatchObject({
+      code: 'VALIDATION_FAILED',
+      fieldErrors: [
+        { field: 'ADMIN_EMAIL', code: 'duplicate' },
+        { field: 'DB_PASSWORD', code: 'duplicate' },
+        { field: 'GHOST', code: 'unknown_variable' },
+        { field: 'LOCKED', code: 'ceiling' },
+        { field: 'DB_PASSWORD', code: 'secret_required' },
+        { field: 'DB_PASSWORD', code: 'secret_required' },
+      ],
+    });
+    // One response for the whole batch: nothing is written and nothing is half-stored.
+    expect(db.calls.some((call) => call.sql.includes('DELETE FROM env_profile_value'))).toBe(false);
+  });
+
+  it('refuses a plaintext value for a variable that is not a secret', async () => {
+    const { service } = setup([
+      ...profileRoutes(profileRow()),
+      [
+        'array_agg(DISTINCT override_ceiling)',
+        [{ name: 'ADMIN_EMAIL', ceilings: ['profile_and_instance'], secret: false }],
+      ],
+    ]);
+
+    await expect(
+      service.replaceProfileValues(
+        'production',
+        [{ varName: 'ADMIN_EMAIL', secretRef: 'sec-1' }],
+        ACTOR,
+      ),
+    ).rejects.toMatchObject({
+      fieldErrors: [{ field: 'ADMIN_EMAIL', code: 'value_required' }],
+    });
+  });
+
+  it('refuses a secret reference the store cannot open', async () => {
+    const { secrets, service } = setup([
+      ...profileRoutes(profileRow()),
+      [
+        'array_agg(DISTINCT override_ceiling)',
+        [{ name: 'DB_PASSWORD', ceilings: ['profile_and_instance'], secret: true }],
+      ],
+    ]);
+    secrets.describe.mockRejectedValue(new Error('deleted'));
+
+    await expect(
+      service.replaceProfileValues(
+        'production',
+        [{ varName: 'DB_PASSWORD', secretRef: 'sec-9' }],
+        ACTOR,
+      ),
+    ).rejects.toMatchObject({
+      fieldErrors: [{ field: 'DB_PASSWORD', code: 'secret_unresolved' }],
+    });
+  });
+
+  it('refuses to delete a profile an instance still pins, naming the instances', async () => {
+    const { db, service } = setup([
+      ...profileRoutes(profileRow()),
+      ['SELECT slug FROM instance WHERE profile_key', [{ slug: 'crm' }, { slug: 'erp' }]],
+    ]);
+
+    await expect(service.deleteProfile('production', ACTOR)).rejects.toMatchObject({
+      code: 'STATE_CONFLICT',
+      detail: 'The environment profile "production" is used by 2 instance(s): crm, erp.',
+      remediation: 'Move those instances to another profile before deleting it.',
+    });
+    expect(db.calls.some((call) => call.sql.includes('DELETE FROM env_profile WHERE key'))).toBe(
+      false,
+    );
+  });
+
+  it('deletes an unused profile and audits the removal', async () => {
+    const { audit, db, service } = setup([
+      ...profileRoutes(profileRow()),
+      ['SELECT slug FROM instance WHERE profile_key', []],
+      ['DELETE FROM env_profile WHERE key', []],
+    ]);
+
+    await expect(service.deleteProfile('production', ACTOR)).resolves.toEqual({
+      key: 'production',
+      deleted: true,
+    });
+    expect(db.calls.some((call) => call.sql.includes('DELETE FROM env_profile WHERE key'))).toBe(
+      true,
+    );
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'profile.deleted', targetId: 'production' }),
+      expect.anything(),
+    );
+  });
+
+  it('reports the profile secret references that would fail at apply time', async () => {
+    const { secrets, service } = setup([
+      ['SELECT 1 FROM env_profile WHERE key', [{ present: true }]],
+      [
+        'FROM env_profile_value v',
+        [
+          { var_name: 'DB_PASSWORD', secret_ref: 'sec-good' },
+          { var_name: 'API_TOKEN', secret_ref: 'sec-gone' },
+        ],
+      ],
+    ]);
+    secrets.describe.mockImplementation(async (secretId: string) => {
+      if (secretId === 'sec-gone') throw new Error('deleted');
+      return { id: secretId, masked: '••••••••' };
+    });
+
+    const problems = await service.unresolvedSecrets({ entryKey: ENTRY, profileKey: 'production' });
+
+    expect(problems).toEqual([
+      {
+        varName: 'API_TOKEN',
+        secretRef: 'sec-gone',
+        reason: 'The secret reference does not resolve; set the value again.',
+      },
+    ]);
+  });
+});
+
+describe('CEILING at resolution time (AC-51)', () => {
+  it('refuses a profile value for a variable capped at none, naming the profile to fix', async () => {
+    const { service } = setup([
+      [
+        'ORDER BY name',
+        [varRow({ name: 'LOCKED', override_ceiling: 'none', default_value: 'fixed' })],
+      ],
+      ['SELECT 1 FROM env_profile WHERE key', [{ present: true }]],
+      [
+        'FROM env_profile_value WHERE profile_key',
+        [{ var_name: 'LOCKED', value_enc: Buffer.from('from-profile'), secret_ref: null }],
+      ],
+    ]);
+
+    const plan = await service.plan({ entryKey: ENTRY, profileKey: 'production', overrides: {} });
+
+    // The declaration's default still resolves: the operator is told to fix the profile, not the field.
+    expect(shown(plan.values)).toEqual([['LOCKED', 'fixed', 'default', false, false]]);
+    expect(plan.fieldErrors).toEqual([
+      {
+        field: 'LOCKED',
+        code: 'ceiling',
+        message: 'This variable is not overridable; remove it from the production profile.',
+      },
+    ]);
+  });
+
+  it('resolves a profile secret reference without exposing the value', async () => {
+    const { service } = setup([
+      ['ORDER BY name', [varRow({ name: 'DB_PASSWORD', type: 'secret', secret: true })]],
+      ['SELECT 1 FROM env_profile WHERE key', [{ present: true }]],
+      [
+        'FROM env_profile_value WHERE profile_key',
+        [{ var_name: 'DB_PASSWORD', value_enc: null, secret_ref: 'sec-9' }],
+      ],
+    ]);
+
+    const plan = await service.plan({ entryKey: ENTRY, profileKey: 'production', overrides: {} });
+
+    expect(shown(plan.values)).toEqual([['DB_PASSWORD', null, 'secret', true, false]]);
   });
 });

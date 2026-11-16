@@ -1,8 +1,8 @@
 import { http, HttpResponse } from 'msw';
 import type { AccessRequest, AlertChannel, PolicyException } from '@seamnex/domain';
-import { COMPOSE_RULES } from '@seamnex/domain';
+import { COMPOSE_RULES, syncStateForGuaranteeClass } from '@seamnex/domain';
 import { at } from '../fixtures/context';
-import { appendAudit, getState, meFor, refreshCapacity } from '../store';
+import { appendAudit, findEntry, getState, meFor, refreshCapacity } from '../store';
 import { actorFor, deny, etagFor, problem, readBody, requireCapability, roleOf } from './utils';
 
 export const adminHandlers = [
@@ -51,13 +51,21 @@ export const adminHandlers = [
     }
     const entitlements = getState()
       .instances.slice(0, user.entitlementCount)
-      .map((instance) => ({
-        instanceId: instance.id,
-        product: instance.product,
-        entryKey: instance.entryKey,
-        productRole: 'User',
-        syncState: 'applied',
-      }));
+      .map((instance) => {
+        const entry = findEntry(instance.entryKey);
+        // FR-2.4: the product role is the entry's declared baseline, not the literal `User` the
+        // handler used to stamp. The state follows the guarantee class, which is the ceiling the
+        // real worker applies; `appliedAt` is only set where the class can reach `applied`.
+        const syncState = syncStateForGuaranteeClass(entry?.guaranteeClass ?? 'native');
+        return {
+          instanceId: instance.id,
+          product: instance.product,
+          entryKey: instance.entryKey,
+          productRole: entry?.integration.defaultProductRole ?? 'member',
+          syncState,
+          appliedAt: syncState === 'applied' ? at(-1) : null,
+        };
+      });
     return HttpResponse.json({ userId: user.id, entitlements });
   }),
 
@@ -125,6 +133,7 @@ export const adminHandlers = [
       role?: string;
       scopeType?: string;
       scopeLabel?: string;
+      productRole?: string;
       propagate?: boolean;
     }>(request);
     group.mapping = {
@@ -132,6 +141,9 @@ export const adminHandlers = [
       scopeType: (body.scopeType as 'platform') ?? group.mapping?.scopeType ?? 'platform',
       scopeId: group.mapping?.scopeId ?? null,
       scopeLabel: body.scopeLabel ?? group.mapping?.scopeLabel ?? 'Platform',
+      // FR-2.4: the product role is what the product itself applies; it defaults to `member` and is
+      // never derived from the platform role.
+      productRole: body.productRole ?? group.mapping?.productRole ?? 'member',
       propagateToProduct: body.propagate ?? group.mapping?.propagateToProduct ?? false,
     };
     group.updatedAt = at(0);
@@ -141,7 +153,7 @@ export const adminHandlers = [
       targetId: group.id,
       targetLabel: group.path,
       outcome: 'success',
-      detail: `Mapped to ${group.mapping?.role ?? 'unmapped'} at ${group.mapping?.scopeLabel ?? 'no scope'}; propagation ${
+      detail: `Mapped to ${group.mapping?.role ?? 'unmapped'} at ${group.mapping?.scopeLabel ?? 'no scope'}; product role ${group.mapping?.productRole ?? 'member'}; propagation ${
         group.mapping?.propagateToProduct ? 'requested immediately' : 'follows the next sync cycle'
       }. Mapping changes are never written by the sync loop.`,
       actor: actorFor(role),
@@ -167,6 +179,10 @@ export const adminHandlers = [
       groups: getState().groups.length,
       changes: 1,
       p95LatencyMs: 82_000,
+      // One membership change moved, so one propagation sample exists — and the figure is the
+      // change → applied interval, not the mirror write.
+      p95PropagationMs: 38_000,
+      propagationSamples: 1,
       errors: [],
       state: 'succeeded' as const,
     };
@@ -177,7 +193,9 @@ export const adminHandlers = [
       targetId: run.id,
       targetLabel: 'Identity sync',
       outcome: 'success',
-      detail: `${run.users} users and ${run.groups} groups reconciled; p95 ${Math.round(run.p95LatencyMs / 1000)} s.`,
+      detail: `${run.users} users and ${run.groups} groups reconciled; mirror p95 ${Math.round(
+        run.p95LatencyMs / 1000,
+      )} s; propagation p95 ${Math.round((run.p95PropagationMs ?? 0) / 1000)} s over ${run.propagationSamples} change(s).`,
       actor: actorFor(role),
     });
     return HttpResponse.json(run, { status: 201 });

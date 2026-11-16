@@ -11,7 +11,9 @@ import { RENDERER_SERVICE, type RendererService } from '../m03-renderer/renderer
 import { CAPACITY_SERVICE, type CapacityService } from '../m19-capacity/capacity.contract';
 import { JobService } from '../../jobs/job.service';
 import { PipelineRegistry } from '../../jobs/pipeline-registry';
+import { imageTagOf } from '../../common/docker/image-ref';
 import type { DeployInput, DeployResult, LifecycleInput, PreviewInput } from './executor.contract';
+import { PreflightService } from './preflight.service';
 
 // The action list lives in `@seamnex/domain` and nowhere else. This file used to keep a private copy,
 // and the copy is what made `reconfigure` unreachable: the enum grew, the executor's list did not,
@@ -50,6 +52,7 @@ export class InstanceLifecycleService {
     @Inject(AUDIT_SERVICE) private readonly audit: AuditService,
     @Inject(JobService) private readonly jobs: JobService,
     @Inject(PipelineRegistry) private readonly pipelines: PipelineRegistry,
+    @Inject(PreflightService) private readonly preflight: PreflightService,
   ) {}
 
   async deploy(input: DeployInput): Promise<DeployResult> {
@@ -285,6 +288,30 @@ export class InstanceLifecycleService {
     const action = input.action as LifecycleAction;
     const instance = await this.instance(input.instanceId);
 
+    if (action === 'upgrade' && input.targetVersion !== undefined) {
+      /*
+       * FR-1.7/AC-06: the confirmation is only useful if it is checked. The dialog showed a delta
+       * computed from a catalogue read that may be minutes old; a pin that moved in between would
+       * apply a version nobody confirmed, and the audit row would not be able to tell.
+       */
+      if (input.targetVersion === instance.currentVersion) {
+        throw new AppError({
+          code: 'STATE_CONFLICT',
+          detail: `The instance already runs ${input.targetVersion}; there is nothing to upgrade.`,
+          remediation:
+            'Close the dialog. An upgrade is offered only when a newer version is pinned.',
+        });
+      }
+      if (instance.availableVersion !== null && input.targetVersion !== instance.availableVersion) {
+        throw new AppError({
+          code: 'STATE_CONFLICT',
+          detail: `The catalogue now pins ${instance.availableVersion}, not the confirmed ${input.targetVersion}.`,
+          remediation:
+            'Re-open the upgrade dialog: the version delta changed while you were confirming it.',
+        });
+      }
+    }
+
     if (action === 'upgrade' && input.backupJobId === undefined) {
       throw new AppError({
         code: 'STATE_CONFLICT',
@@ -308,6 +335,9 @@ export class InstanceLifecycleService {
       ...(input.backupJobId === undefined ? {} : { backupJobId: input.backupJobId }),
       ...(input.justification === undefined ? {} : { justification: input.justification }),
       ...(input.renderSetId === undefined ? {} : { renderSetId: input.renderSetId }),
+      // The job carries the confirmed version so the pipeline can re-assert it and the audit trail
+      // can name it, rather than re-resolving the catalogue and hoping it has not moved.
+      ...(input.targetVersion === undefined ? {} : { targetVersion: input.targetVersion }),
     });
     await this.audit.append({
       action: `instance.${action}.requested`,
@@ -316,44 +346,45 @@ export class InstanceLifecycleService {
       targetType: 'instance',
       targetId: instance.id,
       outcome: 'success',
-      detail: { jobId: job.jobId, dataRetention: input.dataRetention ?? null },
+      detail: {
+        jobId: job.jobId,
+        dataRetention: input.dataRetention ?? null,
+        targetVersion: input.targetVersion ?? null,
+      },
     });
     return { jobId: job.jobId, kind: action };
   }
 
   async preview(input: PreviewInput): Promise<DeployPreview> {
-    const entry = await this.entry(input.entryKey);
-    const resources = this.resourcesOf(entry, input);
-    // The same FR-1.9 comparison `deploy` refuses on. A preview that stayed silent would let the
-    // wizard promise a deployment the API rejects one click later.
-    const quotas = volumeQuotaShortfall(entry.payload, resources.diskMb);
-    const decision = await this.capacity.admit({ resources });
-    const conflict = await this.slugConflict(input.slug);
-    const slugAvailable = conflict === null;
-    const scaffoldWarning =
-      entry.packaging === 'none' && !(await this.hasApprovedScaffold(entry.key))
-        ? 'This entry has no Compose file or Dockerfile; approve a scaffold draft before deploying.'
-        : null;
-    const quotaWarning =
-      quotas.shortfallMb > 0
-        ? `Volume quotas total ${quotas.declaredMb} MB, ${quotas.shortfallMb} MB more than the ${resources.diskMb} MB disk reservation; a deployment would be refused.`
-        : null;
+    /*
+     * FR-1.11: the preview is the pre-flight, not a capacity guess with a hard-coded verdict.
+     *
+     * It used to answer capacity, slug and scaffold and then report `policyVerdict: 'allowed'`
+     * before the policy had run — a permitted-looking preview for an attempt that had never been
+     * evaluated. The checks now come from `PreflightService`, which returns a blocker per fact and a
+     * verdict with the evidence behind it.
+     */
+    const result = await this.preflight.run({
+      entryKey: input.entryKey,
+      slug: input.slug,
+      ...(input.profileKey === undefined ? {} : { profileKey: input.profileKey }),
+      ...(input.resources === undefined ? {} : { resources: input.resources }),
+      ...(input.envOverrides === undefined ? {} : { envOverrides: input.envOverrides }),
+    });
 
     return {
-      admissible: decision.admissible && slugAvailable && quotas.shortfallMb === 0,
-      // "already routed" was the message for both a live deployment and a 30-day reservation, and it
-      // sent the operator looking for a route that does not exist. The reason and, for a reservation,
-      // the date it lapses are the part that makes the refusal actionable.
-      headline: conflict === null ? decision.headline : conflict.detail,
-      detail: decision.detail,
-      shortfall: decision.shortfall,
-      capacitySource: decision.source,
-      routeHost: this.hostFor(input.slug),
-      slugAvailable,
-      policyVerdict: 'allowed',
-      warnings: [scaffoldWarning, quotaWarning, conflict?.warning ?? null].filter(
-        (item): item is string => item !== null,
-      ),
+      admissible: result.admissible,
+      headline: result.headline,
+      detail: result.detail,
+      shortfall: { ...result.shortfall },
+      capacitySource: result.capacitySource,
+      routeHost: result.routeHost,
+      slugAvailable: result.slugAvailable,
+      policyVerdict: result.policyVerdict,
+      policyEvaluatedAt: result.policyEvaluatedAt,
+      policySource: result.policySource,
+      blockers: result.blockers.map((blocker) => ({ ...blocker })),
+      warnings: [...result.warnings],
       evaluatedAt: new Date().toISOString(),
     };
   }
@@ -465,9 +496,32 @@ export class InstanceLifecycleService {
     return row;
   }
 
-  private async instance(instanceId: string): Promise<{ id: string; slug: string; state: string }> {
-    const result = await this.pool.query<{ id: string; slug: string; state: string }>(
-      `SELECT id, slug, state FROM instance WHERE id = $1 AND deleted_at IS NULL`,
+  /**
+   * FR-1.7: the instance, plus the two versions the upgrade confirmation is about.
+   *
+   * `currentVersion` is what the last apply recorded and falls back to the deploy-time image tag;
+   * `availableVersion` is the entry's upstream pin. Reading them here is what lets `lifecycle()`
+   * refuse a confirmed target that no longer matches the catalogue instead of accepting a promise it
+   * cannot keep.
+   */
+  private async instance(instanceId: string): Promise<{
+    id: string;
+    slug: string;
+    state: string;
+    currentVersion: string;
+    availableVersion: string | null;
+  }> {
+    const result = await this.pool.query<{
+      id: string;
+      slug: string;
+      state: string;
+      payload: Record<string, unknown> | null;
+      entry_payload: Record<string, unknown> | null;
+    }>(
+      `SELECT i.id, i.slug, i.state, i.payload, c.payload AS entry_payload
+         FROM instance i
+         JOIN catalog_entry c ON c.key = i.entry_key
+        WHERE i.id = $1 AND i.deleted_at IS NULL`,
       [instanceId],
     );
     const row = result.rows[0];
@@ -478,7 +532,27 @@ export class InstanceLifecycleService {
         remediation: 'Refresh the instance list.',
       });
     }
-    return row;
+
+    const payload = row.payload ?? {};
+    const imageRef = typeof payload.imageRef === 'string' ? payload.imageRef : null;
+    const recorded = typeof payload.currentVersion === 'string' ? payload.currentVersion : null;
+    const currentVersion = recorded ?? imageTagOf(imageRef) ?? 'unversioned';
+    const upstream = row.entry_payload?.upstream;
+    const latestVersion =
+      typeof upstream === 'object' &&
+      upstream !== null &&
+      typeof (upstream as Record<string, unknown>).latestVersion === 'string'
+        ? ((upstream as Record<string, unknown>).latestVersion as string)
+        : null;
+
+    return {
+      id: row.id,
+      slug: row.slug,
+      state: row.state,
+      currentVersion,
+      availableVersion:
+        latestVersion !== null && latestVersion !== currentVersion ? latestVersion : null,
+    };
   }
 
   private async assertSlugAvailable(slug: string): Promise<void> {
@@ -534,16 +608,6 @@ export class InstanceLifecycleService {
       warning:
         'Nothing is published at that host; the name is held by a deletion, not by a running deployment. Choose another slug.',
     };
-  }
-
-  private async hasApprovedScaffold(entryKey: string): Promise<boolean> {
-    const result = await this.pool.query<{ present: boolean }>(
-      `SELECT EXISTS (
-         SELECT 1 FROM scaffold_artefact WHERE entry_key = $1 AND approved_at IS NOT NULL
-       ) AS present`,
-      [entryKey],
-    );
-    return result.rows[0]?.present === true;
   }
 
   private resourcesOf(

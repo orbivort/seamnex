@@ -52,6 +52,7 @@ import { engineOf } from '../../common/engine/database';
 import { writeExportArchive, type ExportArtefact } from './export-archive';
 import { composeDocumentOf, mountPathForVolume } from '../../common/compose/compose-volumes';
 import { describeProbe, probeProductHttp } from '../../common/exec/http-probe';
+import { imageTagOf } from '../../common/docker/image-ref';
 
 type InstanceRow = {
   id: string;
@@ -214,6 +215,11 @@ export class DeploymentPipeline implements OnModuleInit {
     this.runs.set(context.jobId, { instance });
     await this.setState(instance.id, 'resolving');
 
+    // FR-1.7: the confirmation is re-asserted against the catalogue at job time. The dialog read the
+    // pin minutes ago; applying whatever the catalogue holds now is what made "the operator
+    // confirmed 9.2.1" unprovable.
+    await this.assertConfirmedVersion(context, instance);
+
     const source = await this.sources.resolve({
       instanceId: instance.id,
       entryKey: instance.entry_key,
@@ -226,6 +232,44 @@ export class DeploymentPipeline implements OnModuleInit {
     await context.log(
       'stdout',
       `source retained: ${source.files.map((file) => file.path).join(', ') || 'none'}`,
+    );
+  }
+
+  /**
+   * FR-1.7/AC-06: refuse an upgrade whose confirmed version is no longer the catalogue pin.
+   *
+   * The catalogue holds one pinned image per entry, so `targetVersion` is a promise about the pin
+   * rather than a selector: equality with `payload.upstream.latestVersion` is the whole check. A
+   * later multi-version catalogue changes the resolution step, not this assertion.
+   */
+  private async assertConfirmedVersion(
+    context: PipelineContext,
+    instance: InstanceRow,
+  ): Promise<void> {
+    const confirmed = context.payload.targetVersion;
+    if (context.action !== 'upgrade' || typeof confirmed !== 'string' || confirmed.length === 0) {
+      return;
+    }
+    const row = await this.pool.query<{ latest: string | null }>(
+      `SELECT payload #>> '{upstream,latestVersion}' AS latest
+         FROM catalog_entry WHERE key = $1`,
+      [instance.entry_key],
+    );
+    const latest = row.rows[0]?.latest ?? null;
+    if (latest !== confirmed) {
+      throw new AppError({
+        code: 'STATE_CONFLICT',
+        detail:
+          latest === null
+            ? `The confirmed upgrade target ${confirmed} cannot be re-asserted: ${instance.entry_key} records no upstream version.`
+            : `The catalogue now pins ${latest}, not the confirmed ${confirmed}.`,
+        remediation:
+          'Re-open the upgrade dialog and confirm the version the catalogue pins now. Nothing was changed.',
+      });
+    }
+    await context.log(
+      'stdout',
+      `confirmed upgrade target ${confirmed} still matches the catalogue pin`,
     );
   }
 
@@ -635,15 +679,30 @@ export class DeploymentPipeline implements OnModuleInit {
     const state = this.requireRun(context.jobId);
     const renderSet = state.renderSet;
 
+    /*
+     * FR-1.7: what is running, recorded from the artefact that was applied rather than from the
+     * request. `targetVersion` proves intent; `appliedVersion` proves outcome, and they are equal
+     * only because `assertConfirmedVersion` checked the pin. A Dockerfile/scaffold build records no
+     * tag, so the previous value is kept rather than replaced with a guess.
+     */
+    const appliedVersion = renderSet === undefined ? null : imageTagOf(renderSet.imageRefs[0]);
+
     if (renderSet !== undefined) {
       await this.recordServices(state.instance, renderSet);
       await this.pool.query(
         `UPDATE instance
-            SET payload = payload || jsonb_build_object('activeRenderSetId', $2::text),
+            SET payload = payload || jsonb_build_object('activeRenderSetId', $2::text)
+                        || CASE WHEN $4::text IS NULL THEN '{}'::jsonb
+                                ELSE jsonb_build_object('currentVersion', $4::text) END,
                 source_path = $3,
                 updated_at = now()
           WHERE id = $1`,
-        [state.instance.id, renderSet.id, state.source?.path ?? state.instance.source_path],
+        [
+          state.instance.id,
+          renderSet.id,
+          state.source?.path ?? state.instance.source_path,
+          appliedVersion,
+        ],
       );
     }
 
@@ -674,6 +733,11 @@ export class DeploymentPipeline implements OnModuleInit {
         renderSetId: renderSet?.id ?? null,
         planId: state.plan?.planId ?? null,
         changes: state.plan?.changes.length ?? 0,
+        // FR-1.7/AC-06: the trail now names the version the operator confirmed and the version the
+        // applied artefact actually carries.
+        targetVersion:
+          typeof context.payload.targetVersion === 'string' ? context.payload.targetVersion : null,
+        appliedVersion,
       },
     });
     this.runs.delete(context.jobId);
@@ -718,7 +782,12 @@ export class DeploymentPipeline implements OnModuleInit {
       targetType: 'instance',
       targetId: instanceId,
       outcome: 'failure',
-      detail: { jobId: context.jobId, fromState: instance.state },
+      detail: {
+        jobId: context.jobId,
+        fromState: instance.state,
+        targetVersion:
+          typeof context.payload.targetVersion === 'string' ? context.payload.targetVersion : null,
+      },
     });
   }
 

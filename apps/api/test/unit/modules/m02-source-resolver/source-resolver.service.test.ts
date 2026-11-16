@@ -966,3 +966,139 @@ describe('confirmScaffold', () => {
     );
   });
 });
+
+/**
+ * FR-1.11 / FR-1.23 — the policy verdict the deploy preview reports *before* anything is admitted.
+ *
+ * The preview reads the same tree the job will read, and it says which of the three verdicts it
+ * produced and on what evidence: a local evaluation with a timestamp, or `unknown` when there is no
+ * local copy at all. Reporting `allowed` for a file that was never read is the failure this suite
+ * exists to prevent.
+ */
+const BLOCKED_COMPOSE = `services:
+  app:
+    image: espocrm/espocrm:latest
+    ports:
+      - '8080:80'
+`;
+
+describe('previewPolicy — the verdict before admission', () => {
+  it('evaluates the vendored compose file and stamps the evidence', async () => {
+    const { catalogRepo, service } = setup({ entry: [entryRow({ payload: document() })] });
+    mirrorTree(catalogRepo, { 'docker-compose.yml': COMPOSE });
+
+    const preview = await service.previewPolicy('D01-01');
+
+    expect(preview).toMatchObject({
+      verdict: 'allowed',
+      violations: [],
+      source: 'local_evaluation',
+      reason: null,
+    });
+    expect(preview.evaluatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it('reports the violations of a vendored compose file that would be refused', async () => {
+    const { catalogRepo, service } = setup({ entry: [entryRow({ payload: document() })] });
+    mirrorTree(catalogRepo, { 'docker-compose.yml': BLOCKED_COMPOSE });
+
+    const preview = await service.previewPolicy('D01-01');
+
+    expect(preview.verdict).toBe('blocked');
+    expect(preview.violations.map((violation) => violation.rule)).toContain('unpinned_image');
+  });
+
+  it('evaluates a vendored Dockerfile when the tree carries no compose file', async () => {
+    const { catalogRepo, service } = setup({ entry: [entryRow({ payload: document() })] });
+    mirrorTree(catalogRepo, { 'docker/Dockerfile': 'FROM alpine:3.20\n' });
+
+    const preview = await service.previewPolicy('D01-01');
+
+    expect(preview).toMatchObject({ verdict: 'allowed', source: 'local_evaluation' });
+  });
+
+  it('honours a live waiver in the preview the same way the job will', async () => {
+    const { catalogRepo, service } = setup({
+      entry: [entryRow({ payload: document() })],
+      waived: [{ rule: 'published_port' }],
+    });
+    mirrorTree(catalogRepo, {
+      'docker-compose.yml': BLOCKED_COMPOSE.replace(
+        'espocrm/espocrm:latest',
+        'espocrm/espocrm:8.0.0',
+      ),
+    });
+
+    const preview = await service.previewPolicy('D01-01');
+
+    expect(preview.verdict).toBe('allowed');
+  });
+
+  it('says it does not know when there is no local source to evaluate', async () => {
+    const { service } = setup({ entry: [entryRow({ payload: document() })] });
+
+    const preview = await service.previewPolicy('D01-01');
+
+    expect(preview).toEqual({
+      verdict: 'unknown',
+      violations: [],
+      evaluatedAt: null,
+      source: 'none',
+      reason: expect.stringContaining('no local copy exists'),
+    });
+  });
+
+  it('falls through to unknown when the vendored tree cannot be evaluated', async () => {
+    const { catalogRepo, service } = setup({ entry: [entryRow({ payload: document() })] });
+    // A compose file that is not parseable: the preview must not guess a verdict from it.
+    mirrorTree(catalogRepo, { 'docker-compose.yml': 'services: [unclosed\n' });
+
+    const preview = await service.previewPolicy('D01-01');
+
+    expect(preview.verdict).toBe('unknown');
+    expect(preview.source).toBe('none');
+  });
+
+  it('evaluates the content of an approved scaffold draft, not its file paths', async () => {
+    const { service } = setup({
+      entry: [entryRow({ payload: document() })],
+      draft: [
+        {
+          id: 'draft-1',
+          files: [
+            {
+              path: 'compose.yaml',
+              language: 'yaml',
+              content: BLOCKED_COMPOSE,
+            },
+          ],
+        },
+      ],
+    });
+
+    const preview = await service.previewPolicy('D01-01');
+
+    // The draft carries an unpinned image and a published port: a preview over empty content would
+    // have said `allowed`, which is exactly the bug this case pins.
+    expect(preview.verdict).toBe('blocked');
+    expect(preview.violations.map((violation) => violation.rule)).toContain('unpinned_image');
+    expect(preview.source).toBe('local_evaluation');
+  });
+
+  it('prefers the vendored tree over a scaffold draft', async () => {
+    const { catalogRepo, service } = setup({
+      entry: [entryRow({ payload: document() })],
+      draft: [
+        {
+          id: 'draft-1',
+          files: [{ path: 'compose.yaml', language: 'yaml', content: BLOCKED_COMPOSE }],
+        },
+      ],
+    });
+    mirrorTree(catalogRepo, { 'docker-compose.yml': COMPOSE });
+
+    const preview = await service.previewPolicy('D01-01');
+
+    expect(preview.verdict).toBe('allowed');
+  });
+});

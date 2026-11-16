@@ -838,13 +838,40 @@ export const instanceHandlers = [
         'Refresh the instance list.',
       );
     }
-    const body =
-      action === 'delete'
-        ? await readBody<{ dataRetention?: DataRetention }>(request).catch(
-            () => ({}) as { dataRetention?: DataRetention },
-          )
-        : {};
+    // The upgrade carries the version the operator confirmed; the delete carries its retention.
+    const body = await readBody<{ dataRetention?: DataRetention; version?: string }>(request).catch(
+      () => ({}) as { dataRetention?: DataRetention; version?: string },
+    );
     const retention: DataRetention = body.dataRetention ?? 'keep';
+    if (action === 'upgrade') {
+      /**
+       * FR-1.7 / AC-06: the catalogue pins one image per entry, so "the version" is a promise about
+       * that pin. The API refuses an upgrade whose confirmed version no longer matches it; a demo
+       * that accepted any string would show an upgrade the platform would have rejected.
+       */
+      const expected =
+        getState().catalog.find((item) => item.key === instance.entryKey)?.upstream.latestVersion ??
+        null;
+      if (body.version === undefined || body.version.trim() === '') {
+        return problem(
+          422,
+          'VALIDATION_FAILED',
+          'The upgrade needs the version you confirmed',
+          'The dialog must send the version it showed; the job records what was confirmed.',
+          'Re-open the upgrade dialog and confirm the version it offers.',
+          [{ field: 'version', code: 'required', message: 'Required.' }],
+        );
+      }
+      if (expected !== null && body.version.trim() !== expected) {
+        return problem(
+          409,
+          'STATE_CONFLICT',
+          'The catalogue pin moved',
+          `You confirmed ${body.version.trim()}, but the catalogue now pins ${expected}.`,
+          'Re-open the upgrade dialog: the version and the render set have changed.',
+        );
+      }
+    }
     const running = instance.state === 'ready' || instance.state === 'degraded';
     const invalid =
       (action === 'stop' || action === 'restart' || action === 'upgrade') && !running

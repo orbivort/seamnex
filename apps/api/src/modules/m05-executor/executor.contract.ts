@@ -52,6 +52,14 @@ export type LifecycleInput = {
   readonly backupJobId?: string;
   /** Rollback target; omitted means the previous applied render set. */
   readonly renderSetId?: string;
+  /**
+   * FR-1.7: the version the operator confirmed in the dialog.
+   *
+   * It is a promise about the catalogue pin, not a selector — the catalogue holds one pinned image
+   * per entry — so the job re-asserts it before applying and refuses with a conflict when the pin
+   * moved. Omitted means "whatever the catalogue pins now" and is only legal without a confirmation.
+   */
+  readonly targetVersion?: string;
 };
 
 /**

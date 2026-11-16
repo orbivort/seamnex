@@ -22,6 +22,7 @@ import { CAPACITY_SERVICE, type CapacityService } from '../m19-capacity/capacity
 import { PLANNER_SERVICE, type PlannerService } from '../m04-planner/planner.contract';
 import { AUDIT_SERVICE, type AuditService } from '../m17-audit/audit.contract';
 import { DockerEngineClient } from '../../common/docker/docker.client';
+import { imageTagOf } from '../../common/docker/image-ref';
 import { InstanceLifecycleService } from './lifecycle.service';
 import type { ExecutorService } from './executor.contract';
 import {
@@ -412,6 +413,17 @@ export class PostgresExecutorService implements ExecutorService {
     const imageRef = text(payload, 'imageRef') ?? text(entry, 'imageRef') ?? 'unknown';
     const imageDigest =
       text(payload, 'imageDigest') ?? text(entry, 'imageDigest') ?? 'sha256:unknown';
+    const upstream = asRecord(entry.upstream) ?? {};
+    /*
+     * FR-1.7: both halves of the delta come from facts that have a writer.
+     *
+     * `currentVersion` is what the last apply recorded (payload), falling back to the image tag the
+     * instance was deployed with; `availableVersion` is the entry's upstream pin. The old pair read
+     * two payload keys nothing wrote, so the dialog showed a version from a tag and "no update" for
+     * ever.
+     */
+    const currentVersion = text(payload, 'currentVersion') ?? imageTagOf(imageRef) ?? 'unversioned';
+    const latestVersion = text(upstream, 'latestVersion');
     const state = (row.status_state ?? row.state) as Instance['state'];
     const owner = namedRef(asRecord(payload.owner), text(entry, 'owner') ?? 'unassigned');
     const domainOwner = namedRef(
@@ -445,8 +457,9 @@ export class PostgresExecutorService implements ExecutorService {
       domainOwner,
       createdAt: row.created_at.toISOString(),
       updatedAt: row.updated_at.toISOString(),
-      currentVersion: text(payload, 'currentVersion') ?? imageRef.split(':').pop() ?? 'unversioned',
-      availableVersion: text(payload, 'availableVersion'),
+      currentVersion,
+      availableVersion:
+        latestVersion !== null && latestVersion !== currentVersion ? latestVersion : null,
       imageDigest,
       source: {
         path: (row.source_path ??

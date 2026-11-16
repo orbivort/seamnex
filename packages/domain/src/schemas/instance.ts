@@ -341,6 +341,37 @@ export const ResourceShortfallSchema = z.object({
   diskMb: z.number().int().nonnegative(),
 });
 
+/**
+ * FR-1.11: one fact that stops a deployment, named well enough that the operator knows where to fix
+ * it. `field` is a form field (`env.SMTP_HOST`, `slug`, `entryKey`) or null when the blocker is not
+ * field-scoped (a policy verdict, a capacity shortfall).
+ *
+ * `blocking` exists because the same list also carries advisory entries: a warning that is shown on
+ * the step but does not refuse admission. Keeping one shape means the wizard renders one list.
+ */
+export const PREVIEW_BLOCKER_CODES = [
+  'unknown_entry',
+  'source_unresolved',
+  'image_unpinned',
+  'env_invalid',
+  'secret_unresolved',
+  'capacity',
+  'route_conflict',
+  'policy_blocked',
+  'policy_unknown',
+  'scaffold_unapproved',
+] as const;
+
+export type PreviewBlockerCode = (typeof PREVIEW_BLOCKER_CODES)[number];
+
+export const PreviewBlockerSchema = z.object({
+  code: z.enum(PREVIEW_BLOCKER_CODES),
+  /** Form field the operator must change, or null when the blocker is not field-scoped. */
+  field: z.string().nullable(),
+  message: z.string().min(1),
+  blocking: z.boolean(),
+});
+
 export const DeployPreviewSchema = z.object({
   admissible: z.boolean(),
   headline: z.string().min(1),
@@ -350,7 +381,16 @@ export const DeployPreviewSchema = z.object({
   capacitySource: z.enum(['measured', 'snapshot', 'unknown']),
   routeHost: z.string().min(1),
   slugAvailable: z.boolean(),
-  policyVerdict: z.enum(['allowed', 'blocked', 'unsafe_approved']),
+  /**
+   * FR-1.20/FR-1.23: `unknown` is a state of its own. The verdict used to be hard-coded `allowed`
+   * before the policy had run, which reported an unevaluated attempt as a permitted one.
+   */
+  policyVerdict: z.enum(['allowed', 'blocked', 'unsafe_approved', 'unknown']),
+  /** When the policy verdict behind `policyVerdict` was produced; null when it is `unknown`. */
+  policyEvaluatedAt: TimestampSchema.nullable(),
+  /** The evidence the verdict came from, so "allowed" is attributable rather than asserted. */
+  policySource: z.enum(['local_evaluation', 'source_resolution', 'none']),
+  blockers: z.array(PreviewBlockerSchema),
   warnings: z.array(z.string().min(1)),
   evaluatedAt: TimestampSchema,
 });
@@ -373,4 +413,5 @@ export type BackupPosture = z.infer<typeof BackupPostureSchema>;
 export type MaintenanceState = z.infer<typeof MaintenanceStateSchema>;
 export type DeployPreview = z.infer<typeof DeployPreviewSchema>;
 export type DeployPreviewRequest = z.infer<typeof DeployPreviewRequestSchema>;
+export type PreviewBlocker = z.infer<typeof PreviewBlockerSchema>;
 export type ResourceShortfall = z.infer<typeof ResourceShortfallSchema>;

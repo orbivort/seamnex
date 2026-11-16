@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { CREDENTIAL_GRANULARITIES, WORKFLOW_STATES } from './enums';
+import { CREDENTIAL_GRANULARITIES, GUARANTEE_CLASSES, WORKFLOW_STATES } from './enums';
 import { ANY_OF_POLICY_KEYS, POLICY_KEYS, type PolicyKey } from './policy';
 import { AuthSessionSchema, SignInRequestSchema } from './schemas/auth';
 import { JobAcceptedSchema } from './schemas/common';
@@ -22,8 +22,14 @@ import {
   EnvImportRequestSchema,
   EnvImportResultSchema,
   EnvPlanSchema,
+  EnvProfileCreateRequestSchema,
+  EnvProfileDeleteResponseSchema,
+  EnvProfilePatchRequestSchema,
   EnvProfileSchema,
+  EnvProfileValuesRequestSchema,
   EnvSchemaVarSchema,
+  EventModeSchema,
+  OperationSchema,
   ScaffoldConfirmationSchema,
   ScaffoldDraftSchema,
 } from './schemas/catalog';
@@ -236,12 +242,33 @@ const WorkflowDraftRequestSchema = z.object({
   targetInstanceId: z.string().min(1),
 });
 
-export const IntegrationMetadataRequestSchema = z.object({
-  // FR-2.14: the value is a fact the whole platform branches on; a free-text string used to be
-  // persisted into the catalog document and only failed later, as an unreadable projection.
-  credentialGranularity: z.enum(CREDENTIAL_GRANULARITIES).optional(),
-  sessionMaxMinutes: z.number().int().positive().optional(),
-});
+/**
+ * FR-2.14: every fact onboarding has to verify, not just the two that were convenient to store.
+ *
+ * The values supersede the catalogue assumption, so an omitted field means "leave the recorded fact
+ * alone", never "reset to the document". An empty body is refused: it would restart the staleness
+ * clock without anyone having verified anything (FR-2.15).
+ */
+export const IntegrationMetadataRequestSchema = z
+  .object({
+    // FR-2.14: the value is a fact the whole platform branches on; a free-text string used to be
+    // persisted into the catalog document and only failed later, as an unreadable projection.
+    credentialGranularity: z.enum(CREDENTIAL_GRANULARITIES).optional(),
+    sessionMaxMinutes: z.number().int().positive().optional(),
+    /** Actual API origin, verified against the running product. */
+    apiBaseUrl: z.string().min(1).optional(),
+    /** `oidc`, `saml`, `forward-auth`, ... — the path the product really authenticates with. */
+    authMethod: z.string().min(1).optional(),
+    /** FR-2.16: the guarantee class actually measured, not the one the document assumed. */
+    guaranteeClass: z.enum(GUARANTEE_CLASSES).optional(),
+    operationInventory: z.array(OperationSchema).optional(),
+    eventModes: z.array(EventModeSchema).optional(),
+    sloSupported: z.boolean().optional(),
+  })
+  .refine((value) => Object.values(value).some((entry) => entry !== undefined), {
+    message:
+      'Verify at least one fact. An empty request would restart the review clock without evidence.',
+  });
 
 /**
  * NFR-4.13: the queue is addressed by an opaque pseudonymous reference, never by a name or an
@@ -283,6 +310,8 @@ const GroupMappingRequestSchema = z.object({
   role: z.string().min(1),
   scopeType: z.string().min(1),
   scopeLabel: z.string().min(1),
+  /** FR-2.4: the role the product itself applies; `entitlement.product_role` records it. */
+  productRole: z.string().trim().min(1).max(64).default('member'),
   propagate: z.boolean().default(false),
 });
 
@@ -452,6 +481,47 @@ const DECLARED_OPERATIONS: readonly DeclaredOperation[] = [
     summary: 'Environment profiles available to deployments.',
     tag: 'catalog',
     response: z.array(EnvProfileSchema),
+  }),
+  op({
+    method: 'POST',
+    path: '/env-profiles',
+    summary: 'Create a lifecycle environment profile (FR-1.26).',
+    tag: 'catalog',
+    response: EnvProfileSchema,
+    request: EnvProfileCreateRequestSchema,
+  }),
+  op({
+    method: 'PATCH',
+    path: '/env-profiles/:key',
+    summary: 'Rename a profile or move it to another lifecycle target (FR-1.26).',
+    tag: 'catalog',
+    response: EnvProfileSchema,
+    request: EnvProfilePatchRequestSchema,
+  }),
+  op({
+    method: 'PUT',
+    path: '/env-profiles/:key/values',
+    summary:
+      'Replace a profile’s variable values, subject to each override ceiling (FR-1.26, AC-51).',
+    tag: 'catalog',
+    response: EnvProfileSchema,
+    request: EnvProfileValuesRequestSchema,
+  }),
+  op({
+    method: 'DELETE',
+    path: '/env-profiles/:key',
+    summary: 'Delete a profile no instance uses (FR-1.26).',
+    tag: 'catalog',
+    response: EnvProfileDeleteResponseSchema,
+  }),
+  op({
+    method: 'POST',
+    path: '/env-profiles/:key/requests',
+    summary:
+      'Ask R1 for a profile change; the request lands in the governance queue (FR-1.26, §5.2).',
+    tag: 'catalog',
+    response: AccessRequestSchema,
+    request: z.object({ justification: z.string().trim().min(1).max(500) }),
   }),
   op({
     method: 'PATCH',

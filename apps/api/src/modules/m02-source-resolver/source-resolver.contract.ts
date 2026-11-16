@@ -16,6 +16,24 @@ export const SOURCE_RESOLVER_SERVICE = Symbol('seamnex.m02.source-resolver');
  */
 export type SourcePath = 'compose' | 'dockerfile' | 'scaffold';
 
+/**
+ * FR-1.11 / FR-1.20 — the verdict a pre-flight can report before anything is copied, cloned or
+ * applied.
+ *
+ * `unknown` is a first-class answer: for an entry whose source is fetched at deployment time there is
+ * no local artefact to evaluate, and saying so is the only honest option. `local_evaluation` means the
+ * vendored tree (or the approved scaffold) was read and evaluated in place, with the same waivers the
+ * job would use — no clone, no `source_resolution` row, no side effect.
+ */
+export type PolicyPreview = {
+  readonly verdict: 'allowed' | 'blocked' | 'unsafe_approved' | 'unknown';
+  readonly violations: readonly { readonly rule: ComposeRule; readonly service: string | null }[];
+  readonly evaluatedAt: string | null;
+  readonly source: 'local_evaluation' | 'none';
+  /** Why no verdict could be produced; null when one was. */
+  readonly reason: string | null;
+};
+
 export type ResolveInput = {
   readonly instanceId: string;
   readonly entryKey: string;
@@ -60,4 +78,12 @@ export interface SourceResolverService {
   scaffold(entryKey: string): Promise<ScaffoldDraft>;
   /** The policy alone, for a dry run and for the compose-policy test. */
   evaluate(composeContent: string, waived: readonly ComposeRule[]): ComposePolicyResult;
+  /**
+   * FR-1.11: the policy verdict for an entry that has not been deployed.
+   *
+   * Reads the vendored tree or the approved scaffold in place. It deliberately does not fetch: a
+   * clone inside a preview would take minutes and write a `source_resolution` row for an attempt that
+   * never happened.
+   */
+  previewPolicy(entryKey: string): Promise<PolicyPreview>;
 }

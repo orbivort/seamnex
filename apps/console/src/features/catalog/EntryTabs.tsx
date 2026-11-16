@@ -153,7 +153,34 @@ export function IntegrationTab({ entry }: { entry: CatalogEntry }) {
       <Panel>
         {/* FR-2.14 — requirement id, developer-only; the panel header used to carry it as its
             eyebrow. */}
-        <PanelHeader title="Verified integration facts" />
+        <PanelHeader
+          title="Verified integration facts"
+          description={`Recorded by ${integration.verifiedBy} on ${formatDateTime(
+            integration.verifiedAt,
+          )}. These values supersede the catalogue assumption; the next review is due ${formatDateTime(
+            integration.nextReviewAt,
+          )}.`}
+          actions={
+            <div className="flex flex-wrap items-center gap-1">
+              <Badge
+                tone={isWriteEligible(integration.credentialGranularity) ? 'positive' : 'caution'}
+                size="sm"
+              >
+                {isWriteEligible(integration.credentialGranularity)
+                  ? 'write workflows'
+                  : 'write-ineligible'}
+              </Badge>
+              <Badge
+                tone={isWorkflowEligible(integration.credentialGranularity) ? 'positive' : 'danger'}
+                size="sm"
+              >
+                {isWorkflowEligible(integration.credentialGranularity)
+                  ? 'workflow nodes'
+                  : 'workflow-ineligible'}
+              </Badge>
+            </div>
+          }
+        />
         <div className="p-4">
           <DefinitionList
             columns={2}
@@ -171,11 +198,25 @@ export function IntegrationTab({ entry }: { entry: CatalogEntry }) {
                 label: 'Single logout',
                 value: integration.sloSupported ? 'Supported' : 'Not supported',
               },
-              { label: 'Verified by', value: integration.verifiedBy },
-              { label: 'Verified at', value: formatDateTime(integration.verifiedAt) },
-              { label: 'Next review', value: formatDateTime(integration.nextReviewAt) },
+              {
+                label: 'Product default role',
+                value: integration.defaultProductRole ?? 'member',
+                hint: 'What the product grants when someone is given plain access to it.',
+              },
+              {
+                label: 'Role push',
+                value: integration.rolePush
+                  ? `${integration.rolePush.method} ${integration.rolePush.path} with ${integration.rolePush.secretName}`
+                  : 'Not declared — the platform never invents an admin API path',
+                mono: integration.rolePush !== undefined,
+              },
             ]}
           />
+          {isWriteEligible(integration.credentialGranularity) ? null : (
+            <div className="mt-2">
+              <InlineNote>{writeIneligibilityReason(integration.credentialGranularity)}</InlineNote>
+            </div>
+          )}
         </div>
       </Panel>
 

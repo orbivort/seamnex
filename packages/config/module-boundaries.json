@@ -133,10 +133,19 @@
         "idp_group_member",
         "group_mapping",
         "sync_run",
+        "propagation_sample",
         "access_request"
       ],
-      "mayImport": ["M07", "M09", "M10", "M24"],
-      "reads": ["entitlement", "role_binding", "instance", "catalog_entry", "instance_route"]
+      "mayImport": ["M07", "M09", "M10", "M15", "M24"],
+      "$comment": "M15 is the product admin token for the FR-2.4 role push: the secret store is the only place a product credential may live, and opening it is audited.",
+      "reads": [
+        "entitlement",
+        "role_binding",
+        "instance",
+        "catalog_entry",
+        "instance_route",
+        "env_profile"
+      ]
     },
     {
       "id": "M09",

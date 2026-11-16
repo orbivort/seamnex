@@ -202,13 +202,14 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
       operation_inventory: unknown;
       event_modes: unknown;
       slo_supported: boolean | null;
+      verified_facts: string[] | null;
       verified_by: string | null;
       verified_at: Date | null;
       next_review_at: Date | null;
     }>(
       `SELECT credential_granularity, session_max_minutes, api_base_url, auth_method,
               guarantee_class_verified, operation_inventory, event_modes, slo_supported,
-              verified_by, verified_at, next_review_at
+              verified_facts, verified_by, verified_at, next_review_at
          FROM integration_metadata
         WHERE instance_id = $1`,
       [instanceId],
@@ -224,6 +225,8 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
       operationInventory: row.operation_inventory,
       eventModes: row.event_modes,
       sloSupported: row.slo_supported,
+      /** FR-2.10: a fact that is not named here is still the catalogue assumption. */
+      verifiedFacts: row.verified_facts ?? [],
       verifiedBy: row.verified_by,
       verifiedAt: row.verified_at?.toISOString() ?? null,
       nextReviewAt: row.next_review_at?.toISOString() ?? null,

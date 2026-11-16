@@ -52,7 +52,9 @@ function DeployWizard({ entryKey }: { entryKey: string }) {
     submit,
     verdict,
     checks,
+    blockersFor,
     blocked,
+    blockedReason,
     failing,
     waiting,
     unresolvedFields,
@@ -77,6 +79,16 @@ function DeployWizard({ entryKey }: { entryKey: string }) {
     description: item.description,
     state: index < step ? 'complete' : index === step ? 'current' : 'upcoming',
   }));
+
+  /**
+   * The blocker list grouped by the step that fixes each one, so the review summary reads as a
+   * to-do list with destinations instead of six red badges with no field behind them.
+   */
+  const blockerGroups = STEPS.map((item, index) => ({
+    index,
+    label: item.label,
+    blockers: blockersFor(index),
+  })).filter((group) => group.blockers.length > 0);
 
   return (
     <Page>
@@ -132,7 +144,9 @@ function DeployWizard({ entryKey }: { entryKey: string }) {
               onChange={update}
             />
           ) : null}
-          {step === 1 ? <SourceStep entry={entry.data} exception={exception} /> : null}
+          {step === 1 ? (
+            <SourceStep entry={entry.data} exception={exception} blockers={blockersFor(1)} />
+          ) : null}
           {step === 2 ? (
             <EnvironmentStep
               entry={entry.data}
@@ -176,6 +190,8 @@ function DeployWizard({ entryKey }: { entryKey: string }) {
               checks={checks}
               unresolved={unresolvedFields}
               warnings={preview.data?.warnings ?? []}
+              blockers={blockerGroups}
+              onGoToStep={setStep}
               {...(routeHost === undefined ? {} : { routeHost })}
             />
           ) : null}
@@ -218,6 +234,13 @@ function DeployWizard({ entryKey }: { entryKey: string }) {
             </p>
           ) : null}
 
+          {/* A disabled control with no visible reason reads as a broken one. */}
+          {blockedReason !== undefined ? (
+            <p id="deploy-blocked-reason" className="mt-3 text-micro text-danger" role="status">
+              {blockedReason}
+            </p>
+          ) : null}
+
           <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-line pt-3">
             <Button variant="ghost" icon={<ArrowLeft />} disabled={step === 0} onClick={back}>
               Back
@@ -234,10 +257,14 @@ function DeployWizard({ entryKey }: { entryKey: string }) {
                 <Button
                   variant="primary"
                   icon={<Rocket />}
-                  disabled={deploy.isPending || blocked}
+                  disabled={deploy.isPending || blocked || blockedReason !== undefined}
                   onClick={submit}
                   aria-describedby={
-                    blocked && step < STEPS.length - 1 ? 'deploy-blocked' : undefined
+                    blockedReason !== undefined
+                      ? 'deploy-blocked-reason'
+                      : blocked && step < STEPS.length - 1
+                        ? 'deploy-blocked'
+                        : undefined
                   }
                 >
                   {deploy.isPending ? 'Starting deployment…' : 'Deploy instance'}

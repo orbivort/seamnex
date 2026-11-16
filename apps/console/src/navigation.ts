@@ -16,6 +16,7 @@ import {
   ScrollText,
   Settings,
   ShieldCheck,
+  SlidersHorizontal,
   Users,
   UsersRound,
   Workflow,
@@ -151,6 +152,15 @@ const GROUPS: NavGroup[] = [
         label: 'Identity sync',
         icon: Activity,
         capabilities: ['identity.manage_users'],
+        requireFull: true,
+      },
+      {
+        // FR-1.26 / AC-51: R1 manages the profiles; R3 reads them and files a change request, so
+        // the entry is admitted on either capability and the page states which one you hold.
+        href: '/admin/environment-profiles',
+        label: 'Environment profiles',
+        icon: SlidersHorizontal,
+        capabilities: ['profile.manage', 'profile.request'],
         requireFull: true,
       },
       {

@@ -1,4 +1,4 @@
-import type { CatalogEntry, EnvSchemaVar } from '@seamnex/domain';
+import type { CatalogEntry, EnvSchemaVar, PreviewBlocker } from '@seamnex/domain';
 import { PACKAGING_LABELS } from '@seamnex/domain';
 import {
   Badge,
@@ -18,12 +18,22 @@ export function ReviewStep({
   checks,
   unresolved,
   warnings,
+  blockers,
   routeHost,
+  onGoToStep,
 }: {
   entry: CatalogEntry;
   values: WizardValues;
   vars: EnvSchemaVar[];
   checks: PreflightCheck[];
+  /**
+   * FR-1.11 — the API's blockers, grouped by the step that can fix them.
+   *
+   * The summary used to paint "fail" beside six checks and leave the operator to guess where the
+   * field lived. Each row now names the step and jumps to it.
+   */
+  blockers?: { index: number; label: string; blockers: PreviewBlocker[] }[];
+  onGoToStep?: (index: number) => void;
   /**
    * Declared variables the resolved plan could not answer. The summary used to say "N field(s) need
    * attention" without naming one, so the operator had to hunt through seventeen inputs.
@@ -117,6 +127,48 @@ export function ReviewStep({
               </ul>
             )}
           </div>
+
+          {(blockers ?? []).length > 0 ? (
+            <div className="mt-4">
+              <Callout
+                tone={
+                  blockers?.some((group) => group.blockers.some((item) => item.blocking))
+                    ? 'danger'
+                    : 'caution'
+                }
+                title="Pre-flight blockers"
+              >
+                <ul className="space-y-2">
+                  {(blockers ?? []).map((group) => (
+                    <li key={group.label}>
+                      <p className="font-mono text-faint label-caps">{group.label}</p>
+                      <ul className="mt-1 list-disc space-y-1 pl-4">
+                        {group.blockers.map((blocker) => (
+                          <li key={`${blocker.code}-${blocker.field ?? '—'}`}>
+                            {blocker.message}
+                            {blocker.blocking ? (
+                              <span className="ml-1 text-meta text-faint">(blocking)</span>
+                            ) : (
+                              <span className="ml-1 text-meta text-faint">(advisory)</span>
+                            )}{' '}
+                            {onGoToStep ? (
+                              <button
+                                type="button"
+                                className="text-micro font-medium text-link underline underline-offset-2"
+                                onClick={() => onGoToStep(group.index)}
+                              >
+                                Go to {group.label}
+                              </button>
+                            ) : null}
+                          </li>
+                        ))}
+                      </ul>
+                    </li>
+                  ))}
+                </ul>
+              </Callout>
+            </div>
+          ) : null}
 
           {(warnings ?? []).length > 0 ? (
             <div className="mt-4">

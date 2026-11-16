@@ -16,6 +16,52 @@ the same number through every manifest and the link definitions at the foot of t
 
 ### Added
 
+- **Pre-flight refuses with the blocker, before anything starts** (`FR-1.11`, `FR-1.23`, `AC-07`) —
+  `POST /instances/preview` now returns a `blockers` list — each entry a `code`, the `field` or fact it
+  refers to, a sentence and whether it blocks — and `admissible` is false while any of them does. The
+  new `PreflightService` composes the checks that already existed but were only consulted once a job
+  was running: the entry and the resolvability of its source, the image pin (`isPinnedImage`),
+  `renderer.plan` for field-level `required`/`ceiling`/rule violations, each secret reference against
+  the secret store, capacity, and the slug's route. The policy verdict stopped being hard-coded
+  `allowed`: it is read from the entry's latest recorded `source_resolution` and reported as
+  `allowed`, `blocked` or `unknown`, always with the `policyEvaluatedAt` and the `policySource` behind
+  it, so a permitted deployment can name the evidence that permitted it and an unevaluated one is no
+  longer reported as a permitted one. The wizard prints each blocker on the step that can fix it,
+  anchors it to the field, and keeps submit disabled with the reason it is disabled.
+- **Environment profiles are staff-owned, and editable where they are read** (`FR-1.26`, `AC-51`) — a
+  profile was a row someone inserted by hand. `POST /env-profiles`, `PATCH /env-profiles/:key`,
+  `PUT /env-profiles/:key/values` and `DELETE /env-profiles/:key` are now the way one is created,
+  retargeted, filled and removed, behind the new `profile.manage` capability (R1); a domain owner (R3)
+  gets `profile.request` instead, the same approval shape as every other scoped change, and the
+  console shows the action disabled with that path as the reason. Writes are validated against what
+  the catalogue declares: a variable no entry declares is refused, a secret-typed variable may only
+  point at a stored secret rather than carry a value, and a value is rejected only when **every** entry
+  that declares the variable caps it at `none`. Each write is audited (`profile.created`,
+  `profile.updated`, `profile.values_replaced`, `profile.deleted`) with the variable names and never
+  the values, reads mask secret references, and a delete a live instance depends on answers
+  `STATE_CONFLICT` naming those instances instead of letting the foreign key surface as a 500.
+  Migration `0035` adds the profile's display `name`. The console gained
+  `/admin/environment-profiles`: the profiles with their lifecycle target, every variable they set
+  with the entry that declares it and the ceiling that applies, so an operator can see why a value is
+  ignored before deploying rather than after.
+- **Identity propagation can reach the product, and is timed where it lands** (`FR-2.4`, `AC-11`,
+  `AC-48`, `S-8`) — a mapping now carries the role the product itself holds
+  (`group_mapping.product_role`, default `member`) and the entitlement records that role instead of the
+  literal `member` it used to write. "Applied" is claimed only when the platform applied something:
+  the identity client it configured, or a push the product acknowledged. The new `IDENTITY_PUSH` port
+  has an HTTP adapter that targets the instance's verified `apiBaseUrl` on the instance's own network,
+  authenticates with a secret-store credential that never reaches argv or a log, and makes one bounded
+  call per changed (subject, instance); `SEAMNEX_IDENTITY_PUSH_ENABLED` (default off) and an optional
+  `integration.rolePush` keep it inert for every entry that declares no admin API, and such a change
+  stays `pending` with its reason recorded in `sync_run.errors` rather than being reported as a
+  propagation that never happened. Migration `0035` adds `entitlement.applied_at`, the
+  `propagation_sample` table and `sync_run.p95_propagation_ms`/`propagation_samples`: the latency is
+  measured from the mirror's `idp_group_member.updated_at` to the applied entitlement, and the run
+  stores its p95 **with the number of changes it was measured across**, so a figure without a sample
+  count cannot be quoted. The mirror-write p95 stays a separate, correctly named diagnostic that is
+  not the AC-48 figure. Samples older than 30 days are pruned by the worker. The identity screens show
+  each entitlement's product role, state and applied time, and the sync screen refuses to report a
+  five-minute pass when no change was measured.
 - **Environment drift is observed, and the declarative half of it is repaired** (`FR-1.29`, `FR-1.35`,
   `NFR-3.6`, `AC-43`) — the drift endpoint, schema and console panel were complete while nothing
   wrote a per-variable row, so the panel could only ever answer "no drift". M22 now compares every
@@ -119,6 +165,21 @@ the same number through every manifest and the link definitions at the foot of t
 
 ### Changed
 
+- **Verification records the facts the screens now quote** (`FR-2.10`, `FR-2.14`, `FR-2.15`, `AC-41`,
+  `AC-50`) — the verification request carried a subset of the facts FR-2.14 names, and an empty one
+  still restarted the review clock, which is how a catalogue assumption came to read as a verified
+  one. `PATCH /catalog/:key/integration-metadata` now accepts the authentication path and guarantee
+  class actually measured, the API base URL, the operation inventory, the event modes, SLO support,
+  credential granularity and the session maximum, and refuses a request that changes nothing. The fact
+  is written into `integration_metadata` — every fact column it has, not the two the old statement
+  carried — and `verified_facts` accumulates what was checked until the next review, so an omitted
+  field means "unchanged" and never "cleared". The audit row records the before/after value per field,
+  and `verifiedAt`/`nextReviewAt`/`stale` move only because a fact arrived. The entry screen groups the
+  facts it verifies (authentication, API surface, events, credentials) with the current value and its
+  provenance, the registry prefers the verified `apiBaseUrl`, `authMethod`, `guaranteeClass`,
+  `operationInventory`, `eventModes` and `sloSupported` while labelling the document's value a
+  catalogue assumption, and an entry whose API cannot issue scoped credentials is reported as
+  write-workflow-ineligible with the granularity that made it so.
 - **"Verified" now means the objects are there** — verification listed the manifest and called that
   a check; it now requires every named dump and volume archive to exist in the target and every
   captured volume to carry a digest, and refuses with `BACKUP_UNUSABLE` naming what is missing. A
@@ -141,6 +202,27 @@ the same number through every manifest and the link definitions at the foot of t
 
 ### Fixed
 
+- **An upgrade applies the version the operator confirmed** (`FR-1.7`, `AC-06`) — the handler passed
+  the confirmed version into `renderSetId`, so the job was handed a rollback selector and never knew
+  what had been approved: the audit trail could not name it. The read model compounded it by deriving
+  both versions from payload keys no producer writes, so the instance showed a version from the image
+  tag and "no update" for ever, even where the catalogue pinned a newer one. The version now travels as
+  `targetVersion` from the dialog through `LifecycleInput` into the job payload; the lifecycle call
+  refuses a target that is already running or no longer matches the catalogue, the resolve step
+  re-asserts it against the pin and refuses `STATE_CONFLICT` when the pin moved, and apply writes the
+  version it applied into `payload.currentVersion`.
+  `instance.upgrade.requested`, `.succeeded` and `.failed` name the version, the instance afterwards
+  reports what is running beside any newer catalogue pin, and the delta the dialog shows comes from
+  the entry's `upstream` rather than from a key nothing writes. The mock platform refuses an upgrade
+  that carries no confirmed version, answers with both versions when the pin moved, and applies the
+  pin it accepted instead of leaving the instance on the version it was on.
+- **A profile is bound by the ceiling that caps it** (`FR-1.26`, `AC-51`) — the renderer tested the
+  override ceiling on the instance branch and not on the profile branch, so a variable the declaration
+  marks as not overridable was populated from `env_profile_value` in silence: the ceiling was enforced
+  against the operator and not against the platform. A profile value over a `none` ceiling is now a
+  `ceiling` field error that names the profile to fix, the resolved value falls back to the catalogue
+  default instead of the value nobody was allowed to set, and an instance value for a `profile only`
+  variable is still refused by the branch that always checked it.
 - **Break-glass approver eligibility is enforced by the API, not only the console** (`FR-4.11`,
   `AC-47`, `NFR-4.4`) — an approver whose `breakglass.approve` grant is scoped (the R2 auditor) may
   approve a **read-only** elevation only, and a domain owner may approve an elevation only when one of

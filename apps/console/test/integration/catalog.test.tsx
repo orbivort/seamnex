@@ -121,9 +121,14 @@ describe('catalog entry', () => {
     render(<App />);
     await screen.findByRole('heading', { name: /EspoCRM/ });
 
+    // FR-2.15: the record action only fires on a real fact, so the form is edited first.
+    fireEvent.change(await screen.findByLabelText(/Session maximum/), {
+      target: { value: '481' },
+    });
     fireEvent.click(await screen.findByRole('button', { name: /Record verified review/ }));
 
     expect(await screen.findByText('D01-01 metadata verified')).toBeDefined();
+    expect(screen.getByText(/Verified: Session maximum/)).toBeDefined();
     expect(screen.getByText(/Review recorded by/)).toBeDefined();
   });
 

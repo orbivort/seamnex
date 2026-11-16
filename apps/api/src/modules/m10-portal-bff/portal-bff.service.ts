@@ -116,8 +116,11 @@ export class PostgresPortalBffService extends Repository implements PortalBffSer
     input: { readonly subjectIdpId: string; readonly target: string },
   ): Promise<void> {
     await tx.query(
-      `INSERT INTO entitlement (subject_idp_id, instance_id, product_role, source, sync_state)
-       SELECT $1, i.id, 'member', 'direct', 'applied' FROM instance i
+      `INSERT INTO entitlement (subject_idp_id, instance_id, product_role, source, sync_state, applied_at)
+       SELECT $1, i.id, coalesce(ce.payload #>> '{integration,defaultProductRole}', 'member'),
+              'direct', 'applied', now()
+         FROM instance i
+         JOIN catalog_entry ce ON ce.key = i.entry_key
         WHERE i.id::text = $2 OR i.slug = $2 OR i.entry_key = $2
        ON CONFLICT (subject_idp_id, instance_id, product_role) DO NOTHING`,
       [input.subjectIdpId, input.target],
@@ -133,8 +136,8 @@ export class PostgresPortalBffService extends Repository implements PortalBffSer
    */
   async grantInstanceOwner(instanceId: string, subjectIdpId: string): Promise<boolean> {
     const granted = await this.execute(
-      `INSERT INTO entitlement (subject_idp_id, instance_id, product_role, source, sync_state)
-       SELECT $2, i.id, 'Owner', 'direct', 'applied'
+      `INSERT INTO entitlement (subject_idp_id, instance_id, product_role, source, sync_state, applied_at)
+       SELECT $2, i.id, 'Owner', 'direct', 'applied', now()
          FROM instance i
         WHERE i.id::text = $1 AND i.deleted_at IS NULL
        ON CONFLICT (subject_idp_id, instance_id, product_role) DO NOTHING`,
@@ -521,7 +524,11 @@ export class PostgresPortalBffService extends Repository implements PortalBffSer
       product: row.product,
       description: String(row.payload.description ?? `${row.product} in ${row.domain}.`),
       guaranteeClass: row.guarantee_class as RequestableProduct['guaranteeClass'],
-      productRole: 'member',
+      // FR-2.4: the role the product grants for plain access, as the entry declares it.
+      productRole: String(
+        (row.payload.integration as { defaultProductRole?: string } | undefined)
+          ?.defaultProductRole ?? 'member',
+      ),
       owner: String((row.payload.owner as { name?: string } | undefined)?.name ?? row.domain),
       requested: row.requested_at !== null,
       requestedAt: row.requested_at?.toISOString() ?? null,

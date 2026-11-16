@@ -411,6 +411,9 @@ describe('reading the recorded integration state', () => {
       operationInventory: [{ name: 'contact.read' }],
       eventModes: ['webhook'],
       sloSupported: true,
+      // FR-2.10/AC-41: the projection says which facts were verified, so a consumer can tell a
+      // measured value from a catalogue assumption without diffing two documents.
+      verifiedFacts: [],
       verifiedBy: ACTOR,
       verifiedAt: '2024-05-01T00:00:00.000Z',
       nextReviewAt: '2024-11-01T00:00:00.000Z',

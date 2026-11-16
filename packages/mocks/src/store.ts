@@ -9,6 +9,7 @@ import type {
   DriftRecord,
   DsarRequest,
   EntitlementResponse,
+  EnvProfile,
   EnvValue,
   IdpGroup,
   IdpUser,
@@ -91,6 +92,8 @@ export type MockState = {
   instanceDetails: Record<string, InstanceDetail>;
   containers: Record<string, ContainerStatus[]>;
   envValues: Record<string, EnvValue[]>;
+  /** FR-1.26: the lifecycle profiles the deploy wizard selects from; mutable so the admin screen works. */
+  profiles: EnvProfile[];
   drift: Record<string, DriftRecord[]>;
   statuses: Record<string, InstanceStatus>;
   jobs: Job[];
@@ -147,6 +150,7 @@ function buildBase(): MockState {
     instanceDetails: clone(INSTANCE_DETAILS),
     containers: clone(CONTAINERS),
     envValues: clone(ENV_VALUES),
+    profiles: clone(ENV_PROFILES),
     drift: clone(DRIFT),
     statuses: clone(INSTANCE_STATUSES),
     jobs: clone(JOBS),
@@ -472,8 +476,9 @@ export function scaffoldFor(entryKey: string) {
   return SCAFFOLD_DRAFTS[entryKey];
 }
 
-export function envProfiles() {
-  return ENV_PROFILES;
+/** FR-1.26: the profiles are mutable state, so the admin screen's writes are visible to the wizard. */
+export function envProfiles(): EnvProfile[] {
+  return current.profiles;
 }
 
 export function instanceBySlug(slug: string): Instance | undefined {

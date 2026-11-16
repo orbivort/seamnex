@@ -311,6 +311,8 @@ export type EntitlementRow = {
   source: 'group' | 'direct';
   sync_state: 'applied' | 'pending' | 'edge_only' | 'unsupported';
   synced_at: Date;
+  /** 0035: when the platform finished applying the grant; NULL means never applied. */
+  applied_at: Date | null;
 };
 
 /**
@@ -375,6 +377,8 @@ export type IntegrationMetadataRow = {
   credential_granularity: 'scoped' | 'account' | 'none';
   session_max_minutes: number | null;
   slo_supported: boolean | null;
+  /** 0035: facts onboarding actually verified; an absent name is still a catalogue assumption. */
+  verified_facts: string[];
   verified_by: string | null;
   verified_at: Date | null;
   next_review_at: Date | null;
@@ -412,6 +416,8 @@ export type GroupMappingRow = {
   scope_type: 'platform' | 'domain' | 'instance';
   scope_id: string | null;
   propagate_to_product: boolean;
+  /** 0035: the role the *product* applies for a subject in this group (FR-2.4). */
+  product_role: string;
   created_by: string;
   created_at: Date;
 };
@@ -427,12 +433,38 @@ export type RoleBindingRow = {
   expires_at: Date | null;
 };
 
+/**
+ * 0035 — one membership change whose entitlement state changed in a cycle.
+ *
+ * `detected_at` is when the mirror observed the membership; `applied_at` is when the platform
+ * finished applying the grant. `latency_ms` is the difference, and a pending change has neither an
+ * applied time nor a latency (AC-11, AC-48).
+ */
+export type PropagationSampleRow = {
+  id: string;
+  sync_run_id: string;
+  subject_idp_id: string;
+  instance_id: string;
+  product_role: string;
+  guarantee_class: string;
+  detected_at: Date;
+  applied_at: Date | null;
+  latency_ms: number | null;
+  outcome: 'applied' | 'pending' | 'unsupported';
+  reason: string | null;
+  created_at: Date;
+};
+
 export type SyncRunRow = {
   id: string;
   started_at: Date;
   finished_at: Date | null;
   changes: number;
   p95_latency_ms: number | null;
+  /** 0035: p95 over propagation changes only; mirror writes stay in `p95_latency_ms`. */
+  p95_propagation_ms: number | null;
+  /** 0035: how many changes the propagation p95 covers. */
+  propagation_samples: number;
   errors: number;
   detail: Record<string, unknown>;
 };

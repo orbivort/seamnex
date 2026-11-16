@@ -1443,7 +1443,9 @@ describe('record', () => {
       ['mariadb', 'database'],
     ]);
     const payloadUpdate = h.db.calls.find((call) => call.sql.includes('jsonb_build_object'));
-    expect(payloadUpdate?.params).toEqual([INSTANCE_ID, 'rs-000000000001', 'compose']);
+    // FR-1.7: the fourth bind is the version the applied image actually carries, so the instance
+    // reports what is running rather than what was requested.
+    expect(payloadUpdate?.params).toEqual([INSTANCE_ID, 'rs-000000000001', 'compose', '7.4']);
     expect(h.db.calls.some((call) => call.sql.includes('UPDATE render_set SET applied_at'))).toBe(
       true,
     );
@@ -1457,11 +1459,15 @@ describe('record', () => {
     expect(h.audit.append).toHaveBeenCalledWith(
       expect.objectContaining({
         action: 'instance.deploy.succeeded',
+        // AC-06: the trail names the confirmed version and the applied one. A deploy has no
+        // confirmed upgrade version, and the artefact it applied went out as 7.4.
         detail: {
           jobId: 'job-1',
           renderSetId: 'rs-000000000001',
           planId: 'plan-000000000001',
           changes: 1,
+          targetVersion: null,
+          appliedVersion: '7.4',
         },
       }),
     );
@@ -1500,7 +1506,7 @@ describe('record', () => {
     await h.run('rollback', 'record', context);
 
     const payloadUpdate = h.db.calls.find((call) => call.sql.includes('jsonb_build_object'));
-    expect(payloadUpdate?.params).toEqual([INSTANCE_ID, 'rs-previous-1234', 'compose']);
+    expect(payloadUpdate?.params).toEqual([INSTANCE_ID, 'rs-previous-1234', 'compose', '7.4']);
   });
 
   it('names the role of every service from what the service is, never from list order', async () => {
@@ -1635,7 +1641,8 @@ describe('markFailed', () => {
       expect.objectContaining({
         action: 'instance.deploy.failed',
         outcome: 'failure',
-        detail: { jobId: 'job-1', fromState: 'verifying' },
+        // AC-06: a failed upgrade says which version it was trying to apply.
+        detail: { jobId: 'job-1', fromState: 'verifying', targetVersion: null },
       }),
     );
   });

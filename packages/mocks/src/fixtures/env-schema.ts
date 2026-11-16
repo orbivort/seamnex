@@ -280,7 +280,9 @@ export const ENV_PROFILES: EnvProfile[] = [
       { varName: 'SMTP_HOST', value: 'smtp.seamnex.local', secretRef: null },
       { varName: 'SMTP_PORT', value: '587', secretRef: null },
       { varName: 'SMTP_USERNAME', value: 'platform-mailer', secretRef: null },
-      { varName: 'SMTP_PASSWORD', value: null, secretRef: 'secret://platform/smtp-relay' },
+      // `SMTP_PASSWORD` is capped at `none`, so a profile value for it is now refused rather than
+      // silently applied (AC-51); the relay credential comes from the secret store, keyed by the
+      // variable name, and never through `env_profile_value`.
       { varName: 'TZ', value: 'Europe/Berlin', secretRef: null },
       { varName: 'CLIENT_MAX_BODY_SIZE', value: '128', secretRef: null },
     ],

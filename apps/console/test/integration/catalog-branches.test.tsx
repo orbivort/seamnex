@@ -357,6 +357,31 @@ describe('catalog entry actions', () => {
     expect(screen.queryByText(/Pre-pulling the images for D01-01/)).toBeNull();
   });
 
+  it('will not record a verification that changes nothing', async () => {
+    openAs('R1', '/catalog/D01-01');
+    render(<App />);
+    await screen.findByRole('heading', { name: /EspoCRM/ });
+
+    // FR-2.15: re-submitting the facts already on file would restart the review clock on nothing.
+    const submit = await screen.findByRole('button', { name: /Record verified review/ });
+    expect(submit.hasAttribute('disabled')).toBe(true);
+    expect(
+      screen.getByText('Change at least one fact before recording a verification.'),
+    ).toBeDefined();
+  });
+
+  it('records only the facts that changed', async () => {
+    openAs('R1', '/catalog/D01-01');
+    render(<App />);
+    await screen.findByRole('heading', { name: /EspoCRM/ });
+
+    fireEvent.change(screen.getByLabelText(/Session maximum/), { target: { value: '481' } });
+    fireEvent.click(await screen.findByRole('button', { name: /Record verified review/ }));
+
+    // The receipt names what was verified, so a review is auditable from the screen.
+    expect(await screen.findByText(/Verified: Session maximum/)).toBeDefined();
+  });
+
   it('reports a review that the API refused', async () => {
     server.use(
       http.patch('/api/v1/catalog/D01-01/integration-metadata', () =>
@@ -372,6 +397,7 @@ describe('catalog entry actions', () => {
     render(<App />);
     await screen.findByRole('heading', { name: /EspoCRM/ });
 
+    fireEvent.change(screen.getByLabelText(/Session maximum/), { target: { value: '481' } });
     fireEvent.click(await screen.findByRole('button', { name: /Record verified review/ }));
 
     expect(await screen.findByText('Recording a review needs metadata.manage')).toBeDefined();
@@ -394,6 +420,7 @@ describe('catalog entry actions', () => {
     render(<App />);
     await screen.findByRole('heading', { name: /EspoCRM/ });
 
+    fireEvent.change(screen.getByLabelText(/Session maximum/), { target: { value: '481' } });
     fireEvent.click(await screen.findByRole('button', { name: /Record verified review/ }));
 
     const pending = await screen.findByRole('button', { name: 'Recording…' });
@@ -424,6 +451,7 @@ describe('catalog entry actions', () => {
 
     // Recording a review invalidates the entry, so the next read is the one that fails.
     rereadFails = true;
+    fireEvent.change(screen.getByLabelText(/Session maximum/), { target: { value: '481' } });
     fireEvent.click(await screen.findByRole('button', { name: /Record verified review/ }));
 
     expect(await screen.findByText('Showing the last data that loaded')).toBeDefined();
@@ -525,14 +553,17 @@ describe('catalog entry actions', () => {
     fireEvent.change(select, { target: { value: 'none' } });
 
     // The verdict, not the label: the operator sees the consequence before submitting.
-    expect(await screen.findByText('Write-ineligible')).toBeDefined();
-    expect(screen.getByText(/Unrecorded change/)).toBeDefined();
+    expect(await screen.findByText('What this granularity costs')).toBeDefined();
+    expect(screen.getAllByText('write-ineligible').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('workflow-ineligible').length).toBeGreaterThan(0);
+    // The receipt names the fact that would be written, so the button is not a blind action.
+    expect(screen.getByText(/Recording: Credential granularity/)).toBeDefined();
 
     // Back to the recorded value and the draft is no longer a pending change.
     fireEvent.change(select, { target: { value: 'scoped' } });
 
-    await waitFor(() => expect(screen.queryByText(/Unrecorded change/)).toBeNull());
-    expect(screen.queryByText('Write-ineligible')).toBeNull();
+    await waitFor(() => expect(screen.queryByText(/Recording: Credential granularity/)).toBeNull());
+    expect(screen.queryByText('What this granularity costs')).toBeNull();
   });
 });
 

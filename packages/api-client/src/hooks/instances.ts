@@ -251,12 +251,24 @@ export function useLifecycleAction() {
       id: string;
       action: string;
       dataRetention?: 'keep' | 'export' | 'delete';
-    }) =>
-      request(`/instances/${input.id}/${input.action}`, {
+      /**
+       * FR-1.7: the version the operator confirmed in the dialog. The server refuses an upgrade
+       * whose target no longer matches the catalogue pin instead of silently re-resolving it.
+       */
+      version?: string;
+      justification?: string;
+    }) => {
+      const body: Record<string, string> = {
+        ...(input.dataRetention === undefined ? {} : { dataRetention: input.dataRetention }),
+        ...(input.version === undefined ? {} : { version: input.version }),
+        ...(input.justification === undefined ? {} : { justification: input.justification }),
+      };
+      return request(`/instances/${input.id}/${input.action}`, {
         schema: JobAcceptedSchema,
         method: 'POST',
-        ...(input.dataRetention ? { body: { dataRetention: input.dataRetention } } : {}),
-      }),
+        ...(Object.keys(body).length === 0 ? {} : { body }),
+      });
+    },
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.instances });
       void client.invalidateQueries({ queryKey: queryKeys.jobs });

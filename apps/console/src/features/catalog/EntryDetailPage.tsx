@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Link, useParams } from 'react-router';
 import { ArrowLeft, Download, Rocket } from 'lucide-react';
 import {
@@ -10,30 +10,19 @@ import {
   useScaffoldDraft,
   useVerifyIntegrationMetadata,
 } from '@seamnex/api-client';
-import {
-  CREDENTIAL_GRANULARITY_OPTIONS,
-  GUARANTEE_CLASS_LABELS,
-  PACKAGING_LABELS,
-  can,
-  canMutate,
-  isWriteEligible,
-  writeIneligibilityReason,
-  type CredentialGranularity,
-} from '@seamnex/domain';
+import { GUARANTEE_CLASS_LABELS, PACKAGING_LABELS, can, canMutate } from '@seamnex/domain';
 import {
   Alert,
   Badge,
   Button,
   Callout,
   DefinitionList,
-  Field,
   Grid,
   InlineNote,
   Page,
   PageHeader,
   Panel,
   PanelHeader,
-  Select,
   SkeletonLines,
   SplitLayout,
   StatusPill,
@@ -45,6 +34,7 @@ import { formatBytes, formatDate, formatDateTime } from '@seamnex/utils';
 import { useSession } from '../../session';
 import { QueryError } from '@seamnex/shell';
 import { EnvTab, IntegrationTab, ScaffoldTab } from './EntryTabs';
+import { FACT_LABELS, VerificationForm } from './VerificationForm';
 
 /** What the deploy path compares with the disk reservation (FR-1.9). */
 function volumeQuotaMb(volumes: readonly { quotaMb: number }[]): number {
@@ -57,15 +47,7 @@ export function EntryDetailPage() {
   const entry = useCatalogEntry(key);
   const envSchema = useEnvSchema(key);
   const [tab, setTab] = useState('overview');
-  const [granularityState, setGranularity] = useState<CredentialGranularity | null>(null);
   const verify = useVerifyIntegrationMetadata(key);
-  // The draft belongs to the pending review. Left in place after a successful save it kept showing
-  // an unsaved value after someone else verified the entry, or after the entry was reloaded from the
-  // repository — the select would then disagree with the record it claims to display.
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- the draft is derived from a mutation result, not a render input, and the hook exposes no per-call callback
-    if (verify.isSuccess) setGranularity(null);
-  }, [verify.isSuccess, verify.data]);
   // CL-18: NFR-2.4 measures apply, not download, so warming the image cache is an operator action
   // taken before a deployment window rather than part of the deploy itself.
   const prefetch = usePrefetchEntry(key);
@@ -92,7 +74,6 @@ export function EntryDetailPage() {
 
   const data = entry.data;
   const guarantee = GUARANTEE_CLASS_LABELS[data.guaranteeClass];
-  const granularity = granularityState ?? data.integration.credentialGranularity;
 
   return (
     <Page>
@@ -181,11 +162,14 @@ export function EntryDetailPage() {
         </Alert>
       ) : null}
 
-      {verify.isError ? <QueryError error={verify.error} compact /> : null}
       {verify.data ? (
         <div className="mb-3">
           <Alert tone="positive" title={`${verify.data.key} metadata verified`}>
-            Review recorded by {verify.data.integration.verifiedBy}; the next review is due{' '}
+            Verified:{' '}
+            {Object.keys(verify.variables ?? {})
+              .map((fact) => FACT_LABELS[fact as keyof typeof FACT_LABELS] ?? fact)
+              .join(', ') || 'no fact'}
+            . Review recorded by {verify.data.integration.verifiedBy}; the next review is due{' '}
             {formatDate(verify.data.integration.nextReviewAt)} and the change is in the audit trail.
           </Alert>
         </div>
@@ -343,15 +327,14 @@ export function EntryDetailPage() {
           </SplitLayout>
 
           <Panel className="mt-3">
-            {/* FR-2.12 · FR-2.14 — requirement ids, developer-only; they used to be the panel
-                eyebrow. */}
+            {/* FR-2.12 — requirement id, developer-only; it used to be the panel eyebrow. */}
             <PanelHeader
-              title="Upstream release state and credential granularity"
-              description="Release and advisory state is tracked per entry. Credential granularity decides whether write workflows are allowed against this product."
+              title="Upstream release state"
+              description="Release and advisory state is tracked per entry, separately from the facts onboarding verified."
             />
-            <SplitLayout ratio="rail" className="gap-4 p-4">
+            <div className="p-4">
               <DefinitionList
-                columns={1}
+                columns={2}
                 items={[
                   { label: 'Current version', value: data.upstream.currentVersion, mono: true },
                   {
@@ -373,70 +356,16 @@ export function EntryDetailPage() {
                   { label: 'Checked', value: formatDateTime(data.upstream.checkedAt) },
                 ]}
               />
-
-              <div className="space-y-2">
-                <Field
-                  label="Credential granularity"
-                  htmlFor="granularity"
-                  hint="A product that cannot issue scoped credentials is write-workflow-ineligible (C-11)."
-                >
-                  {/* FR-2.14 is a mutating administrator action, so the control follows `canMutate`:
-                      a `scoped` grant renders the field read-only rather than letting the operator
-                      submit a change the policy would refuse. The option list comes from the domain
-                      so the wording cannot drift from the rule it describes. */}
-                  <Select
-                    id="granularity"
-                    value={granularity}
-                    disabled={!canMutate(session.role, 'metadata.manage')}
-                    onChange={(event) =>
-                      setGranularity(event.target.value as CredentialGranularity)
-                    }
-                  >
-                    {CREDENTIAL_GRANULARITY_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </Select>
-                </Field>
-                {/* The verdict, not the label: an operator changing `scoped` to `account` needs to
-                    see that it makes the product write-ineligible *before* submitting. */}
-                {isWriteEligible(granularity) ? null : (
-                  <Callout
-                    tone={granularity === 'none' ? 'danger' : 'caution'}
-                    title="Write-ineligible"
-                  >
-                    {writeIneligibilityReason(granularity)}
-                  </Callout>
-                )}
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  disabled={!canMutate(session.role, 'metadata.manage') || verify.isPending}
-                  onClick={() =>
-                    verify.mutate({
-                      credentialGranularity: granularity,
-                      sessionMaxMinutes: data.integration.sessionMaxMinutes,
-                    })
-                  }
-                >
-                  {verify.isPending ? 'Recording…' : 'Record verified review'}
-                </Button>
-                {granularityState !== null &&
-                granularityState !== data.integration.credentialGranularity ? (
-                  <InlineNote>
-                    Unrecorded change: the catalog still holds{' '}
-                    <span className="font-mono">{data.integration.credentialGranularity}</span>.
-                  </InlineNote>
-                ) : null}
-                <InlineNote>
-                  Verification restarts the staleness clock and writes an audit record. Lowering the
-                  granularity below operation-scoped revokes the live write scopes it invalidates,
-                  in the same transaction.
-                </InlineNote>
-              </div>
-            </SplitLayout>
+            </div>
           </Panel>
+
+          <div className="mt-3">
+            <VerificationForm
+              entry={data}
+              verify={verify}
+              canVerify={canMutate(session.role, 'metadata.manage')}
+            />
+          </div>
         </TabPanel>
 
         <TabPanel value="integration" className="pt-3">

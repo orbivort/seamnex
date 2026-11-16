@@ -55,9 +55,11 @@ describe('role navigation', () => {
   });
 
   it('requires an outright grant for administration, not a scoped one', () => {
-    // R3 holds `identity.manage_groups` and `identity.manage_users` only as `scoped`.
+    // R3 holds `identity.manage_groups` and `identity.manage_users` only as `scoped`, so the
+    // directory screens stay shut. `profile.request` is a full grant, which is why the group itself
+    // is reachable — with exactly one item, the one the role may actually use.
     const admin = navigationFor('R3').find((group) => group.label === 'Administration');
-    expect(admin).toBeUndefined();
+    expect(admin?.items.map((item) => item.href)).toEqual(['/admin/environment-profiles']);
   });
 
   it('keeps break-glass reachable for the approver and the requester alike', () => {
@@ -75,7 +77,12 @@ describe('role navigation', () => {
   it('marks the admin entries that need an unscoped grant', () => {
     const entries = flatNav('R1');
     const requiresFull = entries.filter((entry) => entry.requireFull).map((entry) => entry.href);
-    expect(requiresFull).toEqual(['/admin/groups', '/admin/identity-sync', '/admin/settings']);
+    expect(requiresFull).toEqual([
+      '/admin/groups',
+      '/admin/identity-sync',
+      '/admin/environment-profiles',
+      '/admin/settings',
+    ]);
   });
 
   it('lands each role on the first surface it may read', () => {

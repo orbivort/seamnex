@@ -170,7 +170,14 @@ export function InstanceDetailPage() {
 
   const run = (action: LifecycleAction) => {
     lifecycle.mutate(
-      { id: data.id, action, ...(action === 'delete' ? { dataRetention: retention } : {}) },
+      {
+        id: data.id,
+        action,
+        ...(action === 'delete' ? { dataRetention: retention } : {}),
+        // FR-1.7: send what the operator confirmed. The server re-asserts it against the catalogue
+        // pin, so an upgrade cannot quietly apply a version nobody approved.
+        ...(action === 'upgrade' && upgradeTarget !== null ? { version: upgradeTarget } : {}),
+      },
       { onSuccess: (accepted) => navigate(`/jobs/${accepted.jobId}`) },
     );
   };
@@ -487,7 +494,11 @@ export function InstanceDetailPage() {
               </Button>
               <Button
                 variant="primary"
-                disabled={!plan.data?.capacityVerdict.admissible || lifecycle.isPending}
+                disabled={
+                  !plan.data?.capacityVerdict.admissible ||
+                  lifecycle.isPending ||
+                  upgradeTarget === null
+                }
                 onClick={() => {
                   run('upgrade');
                   setDialog(null);
@@ -520,6 +531,12 @@ export function InstanceDetailPage() {
                     pre-upgrade backup
                   </Badge>
                 </div>
+                {upgradeTarget === null ? (
+                  <Alert tone="caution" title="No newer version is pinned">
+                    The catalogue pins {data.currentVersion} for this entry. Refresh the entry after
+                    a catalogue reload, or redeploy to apply the current pin.
+                  </Alert>
+                ) : null}
                 <p className="font-mono text-micro text-faint">
                   render {planData.from} → {planData.to}
                 </p>

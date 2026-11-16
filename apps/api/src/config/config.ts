@@ -191,6 +191,22 @@ const EnvironmentSchema = z
     /** Identity sync cadence and batch size (deliverable 3.6). */
     SEAMNEX_SYNC_INTERVAL_MS: z.coerce.number().int().min(1_000).max(3_600_000).default(300_000),
     SEAMNEX_SYNC_BATCH_SIZE: z.coerce.number().int().min(1).max(5_000).default(200),
+    /**
+     * FR-2.4 — whether the sync worker may push a mapped product role into a product's own admin API.
+     *
+     * Off by default, and it is a switch rather than a default because turning it on makes the
+     * platform a writer in a system it does not own: a wrong path or a stale token would edit real
+     * accounts. With it off, an entitlement whose product has no identity client stays `pending` and
+     * says why — which is the truthful state, not a degraded one.
+     */
+    SEAMNEX_IDENTITY_PUSH_ENABLED: booleanish.default(false),
+    /** Ceiling for one role push; a product that cannot answer in this window is reported, not retried. */
+    SEAMNEX_IDENTITY_PUSH_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(1_000)
+      .max(60_000)
+      .default(10_000),
     LOG_LEVEL: z
       .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'])
       .default('info'),

@@ -32,6 +32,7 @@ const PRELOADERS: Record<string, Preloader> = {
   '/admin/users': () => import('./features/admin/UsersPage'),
   '/admin/groups': () => import('./features/admin/GroupsPage'),
   '/admin/identity-sync': () => import('./features/admin/IdentitySyncPage'),
+  '/admin/environment-profiles': () => import('./features/admin/EnvironmentProfilesPage'),
   '/admin/settings': () => import('./features/admin/SettingsPage'),
 };
 

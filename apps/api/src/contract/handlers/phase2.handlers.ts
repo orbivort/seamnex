@@ -233,6 +233,57 @@ export class Phase2Handlers implements OperationGroup {
       ],
       [key('GET', '/env-profiles'), async () => body(await this.env.profiles())],
       [
+        key('POST', '/env-profiles'),
+        async (input) =>
+          body(
+            await this.env.createProfile(
+              input.body as { key: string; name: string; target: 'production' | 'staging' },
+              actor(input),
+            ),
+          ),
+      ],
+      [
+        key('PATCH', '/env-profiles/:key'),
+        async (input) =>
+          body(
+            await this.env.patchProfile(
+              param(input, 'key'),
+              input.body as { name?: string; target?: 'production' | 'staging' },
+              actor(input),
+            ),
+          ),
+      ],
+      [
+        key('PUT', '/env-profiles/:key/values'),
+        async (input) =>
+          body(
+            await this.env.replaceProfileValues(
+              param(input, 'key'),
+              (
+                input.body as {
+                  values: { varName: string; value?: string | null; secretRef?: string | null }[];
+                }
+              ).values,
+              actor(input),
+            ),
+          ),
+      ],
+      [
+        key('DELETE', '/env-profiles/:key'),
+        async (input) => body(await this.env.deleteProfile(param(input, 'key'), actor(input))),
+      ],
+      [
+        key('POST', '/env-profiles/:key/requests'),
+        async (input) =>
+          body(
+            await this.identity.requestProfileChange(
+              param(input, 'key'),
+              (input.body as { justification: string }).justification,
+              actor(input),
+            ),
+          ),
+      ],
+      [
         key('PATCH', '/catalog/:key/integration-metadata'),
         async (input) =>
           body(
@@ -424,6 +475,7 @@ export class Phase2Handlers implements OperationGroup {
                 role: string;
                 scopeType: string;
                 scopeLabel: string;
+                productRole: string;
                 propagate: boolean;
               },
               actor(input),

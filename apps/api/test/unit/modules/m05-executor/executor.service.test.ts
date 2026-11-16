@@ -38,7 +38,8 @@ function row(overrides: Record<string, unknown> = {}): Record<string, unknown> {
       owner: { id: 'u1', name: 'Team CRM' },
       licenseId: 'AGPL',
       currentVersion: '7.4.1',
-      availableVersion: '7.4.2',
+      // No `availableVersion`: nothing writes it, and the projection must not read it. The newer
+      // release comes from the catalogue pin asserted below.
     },
     updated_at: new Date('2026-01-02T00:00:00Z'),
     created_at: new Date('2026-01-01T00:00:00Z'),
@@ -54,6 +55,15 @@ function row(overrides: Record<string, unknown> = {}): Record<string, unknown> {
       guaranteeClass: 'fa_header',
       licenseId: 'BSD',
       repoUrl: 'https://example.test/crm.git',
+      // FR-1.7: the "is there something newer?" half of the delta is the entry's upstream pin, not a
+      // payload key nothing writes.
+      upstream: {
+        currentVersion: '7.4.1',
+        latestVersion: '7.4.2',
+        advisory: null,
+        releaseUrl: 'https://example.test/crm/releases/7.4.2',
+        checkedAt: '2026-01-04T00:00:00.000Z',
+      },
     },
     route_host: 'crm.seamnex.local',
     route_path_prefix: '/crm',

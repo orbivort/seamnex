@@ -2914,6 +2914,40 @@
                           "sloSupported": {
                             "type": "boolean"
                           },
+                          "defaultProductRole": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "rolePush": {
+                            "type": "object",
+                            "properties": {
+                              "path": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "method": {
+                                "default": "POST",
+                                "type": "string",
+                                "const": "POST"
+                              },
+                              "roleField": {
+                                "default": "role",
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "secretName": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            },
+                            "required": [
+                              "path",
+                              "method",
+                              "roleField",
+                              "secretName"
+                            ],
+                            "additionalProperties": false
+                          },
                           "verifiedBy": {
                             "type": "string",
                             "minLength": 1
@@ -3705,6 +3739,40 @@
                         },
                         "sloSupported": {
                           "type": "boolean"
+                        },
+                        "defaultProductRole": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "rolePush": {
+                          "type": "object",
+                          "properties": {
+                            "path": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "method": {
+                              "default": "POST",
+                              "type": "string",
+                              "const": "POST"
+                            },
+                            "roleField": {
+                              "default": "role",
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "secretName": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "path",
+                            "method",
+                            "roleField",
+                            "secretName"
+                          ],
+                          "additionalProperties": false
                         },
                         "verifiedBy": {
                           "type": "string",
@@ -4756,6 +4824,881 @@
             }
           }
         }
+      },
+      "post": {
+        "operationId": "post-env-profiles",
+        "summary": "Create a lifecycle environment profile (FR-1.26).",
+        "tags": [
+          "catalog"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_-]{1,31}$"
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "target": {
+                    "type": "string",
+                    "enum": [
+                      "production",
+                      "staging"
+                    ]
+                  }
+                },
+                "required": [
+                  "key",
+                  "name",
+                  "target"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-policy-key": "profile.manage",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "target": {
+                      "type": "string",
+                      "enum": [
+                        "production",
+                        "staging"
+                      ]
+                    },
+                    "updatedBy": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                    },
+                    "values": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "varName": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "value": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "secretRef": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "varName",
+                          "value",
+                          "secretRef"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "key",
+                    "name",
+                    "target",
+                    "updatedBy",
+                    "updatedAt",
+                    "values"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/env-profiles/{key}": {
+      "patch": {
+        "operationId": "patch-env-profiles-key",
+        "summary": "Rename a profile or move it to another lifecycle target (FR-1.26).",
+        "tags": [
+          "catalog"
+        ],
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "target": {
+                    "type": "string",
+                    "enum": [
+                      "production",
+                      "staging"
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-policy-key": "profile.manage",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "target": {
+                      "type": "string",
+                      "enum": [
+                        "production",
+                        "staging"
+                      ]
+                    },
+                    "updatedBy": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                    },
+                    "values": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "varName": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "value": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "secretRef": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "varName",
+                          "value",
+                          "secretRef"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "key",
+                    "name",
+                    "target",
+                    "updatedBy",
+                    "updatedAt",
+                    "values"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "delete-env-profiles-key",
+        "summary": "Delete a profile no instance uses (FR-1.26).",
+        "tags": [
+          "catalog"
+        ],
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-policy-key": "profile.manage",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "deleted": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "key",
+                    "deleted"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/env-profiles/{key}/values": {
+      "put": {
+        "operationId": "put-env-profiles-key-values",
+        "summary": "Replace a profile’s variable values, subject to each override ceiling (FR-1.26, AC-51).",
+        "tags": [
+          "catalog"
+        ],
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "values": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "varName": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "value": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "secretRef": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "varName"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "values"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-policy-key": "profile.manage",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "target": {
+                      "type": "string",
+                      "enum": [
+                        "production",
+                        "staging"
+                      ]
+                    },
+                    "updatedBy": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                    },
+                    "values": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "varName": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "value": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "secretRef": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "varName",
+                          "value",
+                          "secretRef"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "key",
+                    "name",
+                    "target",
+                    "updatedBy",
+                    "updatedAt",
+                    "values"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/env-profiles/{key}/requests": {
+      "post": {
+        "operationId": "post-env-profiles-key-requests",
+        "summary": "Ask R1 for a profile change; the request lands in the governance queue (FR-1.26, §5.2).",
+        "tags": [
+          "catalog"
+        ],
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "justification": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "justification"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-policy-key": "profile.request",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "requester": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "name": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "name"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "entitlement",
+                        "membership",
+                        "instance_param"
+                      ]
+                    },
+                    "target": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "justification": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "open",
+                        "approved",
+                        "rejected",
+                        "expired"
+                      ]
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                    },
+                    "decidedBy": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "decidedAt": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "domain": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "requester",
+                    "kind",
+                    "target",
+                    "justification",
+                    "state",
+                    "createdAt",
+                    "decidedBy",
+                    "decidedAt",
+                    "domain"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/catalog/{key}/integration-metadata": {
@@ -4795,6 +5738,105 @@
                     "type": "integer",
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
+                  },
+                  "apiBaseUrl": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "authMethod": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "guaranteeClass": {
+                    "type": "string",
+                    "enum": [
+                      "native",
+                      "fa_header",
+                      "fa_delegated",
+                      "fa_gate"
+                    ]
+                  },
+                  "operationInventory": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "label": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "read",
+                            "write"
+                          ]
+                        },
+                        "description": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "path": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "method": {
+                          "type": "string",
+                          "enum": [
+                            "GET",
+                            "POST",
+                            "PUT",
+                            "PATCH",
+                            "DELETE"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "label",
+                        "mode",
+                        "description"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "eventModes": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "webhook",
+                            "schedule",
+                            "poll",
+                            "none"
+                          ]
+                        },
+                        "label": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "minimumIntervalMinutes": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "mode",
+                        "label"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "sloSupported": {
+                    "type": "boolean"
                   }
                 },
                 "additionalProperties": false
@@ -5121,6 +6163,40 @@
                         },
                         "sloSupported": {
                           "type": "boolean"
+                        },
+                        "defaultProductRole": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "rolePush": {
+                          "type": "object",
+                          "properties": {
+                            "path": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "method": {
+                              "default": "POST",
+                              "type": "string",
+                              "const": "POST"
+                            },
+                            "roleField": {
+                              "default": "role",
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "secretName": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "path",
+                            "method",
+                            "roleField",
+                            "secretName"
+                          ],
+                          "additionalProperties": false
                         },
                         "verifiedBy": {
                           "type": "string",
@@ -10359,8 +11435,71 @@
                       "enum": [
                         "allowed",
                         "blocked",
-                        "unsafe_approved"
+                        "unsafe_approved",
+                        "unknown"
                       ]
+                    },
+                    "policyEvaluatedAt": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "policySource": {
+                      "type": "string",
+                      "enum": [
+                        "local_evaluation",
+                        "source_resolution",
+                        "none"
+                      ]
+                    },
+                    "blockers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "code": {
+                            "type": "string",
+                            "enum": [
+                              "unknown_entry",
+                              "source_unresolved",
+                              "image_unpinned",
+                              "env_invalid",
+                              "secret_unresolved",
+                              "capacity",
+                              "route_conflict",
+                              "policy_blocked",
+                              "policy_unknown",
+                              "scaffold_unapproved"
+                            ]
+                          },
+                          "field": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "blocking": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "code",
+                          "field",
+                          "message",
+                          "blocking"
+                        ],
+                        "additionalProperties": false
+                      }
                     },
                     "warnings": {
                       "type": "array",
@@ -10383,6 +11522,9 @@
                     "routeHost",
                     "slugAvailable",
                     "policyVerdict",
+                    "policyEvaluatedAt",
+                    "policySource",
+                    "blockers",
                     "warnings",
                     "evaluatedAt"
                   ],
@@ -26205,7 +27347,23 @@
                           },
                           "syncState": {
                             "type": "string",
-                            "minLength": 1
+                            "enum": [
+                              "applied",
+                              "pending",
+                              "edge_only",
+                              "unsupported"
+                            ]
+                          },
+                          "appliedAt": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -26213,7 +27371,8 @@
                           "product",
                           "entryKey",
                           "productRole",
-                          "syncState"
+                          "syncState",
+                          "appliedAt"
                         ],
                         "additionalProperties": false
                       }
@@ -26511,6 +27670,10 @@
                                 "type": "string",
                                 "minLength": 1
                               },
+                              "productRole": {
+                                "type": "string",
+                                "minLength": 1
+                              },
                               "propagateToProduct": {
                                 "type": "boolean"
                               }
@@ -26520,6 +27683,7 @@
                               "scopeType",
                               "scopeId",
                               "scopeLabel",
+                              "productRole",
                               "propagateToProduct"
                             ],
                             "additionalProperties": false
@@ -26649,6 +27813,12 @@
                     "type": "string",
                     "minLength": 1
                   },
+                  "productRole": {
+                    "default": "member",
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
                   "propagate": {
                     "default": false,
                     "type": "boolean"
@@ -26658,6 +27828,7 @@
                   "role",
                   "scopeType",
                   "scopeLabel",
+                  "productRole",
                   "propagate"
                 ],
                 "additionalProperties": false
@@ -26730,6 +27901,10 @@
                               "type": "string",
                               "minLength": 1
                             },
+                            "productRole": {
+                              "type": "string",
+                              "minLength": 1
+                            },
                             "propagateToProduct": {
                               "type": "boolean"
                             }
@@ -26739,6 +27914,7 @@
                             "scopeType",
                             "scopeId",
                             "scopeLabel",
+                            "productRole",
                             "propagateToProduct"
                           ],
                           "additionalProperties": false
@@ -26881,6 +28057,23 @@
                         "minimum": 0,
                         "maximum": 9007199254740991
                       },
+                      "p95PropagationMs": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "propagationSamples": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
                       "errors": {
                         "type": "array",
                         "items": {
@@ -26904,6 +28097,8 @@
                       "groups",
                       "changes",
                       "p95LatencyMs",
+                      "p95PropagationMs",
+                      "propagationSamples",
                       "errors",
                       "state"
                     ],
@@ -27025,6 +28220,23 @@
                       "minimum": 0,
                       "maximum": 9007199254740991
                     },
+                    "p95PropagationMs": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "propagationSamples": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
                     "errors": {
                       "type": "array",
                       "items": {
@@ -27048,6 +28260,8 @@
                     "groups",
                     "changes",
                     "p95LatencyMs",
+                    "p95PropagationMs",
+                    "propagationSamples",
                     "errors",
                     "state"
                   ],
@@ -31689,6 +32903,9 @@
                           "none"
                         ]
                       },
+                      "sloSupported": {
+                        "type": "boolean"
+                      },
                       "writeEligible": {
                         "type": "boolean"
                       },
@@ -31709,6 +32926,22 @@
                       },
                       "stale": {
                         "type": "boolean"
+                      },
+                      "verifiedFacts": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "apiBaseUrl",
+                            "authMethod",
+                            "guaranteeClass",
+                            "operations",
+                            "eventModes",
+                            "credentialGranularity",
+                            "sessionMaxMinutes",
+                            "sloSupported"
+                          ]
+                        }
                       }
                     },
                     "required": [
@@ -31724,12 +32957,14 @@
                       "operations",
                       "eventModes",
                       "credentialGranularity",
+                      "sloSupported",
                       "writeEligible",
                       "workflowEligible",
                       "owner",
                       "verifiedAt",
                       "nextReviewAt",
-                      "stale"
+                      "stale",
+                      "verifiedFacts"
                     ],
                     "additionalProperties": false
                   }
@@ -31956,6 +33191,9 @@
                         "none"
                       ]
                     },
+                    "sloSupported": {
+                      "type": "boolean"
+                    },
                     "writeEligible": {
                       "type": "boolean"
                     },
@@ -31976,6 +33214,22 @@
                     },
                     "stale": {
                       "type": "boolean"
+                    },
+                    "verifiedFacts": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "apiBaseUrl",
+                          "authMethod",
+                          "guaranteeClass",
+                          "operations",
+                          "eventModes",
+                          "credentialGranularity",
+                          "sessionMaxMinutes",
+                          "sloSupported"
+                        ]
+                      }
                     }
                   },
                   "required": [
@@ -31991,12 +33245,14 @@
                     "operations",
                     "eventModes",
                     "credentialGranularity",
+                    "sloSupported",
                     "writeEligible",
                     "workflowEligible",
                     "owner",
                     "verifiedAt",
                     "nextReviewAt",
-                    "stale"
+                    "stale",
+                    "verifiedFacts"
                   ],
                   "additionalProperties": false
                 }
@@ -32213,6 +33469,9 @@
                           "none"
                         ]
                       },
+                      "sloSupported": {
+                        "type": "boolean"
+                      },
                       "writeEligible": {
                         "type": "boolean"
                       },
@@ -32233,6 +33492,22 @@
                       },
                       "stale": {
                         "type": "boolean"
+                      },
+                      "verifiedFacts": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "apiBaseUrl",
+                            "authMethod",
+                            "guaranteeClass",
+                            "operations",
+                            "eventModes",
+                            "credentialGranularity",
+                            "sessionMaxMinutes",
+                            "sloSupported"
+                          ]
+                        }
                       }
                     },
                     "required": [
@@ -32248,12 +33523,14 @@
                       "operations",
                       "eventModes",
                       "credentialGranularity",
+                      "sloSupported",
                       "writeEligible",
                       "workflowEligible",
                       "owner",
                       "verifiedAt",
                       "nextReviewAt",
-                      "stale"
+                      "stale",
+                      "verifiedFacts"
                     ],
                     "additionalProperties": false
                   }

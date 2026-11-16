@@ -76,7 +76,14 @@ export function useUpdateGroupMapping() {
   return useMutation({
     mutationFn: (input: {
       id: string;
-      body: { role: string; scopeType: string; scopeLabel: string; propagate: boolean };
+      body: {
+        role: string;
+        scopeType: string;
+        scopeLabel: string;
+        /** FR-2.4: the role the product applies; separate from the platform role. */
+        productRole: string;
+        propagate: boolean;
+      };
     }) =>
       request(`/admin/groups/${input.id}/mapping`, {
         schema: IdpGroupSchema,
