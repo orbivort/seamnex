@@ -86,6 +86,34 @@ export const LifecycleActionRequestSchema = z.object({
   justification: z.string().min(1).optional(),
 });
 
+/**
+ * FR-1.13 / AC-20 — one portable export, described by what it actually holds.
+ *
+ * `includes` is written at capture time from the files that were produced, so a reader never has to
+ * trust the name of the action: an archive without a database says so. `excluded` names what was
+ * deliberately left out and why (`secrets`, a volume the daemon no longer holds).
+ */
+export const InstanceExportIncludeSchema = z.enum([
+  'database',
+  'volumes',
+  'definition',
+  'environment',
+]);
+
+export const InstanceExportSchema = z.object({
+  exportId: z.string().min(1),
+  exportedAt: TimestampSchema,
+  /** Name the archive must be saved under; the server sets the same value in Content-Disposition. */
+  fileName: z.string().min(1),
+  bytes: z.number().int().nonnegative(),
+  sha256: z.string().min(1),
+  includes: z.array(InstanceExportIncludeSchema),
+  excluded: z.array(z.object({ item: z.string().min(1), reason: z.string().min(1) })),
+  renderSetId: IdSchema.nullable(),
+});
+
+export const InstanceExportListSchema = z.array(InstanceExportSchema);
+
 export const InstanceSchema = z.object({
   id: IdSchema,
   slug: SlugSchema,
@@ -340,6 +368,7 @@ export type IntegrationCheck = z.infer<typeof IntegrationCheckSchema>;
 export type InstanceService = z.infer<typeof InstanceServiceSchema>;
 export type InstanceVolume = z.infer<typeof InstanceVolumeSchema>;
 export type InstancePlan = z.infer<typeof InstancePlanSchema>;
+export type InstanceExport = z.infer<typeof InstanceExportSchema>;
 export type BackupPosture = z.infer<typeof BackupPostureSchema>;
 export type MaintenanceState = z.infer<typeof MaintenanceStateSchema>;
 export type DeployPreview = z.infer<typeof DeployPreviewSchema>;

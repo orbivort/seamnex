@@ -48,7 +48,8 @@ const LOG_TEMPLATES: Record<JobKind, string[]> = {
     'extracting volumes',
     'running smoke test',
   ],
-  export: ['building portable archive', 'writing manifest'],
+  // The pipeline's real order: dump, volumes, definition + manifest, then one tar.
+  export: ['dumping database', 'archiving volumes', 'packing the portable archive', 'writing manifest'],
   prepull: ['pre-pulling image layers', 'layers cached'],
   scaffold: ['generating compose artefacts', 'validating compose policy', 'committing draft'],
   verify: ['restoring into a scratch stack', 'running the smoke test', 'recording evidence'],

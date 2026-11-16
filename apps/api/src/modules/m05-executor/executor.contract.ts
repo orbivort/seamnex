@@ -1,6 +1,7 @@
 import type { z } from 'zod';
 import {
   type ImageSchema,
+  type InstanceExportSchema,
   type InstancePlanSchema,
   type DeployPreview,
   type DriftRecord,
@@ -10,6 +11,14 @@ import {
 
 export type Image = z.infer<typeof ImageSchema>;
 export type InstancePlan = z.infer<typeof InstancePlanSchema>;
+export type InstanceExport = z.infer<typeof InstanceExportSchema>;
+
+/** A resolved archive: the dispatcher streams it, so the bytes never pass through the handler. */
+export type ExportArchive = {
+  readonly path: string;
+  readonly fileName: string;
+  readonly bytes: number;
+};
 
 export const EXECUTOR_SERVICE = Symbol('seamnex.m05.executor');
 
@@ -55,6 +64,18 @@ export type LifecycleInput = {
 export interface ExecutorService {
   instances(filter: { q?: string; state?: string; entryKey?: string }): Promise<Instance[]>;
   instance(id: string): Promise<InstanceDetail>;
+  /**
+   * FR-1.13 / AC-20 — the portable exports on disk, newest first.
+   *
+   * The catalogue is the filesystem, so the read is here rather than in a table: M05 owns both the
+   * capture (the pipeline) and the description of what it produced.
+   */
+  exports(instanceId: string): Promise<InstanceExport[]>;
+  /**
+   * Resolves one archive for streaming. The path is derived from the id, never supplied by the
+   * caller, and a file that no longer matches its manifest is refused rather than served short.
+   */
+  exportArchive(instanceId: string, exportId: string): Promise<ExportArchive>;
   drift(instanceId: string): Promise<DriftRecord[]>;
   images(instanceId: string): Promise<Image[]>;
   plan(instanceId: string, action: string): Promise<InstancePlan>;

@@ -16,6 +16,13 @@ import {
   writeFileAtomic,
 } from '../../common/fs/files';
 import { runOrThrow } from '../../common/exec/exec';
+import {
+  connectionEnvFrom,
+  dumpCommand,
+  engineOf,
+  restoreCommand,
+  type DatabaseEngine,
+} from '../../common/engine/database';
 import { AppError } from '../../common/problem/app-error';
 import { ensurePlatformPartitions } from '../../common/db/partitions';
 import { SECRETS_SERVICE, type SecretsService } from '../m15-secrets/secrets.contract';
@@ -2077,23 +2084,16 @@ export class BackupRunnerService implements OnModuleInit {
     }
   }
 
-  private async databaseEnv(instanceId: string, engine: string): Promise<Record<string, string>> {
+  private async databaseEnv(
+    instanceId: string,
+    engine: DatabaseEngine,
+  ): Promise<Record<string, string>> {
     const result = await this.pool.query<{ var_name: string; value_enc: Buffer | null }>(
       `SELECT var_name, value_enc FROM instance_env_value
         WHERE instance_id = $1 AND source <> 'secret' AND value_enc IS NOT NULL`,
       [instanceId],
     );
-    const env: Record<string, string> = {};
-    for (const row of result.rows) {
-      const value = row.value_enc?.toString('utf8') ?? '';
-      if (row.var_name === 'DATABASE_URL' && value.length > 0) env.PGURL = value;
-      if (engine !== 'postgres' && /^MYSQL_|^MARIADB_/.test(row.var_name))
-        env[row.var_name] = value;
-    }
-    if (engine === 'postgres' && env.PGURL === undefined) {
-      env.PGURL = 'postgres://postgres@db:5432/postgres';
-    }
-    return env;
+    return connectionEnvFrom(result.rows, engine);
   }
 }
 
@@ -2176,39 +2176,6 @@ function payloadOf(context: PipelineContext, key: string): string {
     });
   }
   return value;
-}
-
-function engineOf(imageRef: string): 'postgres' | 'mysql' | 'mariadb' | null {
-  if (/postgres/i.test(imageRef)) return 'postgres';
-  if (/mariadb/i.test(imageRef)) return 'mariadb';
-  if (/mysql/i.test(imageRef)) return 'mysql';
-  return null;
-}
-
-function dumpCommand(engine: 'postgres' | 'mysql' | 'mariadb', target: string): string[] {
-  if (engine === 'postgres')
-    return ['sh', '-c', `pg_dump --format=custom --dbname="$PGURL" --file=${target}`];
-  return [
-    'sh',
-    '-c',
-    `mysqldump --single-transaction --all-databases -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" > ${target}`,
-  ];
-}
-
-/**
- * The inverse of `dumpCommand` — the other half of "a dump the restore cannot load is not a backup".
- *
- * PostgreSQL is restored with `--clean --if-exists`, so the dump converges on the instance's database
- * instead of failing on the tables the installer already created, and with `--no-owner` because the
- * dump names the role that took it, which does not exist on a restored host. MySQL's all-databases
- * dump carries its own `CREATE DATABASE`/`USE` statements, so it is fed back through the client
- * unchanged.
- */
-function restoreCommand(engine: 'postgres' | 'mysql' | 'mariadb', target: string): string[] {
-  if (engine === 'postgres') {
-    return ['sh', '-c', `pg_restore --clean --if-exists --no-owner --dbname="$PGURL" ${target}`];
-  }
-  return ['sh', '-c', `mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" < ${target}`];
 }
 
 function now(): string {

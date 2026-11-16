@@ -16,6 +16,23 @@ the same number through every manifest and the link definitions at the foot of t
 
 ### Added
 
+- **A full data export is an archive, not a description of one** (`FR-1.13`, `AC-20`, `NFR-6.3`) —
+  the `export` action now dumps every database service in plain SQL (readable and loadable without
+  this platform's tooling), archives every registered data volume, copies the applied render set and
+  the resolved non-secret environment, writes a manifest with a SHA-256 per file plus a read-me for
+  restoring the parts by hand, and packs all of it into one `.tar.gz` beside a sidecar record under
+  `<instance data>/<id>/exports/`. Secret values are named in `instance/env.json` and never
+  included. The action refuses rather than lies: an instance that was never deployed, or a declared
+  database that cannot be dumped because the instance is not running, fails the job before the first
+  helper runs and leaves no artefact, and `includes`/`excluded` are computed from what was written.
+  Two reads make the archive reachable — `GET /instances/:id/exports` and `GET
+  /instances/:id/exports/:exportId/archive`, both `instance.lifecycle` (R1, the same capability that
+  creates it) — with the archive streamed under `Content-Disposition`, the manifest's byte count,
+  `no-store`, and an `instance.export.downloaded` audit row; the console gained an Exports tab
+  listing each archive with what it holds, what it leaves out and its checksum. The engine, dump and
+  restore knowledge moved to `common/engine/database.ts` so the backup runner and the export read
+  the same rules instead of two copies of them (`docs/openapi.json` regenerated; delete-with-export
+  ordering remains ISSUE-37).
 - **The compose policy exception path works, and is scoped** (`FR-1.20`, `NFR-4.15`, `AC-33`,
   `FR-4.11`) — an R1 can now file an exception through `POST /admin/policy-exceptions` (new
   `exception.request` capability) instead of a hand-written `INSERT`; the request names a product, a

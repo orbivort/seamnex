@@ -15,10 +15,12 @@ export {
   isAbortError,
   lastKnownStatusAt,
   onUnauthorized,
+  openDownload,
   openEventStream,
   request,
   resetTransport,
   toProblem,
+  type DownloadHandle,
   type RequestOptions,
 } from './http';
 export {

@@ -1,6 +1,14 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeDb, type Route } from '../../../support/fakes';
 import { PostgresExecutorService } from '../../../../src/modules/m05-executor/executor.service';
+import {
+  archivePath,
+  exportsDirectory,
+  writeExportRecord,
+  type ExportRecord,
+} from '../../../../src/modules/m05-executor/instance-exports';
 
 /**
  * The read model. Two properties are asserted over and over, because both were defects: every
@@ -68,7 +76,7 @@ function row(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   };
 }
 
-function setup(routes: readonly Route[] = []) {
+function setup(routes: readonly Route[] = [], options: { readonly dataDir?: string } = {}) {
   const db = fakeDb(routes);
   const planner = { instancePlan: vi.fn(async () => ({ planId: 'plan-1' })) };
   const lifecycleService = {
@@ -81,6 +89,7 @@ function setup(routes: readonly Route[] = []) {
   const capacity = { record: vi.fn(async () => null) };
   const audit = { append: vi.fn(async () => undefined) };
   const docker = { volumeUsageMb: vi.fn(async () => 0) };
+  const config = { SEAMNEX_INSTANCE_DATA_DIR: options.dataDir ?? './temp/instances' };
   const service = new PostgresExecutorService(
     db.pool,
     planner as never,
@@ -88,6 +97,7 @@ function setup(routes: readonly Route[] = []) {
     capacity as never,
     audit as never,
     docker as never,
+    config as never,
   );
   return { db, planner, lifecycleService, capacity, audit, docker, service };
 }
@@ -611,6 +621,157 @@ describe('volume usage', () => {
 
     // Writing 0 would turn "unknown" into "empty" — the false claim this sampling exists to remove.
     expect(db.calls.some((call) => call.sql.includes('UPDATE instance_volume'))).toBe(false);
+  });
+
+  it('reports a measurement failure that is not an Error', async () => {
+    const { db, docker, service } = setup([
+      volumes([{ instance_id: 'inst-1', name: 'vol', quota_mb: 100, used_mb: 5 }]),
+    ]);
+    docker.volumeUsageMb.mockRejectedValueOnce('daemon is gone');
+
+    await expect(service.recordVolumeUsage()).resolves.toBeUndefined();
+
+    expect(db.calls.some((call) => call.sql.includes('UPDATE instance_volume'))).toBe(false);
+  });
+});
+
+const EXPORT_ID = '20261116T103100Z-1a2b3c4d';
+const DATA_DIR = join('temp', 'm05-executor-service-exports');
+
+function exportRecord(exportId: string, bytes = 34): ExportRecord {
+  return {
+    version: 1,
+    exportId,
+    exportedAt: '2026-11-16T10:31:00.000Z',
+    instance: { id: INSTANCE_ID, slug: 'crm', entryKey: 'D01-01', state: 'ready' },
+    renderSet: { id: 'rs-000000000001', contentHash: 'hash-1', applied: true },
+    includes: ['database', 'environment'],
+    excluded: [],
+    files: [{ path: 'database/db.sql', sha256: 'b'.repeat(64), bytes: 12 }],
+    totalBytes: 12,
+    archive: { fileName: `${exportId}.tar.gz`, bytes, sha256: 'c'.repeat(64) },
+  };
+}
+
+describe('exports', () => {
+  const existingInstance: Route = ['SELECT id FROM instance', [{ id: INSTANCE_ID }]];
+
+  beforeEach(() => {
+    rmSync(DATA_DIR, { recursive: true, force: true });
+  });
+
+  afterEach(() => {
+    rmSync(DATA_DIR, { recursive: true, force: true });
+  });
+
+  it('lists the sidecars the capture wrote, newest first', async () => {
+    const directory = exportsDirectory(DATA_DIR, INSTANCE_ID);
+    writeExportRecord(directory, exportRecord('20261109T103100Z-1a2b3c4d'));
+    writeExportRecord(directory, exportRecord(EXPORT_ID));
+    const { service } = setup([existingInstance], { dataDir: DATA_DIR });
+
+    const list = await service.exports(INSTANCE_ID);
+
+    expect(list.map((entry) => entry.exportId)).toEqual([EXPORT_ID, '20261109T103100Z-1a2b3c4d']);
+    expect(list[0]).toMatchObject({
+      fileName: `${EXPORT_ID}.tar.gz`,
+      bytes: 34,
+      includes: ['database', 'environment'],
+      renderSetId: 'rs-000000000001',
+    });
+  });
+
+  it('skips a sidecar it cannot read rather than failing the list', async () => {
+    const directory = exportsDirectory(DATA_DIR, INSTANCE_ID);
+    writeExportRecord(directory, exportRecord(EXPORT_ID));
+    writeFileSync(join(directory, '20261110T103100Z-deadbeef.json'), '{"version":1,');
+    const { service } = setup([existingInstance], { dataDir: DATA_DIR });
+
+    await expect(service.exports(INSTANCE_ID)).resolves.toMatchObject([{ exportId: EXPORT_ID }]);
+  });
+
+  it('answers 404 for an instance that never existed', async () => {
+    const { service } = setup([['SELECT id FROM instance', []]], { dataDir: DATA_DIR });
+
+    await expect(service.exports(INSTANCE_ID)).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+      detail: `No instance ${INSTANCE_ID}.`,
+    });
+  });
+
+  it('answers 404 for an id that is not a UUID, without touching the database', async () => {
+    const { db, service } = setup();
+
+    await expect(service.exports('nope')).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    expect(db.calls).toHaveLength(0);
+  });
+});
+
+describe('export archive', () => {
+  const existingInstance: Route = ['SELECT id FROM instance', [{ id: INSTANCE_ID }]];
+
+  beforeEach(() => {
+    rmSync(DATA_DIR, { recursive: true, force: true });
+  });
+
+  afterEach(() => {
+    rmSync(DATA_DIR, { recursive: true, force: true });
+  });
+
+  function writeArchive(exportId: string, bytes: number, content: Buffer | string): void {
+    writeExportRecord(exportsDirectory(DATA_DIR, INSTANCE_ID), exportRecord(exportId, bytes));
+    writeFileSync(archivePath(DATA_DIR, INSTANCE_ID, exportId), content);
+  }
+
+  it('resolves the archive when its size matches the manifest', async () => {
+    const content = Buffer.from('tar-bytes');
+    writeArchive(EXPORT_ID, content.byteLength, content);
+    const { service } = setup([existingInstance], { dataDir: DATA_DIR });
+
+    await expect(service.exportArchive(INSTANCE_ID, EXPORT_ID)).resolves.toEqual({
+      path: archivePath(DATA_DIR, INSTANCE_ID, EXPORT_ID),
+      fileName: `${EXPORT_ID}.tar.gz`,
+      bytes: content.byteLength,
+    });
+  });
+
+  it('answers 404 for an export whose sidecar is gone', async () => {
+    const { service } = setup([existingInstance], { dataDir: DATA_DIR });
+
+    await expect(service.exportArchive(INSTANCE_ID, EXPORT_ID)).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+      detail: `No export ${EXPORT_ID} for this instance.`,
+    });
+  });
+
+  it('answers 404 for a sidecar whose archive is gone', async () => {
+    writeExportRecord(exportsDirectory(DATA_DIR, INSTANCE_ID), exportRecord(EXPORT_ID));
+    const { service } = setup([existingInstance], { dataDir: DATA_DIR });
+
+    await expect(service.exportArchive(INSTANCE_ID, EXPORT_ID)).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+    });
+  });
+
+  it('refuses an archive shorter than its manifest records, naming both numbers', async () => {
+    writeArchive(EXPORT_ID, 999, 'short');
+    const { service } = setup([existingInstance], { dataDir: DATA_DIR });
+
+    await expect(service.exportArchive(INSTANCE_ID, EXPORT_ID)).rejects.toMatchObject({
+      code: 'STATE_CONFLICT',
+      detail: `Export ${EXPORT_ID} is 5 bytes on disk but its manifest records 999.`,
+    });
+  });
+
+  it('answers 404 for a malformed id or one that addresses no row', async () => {
+    const { service } = setup([['SELECT id FROM instance', []]], { dataDir: DATA_DIR });
+
+    await expect(service.exportArchive('nope', EXPORT_ID)).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+    });
+    await expect(service.exportArchive(INSTANCE_ID, EXPORT_ID)).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+    });
   });
 });
 

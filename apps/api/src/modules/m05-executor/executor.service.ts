@@ -1,16 +1,22 @@
+import { statSync } from 'node:fs';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { DeployPreview, DriftRecord, Instance, InstanceDetail } from '@seamnex/domain';
 import type {
   DeployInput,
   DeployResult,
+  ExportArchive,
   Image,
+  InstanceExport,
   InstancePlan,
   LifecycleInput,
   PreviewInput,
 } from './executor.contract';
 import type { Pool } from 'pg';
 import { PG_POOL } from '../../database/database.module';
+import { APP_CONFIG } from '../../config/config.module';
+import type { AppConfig } from '../../config/config';
 import { AppError } from '../../common/problem/app-error';
+import { isFile } from '../../common/fs/files';
 import { isUuid } from '../../common/http/uuid';
 import { CAPACITY_SERVICE, type CapacityService } from '../m19-capacity/capacity.contract';
 import { PLANNER_SERVICE, type PlannerService } from '../m04-planner/planner.contract';
@@ -18,6 +24,13 @@ import { AUDIT_SERVICE, type AuditService } from '../m17-audit/audit.contract';
 import { DockerEngineClient } from '../../common/docker/docker.client';
 import { InstanceLifecycleService } from './lifecycle.service';
 import type { ExecutorService } from './executor.contract';
+import {
+  archivePath,
+  exportsDirectory,
+  listExportRecords,
+  readExportRecord,
+  toInstanceExport,
+} from './instance-exports';
 
 type InstanceRow = {
   id: string;
@@ -97,6 +110,7 @@ export class PostgresExecutorService implements ExecutorService {
     @Inject(CAPACITY_SERVICE) private readonly capacity: CapacityService,
     @Inject(AUDIT_SERVICE) private readonly audit: AuditService,
     @Inject(DockerEngineClient) private readonly docker: DockerEngineClient,
+    @Inject(APP_CONFIG) private readonly config: AppConfig,
   ) {}
 
   preview(input: PreviewInput): Promise<DeployPreview> {
@@ -254,6 +268,67 @@ export class PostgresExecutorService implements ExecutorService {
       integrationChecks: [],
       maintenance,
     };
+  }
+
+  /**
+   * FR-1.13 / AC-20 — what the platform can honestly say this instance exported.
+   *
+   * Read from the sidecars the capture wrote, so the list cannot promise an archive that is not
+   * there. A sidecar that fails to parse is skipped with a warning: one interrupted write must not
+   * hide the others.
+   */
+  async exports(instanceId: string): Promise<InstanceExport[]> {
+    if (!isUuid(instanceId)) throw notFound(instanceId);
+    await this.assertInstanceExists(instanceId);
+    const records = await listExportRecords(
+      exportsDirectory(this.config.SEAMNEX_INSTANCE_DATA_DIR, instanceId),
+      {
+        onSkip: (fileName, reason) =>
+          this.logger.warn(`export ${fileName} skipped: ${reason}`),
+      },
+    );
+    return records.map(toInstanceExport);
+  }
+
+  /**
+   * Resolves an archive for the dispatcher to stream.
+   *
+   * The size check is not belt-and-braces: `content-length` is taken from the manifest, so serving a
+   * truncated file would answer `200` with a short body and a browser would keep the fragment. A
+   * mismatch is refused with the numbers named.
+   */
+  async exportArchive(instanceId: string, exportId: string): Promise<ExportArchive> {
+    if (!isUuid(instanceId)) throw notFound(instanceId);
+    await this.assertInstanceExists(instanceId);
+
+    const directory = exportsDirectory(this.config.SEAMNEX_INSTANCE_DATA_DIR, instanceId);
+    const record = await readExportRecord(directory, exportId);
+    const path = archivePath(this.config.SEAMNEX_INSTANCE_DATA_DIR, instanceId, exportId);
+    if (record === null || !isFile(path)) throw noExport(exportId);
+
+    const bytes = statSync(path).size;
+    if (bytes !== record.archive.bytes) {
+      throw new AppError({
+        code: 'STATE_CONFLICT',
+        detail: `Export ${exportId} is ${bytes} bytes on disk but its manifest records ${record.archive.bytes}.`,
+        remediation:
+          'The archive is truncated and was not served. Run the export again; the previous file is kept until you remove it.',
+      });
+    }
+    return { path, fileName: record.archive.fileName, bytes };
+  }
+
+  /**
+   * The row outlives the deployment (delete is a soft delete), and this check deliberately does not
+   * filter `deleted_at`: AC-20's order is "export, then teardown", and an archive that becomes
+   * unreachable the moment the instance is torn down would defeat the exit strategy it exists for.
+   */
+  private async assertInstanceExists(instanceId: string): Promise<void> {
+    const result = await this.pool.query<{ id: string }>(
+      `SELECT id FROM instance WHERE id = $1`,
+      [instanceId],
+    );
+    if (result.rows[0] === undefined) throw notFound(instanceId);
   }
 
   async drift(instanceId: string): Promise<DriftRecord[]> {
@@ -465,5 +540,14 @@ function notFound(id: string): AppError {
     code: 'NOT_FOUND',
     detail: `No instance ${id}.`,
     remediation: 'Refresh the instance list.',
+  });
+}
+
+function noExport(exportId: string): AppError {
+  return new AppError({
+    code: 'NOT_FOUND',
+    detail: `No export ${exportId} for this instance.`,
+    remediation:
+      'Refresh the export list. An archive removed from disk is no longer listed, and nothing is served from a stale entry.',
   });
 }

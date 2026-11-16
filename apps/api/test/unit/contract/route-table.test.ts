@@ -1,3 +1,5 @@
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { API_OPERATIONS } from '@seamnex/domain';
 import type { FastifyReply, FastifyRequest } from 'fastify';
@@ -16,7 +18,7 @@ type ReplyDouble = {
   readonly headers: Record<string, unknown>;
   readonly statuses: number[];
   readonly sent: unknown[];
-  raw: { headersSent: boolean };
+  raw: { headersSent: boolean; destroy: () => void };
 };
 
 function replyDouble(): FastifyReply & ReplyDouble {
@@ -27,7 +29,7 @@ function replyDouble(): FastifyReply & ReplyDouble {
     headers,
     statuses,
     sent,
-    raw: { headersSent: false },
+    raw: { headersSent: false, destroy: () => undefined },
     status(code: number) {
       statuses.push(code);
       return reply;
@@ -58,6 +60,17 @@ function requestDouble(overrides: Record<string, unknown> = {}): FastifyRequest 
     body: undefined,
     ...overrides,
   } as unknown as FastifyRequest;
+}
+
+/** Drains a streamed reply body, so a file result is proven to carry the file's bytes. */
+async function readAll(body: unknown): Promise<string> {
+  const stream = body as NodeJS.ReadableStream;
+  const chunks: Buffer[] = [];
+  return new Promise<string>((resolve, reject) => {
+    stream.on('data', (chunk: Buffer) => chunks.push(chunk));
+    stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    stream.on('error', reject);
+  });
 }
 
 type HarnessOptions = {
@@ -214,6 +227,70 @@ describe('RouteTableService dispatch', () => {
     const reply = await dispatch('GET /jobs/:id/stream');
     expect(reply.statuses).toEqual([]);
     expect(reply.sent).toEqual([]);
+  });
+
+  it('streams a file result as a download with the framing headers', async () => {
+    const file = join('temp', 'agent', 'route-table-export.tar.gz');
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, 'archive');
+    const { dispatch } = harness({
+      handler: async () => ({
+        kind: 'file',
+        path: file,
+        contentType: 'application/gzip',
+        fileName: '20261116T103100Z-1a2b3c4d.tar.gz',
+        bytes: 7,
+      }),
+    });
+
+    const reply = await dispatch(
+      'GET /instances/:id/exports/:exportId/archive',
+      requestDouble({
+        url: '/api/v1/instances/i1/exports/20261116T103100Z-1a2b3c4d/archive',
+        params: { id: 'i1', exportId: '20261116T103100Z-1a2b3c4d' },
+      }),
+    );
+
+    expect(reply.statuses).toEqual([200]);
+    expect(reply.headers['content-type']).toBe('application/gzip');
+    expect(reply.headers['content-disposition']).toBe(
+      'attachment; filename="20261116T103100Z-1a2b3c4d.tar.gz"',
+    );
+    // The count comes from the manifest, so a short file cannot look complete on the wire.
+    expect(reply.headers['content-length']).toBe('7');
+    expect(reply.headers['cache-control']).toBe('no-store');
+    expect(reply.headers['x-content-type-options']).toBe('nosniff');
+    expect(reply.headers['x-request-id']).toBe('rid-dispatch');
+
+    // The body is the file, streamed: not a buffered copy and not a re-encoded object.
+    await expect(readAll(reply.sent[0])).resolves.toBe('archive');
+    rmSync(file, { force: true });
+  });
+
+  it('cannot be given a filename that breaks out of the attachment header', async () => {
+    const file = join('temp', 'agent', 'route-table-export-header.tar.gz');
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, 'archive');
+    const { dispatch } = harness({
+      handler: async () => ({
+        kind: 'file',
+        path: file,
+        contentType: 'application/gzip',
+        fileName: 'x"\r\nSet-Cookie: sid=stolen',
+        bytes: 7,
+      }),
+    });
+
+    const reply = await dispatch(
+      'GET /instances/:id/exports/:exportId/archive',
+      requestDouble({ params: { id: 'i1', exportId: '20261116T103100Z-1a2b3c4d' } }),
+    );
+
+    expect(reply.headers['content-disposition']).toBe('attachment; filename="x_Set-Cookie_sid_stolen"');
+    expect(reply.headers['set-cookie']).toBeUndefined();
+
+    await readAll(reply.sent[0]);
+    rmSync(file, { force: true });
   });
 
   it('answers 501 when a declared operation has no handler', async () => {

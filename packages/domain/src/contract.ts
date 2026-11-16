@@ -42,6 +42,7 @@ import {
   EnvValueSchema,
   ImageSchema,
   InstanceDetailSchema,
+  InstanceExportListSchema,
   InstanceListSchema,
   InstancePlanSchema,
   InstanceStatusSchema,
@@ -179,7 +180,11 @@ export type DeclaredOperation = {
   etag?: true;
   /** `external` = consumed by BI or scripts, not by a screen in this repository. */
   consumer?: 'ui' | 'external';
-  contentType?: 'application/json' | 'text/event-stream';
+  /**
+   * The success body's media type. `text/event-stream` is a reply the handler owns (SSE);
+   * `application/gzip` is a streamed file whose description is a separate read.
+   */
+  contentType?: 'application/json' | 'text/event-stream' | 'application/gzip';
   /**
    * Declared anonymous: no session is required and the PDP is skipped. The set is pinned to
    * `ANONYMOUS_OPERATIONS` by the route-policy check.
@@ -602,6 +607,35 @@ const DECLARED_OPERATIONS: readonly DeclaredOperation[] = [
     summary: 'Recent container logs, retrievable without host shell access (AC-29).',
     tag: 'instances',
     response: ContainerLogListSchema,
+  }),
+  /**
+   * FR-1.13 / AC-20 — the portable exports this instance has produced, newest first.
+   *
+   * Read from the on-disk catalogue, not from a table: an export is a file a business takes away, and
+   * the record of it travels with the artefact (see `instance-exports.ts` in M05).
+   */
+  op({
+    method: 'GET',
+    path: '/instances/:id/exports',
+    summary: 'Portable data exports of this instance, with what each one actually contains.',
+    tag: 'instances',
+    response: InstanceExportListSchema,
+  }),
+  /**
+   * FR-1.13 / AC-20 — the archive itself.
+   *
+   * `z.unknown()` for the same reason the SSE read uses it: the body is not JSON, and the document
+   * publishes `application/gzip` with `format: binary` from `contentType`. The *description* of the
+   * archive is the listing above. The handler streams from disk, so a multi-gigabyte export never
+   * passes through the process's memory.
+   */
+  op({
+    method: 'GET',
+    path: '/instances/:id/exports/:exportId/archive',
+    summary: 'Download one portable export archive (a plain .tar.gz the business can keep).',
+    tag: 'instances',
+    response: z.unknown(),
+    contentType: 'application/gzip',
   }),
   op({
     method: 'POST',
@@ -1520,26 +1554,38 @@ export function buildOpenApiDocument(): OpenApiDocument {
     const successContent =
       operation.contentType === 'text/event-stream'
         ? { 'text/event-stream': { schema: { type: 'string' } } }
-        : { 'application/json': { schema: jsonSchemaFor(operation.response ?? z.unknown()) } };
+        : operation.contentType === 'application/gzip'
+          ? { 'application/gzip': { schema: { type: 'string', format: 'binary' } } }
+          : { 'application/json': { schema: jsonSchemaFor(operation.response ?? z.unknown()) } };
+
+    const successHeaders = {
+      // The validator a later `If-Match` replays. A read that publishes none leaves the paired
+      // conditional write with nothing to send, so it is part of the document.
+      ...(operation.etag === true
+        ? {
+            ETag: {
+              description:
+                'Validator of this representation; replay it as `If-Match` on a write.',
+              schema: { type: 'string' },
+            },
+          }
+        : {}),
+      ...(operation.contentType === 'application/gzip'
+        ? {
+            'Content-Disposition': {
+              description: 'Attachment filename the client saves the archive under.',
+              schema: { type: 'string' },
+            },
+          }
+        : {}),
+    };
 
     const success = operation.noContent
       ? { '204': { description: 'No content; the operation succeeded without a body.' } }
       : {
           [operation.accepted ? '202' : '200']: {
             description: operation.accepted ? 'Accepted; poll the job link.' : 'Success.',
-            // The validator a later `If-Match` replays. A read that publishes none leaves the
-            // paired conditional write with nothing to send, so it is part of the document.
-            ...(operation.etag === true
-              ? {
-                  headers: {
-                    ETag: {
-                      description:
-                        'Validator of this representation; replay it as `If-Match` on a write.',
-                      schema: { type: 'string' },
-                    },
-                  },
-                }
-              : {}),
+            ...(Object.keys(successHeaders).length > 0 ? { headers: successHeaders } : {}),
             content: successContent,
           },
         };

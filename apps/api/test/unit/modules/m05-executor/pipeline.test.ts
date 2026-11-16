@@ -1,5 +1,13 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fakeDb, type Route } from '../../../support/fakes';
 import type { AppConfig } from '../../../../src/config/config';
@@ -228,6 +236,8 @@ function setup(routes: readonly Route[] = [], configOverrides: Record<string, un
     SEAMNEX_VERIFY_MAX_RESTARTS: 3,
     SEAMNEX_VERIFY_UNHEALTHY_GRACE_MS: 0,
     SEAMNEX_INSTANCE_DATA_DIR: DATA_DIR,
+    // One path serves both sides on this host, which is the normal deployment.
+    SEAMNEX_DOCKER_PATH_MAP: '',
     ...configOverrides,
   } as unknown as AppConfig;
 
@@ -635,10 +645,10 @@ describe('plan', () => {
   });
 
   it('refuses to plan a job that never rendered', async () => {
-    // An export records a run with an instance but no render set of its own.
+    // `resolve` records the run before a render set exists, which is the state `plan` must refuse.
     const h = setup();
-    const context = ctx({ action: 'export' });
-    await h.run('export', 'apply', context);
+    const context = ctx();
+    await h.run('deploy', 'resolve', context);
 
     await expect(h.run('deploy', 'plan', context)).rejects.toThrow('plan ran before render');
   });
@@ -842,8 +852,10 @@ describe('apply', () => {
 
   it('refuses to apply a job that never rendered', async () => {
     const h = setup();
-    const context = ctx({ action: 'export' });
-    await h.run('export', 'apply', context);
+    const context = ctx();
+    // `resolve` records the run; nothing has rendered into it yet.
+    await h.run('deploy', 'resolve', context);
+    h.sources.resolve.mockClear();
 
     await expect(h.run('deploy', 'apply', context)).rejects.toThrow('apply ran before render');
     expect(h.docker.composeUp).not.toHaveBeenCalled();
@@ -1878,41 +1890,270 @@ describe('delete', () => {
   });
 });
 
+/**
+ * FR-1.13 / AC-20 — the capture, not a description of one.
+ *
+ * The helper containers are faked, and the fake writes real bytes into the mounted host directory:
+ * a capture that "succeeded" without producing files would pass every other assertion here while
+ * shipping an empty archive, which is the defect this suite replaces.
+ */
 describe('export', () => {
-  it('writes the render set identity of the applied deployment', async () => {
-    const h = setup();
+  // Every export test writes to the same instance directory; each starts from an empty one so the
+  // sidecar it reads is the archive it just produced.
+  beforeEach(() => {
+    rmSync(join(DATA_DIR, INSTANCE_ID, 'exports'), { recursive: true, force: true });
+    rmSync(join(DATA_DIR, 'archive-contents'), { recursive: true, force: true });
+  });
+
+  /** The mount a `-v` argument names, spelled `[host]:[container]` — Windows drive letters included. */
+  const MOUNT = /^(.*):(\/[^:]*)(?::ro)?$/;
+
+  function mountsOf(args: readonly string[]): { host: string; target: string }[] {
+    const mounts: { host: string; target: string }[] = [];
+    for (let index = 0; index < args.length; index += 1) {
+      if (args[index] !== '-v') continue;
+      const match = MOUNT.exec(args[index + 1] ?? '');
+      if (match?.[1] !== undefined && match[2] !== undefined) {
+        mounts.push({ host: match[1], target: match[2] });
+      }
+    }
+    return mounts;
+  }
+
+  function hostPathOf(args: readonly string[], containerPath: string): string | null {
+    for (const mount of mountsOf(args)) {
+      if (containerPath === mount.target) return mount.host;
+      if (containerPath.startsWith(`${mount.target}/`)) {
+        return join(mount.host, containerPath.slice(mount.target.length + 1));
+      }
+    }
+    return null;
+  }
+
+  /** What the helper containers do on a real host: write the dump, then pack the staging tree. */
+  function fakeHelpers(docker: { runCli: unknown }, options: { dumpFails?: boolean } = {}): void {
+    (docker.runCli as { mockImplementation: (fn: unknown) => void }).mockImplementation(
+      async (_file: string, args: readonly string[]) => {
+        // The dump runs through `sh -c`, so its target is inside the command string, not an argument.
+        const dumpTarget = /--file=(\S+)/.exec(args.join(' '));
+        if (dumpTarget?.[1] !== undefined) {
+          if (options.dumpFails === true) {
+            return { code: 1, stdout: '', stderr: 'could not connect to server', truncated: false };
+          }
+          const target = hostPathOf(args, dumpTarget[1]);
+          if (target !== null) writeFileSync(target, 'CREATE TABLE crm (id integer);\n');
+        }
+
+        const tarIndex = args.indexOf('-czf');
+        if (tarIndex !== -1) {
+          // Snapshot the staging tree before it is removed: the archive's contents are asserted from
+          // it, and the fake tar cannot be read back.
+          const source = hostPathOf(args, args[args.indexOf('-C') + 1] ?? '/src');
+          // A volume archive's source is a named volume, not a host path; only the staging tree is
+          // snapshot, and only while it is still there.
+          if (source !== null && existsSync(source)) {
+            rmSync(join(DATA_DIR, 'archive-contents'), { recursive: true, force: true });
+            cpSync(source, join(DATA_DIR, 'archive-contents'), { recursive: true });
+          }
+          const target = hostPathOf(args, args[tarIndex + 1] ?? '');
+          if (target !== null) writeFileSync(target, 'fake-tar-bytes');
+        }
+        return { code: 0, stdout: '', stderr: '', truncated: false };
+      },
+    );
+  }
+
+  function renderDirectory(): string {
+    const directory = join(DATA_DIR, 'render', 'rs-000000000001');
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, COMPOSE), 'services:\n  db:\n    image: postgres:16-alpine\n');
+    writeFileSync(join(directory, 'platform.env'), 'INSTANCE_SLUG=crm\n');
+    return directory;
+  }
+
+  function exportFiles(): { sidecar: Record<string, unknown>; exportId: string } {
+    const directory = join(DATA_DIR, INSTANCE_ID, 'exports');
+    const archive = readdirSync(directory).find((name) => name.endsWith('.tar.gz'));
+    expect(archive).toBeDefined();
+    const exportId = String(archive).replace(/\.tar\.gz$/, '');
+    const sidecar = JSON.parse(readFileSync(join(directory, `${exportId}.json`), 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    return { sidecar, exportId };
+  }
+
+  it('captures the database, the volumes, the definition and a manifest into one archive', async () => {
+    const h = setup([
+      ['SELECT i.id, i.entry_key, i.slug, i.domain_route', [{ ...INSTANCE_ROW, state: 'ready' }]],
+      ['FROM instance_service', [{ service_name: 'db', image_ref: 'postgres:16-alpine' }]],
+      ['FROM instance_volume', [{ name: 'seamnex-crm-db-data' }]],
+      [
+        'FROM instance_env_value',
+        [
+          {
+            var_name: 'DATABASE_URL',
+            value_enc: Buffer.from('postgres://postgres@db:5432/crm'),
+            source: 'instance',
+            secret_ref: null,
+          },
+          { var_name: 'SMTP_PASSWORD', value_enc: null, source: 'secret', secret_ref: 'secret://crm/smtp' },
+          // An unset non-secret variable is not a credential: it must not be reported as one.
+          { var_name: 'SMTP_USERNAME', value_enc: null, source: 'instance', secret_ref: null },
+        ],
+      ],
+    ]);
+    h.renderer.applied.mockResolvedValue(renderSetOf({ directory: renderDirectory() }));
+    fakeHelpers(h.docker);
+    const context = ctx({ action: 'export' });
+
+    await h.run('export', 'apply', context);
+    await h.run('export', 'record', context);
+
+    const { sidecar, exportId } = exportFiles();
+    expect(sidecar).toMatchObject({
+      version: 1,
+      exportId,
+      instance: { id: INSTANCE_ID, slug: 'crm', entryKey: 'D01-01', state: 'ready' },
+      renderSet: { id: 'rs-000000000001', contentHash: 'hash-1', applied: true },
+      includes: ['database', 'volumes', 'definition', 'environment'],
+    });
+    expect((sidecar.files as { path: string }[]).map((file) => file.path)).toEqual(
+      expect.arrayContaining([
+        'database/db.sql',
+        'volumes/seamnex-crm-db-data.tar.gz',
+        'render/docker-compose.platform.yml',
+        'render/platform.env',
+        'instance/env.json',
+        'README.txt',
+      ]),
+    );
+    for (const file of sidecar.files as { sha256: string }[]) {
+      expect(file.sha256).toMatch(/^[0-9a-f]{64}$/);
+    }
+    expect(sidecar.archive).toMatchObject({
+      fileName: `${exportId}.tar.gz`,
+      bytes: Buffer.byteLength('fake-tar-bytes'),
+    });
+
+    // Secrets are named, never carried.
+    const env = JSON.parse(
+      readFileSync(join(DATA_DIR, 'archive-contents', 'instance', 'env.json'), 'utf8'),
+    ) as { values: { name: string; value: string | null }[]; secretNames: string[] };
+    expect(env.values).toEqual(
+      expect.arrayContaining([
+        { name: 'DATABASE_URL', source: 'instance', value: 'postgres://postgres@db:5432/crm' },
+        { name: 'SMTP_PASSWORD', source: 'secret', value: null },
+      ]),
+    );
+    expect(env.secretNames).toEqual(['SMTP_PASSWORD']);
+
+    // The staging tree held a plaintext copy of the database; the archive is the artefact.
+    expect(readdirSync(join(DATA_DIR, INSTANCE_ID, 'exports')).some((n) => n.startsWith('.staging-'))).toBe(
+      false,
+    );
+
+    // AC-20 evidence: the audit row names the artefact a reviewer can go and fetch.
+    expect(h.audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'instance.export.succeeded',
+        detail: expect.objectContaining({
+          exportId,
+          fileName: `${exportId}.tar.gz`,
+          includes: ['database', 'volumes', 'definition', 'environment'],
+        }),
+      }),
+    );
+    expect(context.log).toHaveBeenCalledWith(
+      'stdout',
+      expect.stringContaining(`export ${exportId} written`),
+    );
+  });
+
+  it('marks a render set that never ran, instead of implying it is what the product runs', async () => {
+    const h = setup([['FROM render_set WHERE instance_id', [{ id: 'rs-000000000001' }]]]);
+    // The deployment failed before `apply` recorded an applied set.
+    h.renderer.applied.mockResolvedValue(null);
+    fakeHelpers(h.docker);
     const context = ctx({ action: 'export' });
 
     await h.run('export', 'apply', context);
 
-    const line = (
-      context.log as unknown as { mock: { calls: [string, string][] } }
-    ).mock.calls.find((call) => call[1].startsWith('export written to '));
-    expect(line?.[1]).toBeDefined();
-    const file = String(line?.[1]).replace('export written to ', '');
-    const document = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
-    expect(document).toMatchObject({
-      instance: { id: INSTANCE_ID, slug: 'crm', entryKey: 'D01-01', state: 'deploying' },
-      renderSet: { id: 'rs-000000000001', contentHash: 'hash-1' },
+    expect(exportFiles().sidecar.renderSet).toEqual({
+      id: 'rs-000000000001',
+      contentHash: 'hash-1',
+      applied: false,
     });
   });
 
-  it('records an export of an instance that has never been rendered', async () => {
+  it('refuses an instance that was never deployed instead of writing a metadata-only file', async () => {
     const h = setup();
     h.renderer.applied.mockResolvedValue(null);
     const context = ctx({ action: 'export' });
 
+    await expect(h.run('export', 'apply', context)).rejects.toMatchObject({
+      code: 'STATE_CONFLICT',
+      detail: 'crm has never been deployed, so there is no data to export.',
+    });
+    expect(h.docker.runCli).not.toHaveBeenCalled();
+  });
+
+  it('refuses a stopped instance whose database cannot be dumped', async () => {
+    const h = setup([
+      ['SELECT i.id, i.entry_key, i.slug, i.domain_route', [{ ...INSTANCE_ROW, state: 'stopped' }]],
+      ['FROM instance_service', [{ service_name: 'db', image_ref: 'postgres:16-alpine' }]],
+    ]);
+    const context = ctx({ action: 'export' });
+
+    await expect(h.run('export', 'apply', context)).rejects.toMatchObject({
+      code: 'STATE_CONFLICT',
+      detail: expect.stringContaining('cannot be dumped while the instance is not running'),
+    });
+    // Refused before the first helper ran: nothing was written and nothing was left behind.
+    expect(h.docker.runCli).not.toHaveBeenCalled();
+  });
+
+  it('names a volume the daemon no longer holds instead of failing the whole export', async () => {
+    const h = setup([['FROM instance_volume', [{ name: 'seamnex-crm-db-data' }]]]);
+    h.renderer.applied.mockResolvedValue(renderSetOf({ directory: renderDirectory() }));
+    h.docker.volumeExists.mockResolvedValue(false);
+    fakeHelpers(h.docker);
+    const context = ctx({ action: 'export' });
+
     await h.run('export', 'apply', context);
 
-    const line = (
-      context.log as unknown as { mock: { calls: [string, string][] } }
-    ).mock.calls.find((call) => call[1].startsWith('export written to '));
-    const document = JSON.parse(
-      readFileSync(String(line?.[1]).replace('export written to ', ''), 'utf8'),
-    ) as {
-      renderSet: unknown;
-    };
-    expect(document.renderSet).toBeNull();
+    const { sidecar } = exportFiles();
+    expect(sidecar.includes).not.toContain('volumes');
+    expect(sidecar.excluded).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ item: 'volumes/seamnex-crm-db-data' }),
+      ]),
+    );
+    expect(context.log).toHaveBeenCalledWith(
+      'system',
+      'volume seamnex-crm-db-data is registered but absent from the daemon; not captured',
+    );
+  });
+
+  it('fails the capture, and keeps nothing, when the database dump fails', async () => {
+    const h = setup([
+      ['SELECT i.id, i.entry_key, i.slug, i.domain_route', [{ ...INSTANCE_ROW, state: 'ready' }]],
+      ['FROM instance_service', [{ service_name: 'db', image_ref: 'postgres:16-alpine' }]],
+    ]);
+    h.renderer.applied.mockResolvedValue(renderSetOf({ directory: renderDirectory() }));
+    fakeHelpers(h.docker, { dumpFails: true });
+    const directory = join(DATA_DIR, INSTANCE_ID, 'exports');
+    const before = existsSync(directory) ? readdirSync(directory).length : 0;
+    const context = ctx({ action: 'export' });
+
+    await expect(h.run('export', 'apply', context)).rejects.toMatchObject({
+      code: 'STATE_CONFLICT',
+      detail: expect.stringContaining('db (postgres) could not be dumped'),
+    });
+    // No artefact and no staging tree: a listed archive that holds no data is the defect.
+    const left = existsSync(directory) ? readdirSync(directory) : [];
+    expect(left).toHaveLength(before);
+    expect(left.filter((name) => name.startsWith('.staging-'))).toHaveLength(0);
   });
 });
 

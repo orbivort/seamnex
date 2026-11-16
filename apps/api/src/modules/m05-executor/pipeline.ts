@@ -48,6 +48,8 @@ import {
   type VolumeSummary,
 } from '../../common/docker/docker.client';
 import { instanceNetwork, projectName } from '../../common/docker/naming';
+import { engineOf } from '../../common/engine/database';
+import { writeExportArchive, type ExportArtefact } from './export-archive';
 import { composeDocumentOf, mountPathForVolume } from '../../common/compose/compose-volumes';
 import { describeProbe, probeProductHttp } from '../../common/exec/http-probe';
 
@@ -69,6 +71,8 @@ type RunState = {
   source?: ResolvedSource;
   renderSet?: RenderSet;
   plan?: PlanRecord;
+  /** Set by `export`; the audit record names the artefact so AC-20 has evidence, not a promise. */
+  artefact?: ExportArtefact;
 };
 
 /**
@@ -850,32 +854,101 @@ export class DeploymentPipeline implements OnModuleInit {
     await context.log('stdout', `project removed; data retention: ${retention}`);
   }
 
+  /**
+   * FR-1.13 / AC-20 — a full data export, not a description of one.
+   *
+   * Two refusals happen before any helper runs, because a file whose name promises a full export and
+   * whose contents are partial is the defect this stage used to be:
+   *
+   * - no applied (or latest) render set: there is no definition and no product to capture;
+   * - a declared database service while the instance is not running: a stopped product cannot be
+   *   dumped, and silently omitting its database would make the archive a lie.
+   *
+   * A failed capture therefore leaves no artefact behind — the writer removes its staging tree.
+   */
   private async export(context: PipelineContext): Promise<void> {
     const instance = await this.instance(context.instanceId);
     this.runs.set(context.jobId, { instance });
-    const renderSet = await this.renderer.applied(instance.id);
-    const directory = join(this.config.SEAMNEX_INSTANCE_DATA_DIR, instance.id, 'exports');
-    ensureDir(directory);
-    const target = join(directory, `${Date.now()}-export.json`);
-    writeFileAtomic(
-      target,
-      `${JSON.stringify(
-        {
-          exportedAt: new Date().toISOString(),
-          instance: {
-            id: instance.id,
-            slug: instance.slug,
-            entryKey: instance.entry_key,
-            state: instance.state,
-          },
-          renderSet:
-            renderSet === null ? null : { id: renderSet.id, contentHash: renderSet.contentHash },
-        },
-        null,
-        2,
-      )}\n`,
+
+    const applied = await this.renderer.applied(instance.id);
+    const renderSet = applied ?? (await this.latestRenderSet(instance.id));
+    if (renderSet === null) {
+      throw new AppError({
+        code: 'STATE_CONFLICT',
+        detail: `${instance.slug} has never been deployed, so there is no data to export.`,
+        remediation:
+          'Deploy the instance first. An export of a definition that never ran would hold no product data, which is not a full data export (FR-1.13).',
+      });
+    }
+
+    const services = await this.pool.query<{ service_name: string; image_ref: string }>(
+      `SELECT service_name, image_ref FROM instance_service WHERE instance_id = $1 ORDER BY service_name`,
+      [instance.id],
     );
-    await context.log('stdout', `export written to ${target}`);
+    const volumes = await this.pool.query<{ name: string }>(
+      `SELECT name FROM instance_volume WHERE instance_id = $1 ORDER BY name`,
+      [instance.id],
+    );
+    const environment = await this.pool.query<{
+      var_name: string;
+      value_enc: Buffer | null;
+      source: string;
+      secret_ref: string | null;
+    }>(
+      `SELECT var_name, value_enc, source, secret_ref FROM instance_env_value
+        WHERE instance_id = $1 ORDER BY var_name`,
+      [instance.id],
+    );
+
+    const datastores = services.rows.filter((service) => engineOf(service.image_ref) !== null);
+    const running = instance.state === 'ready' || instance.state === 'degraded';
+    if (datastores.length > 0 && !running) {
+      throw new AppError({
+        code: 'STATE_CONFLICT',
+        detail: `${instance.slug} is ${instance.state}: ${datastores
+          .map((service) => service.service_name)
+          .join(', ')} cannot be dumped while the instance is not running.`,
+        remediation:
+          'Start the instance and run the export again. A stopped database is not an empty database; nothing was written.',
+      });
+    }
+
+    const artefact = await writeExportArchive(
+      {
+        dataDir: this.config.SEAMNEX_INSTANCE_DATA_DIR,
+        pathMap: this.config.SEAMNEX_DOCKER_PATH_MAP,
+        docker: this.docker,
+        log: (stream, line) => context.log(stream, line),
+      },
+      {
+        instance: {
+          id: instance.id,
+          slug: instance.slug,
+          entryKey: instance.entry_key,
+          state: instance.state,
+        },
+        renderSet: {
+          id: renderSet.id,
+          contentHash: renderSet.contentHash,
+          directory: renderSet.directory,
+          applied: applied !== null,
+        },
+        services: services.rows.map((row) => ({
+          service: row.service_name,
+          imageRef: row.image_ref,
+        })),
+        volumes: volumes.rows.map((row) => row.name),
+        envRows: environment.rows,
+      },
+    );
+
+    this.requireRun(context.jobId).artefact = artefact;
+    await context.log(
+      'stdout',
+      `export ${artefact.exportId} written: ${artefact.fileName} (${artefact.bytes} bytes; ${
+        artefact.includes.join(', ') || 'no data'
+      })`,
+    );
   }
 
   private async prepull(context: PipelineContext): Promise<void> {
@@ -916,7 +989,19 @@ export class DeploymentPipeline implements OnModuleInit {
       targetType: 'instance',
       targetId: state?.instance.id ?? context.instanceId,
       outcome: 'success',
-      detail: { jobId: context.jobId },
+      // The export's artefact is evidence: AC-20 asks that the data is *usable externally*, and an
+      // audit line that names the id, size and contents is what a reviewer can check later.
+      detail:
+        state?.artefact === undefined
+          ? { jobId: context.jobId }
+          : {
+              jobId: context.jobId,
+              exportId: state.artefact.exportId,
+              fileName: state.artefact.fileName,
+              bytes: state.artefact.bytes,
+              sha256: state.artefact.sha256,
+              includes: state.artefact.includes,
+            },
     });
   }
 

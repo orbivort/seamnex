@@ -853,7 +853,11 @@ export const instanceHandlers = [
           ? 'Only a stopped instance can be started.'
           : action === 'reconfigure' && instance.state === 'requested'
             ? 'The definition has not been rendered yet; deploy the instance first.'
-            : null;
+            : // The pipeline refuses an export that cannot dump the database, so the mock must too:
+              // a demo that "exports" a stopped instance would contradict the archive it serves.
+              action === 'export' && !running
+              ? 'Export needs a running instance: a stopped database cannot be dumped.'
+              : null;
     if (invalid) {
       return problem(
         409,
@@ -877,7 +881,10 @@ export const instanceHandlers = [
                 ? 'deploying'
                 : action === 'delete'
                   ? 'deleting'
-                  : 'restarting';
+                  : action === 'export'
+                    ? // An export reads; it must not park a healthy instance in a transition.
+                      instance.state
+                    : 'restarting';
     instance.state = nextState;
     const status = getState().statuses[instance.id];
     if (status) status.state = instance.state;

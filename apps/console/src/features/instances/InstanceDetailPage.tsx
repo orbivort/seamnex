@@ -49,6 +49,7 @@ import { BackupsTab } from './tabs/BackupsTab';
 import { ContainersTab } from './tabs/ContainersTab';
 import { DriftTab } from './tabs/DriftTab';
 import { EnvironmentTab } from './tabs/EnvironmentTab';
+import { ExportsTab } from './tabs/ExportsTab';
 import { IntegrationTab } from './tabs/IntegrationTab';
 import { JobsTab } from './tabs/JobsTab';
 import { OverviewTab } from './tabs/OverviewTab';
@@ -407,6 +408,9 @@ export function InstanceDetailPage() {
           ...(canReadEnv ? [{ value: 'env', label: 'Environment' }] : []),
           { value: 'drift', label: 'Drift' },
           { value: 'backups', label: 'Backups' },
+          // FR-1.13: the exit-strategy artefact. Only a role that may export sees it, because the
+          // read behind it is the same R1-only capability (a guaranteed refusal otherwise).
+          ...(canLifecycle ? [{ value: 'exports', label: 'Exports' }] : []),
           { value: 'jobs', label: 'Jobs' },
           { value: 'integration', label: 'Integration' },
         ]}
@@ -441,6 +445,11 @@ export function InstanceDetailPage() {
         <TabPanel value="backups" className="pt-3">
           <BackupsTab instance={data} />
         </TabPanel>
+        {canLifecycle ? (
+          <TabPanel value="exports" className="pt-3">
+            <ExportsTab instance={data} />
+          </TabPanel>
+        ) : null}
         <TabPanel value="jobs" className="pt-3">
           <JobsTab instance={data} />
         </TabPanel>

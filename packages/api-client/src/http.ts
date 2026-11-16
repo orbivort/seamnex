@@ -488,3 +488,68 @@ export async function openEventStream(
 
   return response;
 }
+
+export type DownloadHandle = {
+  /** The unread body. The caller owns it — a blob, a stream, or nothing if it aborts. */
+  readonly response: Response;
+  /** The server's filename, so a browser save matches the manifest it just downloaded. */
+  readonly fileName: string;
+};
+
+/**
+ * A response head that is not JSON: the streamed export archive (FR-1.13).
+ *
+ * Separate from `request` on purpose. `request` parses the body as JSON and validates it against
+ * the operation's schema; an archive is neither, and reading a multi-gigabyte body into a string to
+ * check that it is not JSON would be the one thing an export endpoint must never do. The transport,
+ * base URL, credentials and problem handling are shared, because those are what make it the same
+ * platform call.
+ */
+export async function openDownload(
+  path: string,
+  options: { signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<DownloadHandle> {
+  let response: Response;
+  try {
+    response = await transport({
+      path,
+      method: 'GET',
+      signal: options.signal ?? null,
+      headers: { Accept: 'application/gzip' },
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+    });
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    throw new ApiError(networkProblem(error), { cause: error });
+  }
+
+  if (!response.ok) {
+    const payload = await readPayload(response);
+    const parsed = ProblemDetailSchema.safeParse(payload);
+    const problem = parsed.success
+      ? parsed.data
+      : nonJsonProblem(response.status, response.statusText, path);
+    if (response.status === 401) notifyUnauthorized(problem);
+    throw new ApiError(problem, {
+      retryAfterMs: parseRetryAfter(response.headers.get('Retry-After')),
+    });
+  }
+
+  markSuccess();
+  return { response, fileName: attachmentName(response.headers.get('Content-Disposition'), path) };
+}
+
+/**
+ * `attachment; filename="…"` → the filename, falling back to the last path segment.
+ *
+ * The server already restricts the value to `[A-Za-z0-9._-]`, but the header is remote input: the
+ * result is stripped of separators again so a compromised or misconfigured server cannot hand the
+ * browser a path.
+ */
+function attachmentName(disposition: string | null, path: string): string {
+  const match = /filename="?([^";]+)"?/i.exec(disposition ?? '');
+  const candidate = (match?.[1] ?? path.slice(path.lastIndexOf('/') + 1))
+    .trim()
+    .replace(/[\\/]/g, '_');
+  return candidate.length > 0 ? candidate : 'export.tar.gz';
+}

@@ -30,6 +30,8 @@ export const queryKeys = {
   adminCredential: (id: string) => ['instances', id, 'admin-credential'] as const,
   drift: (id: string) => ['instances', id, 'drift'] as const,
   instanceBackups: (id: string) => ['instances', id, 'backups'] as const,
+  /** FR-1.13: the portable exports on disk, read from the catalogue the capture wrote. */
+  instanceExports: (id: string) => ['instances', id, 'exports'] as const,
   images: (id: string) => ['instances', id, 'images'] as const,
   jobs: ['jobs'] as const,
   job: (id: string) => ['jobs', id] as const,

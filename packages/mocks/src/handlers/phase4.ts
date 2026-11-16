@@ -13,6 +13,7 @@ import type {
 } from '@seamnex/domain';
 import { at, PLATFORM_DOMAIN } from '../fixtures/context';
 import { fieldFixture, sampleItemFor } from '../fixtures/field-snapshots';
+import { exportArchiveBody, instanceExportsFor } from '../fixtures/instance-exports';
 import { appendAudit, getState } from '../store';
 import { DEPLOY_STEPS, enqueueJob } from './job-factory';
 import { actorFor, problem, readBody, requireCapability, roleOf } from './utils';
@@ -43,6 +44,32 @@ function fileVersion(workflow: Workflow): void {
 
 export const phase4Handlers = [
   // ---- 4A ------------------------------------------------------------------------------------
+  /*
+   * FR-1.13 / AC-20 — the export list and archive, registered here so the static `exports`
+   * segment is matched before any `:id/:action` handler.
+   *
+   * The read is `instance.lifecycle` (R1 only), exactly like the action that produces the archive;
+   * a seeded domain owner therefore gets the same refusal the API would send.
+   */
+  http.get('/api/v1/instances/:id/exports', ({ params, request }) => {
+    const guard = requireCapability(roleOf(request), 'instance.lifecycle');
+    if (guard) return guard;
+    return HttpResponse.json(instanceExportsFor(String(params.id)));
+  }),
+
+  http.get('/api/v1/instances/:id/exports/:exportId/archive', ({ params, request }) => {
+    const guard = requireCapability(roleOf(request), 'instance.lifecycle');
+    if (guard) return guard;
+    const exportId = String(params.exportId);
+    return new HttpResponse(exportArchiveBody(String(params.id), exportId), {
+      headers: {
+        'content-type': 'application/gzip',
+        'content-disposition': `attachment; filename="${exportId}.tar.gz"`,
+        'cache-control': 'no-store',
+      },
+    });
+  }),
+
   http.post('/api/v1/instances/preview', async ({ request }) => {
     const guard = requireCapability(roleOf(request), 'instance.deploy');
     if (guard) return guard;

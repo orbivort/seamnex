@@ -12,13 +12,14 @@ import {
   EnvValueSchema,
   ImageSchema,
   InstanceDetailSchema,
+  InstanceExportListSchema,
   RelayProvisionReportSchema,
   InstanceListSchema,
   InstancePlanSchema,
   InstanceStatusSchema,
   JobAcceptedSchema,
 } from '@seamnex/domain';
-import { request } from '../http';
+import { openDownload, request, type DownloadHandle } from '../http';
 import { queryKeys } from '../query-keys';
 
 const ContainerListSchema = z.array(ContainerStatusSchema);
@@ -116,8 +117,45 @@ export function useInstanceBackups(id: string) {
   });
 }
 
-export function useInstancePlan(id: string, action: string | null) {
+/**
+ * FR-1.13 / AC-20 — the portable exports this instance has on disk.
+ *
+ * `enabled` because the read is `instance.lifecycle` (R1-only): a domain owner's screen must not
+ * fire a query that is a guaranteed 403, which is what would put a refusal in the console's log for
+ * simply opening a tab.
+ */
+export function useInstanceExports(id: string, options: { enabled?: boolean } = {}) {
   return useQuery({
+    queryKey: queryKeys.instanceExports(id),
+    queryFn: ({ signal }) =>
+      request(`/instances/${id}/exports`, { schema: InstanceExportListSchema, signal }),
+    enabled: id.length > 0 && (options.enabled ?? true),
+    // The list is written by a job on the server, so a tab switch must not show a stale archive
+    // next to a download button that no longer resolves.
+    refetchOnWindowFocus: true,
+  });
+}
+
+/**
+ * Opens one archive for the caller to save.
+ *
+ * Not a query: the body is the artefact, not a cache entry, and re-fetching it because a component
+ * re-rendered would transfer a business's dataset twice. The caller owns the response body.
+ */
+export function openInstanceExport(
+  instanceId: string,
+  exportId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<DownloadHandle> {
+  return openDownload(`/instances/${instanceId}/exports/${exportId}/archive`, {
+    // The server stats the file and starts streaming; a big archive can take a moment to open on a
+    // busy host, and the 15 s JSON default would abort before the first byte.
+    timeoutMs: 120_000,
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+  });
+}
+
+export function useInstancePlan(id: string, action: string | null) {  return useQuery({
     queryKey: [...queryKeys.instance(id), 'plan', action] as const,
     queryFn: ({ signal }) =>
       request(`/instances/${id}/plan?action=${action ?? 'upgrade'}`, {

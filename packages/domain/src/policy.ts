@@ -149,6 +149,13 @@ export const POLICY_KEYS: Readonly<Record<string, PolicyKey>> = {
   'POST /instances/:id/relay/provision': 'instance.env',
   'GET /instances/:id/drift': 'instance.configure',
   'GET /instances/:id/backups': 'instance.backup',
+  /*
+   * FR-1.13: an export is a plaintext copy of *everything* the product holds, so it is readable only
+   * by the role that may produce one — `instance.lifecycle` is R1-only (capabilities §5.2). Using
+   * `instance.backup` here would hand R3, who may take a scoped backup, the whole dataset instead.
+   */
+  'GET /instances/:id/exports': 'instance.lifecycle',
+  'GET /instances/:id/exports/:exportId/archive': 'instance.lifecycle',
   'GET /instances/:id/containers/:cid/logs': 'instance.view_logs',
   'POST /instances/:id/backups': 'instance.backup',
   'PUT /instances/:id/backup-schedule': 'instance.backup',
