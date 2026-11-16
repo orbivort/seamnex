@@ -280,6 +280,32 @@ function buildDocuments(
     )}\n`,
   });
 
+  /*
+   * FR-1.20 / AC-33: "operates on a platform-owned copy with the patch recorded as a diff". The
+   * substitutions above are in `docker-compose.platform.yml`, but a diff nobody can read next to the
+   * document it describes is not a record — and the render set is immutable, backed up and
+   * re-materialised on a restore, so this is the copy that survives. Written only when the policy
+   * found something: an empty file on every clean deployment is noise that hides the ones that
+   * matter.
+   */
+  const policy = input.source.policy;
+  if (policy.patch.length > 0 || policy.violations.length > 0) {
+    documents.push({
+      path: 'policy-patch.json',
+      content: `${JSON.stringify(
+        {
+          version: 1,
+          verdict: policy.verdict,
+          waived: policy.waived,
+          violations: policy.violations,
+          patch: policy.patch,
+        },
+        null,
+        2,
+      )}\n`,
+    });
+  }
+
   return documents;
 }
 
@@ -456,6 +482,13 @@ function manifestOf(
     imageRefs: imageRefs(input),
     sourcePath: input.source.path,
     policyVerdict: input.source.policy.verdict,
+    /** The same record as `policy-patch.json`, so a manifest reader needs no second read. */
+    policy: {
+      verdict: input.source.policy.verdict,
+      waived: input.source.policy.waived,
+      violations: input.source.policy.violations,
+      patch: input.source.policy.patch,
+    },
     route: input.route,
     resources: input.resources,
     files: files.map((file) => ({ path: file.path, sha256: file.sha256 })),

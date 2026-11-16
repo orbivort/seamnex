@@ -1,4 +1,6 @@
+import { COMPOSE_RULES, type ComposeRule } from '@seamnex/domain';
 import { parseAllDocuments, stringify } from 'yaml';
+import type { ComposePatchEntry, ComposePolicyResult, ComposeViolation } from './policy-result';
 
 /**
  * 4A.3 — the compose policy.
@@ -13,45 +15,17 @@ import { parseAllDocuments, stringify } from 'yaml';
  *     port; Traefik reaches it over the platform network, and invariant 9 ("zero published ports")
  *     is asserted again immediately before apply.
  *
- * A rule can be waived, but only by an *approved, unexpired* `policy_exception` row, and the result
- * is recorded as `unsafe_approved` (NFR-4.15, AC-33). The original file is never modified: the
- * normalised document is a separate render artefact, and the patch diff is recorded with it.
+ * A rule can be waived, but only by an *approved, unexpired* `policy_exception` row whose scope names
+ * this product, and the result is recorded as `unsafe_approved` (NFR-4.15, AC-33). The original file
+ * is never modified: the normalised document is a separate render artefact, and the patch diff is
+ * recorded with it.
+ *
+ * The rule vocabulary lives in `@seamnex/domain` so the waiver query, this evaluator and the console's
+ * request form cannot drift apart; it is re-exported here for the callers that already import it.
  */
+export { COMPOSE_RULES };
 
-export const COMPOSE_RULES = [
-  'network_mode_host',
-  'privileged',
-  'host_path_mount',
-  'external_network',
-  'unpinned_image',
-] as const;
-
-export type ComposeRule = (typeof COMPOSE_RULES)[number];
-
-export type ComposeViolation = {
-  readonly rule: ComposeRule;
-  readonly service: string | null;
-  readonly detail: string;
-};
-
-export type ComposePatchEntry = {
-  readonly path: string;
-  readonly from: unknown;
-  readonly to: unknown;
-};
-
-export type ComposePolicyResult = {
-  readonly verdict: 'allowed' | 'blocked' | 'unsafe_approved';
-  readonly violations: readonly ComposeViolation[];
-  /** Violations that are covered by an approved exception. */
-  readonly waived: readonly ComposeRule[];
-  /** The platform-owned copy: published ports removed, exposure declared. */
-  readonly document: Record<string, unknown>;
-  readonly patch: readonly ComposePatchEntry[];
-  /** Invariant 9: must be 0 before apply. */
-  readonly publishedPorts: number;
-  readonly services: readonly string[];
-};
+export type { ComposeRule, ComposePatchEntry, ComposePolicyResult, ComposeViolation };
 
 type AnyRecord = Record<string, unknown>;
 
@@ -134,7 +108,7 @@ export function evaluateCompose(
         detail: `service ${name} declares neither an image nor a build context.`,
       });
     }
-    if (image !== null && !isPinned(image)) {
+    if (image !== null && !isPinnedImage(image)) {
       violations.push({
         rule: 'unpinned_image',
         service: name,
@@ -210,7 +184,12 @@ function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
-function isPinned(image: string): boolean {
+/**
+ * NFR-4.15's "unpinned tag" rule, shared with the Dockerfile evaluator: a digest or a version tag is
+ * pinned, `latest` and "no tag" are not. The last segment is the only part worth reading — an
+ * earlier `registry.example.test:5000/app` colon belongs to the host, not to a tag.
+ */
+export function isPinnedImage(image: string): boolean {
   if (image.includes('@sha256:')) return true;
   const withoutRegistry = image.split('/').pop() ?? image;
   const tag = withoutRegistry.includes(':') ? (withoutRegistry.split(':').pop() ?? '') : '';

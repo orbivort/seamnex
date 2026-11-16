@@ -176,6 +176,69 @@ describe('render', () => {
     expect(set.publishedPorts).toBe(0);
   });
 
+  /*
+   * FR-1.20 / AC-33: "the platform operates on a platform-owned copy with the patch recorded as a
+   * diff". The copy is `docker-compose.platform.yml`; the diff is written beside it, in the set that
+   * is immutable, backed up and re-materialised on a restore. A patch nobody can read next to the
+   * document it describes is not a record.
+   */
+  it('writes the applied patch into the render set when the policy changed something', async () => {
+    const { service } = setup([
+      ...ENV_ROUTES,
+      ['INSERT INTO render_set', [RENDER_ROW]],
+      ['INSERT INTO render_file', []],
+    ]);
+    const base = input();
+
+    const set = await service.render(
+      input({
+        source: {
+          ...base.source,
+          policy: {
+            ...policy(base.source.policy.document),
+            verdict: 'unsafe_approved',
+            waived: ['privileged'],
+            violations: [
+              {
+                rule: 'privileged',
+                service: 'app',
+                detail: 'service app requests privileged mode.',
+              },
+            ],
+            patch: [{ path: 'services.app.ports', from: ['8080:80'], to: ['80'] }],
+          },
+        },
+      }),
+    );
+
+    expect(set.files.map((file) => file.path)).toContain('policy-patch.json');
+    const recorded = JSON.parse(
+      readFileSync(join(set.directory, 'policy-patch.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(recorded).toEqual({
+      version: 1,
+      verdict: 'unsafe_approved',
+      waived: ['privileged'],
+      violations: [
+        { rule: 'privileged', service: 'app', detail: 'service app requests privileged mode.' },
+      ],
+      patch: [{ path: 'services.app.ports', from: ['8080:80'], to: ['80'] }],
+    });
+  });
+
+  it('leaves the patch out of a clean render', async () => {
+    const { service } = setup([
+      ...ENV_ROUTES,
+      ['INSERT INTO render_set', [RENDER_ROW]],
+      ['INSERT INTO render_file', []],
+    ]);
+
+    const set = await service.render(input());
+
+    // An empty file on every clean deployment is noise that hides the ones that matter.
+    expect(set.files.map((file) => file.path)).not.toContain('policy-patch.json');
+  });
+
   it('injects resource ceilings, restart policy, labels and log rotation in the override', async () => {
     const { service } = setup([
       ...ENV_ROUTES,

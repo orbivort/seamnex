@@ -143,16 +143,16 @@ describe('compose policy exceptions', () => {
     await screen.findByText('Compose policy exceptions');
 
     const item = present(
-      (await screen.findByText(/Published port/)).closest('li'),
-      'the Published port exception item',
+      (await screen.findByText(/Unpinned image/)).closest('li'),
+      'the unpinned image exception item',
     );
     fireEvent.click(within(item).getByRole('button', { name: 'Approve' }));
 
-    expect(await screen.findByText('Published port · approved')).toBeDefined();
+    expect(await screen.findByText('Unpinned image · approved')).toBeDefined();
     expect(screen.getByText(/Decided by Sofia Almeida/)).toBeDefined();
 
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
-    await waitFor(() => expect(screen.queryByText('Published port · approved')).toBeNull());
+    await waitFor(() => expect(screen.queryByText('Unpinned image · approved')).toBeNull());
   });
 
   it('reports a refused decision instead of showing the old state as decided', async () => {
@@ -179,8 +179,8 @@ describe('compose policy exceptions', () => {
     await screen.findByText('Compose policy exceptions');
 
     const item = present(
-      (await screen.findByText(/Published port/)).closest('li'),
-      'the Published port exception item',
+      (await screen.findByText(/Unpinned image/)).closest('li'),
+      'the unpinned image exception item',
     );
     fireEvent.click(within(item).getByRole('button', { name: 'Approve' }));
 
@@ -198,6 +198,127 @@ describe('compose policy exceptions', () => {
     ).toBeDefined();
     expect(screen.getByText('expired undecided')).toBeDefined();
     expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
+  });
+
+  /*
+   * FR-1.20 / NFR-4.15 / AC-33: the half of the flow that did not exist. An R1 files the request; the
+   * queue shows it awaiting a second party, and the same person may not approve it.
+   */
+  it('files an exception for one product and shows it awaiting a second party', async () => {
+    openAs('R1', '/governance/maintenance');
+    render(<App />);
+    await screen.findByText('Compose policy exceptions');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Request exception' }));
+    const dialog = await screen.findByRole('dialog');
+    // The product list is a query; the control stays disabled until it answers, so the test waits for
+    // the same thing an operator does. A change fired at a disabled select is dropped by React.
+    const product = within(dialog).getByLabelText(/Product/) as HTMLSelectElement;
+    await waitFor(() => expect(product.disabled).toBe(false));
+    fireEvent.change(product, { target: { value: 'D02-01' } });
+    fireEvent.change(within(dialog).getByLabelText(/Justification/), {
+      target: { value: 'The vendor image has no pinned release until the next quarter.' },
+    });
+    fireEvent.change(within(dialog).getByLabelText(/Expires on/), {
+      target: { value: new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10) },
+    });
+    expect((within(dialog).getByLabelText(/Product/) as HTMLSelectElement).value).toBe('D02-01');
+    expect(
+      (within(dialog).getByLabelText(/Justification/) as HTMLTextAreaElement).value.length,
+    ).toBeGreaterThan(20);
+    expect((within(dialog).getByLabelText(/Expires on/) as HTMLInputElement).value).toMatch(
+      /^\d{4}-\d{2}-\d{2}$/,
+    );
+    const submit = within(dialog).getByRole('button', { name: 'Request exception' });
+    expect((submit as HTMLButtonElement).disabled, 'the request must be submittable').toBe(false);
+    fireEvent.click(submit);
+
+    // The dialog closes only on success, so its absence means the server accepted the request.
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    const filed = present(
+      getState().policyExceptions.find((item) => item.scope === 'D02-01'),
+      'the filed exception',
+    );
+    expect(filed.state).toBe('requested');
+    expect(filed.rule).toBe('privileged');
+    // The register names the rule the way a person reads it, and shows the request as undecided.
+    expect(await screen.findByText('D02-01')).toBeDefined();
+    expect(await screen.findByText(/Privileged mode/)).toBeDefined();
+    expect(screen.getAllByText('awaiting second party').length).toBeGreaterThan(0);
+  });
+
+  it('refuses a past or over-long expiry before the round trip', async () => {
+    openAs('R1', '/governance/maintenance');
+    render(<App />);
+    await screen.findByText('Compose policy exceptions');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Request exception' }));
+    const dialog = await screen.findByRole('dialog');
+    const expiry = within(dialog).getByLabelText(/Expires on/) as HTMLInputElement;
+    const justification = within(dialog).getByLabelText(/Justification/) as HTMLTextAreaElement;
+    fireEvent.change(justification, {
+      target: { value: 'The vendor image has no pinned release until the next quarter.' },
+    });
+
+    const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+    fireEvent.change(expiry, { target: { value: yesterday } });
+    // An expired exception blocks the next deployment, so the form refuses to file one.
+    expect(within(dialog).getByText('Choose a future date.')).toBeDefined();
+
+    // A quarter is the ceiling the API enforces; the form says so before the round trip.
+    const farFuture = new Date(Date.now() + 200 * 86_400_000).toISOString().slice(0, 10);
+    fireEvent.change(expiry, { target: { value: farFuture } });
+    expect(within(dialog).getByText('At most 90 days ahead.')).toBeDefined();
+  });
+
+  it('shows the server refusal inside the dialog and keeps it open', async () => {
+    server.use(
+      http.post('/api/v1/admin/policy-exceptions', () =>
+        HttpResponse.json(
+          {
+            type: 'https://platform.seamnex.local/problems/state-conflict',
+            title: 'An exception already covers this rule',
+            status: 409,
+            detail: 'Exception pe-104 is approved for D02-01.',
+            code: 'STATE_CONFLICT',
+            fieldErrors: [],
+            remediation: 'Use the existing exception.',
+          },
+          { status: 409 },
+        ),
+      ),
+    );
+
+    openAs('R1', '/governance/maintenance');
+    render(<App />);
+    await screen.findByText('Compose policy exceptions');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Request exception' }));
+    const dialog = await screen.findByRole('dialog');
+    const product = within(dialog).getByLabelText(/Product/) as HTMLSelectElement;
+    await waitFor(() => expect(product.disabled).toBe(false));
+    fireEvent.change(product, { target: { value: 'D02-01' } });
+    fireEvent.change(within(dialog).getByLabelText(/Justification/), {
+      target: { value: 'The vendor image has no pinned release until the next quarter.' },
+    });
+    const submit = within(dialog).getByRole('button', { name: 'Request exception' });
+    await waitFor(() => expect((submit as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(submit);
+
+    expect(await screen.findByText('An exception already covers this rule')).toBeDefined();
+    expect(screen.getByRole('dialog')).toBeDefined();
+  });
+
+  it('hides the exception request from a role that may not file one', async () => {
+    openAs('R3', '/governance/maintenance');
+    render(<App />);
+    await screen.findByText('Compose policy exceptions');
+
+    // NFR-4.15: R1 requests and a second party decides. The domain owner approves, and cannot file.
+    expect(screen.getByRole('button', { name: 'Request exception' })).toHaveProperty(
+      'disabled',
+      true,
+    );
   });
 
   it('hides the window register from a role that may not read settings', async () => {

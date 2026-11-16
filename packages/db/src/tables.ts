@@ -202,6 +202,20 @@ export type InstanceParamRow = {
   read_at: Date;
 };
 
+/** One substitution the platform made to the platform-owned copy (FR-1.19, design §11.5). */
+export type SourcePatchEntry = {
+  path: string;
+  from: unknown;
+  to: unknown;
+};
+
+/** One policy rule the source tripped, waived or not (NFR-4.15). */
+export type SourcePolicyViolation = {
+  rule: string;
+  service: string | null;
+  detail: string;
+};
+
 export type SourceResolutionRow = {
   id: string;
   instance_id: string;
@@ -211,6 +225,9 @@ export type SourceResolutionRow = {
   resolved_image_ref: string | null;
   resolved_image_digest: string | null;
   policy_verdict: 'allowed' | 'blocked' | 'unsafe_approved' | null;
+  /** Recorded even for a blocked attempt, so a refusal leaves evidence (0034). */
+  patch_diff: SourcePatchEntry[];
+  policy_violations: SourcePolicyViolation[];
   created_at: Date;
 };
 

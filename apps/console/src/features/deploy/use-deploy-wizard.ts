@@ -19,7 +19,7 @@ import type {
   EnvSchemaVar,
   PolicyException,
 } from '@seamnex/domain';
-import { admissionVerdict, PACKAGING_LABELS } from '@seamnex/domain';
+import { admissionVerdict, PACKAGING_LABELS, composeRuleLabel } from '@seamnex/domain';
 import { useDebouncedValue } from '@seamnex/shell';
 import { formatDate, formatRelative } from '@seamnex/utils';
 import type { PreflightCheck, WizardValues } from './steps/types';
@@ -275,12 +275,16 @@ export function useDeployWizard(entryKey: string): DeployWizard {
     { enabled: step === STEPS.length - 1 && preview.data === undefined },
   );
 
+  /*
+   * Exact match on the product key, not a text fragment. `scope` is the catalog entry key
+   * (NFR-4.15: the scope is part of what is approved), and `includes` matched every exception whose
+   * label happened to mention the key — including another product's.
+   */
   const exception = useMemo(
     () =>
       (exceptions.data ?? []).find(
         (item) =>
-          item.scope.includes(entryKey) &&
-          (item.state === 'approved' || item.state === 'requested'),
+          item.scope === entryKey && (item.state === 'approved' || item.state === 'requested'),
       ) ?? null,
     [exceptions.data, entryKey],
   );
@@ -452,7 +456,7 @@ export function useDeployWizard(entryKey: string): DeployWizard {
             label: exception ? 'Source path allowed by exception' : 'Source path allowed by policy',
             ok: exception ? exception.state === 'approved' : true,
             detail: exception
-              ? `${exception.id} · ${exception.rule} · ${exception.state === 'approved' ? `approved by ${exception.approver}` : 'awaiting a second party'}.`
+              ? `${exception.id} · ${composeRuleLabel(exception.rule)} · ${exception.state === 'approved' ? `approved by ${exception.approver}` : 'awaiting a second party'}.`
               : `${PACKAGING_LABELS[entryData.packaging]} path; no exception required.`,
           },
           {

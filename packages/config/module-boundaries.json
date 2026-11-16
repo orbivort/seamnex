@@ -275,7 +275,8 @@
         "instance_status",
         "render_set",
         "idp_user",
-        "product_account"
+        "product_account",
+        "source_resolution"
       ]
     },
     {

@@ -253,12 +253,17 @@ export const PROBLEM_CATALOG = {
     remediation: 'Use an https URL on an allow-listed host, without embedded credentials.',
     slug: 'source-url-rejected',
   },
-  /** 4A.3: a compose file that the policy refuses; the diff names the offending key. */
+  /**
+   * 4A.3 / NFR-4.15: an ingested definition the policy refuses. The code keeps its original name
+   * because it is published, but the source may be a Compose file, a Dockerfile, or the artefacts of
+   * an approved scaffold — the detail names the offending construct and whether a covering exception
+   * has lapsed.
+   */
   COMPOSE_POLICY_BLOCKED: {
     status: 422,
-    title: 'The compose definition breaks a blocking policy rule',
+    title: 'The source definition breaks a blocking policy rule',
     remediation:
-      'Remove the offending key, or record an approved exception before the next deployment.',
+      'Remove the offending construct, or have a second party approve a time-boxed policy exception for the product before the next deployment.',
     slug: 'compose-policy-blocked',
   },
   /**

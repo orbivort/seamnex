@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ComposeRuleSchema } from '../compose-rules';
 import {
   ACCESS_MODES,
   ACCESS_REQUEST_KINDS,
@@ -211,6 +212,12 @@ export const BreakGlassSessionSchema = z.object({
 export const PolicyExceptionSchema = z.object({
   id: IdSchema,
   rule: z.string().min(1),
+  /**
+   * The catalog entry key the exception covers (`D04-01`), not free text. NFR-4.15 makes the scope
+   * part of what is approved, and the waiver is resolved by comparing this value with the product
+   * being deployed — a human label could not be compared, which is how one exception came to waive a
+   * rule for every product.
+   */
   scope: z.string().min(1),
   justification: z.string().min(1),
   requester: z.string().min(1),
@@ -219,6 +226,22 @@ export const PolicyExceptionSchema = z.object({
   requestedAt: TimestampSchema,
   expiresAt: TimestampSchema,
   patchDiff: z.string().min(1),
+});
+
+/**
+ * NFR-4.15 / FR-4.11 — what an R1 asks for, and nothing more.
+ *
+ * The deviation itself is not in the body: the platform derives it from the recorded resolution of
+ * the product's source. A client that could name its own patch diff could approve itself a patch
+ * that does not exist, which is the defect this whole flow exists to prevent.
+ */
+export const PolicyExceptionRequestSchema = z.object({
+  entryKey: EntryKeySchema,
+  rule: ComposeRuleSchema,
+  /** FR-4.11's written justification, the same floor the break-glass request uses. */
+  justification: z.string().min(20),
+  /** A time box, not a permanent waiver: an expiry that has passed blocks the next deployment. */
+  expiresAt: TimestampSchema,
 });
 
 export const MaintenanceWindowSchema = z.object({
@@ -306,6 +329,7 @@ export type PatchRecord = z.infer<typeof PatchRecordSchema>;
 export type PostureSummary = z.infer<typeof PostureSummarySchema>;
 export type BreakGlassSession = z.infer<typeof BreakGlassSessionSchema>;
 export type PolicyException = z.infer<typeof PolicyExceptionSchema>;
+export type PolicyExceptionRequest = z.infer<typeof PolicyExceptionRequestSchema>;
 export type MaintenanceWindow = z.infer<typeof MaintenanceWindowSchema>;
 export type DsarRequest = z.infer<typeof DsarRequestSchema>;
 export type AccessRequest = z.infer<typeof AccessRequestSchema>;

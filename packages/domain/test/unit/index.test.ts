@@ -3,6 +3,7 @@ import * as barrel from '../../src/index';
 import * as breakGlassApproval from '../../src/break-glass-approval';
 import * as capabilities from '../../src/capabilities';
 import * as capacity from '../../src/capacity';
+import * as composeRules from '../../src/compose-rules';
 import * as contract from '../../src/contract';
 import * as credentialGranularity from '../../src/credential-granularity';
 import * as enums from '../../src/enums';
@@ -48,6 +49,7 @@ const MODULES = [
   ['break-glass-approval', breakGlassApproval],
   ['capabilities', capabilities],
   ['capacity', capacity],
+  ['compose-rules', composeRules],
   ['contract', contract],
   ['credential-granularity', credentialGranularity],
   ['enums', enums],

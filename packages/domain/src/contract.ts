@@ -81,6 +81,7 @@ import {
   MaintenanceWindowPatchRequestSchema,
   MaintenanceWindowSchema,
   PatchRecordSchema,
+  PolicyExceptionRequestSchema,
   PolicyExceptionSchema,
   PostureSummarySchema,
 } from './schemas/governance';
@@ -1282,6 +1283,15 @@ const DECLARED_OPERATIONS: readonly DeclaredOperation[] = [
     summary: 'Policy exceptions awaiting a second-party decision (NFR-4.15).',
     tag: 'admin',
     response: z.array(PolicyExceptionSchema),
+  }),
+  op({
+    method: 'POST',
+    path: '/admin/policy-exceptions',
+    summary:
+      'File a time-boxed exception to one compose policy rule for one product (FR-1.20, NFR-4.15).',
+    tag: 'admin',
+    response: PolicyExceptionSchema,
+    request: PolicyExceptionRequestSchema,
   }),
   op({
     method: 'POST',

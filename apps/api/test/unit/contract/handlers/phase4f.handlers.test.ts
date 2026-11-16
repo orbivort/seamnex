@@ -12,6 +12,7 @@ function services() {
       requestBreakGlass: vi.fn().mockResolvedValue({ id: 'bg1' }),
       decideBreakGlass: vi.fn().mockResolvedValue({ id: 'bg1' }),
       reveal: vi.fn().mockResolvedValue({ credential: 'secret' }),
+      requestException: vi.fn().mockResolvedValue({ id: 'pe1' }),
       decideException: vi.fn().mockResolvedValue({ id: 'pe1' }),
       decideAccessRequest: vi.fn().mockResolvedValue({ id: 'ar1' }),
       createWindow: vi.fn().mockResolvedValue({ id: 'mw1' }),
@@ -77,6 +78,20 @@ describe('break-glass lifecycle', () => {
 });
 
 describe('decision routes', () => {
+  it('POST /admin/policy-exceptions files the request on behalf of the actor', async () => {
+    const body = {
+      entryKey: 'D01-01',
+      rule: 'privileged',
+      justification: 'The agency staging sync needs the host path until migration closes.',
+      expiresAt: '2027-01-01T00:00:00.000Z',
+    };
+
+    const result = await call('POST /admin/policy-exceptions', { body });
+
+    expect(s.governance.requestException).toHaveBeenCalledWith(body, 'sub-1');
+    expect(result).toEqual({ kind: 'body', body: { id: 'pe1' } });
+  });
+
   it.each(['approve', 'reject'])('POST policy exceptions accepts %s', async (decision) => {
     await call('POST /admin/policy-exceptions/:id/:decision', {
       params: { id: 'pe1', decision },
@@ -202,8 +217,9 @@ describe('privacy requests', () => {
 });
 
 describe('phase 4f registry', () => {
-  it('implements the fifteen 4F operations', () => {
-    expect(handlers.size).toBe(15);
+  it('implements the sixteen 4F operations', () => {
+    // 15 + POST /admin/policy-exceptions (FR-1.20, NFR-4.15): the request half of the exception flow.
+    expect(handlers.size).toBe(16);
   });
 
   it('tags the group phase-4f', () => {

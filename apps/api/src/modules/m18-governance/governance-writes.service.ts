@@ -12,9 +12,16 @@ import type {
   MaintenanceWindowPatchRequest,
   PlatformRole,
   PolicyException,
+  PolicyExceptionRequest,
   PrivacyRequest,
 } from '@seamnex/domain';
-import { accessFor, breakGlassApprovalRefusal, breakGlassStateAt } from '@seamnex/domain';
+import {
+  COMPOSE_RULES,
+  accessFor,
+  breakGlassApprovalRefusal,
+  breakGlassStateAt,
+  isComposeRule,
+} from '@seamnex/domain';
 import type { Pool } from 'pg';
 import { withTransaction, type Queryable } from '@seamnex/db';
 import { APP_CONFIG } from '../../config/config.module';
@@ -33,12 +40,16 @@ import {
   type IdentitySyncService,
 } from '../m08-identity-sync/identity-sync.contract';
 import { PORTAL_BFF_SERVICE, type PortalBffService } from '../m10-portal-bff/portal-bff.contract';
+import { describePolicyDecision } from '../../common/compose/source-policy';
+import type { ComposePatchEntry, ComposeViolation } from '../../common/compose/policy-result';
 import {
   MAINTENANCE_WINDOW_SELECT,
-  policyExceptionDiff,
+  POLICY_EXCEPTION_SELECT,
   policyExceptionRequester,
   toMaintenanceWindow,
+  toPolicyException,
   type MaintenanceWindowRow,
+  type PolicyExceptionRow,
 } from './maintenance-window';
 import { PrivacyQueueService } from './privacy-queue.service';
 import type { GovernanceWrites } from './governance.contract';
@@ -60,6 +71,15 @@ const DECISIONS: ReadonlySet<string> = new Set(['approve', 'reject', 'revoke', '
 
 /** NFR-3.9 fallback when the settings row is missing or unreadable. */
 const DEFAULT_BREAK_GLASS_MINUTES = 60;
+
+/**
+ * The longest time box a policy exception may be granted for (AC-33).
+ *
+ * Break-glass caps itself in `settings` (NFR-3.9); a policy exception has no settings row, so the
+ * ceiling is a constant here. A quarter is long enough for a migration that spans one and short
+ * enough that a forgotten exception cannot quietly become the standing configuration.
+ */
+const MAX_EXCEPTION_DAYS = 90;
 
 /**
  * What a refused approval must be able to say after the transaction that refused it has rolled back:
@@ -654,6 +674,157 @@ export class GovernanceWritesService implements GovernanceWrites {
 
   // ---- policy exceptions and access requests ---------------------------------------------------
 
+  /**
+   * FR-1.20 / NFR-4.15 / AC-33 — filing a policy exception.
+   *
+   * The defect this closes is that **nothing could create a row**: `policy_exception` had a decision
+   * path, a queue and a console panel, and the only way to get an exception was a hand-written
+   * `INSERT`. A control that cannot be exercised is a control that does not exist, and AC-33's
+   * "with an approved, time-boxed exception it deploys" was therefore unreachable.
+   *
+   * What the requester sends is a product, a rule, a justification and an expiry. What the platform
+   * records is the **deviation it observed** on that product's last refused resolution — read from
+   * `source_resolution` (0034), never from the request. A client that could name its own patch diff
+   * could describe a deviation that does not exist and have it approved.
+   *
+   * `approver` is `NOT NULL` and holds the creator until a decision overwrites it; the requester is
+   * recorded in `patch_diff.requestedBy`, which is the convention `policyExceptionRequester()` and
+   * the read model already resolve. `decideException` refuses a decision by that same person.
+   */
+  async requestException(
+    request: PolicyExceptionRequest,
+    actorId: string,
+  ): Promise<PolicyException> {
+    if (!isComposeRule(request.rule)) {
+      throw new AppError({
+        code: 'VALIDATION_FAILED',
+        status: 422,
+        detail: `Unknown policy rule "${request.rule}".`,
+        remediation: `Use one of: ${COMPOSE_RULES.join(', ')}.`,
+        fieldErrors: [{ field: 'rule', code: 'unknown', message: 'Unknown policy rule.' }],
+      });
+    }
+
+    const justification = request.justification.trim();
+    if (justification.length < MIN_JUSTIFICATION) {
+      throw new AppError({
+        code: 'VALIDATION_FAILED',
+        status: 422,
+        detail: `A written justification of at least ${MIN_JUSTIFICATION} characters is required.`,
+        remediation:
+          'State what the product needs the deviation for, why the source cannot be fixed now, and when it will be.',
+        fieldErrors: [
+          {
+            field: 'justification',
+            code: 'minLength',
+            message: `At least ${MIN_JUSTIFICATION} characters.`,
+          },
+        ],
+      });
+    }
+
+    const expiresAt = this.exceptionExpiry(request.expiresAt);
+    const scope = request.entryKey.trim();
+    const entry = await this.pool.query<{ key: string }>(
+      `SELECT key FROM catalog_entry WHERE key = $1`,
+      [scope],
+    );
+    if (entry.rows[0] === undefined) {
+      throw new AppError({
+        code: 'VALIDATION_FAILED',
+        status: 422,
+        detail: `No catalog entry ${scope}.`,
+        remediation: 'Choose the product the deviation belongs to; an exception is scoped to one.',
+        fieldErrors: [{ field: 'entryKey', code: 'unknown', message: 'Product does not exist.' }],
+      });
+    }
+
+    /*
+     * The row, its evidence and the audit entry share one commit — the same rule `requestBreakGlass`
+     * learned the hard way: a row whose creation is not recorded is an authority nobody can explain.
+     */
+    const id = await withTransaction(this.pool, async (tx) => {
+      await this.audit.lockChain(tx);
+
+      /*
+       * One live exception per product and rule. Not a uniqueness constraint, because the table's
+       * history has to keep rejected and lapsed rows; and not a hard guarantee either — two
+       * simultaneous requests can both pass this read. The consequence is two rows needing two
+       * decisions that waive the same rule, which is noise rather than a hole: the second approval
+       * is still a second party's.
+       */
+      const live = await tx.query<{ id: string; state: string; expires_at: Date }>(
+        `SELECT id, state, expires_at FROM policy_exception
+          WHERE scope = $1 AND rule = $2 AND state IN ('pending', 'approved')
+          ORDER BY expires_at DESC`,
+        [scope, request.rule],
+      );
+      const covering = live.rows.find((row) => row.expires_at.getTime() > Date.now());
+      if (covering !== undefined) {
+        throw new AppError({
+          code: 'STATE_CONFLICT',
+          status: 409,
+          detail: `An exception for ${request.rule} on ${scope} is already ${covering.state === 'approved' ? 'approved' : 'awaiting a decision'}, until ${covering.expires_at.toISOString()}.`,
+          remediation:
+            'Use the existing exception, or wait for it to lapse. A second request does not widen the waiver.',
+        });
+      }
+
+      const evidence = await this.exceptionEvidence(tx, scope, request.rule);
+      const violations = evidence.violations.filter((violation) => violation.rule === request.rule);
+      const diff = describePolicyDecision({
+        rule: request.rule,
+        violations,
+        patch: evidence.patch,
+      });
+
+      const inserted = await tx.query<{ id: string }>(
+        `INSERT INTO policy_exception
+           (rule, scope, justification, approver, expires_at, patch_diff, state)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'pending')
+         RETURNING id`,
+        [
+          request.rule,
+          scope,
+          justification,
+          actorId,
+          expiresAt,
+          JSON.stringify({
+            requestedBy: actorId,
+            rule: request.rule,
+            sourceResolutionId: evidence.resolutionId,
+            violations,
+            patch: evidence.patch,
+            diff,
+          }),
+        ],
+      );
+      const created = inserted.rows[0]?.id;
+      if (created === undefined) throw internal('The policy exception was not created.');
+
+      await this.audit.append(
+        {
+          action: 'policy_exception.requested',
+          actorType: 'user',
+          actorId,
+          targetType: 'policy_exception',
+          targetId: created,
+          outcome: 'success',
+          detail: {
+            rule: request.rule,
+            scope,
+            expiresAt: expiresAt.toISOString(),
+            resolutionId: evidence.resolutionId,
+          },
+        },
+        tx,
+      );
+      return created;
+    });
+
+    return this.policyException(id);
+  }
+
   async decideException(
     id: string,
     decision: 'approve' | 'reject',
@@ -716,9 +887,13 @@ export class GovernanceWritesService implements GovernanceWrites {
       ]);
       /* The decision is echoed to a screen that names the decider, so it carries the person the
          queue shows, not the subject identifier the column stores. */
-      const naming = await tx.query<{ name: string | null }>(
-        `SELECT coalesce(display_name, username) AS name FROM idp_user WHERE idp_id = $1`,
-        [actorId],
+      const naming = await tx.query<{
+        requester_name: string | null;
+        approver_name: string | null;
+      }>(
+        `SELECT (SELECT coalesce(display_name, username) FROM idp_user WHERE idp_id = $1) AS requester_name,
+                (SELECT coalesce(display_name, username) FROM idp_user WHERE idp_id = $2) AS approver_name`,
+        [requester, actorId],
       );
       await this.audit.append(
         {
@@ -733,18 +908,15 @@ export class GovernanceWritesService implements GovernanceWrites {
         tx,
       );
 
-      return {
-        id,
-        rule: exception.rule,
-        scope: exception.scope,
-        justification: exception.justification,
-        requester,
-        approver: naming.rows[0]?.name ?? actorId,
+      /* One mapper for the queue and for both write answers: the row is returned exactly as the list
+         would render it, so a screen that shows the response and then refetches cannot see it change. */
+      return toPolicyException({
+        ...exception,
+        approver: actorId,
         state,
-        requestedAt: exception.created_at.toISOString(),
-        expiresAt: exception.expires_at.toISOString(),
-        patchDiff: policyExceptionDiff(exception.patch_diff),
-      };
+        requester_name: naming.rows[0]?.requester_name ?? null,
+        approver_name: naming.rows[0]?.approver_name ?? null,
+      });
     });
   }
 
@@ -1167,6 +1339,112 @@ export class GovernanceWritesService implements GovernanceWrites {
   }
 
   /** The same select and mapper the list uses, so the write answer cannot disagree with the list. */
+  private async policyException(id: string): Promise<PolicyException> {
+    const result = await this.pool.query<PolicyExceptionRow>(
+      `${POLICY_EXCEPTION_SELECT} WHERE pe.id = $1`,
+      [id],
+    );
+    const row = result.rows[0];
+    if (row === undefined) throw noPolicyException(id);
+    return toPolicyException(row);
+  }
+
+  /**
+   * The time box a request may ask for (AC-33: "the exception carries an expiry").
+   *
+   * FR-4.11's rule is a *time box*, not a permanent waiver, and break-glass already caps its own
+   * window in `settings`. A policy exception has no settings row, so the ceiling is a constant: long
+   * enough for a migration that runs over a quarter, short enough that a forgotten exception cannot
+   * become the standing configuration. Anything longer is a decision to change this number, not a
+   * number to type into a form.
+   */
+  private exceptionExpiry(value: string): Date {
+    const expiresAt = new Date(value);
+    if (Number.isNaN(expiresAt.getTime())) {
+      throw new AppError({
+        code: 'VALIDATION_FAILED',
+        status: 422,
+        detail: 'The expiry is not an instant.',
+        remediation: 'Send an ISO-8601 UTC timestamp, for example 2027-02-01T00:00:00Z.',
+        fieldErrors: [{ field: 'expiresAt', code: 'invalid', message: 'Not an instant.' }],
+      });
+    }
+    const now = Date.now();
+    if (expiresAt.getTime() <= now) {
+      throw new AppError({
+        code: 'VALIDATION_FAILED',
+        status: 422,
+        detail: 'An exception must expire in the future.',
+        remediation:
+          'An expired exception blocks the next deployment by design; pick a later date.',
+        fieldErrors: [{ field: 'expiresAt', code: 'past', message: 'Must be a future instant.' }],
+      });
+    }
+    const ceiling = now + MAX_EXCEPTION_DAYS * 24 * 60 * 60 * 1_000;
+    if (expiresAt.getTime() > ceiling) {
+      throw new AppError({
+        code: 'VALIDATION_FAILED',
+        status: 422,
+        detail: `A policy exception cannot be granted for more than ${MAX_EXCEPTION_DAYS} days.`,
+        remediation:
+          'Ask for the window the work actually needs; renew it before it lapses if the work continues.',
+        fieldErrors: [
+          {
+            field: 'expiresAt',
+            code: 'max',
+            message: `At most ${MAX_EXCEPTION_DAYS} days.`,
+          },
+        ],
+      });
+    }
+    return expiresAt;
+  }
+
+  /**
+   * What the platform observed, from its own record.
+   *
+   * The last refused resolution of this product that named this rule. It is read inside the request's
+   * transaction so the evidence and the row that cites it share a commit. A product that has never
+   * been refused simply has no evidence: the exception is then a statement about the next deployment
+   * that trips the rule, and `describePolicyDecision` says exactly that instead of inventing a diff.
+   */
+  private async exceptionEvidence(
+    tx: Queryable,
+    entryKey: string,
+    rule: string,
+  ): Promise<{
+    resolutionId: string | null;
+    violations: ComposeViolation[];
+    patch: ComposePatchEntry[];
+  }> {
+    const result = await tx.query<{
+      id: string;
+      policy_violations: unknown;
+      patch_diff: unknown;
+    }>(
+      `SELECT sr.id, sr.policy_violations, sr.patch_diff
+         FROM source_resolution sr
+         JOIN instance i ON i.id = sr.instance_id
+        WHERE i.entry_key = $1
+          AND sr.policy_verdict = 'blocked'
+          AND EXISTS (
+            SELECT 1 FROM jsonb_array_elements(sr.policy_violations) AS violation
+             WHERE violation->>'rule' = $2
+          )
+        ORDER BY sr.created_at DESC
+        LIMIT 1`,
+      [entryKey, rule],
+    );
+    const row = result.rows[0];
+    if (row === undefined) return { resolutionId: null, violations: [], patch: [] };
+    return {
+      resolutionId: row.id,
+      violations: violationsOf(row.policy_violations),
+      patch: patchEntriesOf(row.patch_diff),
+    };
+  }
+
+  /** The same select and mapper the list uses, so the write answer cannot disagree with the list. */
   private async window(id: string): Promise<MaintenanceWindow> {
     const result = await this.pool.query<MaintenanceWindowRow>(
       `${MAINTENANCE_WINDOW_SELECT} WHERE m.id = $1`,
@@ -1314,4 +1592,40 @@ function internal(detail: string): AppError {
     detail,
     remediation: 'Retry; nothing was changed.',
   });
+}
+
+/**
+ * `jsonb` comes back as `unknown`, and these arrays were written by an older build or by hand in a
+ * recovery: every field is checked rather than cast. A malformed entry is dropped, not guessed — the
+ * exception still names the rule, and the approver is never shown a diff the platform cannot stand
+ * behind.
+ */
+function violationsOf(value: unknown): ComposeViolation[] {
+  if (!Array.isArray(value)) return [];
+  const violations: ComposeViolation[] = [];
+  for (const entry of value) {
+    if (entry === null || typeof entry !== 'object') continue;
+    const rule = (entry as { rule?: unknown }).rule;
+    const service = (entry as { service?: unknown }).service;
+    const detail = (entry as { detail?: unknown }).detail;
+    if (typeof rule !== 'string' || !isComposeRule(rule) || typeof detail !== 'string') continue;
+    violations.push({ rule, service: typeof service === 'string' ? service : null, detail });
+  }
+  return violations;
+}
+
+function patchEntriesOf(value: unknown): ComposePatchEntry[] {
+  if (!Array.isArray(value)) return [];
+  const patch: ComposePatchEntry[] = [];
+  for (const entry of value) {
+    if (entry === null || typeof entry !== 'object') continue;
+    const path = (entry as { path?: unknown }).path;
+    if (typeof path !== 'string' || path.length === 0) continue;
+    patch.push({
+      path,
+      from: (entry as { from?: unknown }).from ?? null,
+      to: (entry as { to?: unknown }).to ?? null,
+    });
+  }
+  return patch;
 }

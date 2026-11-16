@@ -20,10 +20,11 @@ import { isUuid } from '../../common/http/uuid';
 import type { GovernanceService } from './governance.contract';
 import {
   MAINTENANCE_WINDOW_SELECT,
-  policyExceptionDiff,
-  policyExceptionRequester,
+  POLICY_EXCEPTION_SELECT,
   toMaintenanceWindow,
+  toPolicyException,
   type MaintenanceWindowRow,
+  type PolicyExceptionRow,
 } from './maintenance-window';
 
 /** NFR-3.5: a passed restore drill is evidence for one quarter, not forever. */
@@ -736,48 +737,10 @@ export class PostgresGovernanceService implements GovernanceService {
   }
 
   async policyExceptions(): Promise<PolicyException[]> {
-    const result = await this.pool.query<{
-      id: string;
-      rule: string;
-      scope: string;
-      justification: string;
-      approver: string;
-      state: string;
-      created_at: Date;
-      expires_at: Date;
-      patch_diff: unknown;
-      requester_name: string | null;
-      approver_name: string | null;
-    }>(
-      /* Both columns hold subject identifiers. The row shows a person on either side, so each is
-         resolved to the directory name once, here, rather than in every screen that reads it. */
-      `SELECT pe.id, pe.rule, pe.scope, pe.justification, pe.approver, pe.state, pe.created_at,
-              pe.expires_at, pe.patch_diff,
-              coalesce(r.display_name, r.username) AS requester_name,
-              coalesce(a.display_name, a.username) AS approver_name
-         FROM policy_exception pe
-         LEFT JOIN idp_user r ON r.idp_id = coalesce(pe.patch_diff->>'requestedBy', pe.approver)
-         LEFT JOIN idp_user a ON a.idp_id = pe.approver
-        ORDER BY pe.created_at DESC`,
+    const result = await this.pool.query<PolicyExceptionRow>(
+      `${POLICY_EXCEPTION_SELECT} ORDER BY pe.created_at DESC`,
     );
-    return result.rows.map((row) => {
-      const state = toPolicyExceptionState(row.state);
-      return {
-        id: row.id,
-        rule: row.rule,
-        scope: row.scope,
-        justification: row.justification,
-        // The requester to the row, never the approver: the console decides who may act on it.
-        requester: row.requester_name ?? policyExceptionRequester(row),
-        // `approver` is NOT NULL and holds the creator until a decision overwrites it, so reading
-        // it raw reported an open exception as already approved by its own requester.
-        approver: state === 'requested' ? null : (row.approver_name ?? row.approver),
-        state,
-        requestedAt: row.created_at.toISOString(),
-        expiresAt: row.expires_at.toISOString(),
-        patchDiff: policyExceptionDiff(row.patch_diff),
-      };
-    });
+    return result.rows.map((row) => toPolicyException(row));
   }
 
   async dsar(): Promise<DsarRequest[]> {
@@ -817,27 +780,6 @@ function toDsarState(state: string): DsarRequest['state'] {
       return 'failed';
     default:
       return 'open';
-  }
-}
-
-/**
- * `policy_exception.state` stores `pending`, `approved`, `rejected`, `expired` (migration 0006);
- * the wire contract names the open state `requested`. Passing the column through untouched made
- * the list fail its own response schema in development — a 500 for every pending exception — and
- * left the console rendering rows whose approve button can never appear, because it keys on
- * `requested`. The mapping belongs here, at the boundary, once.
- */
-function toPolicyExceptionState(state: string): PolicyException['state'] {
-  switch (state) {
-    case 'pending':
-    case 'requested':
-      return 'requested';
-    case 'approved':
-      return 'approved';
-    case 'rejected':
-      return 'rejected';
-    default:
-      return 'expired';
   }
 }
 

@@ -13,8 +13,9 @@ import { FilesystemSourceResolver } from '../../../../src/modules/m02-source-res
  * The tree is a real temp directory (the service *is* a filesystem adapter: a fake fs would test the
  * fake) and git is the only stubbed seam, because cloning is the one thing a unit test cannot do
  * deterministically. The assertions are about the decisions: Compose wins over Dockerfile, a
- * vendored mirror wins over the network, a blocked compose file fails before a job starts and names
- * the service, and nothing is persisted for a resolution that was refused.
+ * vendored mirror wins over the network, a blocked source fails before a job starts and names the
+ * construct — and the attempt is **recorded**, because that row is the evidence an exception request
+ * cites (NFR-4.15, AC-33).
  */
 const h = vi.hoisted(() => ({ cloneAtRevision: vi.fn() }));
 vi.mock('../../../../src/common/exec/git', () => ({ cloneAtRevision: h.cloneAtRevision }));
@@ -109,6 +110,19 @@ const DRAFT_FILES = [
   { path: 'app/compose.yaml', language: 'yaml', content: 'services: {}\n' },
 ];
 
+/**
+ * `policy_exception` rows as the waiver query sees them: the rule, whether its time box is still
+ * open, and when it closes. The query compares `expires_at` with `now()`, so a fixture that says
+ * `live: false` is an approved exception that has lapsed — it waives nothing (AC-33).
+ */
+function waivedRows(rows: Record<string, unknown>[]) {
+  return rows.map((row) => ({
+    rule: String(row.rule),
+    live: row.live ?? true,
+    expires_at: (row.expires_at as Date | undefined) ?? new Date(Date.now() + 86_400_000),
+  }));
+}
+
 function setup(options: SetupOptions = {}) {
   const root = mkdtempSync(join(tmpdir(), 'seamnex-m02-'));
   roots.push(root);
@@ -120,7 +134,7 @@ function setup(options: SetupOptions = {}) {
   const db = fakeDb([
     [ENTRY, options.entry ?? []],
     [DRAFT, options.draft ?? []],
-    [WAIVED, options.waived ?? []],
+    [WAIVED, waivedRows(options.waived ?? [])],
     [INSERT_FILE, []],
     [INSERT_RESOLUTION, options.resolution ?? [{ id: 'res-1' }]],
     [CONFIRM_SELECT, options.confirm ?? []],
@@ -230,6 +244,10 @@ describe('resolve — source path precedence', () => {
       'espocrm/espocrm:8.0.0',
       'sha256:0000000000000000000000000000000000000000000000000000000000000000',
       'allowed',
+      // The evidence travels with the verdict (0034): a clean file records two empty lists rather
+      // than nothing, so "the policy ran and found nothing" is distinguishable from "never recorded".
+      '[]',
+      '[]',
     ]);
     const files = db.calls.filter((call) => call.sql.includes(INSERT_FILE));
     expect(files.map((call) => call.params)).toEqual([
@@ -266,10 +284,73 @@ describe('resolve — source path precedence', () => {
     });
     expect(resolved.dockerfilePath).toMatch(/docker[\\/]Dockerfile$/);
     expect(resolved.files.map((file) => file.path)).toEqual(['docker/Dockerfile']);
-    // The build produces a platform-tagged image, so the recorded verdict is the neutral one.
+    // The base image is pinned, so the build passes the same policy the compose path passes.
     const resolution = db.calls.find((call) => call.sql.includes(INSERT_RESOLUTION));
     expect(resolution?.params.slice(1, 3)).toEqual(['dockerfile', 'mirror://D01-01']);
     expect(resolution?.params[6]).toBe('allowed');
+  });
+
+  it('refuses a Dockerfile whose base image is unpinned (NFR-4.15)', async () => {
+    const { db, catalogRepo, service } = setup({ entry: [entryRow({ payload: document() })] });
+    mirrorTree(catalogRepo, {
+      SOURCE_REVISION: 'rev-from-mirror\n',
+      'docker/Dockerfile': 'FROM alpine:latest\n',
+    });
+
+    await expect(
+      service.resolve({ instanceId: 'inst-1', entryKey: 'D01-01' }),
+    ).rejects.toMatchObject({
+      code: 'COMPOSE_POLICY_BLOCKED',
+      remediation: expect.stringContaining('policy exception for D01-01'),
+      fieldErrors: [
+        {
+          field: 'stage-1',
+          code: 'unpinned_image',
+          message:
+            'stage stage-1 builds from alpine:latest, which is not digest- or version-pinned.',
+        },
+      ],
+    });
+    // The Dockerfile path used to skip the policy entirely; the refusal is now recorded like any other.
+    expect(
+      db.calls.find((call) => call.sql.includes(INSERT_RESOLUTION))?.params.slice(6, 7),
+    ).toEqual(['blocked']);
+  });
+
+  it('records unsafe_approved for a Dockerfile covered by an exception', async () => {
+    const { db, catalogRepo, service } = setup({
+      entry: [entryRow({ payload: document() })],
+      waived: [{ rule: 'unpinned_image' }],
+    });
+    mirrorTree(catalogRepo, {
+      SOURCE_REVISION: 'rev-from-mirror\n',
+      'docker/Dockerfile': 'FROM alpine:latest\n',
+    });
+
+    const resolved = await service.resolve({ instanceId: 'inst-1', entryKey: 'D01-01' });
+
+    expect(resolved.policy.verdict).toBe('unsafe_approved');
+    expect(resolved.policy.waived).toEqual(['unpinned_image']);
+    expect(db.calls.find((call) => call.sql.includes(INSERT_RESOLUTION))?.params[6]).toBe(
+      'unsafe_approved',
+    );
+  });
+
+  it('passes an approved scaffold through the policy as well', async () => {
+    const { service } = setup({
+      entry: [entryRow()],
+      draft: [
+        {
+          id: 'draft-1',
+          files: [{ path: 'Dockerfile', language: 'dockerfile', content: 'FROM alpine:latest\n' }],
+        },
+      ],
+    });
+
+    // A confirmed draft is an ingested definition like any other: the platform would build it.
+    await expect(
+      service.resolve({ instanceId: 'inst-1', entryKey: 'D01-01' }),
+    ).rejects.toMatchObject({ code: 'COMPOSE_POLICY_BLOCKED' });
   });
 
   it('writes an approved scaffold into the attempt directory when the tree has neither', async () => {
@@ -299,6 +380,24 @@ describe('resolve — source path precedence', () => {
     expect(
       db.calls.filter((call) => call.sql.includes(INSERT_FILE)).map((call) => call.params),
     ).toEqual(DRAFT_FILES.map((file) => ['res-1', file.path, sha256(file.content), file.content]));
+  });
+
+  it('treats a draft with no compose file and no Dockerfile as a bare run definition', async () => {
+    const { service } = setup({
+      entry: [entryRow()],
+      draft: [
+        {
+          id: 'draft-1',
+          files: [{ path: 'notes.md', language: 'markdown', content: '# Runbook\n' }],
+        },
+      ],
+    });
+
+    const resolved = await service.resolve({ instanceId: 'inst-1', entryKey: 'D01-01' });
+
+    // Nothing to refuse and nothing to normalise: the platform renders the compose project itself.
+    expect(resolved.policy.verdict).toBe('allowed');
+    expect(resolved.policy.services).toEqual([]);
   });
 
   it('refuses an entry with no compose file, no Dockerfile and no approved scaffold', async () => {
@@ -541,16 +640,19 @@ networks:
 
   it('refuses a compose file that breaks the policy, naming the service and recording the refusal', async () => {
     const { audit, db, catalogRepo, service } = setup({ entry: [entryRow()] });
-    mirrorTree(catalogRepo, { 'docker-compose.yml': BLOCKED });
+    mirrorTree(catalogRepo, {
+      SOURCE_REVISION: 'rev-from-mirror\n',
+      'docker-compose.yml': BLOCKED,
+    });
 
     const failure = service.resolve({ instanceId: 'inst-1', entryKey: 'D01-01' });
 
     await expect(failure).rejects.toMatchObject({
       code: 'COMPOSE_POLICY_BLOCKED',
       detail:
-        'The compose file is refused by the platform policy: service app requests privileged mode. network legacy is declared external.',
+        'The source definition is refused by the platform policy: service app requests privileged mode. network legacy is declared external.',
       remediation:
-        'Remove the offending key, or record an approved policy exception before the next deployment.',
+        'Remove the offending construct, or have a second party approve a time-boxed policy exception for D01-01 (Governance → Maintenance and policy exceptions), then deploy again. Resolution res-1 is recorded with the violations and the normalisation it would have applied.',
       fieldErrors: [
         { field: 'app', code: 'privileged', message: 'service app requests privileged mode.' },
         // A violation with no service is named by its rule instead.
@@ -569,14 +671,35 @@ networks:
         outcome: 'failure',
         detail: {
           entryKey: 'D01-01',
+          resolutionId: 'res-1',
           violations: [
             { rule: 'privileged', service: 'app' },
             { rule: 'external_network', service: null },
           ],
+          expiredRules: [],
         },
       }),
     );
-    expect(db.calls.some((call) => call.sql.includes(INSERT_RESOLUTION))).toBe(false);
+    /*
+     * The refusal is recorded, not discarded. This is the change ISSUE-09 needed: an exception
+     * request cites the platform's own observation of the deviation, so a blocked attempt has to
+     * leave that observation behind. The row is written before the throw on purpose.
+     */
+    const resolution = db.calls.find((call) => call.sql.includes(INSERT_RESOLUTION));
+    expect(resolution?.params).toEqual([
+      'inst-1',
+      'compose',
+      'mirror://D01-01',
+      'rev-from-mirror',
+      null,
+      null,
+      'blocked',
+      '[]',
+      JSON.stringify([
+        { rule: 'privileged', service: 'app', detail: 'service app requests privileged mode.' },
+        { rule: 'external_network', service: null, detail: 'network legacy is declared external.' },
+      ]),
+    ]);
   });
 
   it('downgrades a waived violation to unsafe_approved and records that verdict', async () => {
@@ -595,6 +718,49 @@ networks:
     expect(db.calls.find((call) => call.sql.includes(INSERT_RESOLUTION))?.params[6]).toBe(
       'unsafe_approved',
     );
+    /*
+     * The waiver lookup is scoped to the product being deployed. It used to be a bare
+     * `SELECT DISTINCT rule … WHERE state='approved'`, which let one approved exception waive the
+     * rule for **every** product — the defect ISSUE-09 names.
+     */
+    expect(db.calls.find((call) => call.sql.includes(WAIVED))?.params).toEqual(['D01-01']);
+  });
+
+  it('does not waive a rule approved for a different product', async () => {
+    const { db, catalogRepo, service } = setup({
+      entry: [entryRow()],
+      // The fixture answers the scoped query: an approved row for another product is not returned,
+      // because the query asks for `scope = D01-01`. The assertion is on what the resolver sent, so
+      // a regression to an unscoped query fails here rather than in production.
+      waived: [],
+    });
+    mirrorTree(catalogRepo, {
+      'docker-compose.yml': BLOCKED.replace('networks:\n  legacy:\n    external: true\n', ''),
+    });
+
+    await expect(
+      service.resolve({ instanceId: 'inst-1', entryKey: 'D01-01' }),
+    ).rejects.toMatchObject({ code: 'COMPOSE_POLICY_BLOCKED' });
+    expect(db.calls.find((call) => call.sql.includes(WAIVED))?.params).toEqual(['D01-01']);
+  });
+
+  it('says an exception lapsed when an approved one no longer covers the rule', async () => {
+    const lapsed = new Date('2026-01-02T00:00:00.000Z');
+    const { catalogRepo, service } = setup({
+      entry: [entryRow()],
+      waived: [{ rule: 'privileged', live: false, expires_at: lapsed }],
+    });
+    mirrorTree(catalogRepo, {
+      'docker-compose.yml': BLOCKED.replace('networks:\n  legacy:\n    external: true\n', ''),
+    });
+
+    await expect(
+      service.resolve({ instanceId: 'inst-1', entryKey: 'D01-01' }),
+    ).rejects.toMatchObject({
+      code: 'COMPOSE_POLICY_BLOCKED',
+      detail:
+        'The source definition is refused by the platform policy: service app requests privileged mode. An approved exception for privileged (expired 2026-01-02T00:00:00.000Z) no longer covers a deployment.',
+    });
   });
 
   it('refuses a compose file that does not parse, before a job can start', async () => {

@@ -16,6 +16,20 @@ the same number through every manifest and the link definitions at the foot of t
 
 ### Added
 
+- **The compose policy exception path works, and is scoped** (`FR-1.20`, `NFR-4.15`, `AC-33`,
+  `FR-4.11`) — an R1 can now file an exception through `POST /admin/policy-exceptions` (new
+  `exception.request` capability) instead of a hand-written `INSERT`; the request names a product, a
+  rule, a written justification and an expiry, and the deviation the approver grants is read from the
+  platform's own refused `source_resolution` rather than from the request body. The waiver is
+  resolved by the catalog entry key, so an exception for one product no longer waives the rule for
+  every product, and a lapsed one is reported as `expired` and quoted in the refusal. Migration `0034`
+  adds `source_resolution.patch_diff` and `source_resolution.policy_violations` (design §10.1 step 5
+  and §11.5 already promised the former): a blocked attempt is recorded with the violations it found
+  and the substitutions it would have applied, and the applied patch is written into the render set as
+  `policy-patch.json` next to the platform-owned copy. The Dockerfile and scaffold paths now pass the
+  same blocking check as a Compose file — a `FROM` that is neither digest- nor version-pinned is
+  refused (`unpinned_image`, waivable) — and the console gained the request dialog and matches an
+  exception by product key rather than by a text fragment.
 - **A platform restore restores** (`FR-1.35`, `FR-1.36`, `AC-30`, `AC-52`, `NFR-3.8`, `NFR-3.9`,
   `ADR-BE-27`) — the `platform-restore` pipeline now proves the recovery set before the first write
   (required artefacts present, every stored object matching its recorded digest), restores the identity

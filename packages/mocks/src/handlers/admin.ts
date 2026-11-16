@@ -1,5 +1,6 @@
 import { http, HttpResponse } from 'msw';
-import type { AccessRequest, AlertChannel } from '@seamnex/domain';
+import type { AccessRequest, AlertChannel, PolicyException } from '@seamnex/domain';
+import { COMPOSE_RULES } from '@seamnex/domain';
 import { at } from '../fixtures/context';
 import { appendAudit, getState, meFor, refreshCapacity } from '../store';
 import { actorFor, deny, etagFor, problem, readBody, requireCapability, roleOf } from './utils';
@@ -415,6 +416,118 @@ export const adminHandlers = [
     const guard = requireCapability(roleOf(request), 'exception.decide');
     if (guard) return guard;
     return HttpResponse.json(getState().policyExceptions);
+  }),
+
+  /**
+   * FR-1.20 / NFR-4.15: filing an exception, the half that did not exist.
+   *
+   * The prototype mirrors the API's rules rather than accepting anything: R1 files, the product must
+   * be known, the justification has a floor, the expiry must be in the future and inside the quarter
+   * ceiling, and one live exception per product and rule. The diff is read from the platform's own
+   * record in a deployment; a prototype has no refused resolution, and saying so is more honest than
+   * inventing one.
+   */
+  http.post('/api/v1/admin/policy-exceptions', async ({ request }) => {
+    const role = roleOf(request);
+    const guard = requireCapability(role, 'exception.request');
+    if (guard) return guard;
+    const body = await readBody<{
+      entryKey?: unknown;
+      rule?: unknown;
+      justification?: unknown;
+      expiresAt?: unknown;
+    }>(request);
+
+    const entryKey = typeof body.entryKey === 'string' ? body.entryKey : '';
+    const rule = typeof body.rule === 'string' ? body.rule : '';
+    const justification = typeof body.justification === 'string' ? body.justification.trim() : '';
+    const expiresAt = typeof body.expiresAt === 'string' ? body.expiresAt : '';
+
+    const known =
+      getState().catalog.some((entry) => entry.key === entryKey) ||
+      getState().instances.some((instance) => instance.entryKey === entryKey);
+    if (!known) {
+      return problem(
+        422,
+        'POLICY_EXCEPTION_UNSCOPED',
+        'The exception names no known product',
+        `"${entryKey}" is not a catalog entry or a deployed instance.`,
+        'Choose the product the deviation belongs to; an exception is scoped to one.',
+        [{ field: 'entryKey', code: 'unknown', message: 'Product does not exist.' }],
+      );
+    }
+    if (!(COMPOSE_RULES as readonly string[]).includes(rule)) {
+      return problem(
+        422,
+        'POLICY_RULE_UNKNOWN',
+        'The rule is not part of the compose policy',
+        `"${rule}" is not one of ${COMPOSE_RULES.join(', ')}.`,
+        'Choose a rule the policy actually evaluates.',
+        [{ field: 'rule', code: 'unknown', message: 'Unknown policy rule.' }],
+      );
+    }
+    if (justification.length < 20) {
+      return problem(
+        422,
+        'VALIDATION_FAILED',
+        'A written justification is required',
+        'At least 20 characters. The approver decides on this text.',
+        'State what the product needs the deviation for and when it will be gone.',
+        [{ field: 'justification', code: 'minLength', message: 'At least 20 characters.' }],
+      );
+    }
+    const expiry = Date.parse(expiresAt);
+    if (!Number.isFinite(expiry) || expiry <= Date.now()) {
+      return problem(
+        422,
+        'VALIDATION_FAILED',
+        'The expiry must be in the future',
+        'An expired exception blocks the next deployment by design.',
+        'Pick a later date.',
+        [{ field: 'expiresAt', code: 'past', message: 'Must be a future instant.' }],
+      );
+    }
+    const state = getState();
+    const covering = state.policyExceptions.find(
+      (item) =>
+        item.scope === entryKey &&
+        item.rule === rule &&
+        item.state === 'approved' &&
+        Date.parse(item.expiresAt) > Date.now(),
+    );
+    if (covering !== undefined) {
+      return problem(
+        409,
+        'STATE_CONFLICT',
+        'An exception already covers this rule',
+        `Exception ${covering.id} is approved for ${entryKey} until ${covering.expiresAt}.`,
+        'Use the existing exception; a second request does not widen the waiver.',
+      );
+    }
+
+    const created: PolicyException = {
+      id: `pe-${state.policyExceptions.length + 200}`,
+      rule,
+      scope: entryKey,
+      justification,
+      requester: actorFor(role).name,
+      approver: null,
+      state: 'requested',
+      requestedAt: new Date().toISOString(),
+      expiresAt: new Date(expiry).toISOString(),
+      patchDiff: `= ${rule} waived for ${entryKey} — no refused resolution is recorded in this prototype, so there is no observed deviation to print.`,
+    };
+    state.policyExceptions.unshift(created);
+    appendAudit({
+      action: 'policy.exception.requested',
+      targetType: 'policy_exception',
+      targetId: created.id,
+      targetLabel: `${created.rule} · ${created.scope}`,
+      outcome: 'success',
+      detail: `${created.id} requested for ${created.scope} until ${created.expiresAt}; awaiting a second party.`,
+      actor: actorFor(role),
+    });
+    return HttpResponse.json(created);
   }),
 
   /** NFR-4.15: an exception is approved by a second party, never by the requester. */

@@ -7,6 +7,7 @@ import {
   stringifyCompose,
   type ComposeRule,
 } from '../../../../src/common/compose/compose-policy';
+import { evaluateDockerfile } from '../../../../src/common/compose/dockerfile-policy';
 
 /**
  * The compose policy is the boundary between a customer-authored file and the host kernel. Each
@@ -337,5 +338,90 @@ describe('stringifyCompose', () => {
       services: { app: { image: VERSIONED, expose: ['80'], command: 'echo ' + 'x'.repeat(200) } },
     });
     expect(text.split('\n').length).toBeLessThan(10);
+  });
+});
+
+/**
+ * NFR-4.15 — "Ingested Compose files **and Dockerfiles** shall pass a blocking policy check before
+ * any container starts." The Dockerfile path used to reach the build with no verdict at all.
+ *
+ * Only the base image is decidable in a Dockerfile: host networking, privileged mode and host bind
+ * mounts are runtime flags the platform itself renders, so claiming to check them here would be a
+ * rule that can never fire. The cases below are therefore about `FROM` and nothing else.
+ */
+describe('evaluateDockerfile', () => {
+  it('accepts a digest-pinned base image', () => {
+    const result = evaluateDockerfile(`FROM ${PINNED}\nCOPY . /app\n`);
+
+    expect(result.verdict).toBe('allowed');
+    expect(result.violations).toEqual([]);
+    expect(result.patch).toEqual([]);
+    expect(result.publishedPorts).toBe(0);
+    expect(result.document).toEqual({});
+  });
+
+  it('accepts a multi-stage build that continues from an earlier stage', () => {
+    const result = evaluateDockerfile(
+      `FROM node:24.15.0 AS build\nRUN npm ci\nFROM build AS test\n`,
+    );
+
+    // `FROM build` names the stage above, not an image: it inherits a base image that was already
+    // checked. Flagging it would block every ordinary multi-stage build.
+    expect(result.verdict).toBe('allowed');
+    expect(result.services).toEqual(['build', 'test']);
+    expect(result.violations).toEqual([]);
+  });
+
+  it.each([
+    ['latest tag', 'node:latest'],
+    ['no tag', 'node'],
+    ['registry port but no tag', 'registry.example.test:5000/app'],
+  ])('refuses an unpinned base image (%s)', (_case, image) => {
+    const result = evaluateDockerfile(`FROM ${image}\n`);
+
+    expect(result.verdict).toBe('blocked');
+    expect(result.violations[0]).toMatchObject({ rule: 'unpinned_image', service: 'stage-1' });
+  });
+
+  it('accepts scratch, which has nothing that can move under us', () => {
+    expect(evaluateDockerfile('FROM scratch\n').verdict).toBe('allowed');
+  });
+
+  it('refuses a base image resolved from a build argument: review cannot pin it', () => {
+    const result = evaluateDockerfile('ARG BASE=node:24\nFROM ${BASE}\n');
+
+    expect(result.verdict).toBe('blocked');
+    expect(result.violations[0]?.detail).toContain('resolved at build time');
+  });
+
+  it('reads an instruction continued over several lines and ignores comments', () => {
+    const result = evaluateDockerfile(
+      [
+        '# syntax=docker/dockerfile:1',
+        '# a comment FROM node:latest',
+        'FROM \\',
+        '  node:latest',
+        '',
+      ].join('\n'),
+    );
+
+    expect(result.violations).toHaveLength(1);
+    expect(result.violations[0]?.detail).toContain('node:latest');
+  });
+
+  it('ignores the platform flag before the image', () => {
+    const result = evaluateDockerfile('FROM --platform=$BUILDPLATFORM node:24.15.0\n');
+    expect(result.verdict).toBe('allowed');
+  });
+
+  it('downgrades a waived rule to unsafe_approved, keeping the violation as evidence', () => {
+    const result = evaluateDockerfile(
+      'FROM node:latest\n',
+      new Set<ComposeRule>(['unpinned_image']),
+    );
+
+    expect(result.verdict).toBe('unsafe_approved');
+    expect(result.waived).toEqual(['unpinned_image']);
+    expect(result.violations).toHaveLength(1);
   });
 });

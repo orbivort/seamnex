@@ -27,6 +27,7 @@ export const CAPABILITIES = [
   'license.review',
   'capacity.view',
   'metadata.manage',
+  'exception.request',
   'exception.decide',
   'alert.configure',
   'maintenance.configure',
@@ -162,7 +163,17 @@ export const CAPABILITY_MATRIX = {
   'license.review': { R1: 'none', R2: 'full', R3: 'none', R4: 'none', R5: 'none', R6: 'none' },
   'capacity.view': { R1: 'full', R2: 'full', R3: 'scoped', R4: 'none', R5: 'none', R6: 'none' },
   'metadata.manage': { R1: 'full', R2: 'scoped', R3: 'scoped', R4: 'none', R5: 'none', R6: 'none' },
-  /** NFR-4.15: a policy exception needs a second party; the requester (R2) may not decide it. */
+  /**
+   * NFR-4.15: "R1 request approved by a second party under the FR-4.11 rule". Filing and deciding are
+   * two capabilities so the request is visible in the matrix as an act of its own — the requester
+   * never decides, and the row, not the route, is where that is enforced (m18).
+   */
+  'exception.request': { R1: 'full', R2: 'none', R3: 'none', R4: 'none', R5: 'none', R6: 'none' },
+  /**
+   * NFR-4.15: a policy exception needs a second party. The auditor (R2) may not decide one: FR-4.11
+   * grants the auditor read-only elevations only, and a policy exception waives a rule for a
+   * deployment that writes.
+   */
   'exception.decide': { R1: 'full', R2: 'none', R3: 'full', R4: 'none', R5: 'none', R6: 'none' },
   'alert.configure': { R1: 'full', R2: 'none', R3: 'none', R4: 'none', R5: 'none', R6: 'none' },
   'maintenance.configure': {

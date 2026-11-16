@@ -15,6 +15,7 @@ export * from './version';
 export * from './routes';
 export * from './contract';
 
+export * from './compose-rules';
 export * from './env-rules';
 export * from './mapping-expression';
 export * from './schemas/auth';

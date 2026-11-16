@@ -9,6 +9,10 @@ export const SOURCE_RESOLVER_SERVICE = Symbol('seamnex.m02.source-resolver');
  * The precedence is fixed (4A.2): a Compose file if the tree has one, otherwise a Dockerfile,
  * otherwise an approved scaffold. It is *not* "whatever the entry's packaging says" — a repository
  * can contain both, and the Compose path is the one the platform can apply without building.
+ *
+ * Whichever path is taken, the source passes the same blocking policy (NFR-4.15) before a job can
+ * start, and the verdict travels with the resolution so the plan, the render manifest and the
+ * instance screen all report what the policy decided.
  */
 export type SourcePath = 'compose' | 'dockerfile' | 'scaffold';
 

@@ -53,6 +53,7 @@ describe('capability matrix (§5.2)', () => {
       'entitlement.grant',
       'product.assign_roles',
       'metadata.manage',
+      'exception.request',
       'exception.decide',
       'alert.configure',
       'maintenance.configure',
@@ -79,6 +80,13 @@ describe('capability matrix (§5.2)', () => {
     expect(canMutate('R2', 'exception.decide')).toBe(false);
     expect(canMutate('R3', 'exception.decide')).toBe(true);
     expect(canMutate('R1', 'exception.decide')).toBe(true);
+  });
+
+  it('files a policy exception from R1 alone, and never from the auditor (FR-1.20)', () => {
+    expect(canMutate('R1', 'exception.request')).toBe(true);
+    for (const role of ['R2', 'R3', 'R4', 'R5', 'R6'] as const) {
+      expect(canMutate(role, 'exception.request'), role).toBe(false);
+    }
   });
 
   it('treats scoped as permitted-but-narrower and explains it', () => {

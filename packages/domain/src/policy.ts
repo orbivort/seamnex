@@ -57,6 +57,7 @@ const SCOPE_RULES: Partial<Record<Capability, ScopeRule>> = {
   'workflow.credentials': 'instance',
   'workflow.approve': 'request',
   'breakglass.request': 'request',
+  'exception.request': 'request',
   /*
    * Role-level only. Whether *this* approver may decide *this* request depends on the elevation's
    * access mode and target domain, which are row facts a policy decision never sees (every
@@ -257,6 +258,7 @@ export const POLICY_KEYS: Readonly<Record<string, PolicyKey>> = {
   'PATCH /admin/maintenance-windows/:id': 'maintenance.configure',
   'DELETE /admin/maintenance-windows/:id': 'maintenance.configure',
   'GET /admin/policy-exceptions': 'exception.decide',
+  'POST /admin/policy-exceptions': 'exception.request',
   'POST /admin/policy-exceptions/:id/:decision': 'exception.decide',
   'GET /admin/dsar': 'privacy.view',
 

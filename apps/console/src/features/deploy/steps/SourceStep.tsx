@@ -1,5 +1,5 @@
 import type { CatalogEntry, PolicyException } from '@seamnex/domain';
-import { PACKAGING_LABELS } from '@seamnex/domain';
+import { PACKAGING_LABELS, composeRuleLabel } from '@seamnex/domain';
 import {
   Badge,
   Callout,
@@ -105,7 +105,7 @@ export function SourceStep({
           {exception ? (
             <div className="px-4 pb-4">
               <InlineNote>
-                {exception.id} · {exception.rule} ·{' '}
+                {exception.id} · {composeRuleLabel(exception.rule)} ·{' '}
                 {exception.state === 'approved'
                   ? `approved by ${exception.approver}`
                   : 'awaiting a second party'}

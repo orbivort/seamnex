@@ -1,9 +1,10 @@
 import { cpSync, existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import {
   CatalogEntrySchema,
   ScaffoldDraftSchema,
+  isComposeRule,
   type ScaffoldConfirmation,
   type ScaffoldDraft,
 } from '@seamnex/domain';
@@ -25,6 +26,9 @@ import {
   type ComposePolicyResult,
   type ComposeRule,
 } from '../../common/compose/compose-policy';
+import { evaluateDockerfile } from '../../common/compose/dockerfile-policy';
+import { emptyPolicy, type SourcePolicyResult } from '../../common/compose/policy-result';
+import { evaluateComposeText } from '../../common/compose/source-policy';
 import type {
   ResolveInput,
   ResolvedSource,
@@ -98,32 +102,25 @@ export class FilesystemSourceResolver implements SourceResolverService {
       );
     }
 
-    let policy: ComposePolicyResult = emptyPolicy();
+    /*
+     * Every path is policy-checked before anything starts (NFR-4.15), and the verdict is recorded
+     * *before* a refusal is raised. A blocked attempt therefore leaves a `source_resolution` row with
+     * the violations it found and the substitutions it would have made; the exception request reads
+     * that row, so an approver decides on a deviation the platform observed rather than on one a
+     * client described.
+     */
+    const waivers = await this.waivers(entry.key);
+    let policy: SourcePolicyResult;
     let files: ResolvedSourceFile[];
 
     if (path === 'compose') {
       const composePath = detected.composeFile as string;
       files = retain(source.directory, [composePath, ...detected.envFiles]);
-      policy = this.evaluate(this.readCompose(composePath), await this.waivedRules());
-      if (policy.verdict === 'blocked') {
-        await this.auditBlocked(input.instanceId, entry.key, policy);
-        throw new AppError({
-          code: 'COMPOSE_POLICY_BLOCKED',
-          detail: `The compose file is refused by the platform policy: ${policy.violations
-            .slice(0, 3)
-            .map((violation) => violation.detail)
-            .join(' ')}`,
-          fieldErrors: policy.violations.map((violation) => ({
-            field: violation.service ?? violation.rule,
-            code: violation.rule,
-            message: violation.detail,
-          })),
-          remediation:
-            'Remove the offending key, or record an approved policy exception before the next deployment.',
-        });
-      }
+      policy = this.evaluate(this.readCompose(composePath), waivers.rules);
     } else if (path === 'dockerfile') {
-      files = retain(source.directory, [detected.dockerfilePath as string, ...detected.envFiles]);
+      const dockerfilePath = detected.dockerfilePath as string;
+      files = retain(source.directory, [dockerfilePath, ...detected.envFiles]);
+      policy = evaluateDockerfile(readFileSync(dockerfilePath, 'utf8'), new Set(waivers.rules));
     } else {
       if (scaffold === null) {
         throw new AppError({
@@ -133,6 +130,7 @@ export class FilesystemSourceResolver implements SourceResolverService {
         });
       }
       files = writeScaffold(directory, scaffold.files);
+      policy = this.evaluateScaffold(files, waivers.rules);
     }
 
     const imageRef =
@@ -152,6 +150,11 @@ export class FilesystemSourceResolver implements SourceResolverService {
       files,
     });
 
+    if (policy.verdict === 'blocked') {
+      await this.auditBlocked(input.instanceId, entry.key, policy, resolutionId, waivers.expired);
+      throw refusal(entry.key, policy, waivers.expired, resolutionId);
+    }
+
     return {
       resolutionId,
       path,
@@ -162,7 +165,7 @@ export class FilesystemSourceResolver implements SourceResolverService {
       dockerfilePath: path === 'dockerfile' ? detected.dockerfilePath : null,
       imageRef,
       imageDigest,
-      policy: path === 'compose' ? policy : emptyPolicy(),
+      policy,
       files,
     };
   }
@@ -398,14 +401,51 @@ export class FilesystemSourceResolver implements SourceResolverService {
     return { id: row.id, files: files.data };
   }
 
-  private async waivedRules(): Promise<ComposeRule[]> {
-    const result = await this.pool.query<{ rule: string }>(
-      `SELECT DISTINCT rule FROM policy_exception
-        WHERE state = 'approved' AND expires_at > now()`,
+  /**
+   * NFR-4.15 — the waivers this deployment may use, and the ones that lapsed.
+   *
+   * Two defects lived in the query this replaces. It ignored `scope`, so **one approved exception
+   * waived the rule for every product**: `SELECT DISTINCT rule … WHERE state='approved'` has no
+   * product in it at all. And it silently dropped an expired row, so the refusal could not say "your
+   * exception ran out" — the operator saw a rule they believed was waived, failing again, with no
+   * explanation. An expired exception therefore comes back as `expired` and is quoted in the refusal
+   * (AC-33: "expiry blocks the next deployment").
+   *
+   * `scope` is the catalog entry key (design §5, data model: the scope is what is approved). A row
+   * whose scope matches nothing — every row written before this change carried free text — waives
+   * nothing, which is the safe direction: a legacy exception must be re-filed to have effect.
+   */
+  private async waivers(entryKey: string): Promise<{
+    rules: ComposeRule[];
+    expired: ExpiredWaiver[];
+  }> {
+    const result = await this.pool.query<{
+      rule: string;
+      live: boolean;
+      expires_at: Date;
+    }>(
+      /* A plan-scoped row is honoured when a caller has a plan; a resolution has none yet (the plan
+         is written after the source is resolved), so the product scope is what decides here. */
+      `SELECT rule, expires_at > now() AS live, expires_at
+         FROM policy_exception
+        WHERE state = 'approved' AND scope = $1
+        ORDER BY expires_at DESC`,
+      [entryKey],
     );
-    return result.rows
-      .map((row) => row.rule)
-      .filter((rule): rule is ComposeRule => isComposeRule(rule));
+
+    const live = new Set<ComposeRule>();
+    const expired = new Map<ComposeRule, Date>();
+    for (const row of result.rows) {
+      if (!isComposeRule(row.rule)) continue;
+      if (row.live) live.add(row.rule);
+      else if (!expired.has(row.rule)) expired.set(row.rule, row.expires_at);
+    }
+    return {
+      rules: [...live],
+      expired: [...expired.entries()]
+        .filter(([rule]) => !live.has(rule))
+        .map(([rule, expiresAt]) => ({ rule, expiresAt })),
+    };
   }
 
   private readCompose(path: string): string {
@@ -415,10 +455,33 @@ export class FilesystemSourceResolver implements SourceResolverService {
     return content;
   }
 
+  /**
+   * The scaffold path's artefacts are ingested definitions like any other (NFR-4.15): a draft can
+   * carry a compose file or a Dockerfile, and either is applied by the platform once confirmed. The
+   * compose file wins, because it is what `compose` would have detected had the draft been committed
+   * before resolution.
+   */
+  private evaluateScaffold(
+    files: readonly ResolvedSourceFile[],
+    waived: readonly ComposeRule[],
+  ): SourcePolicyResult {
+    const compose = files.find((file) => COMPOSE_CANDIDATES.includes(basename(file.path)));
+    if (compose !== undefined) return evaluateComposeText(compose.content, new Set(waived));
+    const dockerfile = files.find((file) => DOCKERFILE_CANDIDATES.includes(basename(file.path)));
+    if (dockerfile !== undefined) {
+      return evaluateDockerfile(dockerfile.content, new Set(waived));
+    }
+    // A draft with neither is a bare run definition: the platform generates the compose project, so
+    // it publishes no port and binds no host path.
+    return emptyPolicy();
+  }
+
   private async auditBlocked(
     instanceId: string,
     entryKey: string,
-    policy: ComposePolicyResult,
+    policy: SourcePolicyResult,
+    resolutionId: string,
+    expired: readonly ExpiredWaiver[],
   ): Promise<void> {
     await this.audit.append({
       action: 'deployment.compose_policy.blocked',
@@ -429,10 +492,12 @@ export class FilesystemSourceResolver implements SourceResolverService {
       outcome: 'failure',
       detail: {
         entryKey,
+        resolutionId,
         violations: policy.violations.map((violation) => ({
           rule: violation.rule,
           service: violation.service,
         })),
+        expiredRules: expired.map((waiver) => waiver.rule),
       },
     });
   }
@@ -444,13 +509,21 @@ export class FilesystemSourceResolver implements SourceResolverService {
     revision: string;
     imageRef: string | null;
     imageDigest: string | null;
-    policy: ComposePolicyResult;
+    policy: SourcePolicyResult;
     files: readonly ResolvedSourceFile[];
   }): Promise<string> {
+    /*
+     * The verdict and its evidence are one row (0034). Three things changed here: the verdict is
+     * recorded for every path rather than only `compose` (a Dockerfile can now be `unsafe_approved`),
+     * the substitutions are stored so "the patch is recorded as a diff" is a fact rather than a
+     * claim (FR-1.20, design §11.5), and a blocked attempt is stored as well — the exception request
+     * cites this row.
+     */
     const inserted = await this.pool.query<{ id: string }>(
       `INSERT INTO source_resolution
-         (instance_id, path, source_url, source_revision, resolved_image_ref, resolved_image_digest, policy_verdict)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+         (instance_id, path, source_url, source_revision, resolved_image_ref, resolved_image_digest,
+          policy_verdict, patch_diff, policy_violations)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb)
        RETURNING id`,
       [
         input.instanceId,
@@ -459,7 +532,9 @@ export class FilesystemSourceResolver implements SourceResolverService {
         input.revision,
         input.imageRef,
         input.imageDigest,
-        input.path === 'compose' ? input.policy.verdict : 'allowed',
+        input.policy.verdict,
+        JSON.stringify(input.policy.patch),
+        JSON.stringify(input.policy.violations),
       ],
     );
     const resolutionId = inserted.rows[0]?.id;
@@ -532,31 +607,48 @@ function writeScaffold(directory: string, files: ScaffoldFiles): ResolvedSourceF
   return written;
 }
 
-function emptyPolicy(): ComposePolicyResult {
-  return {
-    verdict: 'allowed',
-    violations: [],
-    waived: [],
-    document: {},
-    patch: [],
-    publishedPorts: 0,
-    services: [],
-  };
+/** An approved exception whose time box has closed: it waives nothing, and the refusal says so. */
+type ExpiredWaiver = { rule: ComposeRule; expiresAt: Date };
+
+/**
+ * The refusal an operator can act on (AC-33).
+ *
+ * It names the blocking constructs, says when a covering exception ran out, and points at the two
+ * things that resolve it: fix the source, or have a second party approve a time-boxed exception for
+ * *this* product. It also names the recorded attempt, because that row is what the exception request
+ * reads — and an operator who cannot find the evidence assumes there is none.
+ */
+function refusal(
+  entryKey: string,
+  policy: SourcePolicyResult,
+  expired: readonly ExpiredWaiver[],
+  resolutionId: string,
+): AppError {
+  const blocking = policy.violations.filter((violation) => !policy.waived.includes(violation.rule));
+  const lapsed =
+    expired.length === 0
+      ? ''
+      : ` An approved exception for ${expired
+          .map((waiver) => `${waiver.rule} (expired ${waiver.expiresAt.toISOString()})`)
+          .join(', ')} no longer covers a deployment.`;
+  return new AppError({
+    code: 'COMPOSE_POLICY_BLOCKED',
+    detail: `The source definition is refused by the platform policy: ${blocking
+      .slice(0, 3)
+      .map((violation) => violation.detail)
+      .join(' ')}${lapsed}`,
+    fieldErrors: blocking.map((violation) => ({
+      field: violation.service ?? violation.rule,
+      code: violation.rule,
+      message: violation.detail,
+    })),
+    remediation: `Remove the offending construct, or have a second party approve a time-boxed policy exception for ${entryKey} (Governance → Maintenance and policy exceptions), then deploy again. Resolution ${resolutionId} is recorded with the violations and the normalisation it would have applied.`,
+  });
 }
 
 function payloadString(payload: Record<string, unknown>, key: string): string | null {
   const value = payload[key];
   return typeof value === 'string' ? value : null;
-}
-
-function isComposeRule(value: string): value is ComposeRule {
-  return [
-    'network_mode_host',
-    'privileged',
-    'host_path_mount',
-    'external_network',
-    'unpinned_image',
-  ].includes(value);
 }
 
 /** Sorted relative paths of a tree: the input to the mirror's content hash. */

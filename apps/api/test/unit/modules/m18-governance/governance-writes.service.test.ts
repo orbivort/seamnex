@@ -922,7 +922,10 @@ function exceptionRoutes(
   return [
     ['FROM policy_exception WHERE id = $1 FOR UPDATE', row === undefined ? [] : [row]],
     ['UPDATE policy_exception', { rows: [], rowCount: 1 }],
-    ['AS name FROM idp_user', options.named ?? [{ name: 'Alex Approver' }]],
+    [
+      'AS requester_name',
+      options.named ?? [{ requester_name: 'Rita Requester', approver_name: 'Alex Approver' }],
+    ],
   ];
 }
 
@@ -1004,7 +1007,7 @@ describe('decideException', () => {
         rule: 'no-hosted-service',
         scope: 'D01-01',
         justification: 'Needs hosted service until the commercial licence lands',
-        requester: REQUESTER,
+        requester: 'Rita Requester',
         approver: 'Alex Approver',
         state: expected,
         requestedAt: '2026-01-01T00:00:00.000Z',
@@ -1019,6 +1022,246 @@ describe('decideException', () => {
     const exception = await service.decideException(EXCEPTION_ID, 'approve', ACTOR);
 
     expect(exception.approver).toBe(ACTOR);
+  });
+});
+
+const JUSTIFICATION = 'The agency staging sync needs the host path until the migration closes.';
+const EXPIRY = new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000);
+
+/**
+ * FR-1.20 / NFR-4.15 / AC-33 — the request half of the exception flow.
+ *
+ * The rows here are what the platform itself wrote on a refused deployment: `source_resolution`
+ * carries the violations the policy found and the substitutions it would have applied. The request
+ * names a product, a rule, a reason and an expiry and nothing else, so the diff an approver sees
+ * cannot be authored by the requester.
+ */
+function exceptionRequestRoutes(
+  options: {
+    entry?: Row[];
+    live?: Row[];
+    evidence?: Row[];
+    created?: Row[];
+    response?: Row[];
+  } = {},
+): Parameters<typeof fakeDb>[0] {
+  const diff = {
+    requestedBy: ACTOR,
+    rule: 'privileged',
+    sourceResolutionId: EXCEPTION_ID,
+    violations: [
+      { rule: 'privileged', service: 'app', detail: 'service app requests privileged mode.' },
+    ],
+    patch: [{ path: 'services.app.ports', from: ['8080:80'], to: ['80'] }],
+    diff: '= privileged kept as declared (app): service app requests privileged mode.',
+  };
+  return [
+    ['SELECT key FROM catalog_entry', options.entry ?? [{ key: 'D01-01' }]],
+    // Specific first: the read that answers the response also matches `FROM policy_exception pe`.
+    ['state, expires_at FROM policy_exception', options.live ?? []],
+    ['FROM source_resolution sr', options.evidence ?? []],
+    ['INSERT INTO policy_exception', options.created ?? [{ id: EXCEPTION_ID }]],
+    [
+      'FROM policy_exception pe',
+      options.response ?? [
+        {
+          ...exceptionRow({ state: 'pending', patch_diff: diff, expires_at: EXPIRY }),
+          requester_name: 'Rita Requester',
+          approver_name: null,
+        },
+      ],
+    ],
+  ];
+}
+
+describe('requestException', () => {
+  it('refuses a rule the policy does not evaluate, before touching the database', async () => {
+    const { db, service } = setup();
+    await expect(
+      service.requestException(
+        {
+          entryKey: 'D01-01',
+          rule: 'no-hosted-service' as never,
+          justification: JUSTIFICATION,
+          expiresAt: EXPIRY.toISOString(),
+        },
+        ACTOR,
+      ),
+    ).rejects.toMatchObject({ code: 'VALIDATION_FAILED', status: 422 });
+    expect(db.calls).toEqual([]);
+  });
+
+  it('refuses a justification shorter than the break-glass floor (FR-4.11)', async () => {
+    const { service } = setup(exceptionRequestRoutes());
+    await expect(
+      service.requestException(
+        {
+          entryKey: 'D01-01',
+          rule: 'privileged',
+          justification: 'too short',
+          expiresAt: EXPIRY.toISOString(),
+        },
+        ACTOR,
+      ),
+    ).rejects.toMatchObject({
+      code: 'VALIDATION_FAILED',
+      fieldErrors: [{ field: 'justification', code: 'minLength' }],
+    });
+  });
+
+  it('refuses an expiry in the past: an expired exception blocks the next deployment', async () => {
+    const { service } = setup(exceptionRequestRoutes());
+    await expect(
+      service.requestException(
+        {
+          entryKey: 'D01-01',
+          rule: 'privileged',
+          justification: JUSTIFICATION,
+          expiresAt: new Date(Date.now() - 1_000).toISOString(),
+        },
+        ACTOR,
+      ),
+    ).rejects.toMatchObject({
+      code: 'VALIDATION_FAILED',
+      fieldErrors: [{ field: 'expiresAt', code: 'past' }],
+    });
+  });
+
+  it('refuses a time box longer than the quarter ceiling', async () => {
+    const { service } = setup(exceptionRequestRoutes());
+    await expect(
+      service.requestException(
+        {
+          entryKey: 'D01-01',
+          rule: 'privileged',
+          justification: JUSTIFICATION,
+          expiresAt: new Date(Date.now() + 120 * 24 * 60 * 60 * 1_000).toISOString(),
+        },
+        ACTOR,
+      ),
+    ).rejects.toMatchObject({
+      code: 'VALIDATION_FAILED',
+      fieldErrors: [{ field: 'expiresAt', code: 'max' }],
+    });
+  });
+
+  it('refuses a product that does not exist', async () => {
+    const { service } = setup(exceptionRequestRoutes({ entry: [] }));
+    await expect(
+      service.requestException(
+        {
+          entryKey: 'D99-99',
+          rule: 'privileged',
+          justification: JUSTIFICATION,
+          expiresAt: EXPIRY.toISOString(),
+        },
+        ACTOR,
+      ),
+    ).rejects.toMatchObject({
+      code: 'VALIDATION_FAILED',
+      fieldErrors: [{ field: 'entryKey', code: 'unknown' }],
+    });
+  });
+
+  it('files the request with the deviation the platform observed, and audits it', async () => {
+    const { audit, db, service } = setup(
+      exceptionRequestRoutes({
+        evidence: [
+          {
+            id: EXCEPTION_ID,
+            policy_violations: [
+              {
+                rule: 'privileged',
+                service: 'app',
+                detail: 'service app requests privileged mode.',
+              },
+            ],
+            patch_diff: [{ path: 'services.app.ports', from: ['8080:80'], to: ['80'] }],
+          },
+        ],
+      }),
+    );
+
+    const exception = await service.requestException(
+      {
+        entryKey: 'D01-01',
+        rule: 'privileged',
+        justification: JUSTIFICATION,
+        expiresAt: EXPIRY.toISOString(),
+      },
+      ACTOR,
+    );
+
+    const inserted = paramsFor(db.calls, 'INSERT INTO policy_exception');
+    expect(inserted.slice(0, 3)).toEqual(['privileged', 'D01-01', JUSTIFICATION]);
+    // `approver` is NOT NULL and holds the creator until a decision overwrites it (migration 0006).
+    expect(inserted[3]).toBe(ACTOR);
+    const evidence = JSON.parse(String(inserted[5])) as Record<string, unknown>;
+    expect(evidence.requestedBy).toBe(ACTOR);
+    expect(evidence.sourceResolutionId).toBe(EXCEPTION_ID);
+    /*
+     * The diff is composed from the platform's record: the waived construct is left exactly as the
+     * upstream file declares it, and the substitutions the platform makes on its own copy are listed
+     * because the approver is approving the deployment, not just the rule name.
+     */
+    expect(evidence.diff).toBe(
+      '= privileged kept as declared (app): service app requests privileged mode.\n~ services.app.ports: ["8080:80"] → ["80"]',
+    );
+
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'policy_exception.requested',
+        targetId: EXCEPTION_ID,
+        detail: expect.objectContaining({
+          rule: 'privileged',
+          scope: 'D01-01',
+          resolutionId: EXCEPTION_ID,
+        }),
+      }),
+      db.client,
+    );
+    // Open requests are `requested` on the wire and have no approver yet.
+    expect(exception).toMatchObject({ state: 'requested', approver: null, scope: 'D01-01' });
+  });
+
+  it('says there was no observed deviation when the product was never refused', async () => {
+    const { db, service } = setup(exceptionRequestRoutes({ evidence: [] }));
+
+    await service.requestException(
+      {
+        entryKey: 'D01-01',
+        rule: 'privileged',
+        justification: JUSTIFICATION,
+        expiresAt: EXPIRY.toISOString(),
+      },
+      ACTOR,
+    );
+
+    const evidence = JSON.parse(
+      String(paramsFor(db.calls, 'INSERT INTO policy_exception')[5]),
+    ) as Record<string, unknown>;
+    expect(evidence.sourceResolutionId).toBeNull();
+    expect(evidence.diff).toContain('no deviation was observed');
+  });
+
+  it('refuses a second live exception for the same product and rule', async () => {
+    const { service } = setup(
+      exceptionRequestRoutes({
+        live: [{ id: EXCEPTION_ID, state: 'approved', expires_at: EXPIRY }],
+      }),
+    );
+
+    await expect(
+      service.requestException(
+        {
+          entryKey: 'D01-01',
+          rule: 'privileged',
+          justification: JUSTIFICATION,
+          expiresAt: EXPIRY.toISOString(),
+        },
+        ACTOR,
+      ),
+    ).rejects.toMatchObject({ code: 'STATE_CONFLICT', status: 409 });
   });
 });
 

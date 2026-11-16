@@ -146,8 +146,10 @@ export const BREAK_GLASS: BreakGlassSession[] = [
 export const POLICY_EXCEPTIONS: PolicyException[] = [
   {
     id: 'pe-104',
-    rule: 'Host-path bind mount',
-    scope: 'D04-01 WooCommerce — inst-shop',
+    rule: 'host_path_mount',
+    // The scope is the catalog entry key (NFR-4.15): the waiver is resolved by comparing it with the
+    // product being deployed, so a human label here would waive nothing.
+    scope: 'D04-01',
     justification:
       'The wp-content directory must stay on the host for the agency staging sync until the migration closes.',
     requester: 'Priya Raman',
@@ -155,20 +157,22 @@ export const POLICY_EXCEPTIONS: PolicyException[] = [
     state: 'approved',
     requestedAt: daysAgo(40),
     expiresAt: at(39 * 24 * 60),
-    patchDiff: '- /var/www/html/wp-content\n+ bind: /srv/agency/woocommerce/wp-content',
+    patchDiff:
+      '= host_path_mount kept as declared (wordpress): service wordpress binds a host path (/srv/agency/woocommerce/wp-content).\n~ services.wordpress.ports: ["8080:80"] → ["80"]',
   },
   {
     id: 'pe-105',
-    rule: 'Published port',
-    scope: 'D04-01 WooCommerce — inst-shop',
+    rule: 'unpinned_image',
+    scope: 'D04-01',
     justification:
-      'The payment provider sandbox calls back on a fixed host port for the migration window; the platform has no exemption for published ports.',
+      'The payment plugin ships only a floating tag while its vendor finishes the digest-pinned release.',
     requester: 'Priya Raman',
     approver: null,
     state: 'requested',
     requestedAt: at(-260),
     expiresAt: at(14 * 24 * 60),
-    patchDiff: '+ ports: ["8080:80"]',
+    patchDiff:
+      '= unpinned_image kept as declared (wordpress): stage wordpress builds from woo:latest.',
   },
 ];
 

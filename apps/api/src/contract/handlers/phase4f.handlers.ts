@@ -4,6 +4,7 @@ import type {
   MaintenanceWindowCreateRequest,
   MaintenanceWindowPatchRequest,
   PlatformRole,
+  PolicyExceptionRequest,
 } from '@seamnex/domain';
 import { operationKey, type ApiOperation } from '@seamnex/domain';
 import type { OperationGroup } from '../operation-handlers';
@@ -67,6 +68,21 @@ export class Phase4FHandlers implements OperationGroup {
       [
         key('POST', '/break-glass-sessions/:id/reveal'),
         async (input) => body(await this.governance.reveal(param(input, 'id'), actor(input))),
+      ],
+      [
+        /*
+         * FR-1.20 / NFR-4.15: the request half of the exception flow. The body names a product, a
+         * rule, a justification and an expiry; the deviation itself is derived from the recorded
+         * resolution, so nothing here is client-supplied evidence.
+         */
+        key('POST', '/admin/policy-exceptions'),
+        async (input) =>
+          body(
+            await this.governance.requestException(
+              input.body as PolicyExceptionRequest,
+              actor(input),
+            ),
+          ),
       ],
       [
         key('POST', '/admin/policy-exceptions/:id/:decision'),

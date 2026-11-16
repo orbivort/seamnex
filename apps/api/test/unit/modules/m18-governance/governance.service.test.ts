@@ -1041,7 +1041,9 @@ function exceptionRow(overrides: Row = {}): Row {
     approver: 'sub-requester',
     state: 'pending',
     created_at: new Date('2026-01-01T00:00:00.000Z'),
-    expires_at: new Date('2026-02-01T00:00:00.000Z'),
+    // Far enough out that the row is live whatever the day the suite runs: the mapper reports an
+    // approved row past its expiry as `expired`, so a fixed past date would make "approved" flaky.
+    expires_at: new Date('2029-01-01T00:00:00.000Z'),
     patch_diff: { requestedBy: 'sub-requester', diff: '--- a\n+++ b' },
     requester_name: null,
     approver_name: null,
@@ -1082,9 +1084,24 @@ describe('policyExceptions', () => {
       approver: null,
       state: 'requested',
       requestedAt: '2026-01-01T00:00:00.000Z',
-      expiresAt: '2026-02-01T00:00:00.000Z',
+      expiresAt: '2029-01-01T00:00:00.000Z',
       patchDiff: '--- a\n+++ b',
     });
+  });
+
+  it('reports an approved row whose time box has closed as expired (AC-33)', async () => {
+    const { service } = setup([
+      [
+        EXCEPTIONS_QUERY,
+        [exceptionRow({ state: 'approved', expires_at: new Date(Date.now() - 1_000) })],
+      ],
+    ]);
+
+    const [exception] = await service.policyExceptions();
+
+    // It waives nothing — the resolver refuses it — so calling it approved told an operator the rule
+    // was covered while the next deployment was already being blocked.
+    expect(exception?.state).toBe('expired');
   });
 
   it('names both parties once a decision exists, or falls back to the column', async () => {

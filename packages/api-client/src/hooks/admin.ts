@@ -1,6 +1,6 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { z } from 'zod';
-import type { AlertChannel } from '@seamnex/domain';
+import type { AlertChannel, PolicyExceptionRequest } from '@seamnex/domain';
 import {
   AccessRequestSchema,
   AlertChannelSchema,
@@ -189,6 +189,28 @@ export function useDecidePolicyException() {
       void client.invalidateQueries({ queryKey: queryKeys.policyExceptions });
       void client.invalidateQueries({ queryKey: queryKeys.audit });
       void client.invalidateQueries({ queryKey: queryKeys.instances });
+    },
+  });
+}
+
+/**
+ * FR-1.20 / NFR-4.15: filing the request half of the exception flow.
+ *
+ * The body carries the product, the rule, the justification and the expiry — never a diff. The
+ * deviation is derived from the platform's own refused resolution, so a caller cannot describe one.
+ */
+export function useRequestPolicyException() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (body: PolicyExceptionRequest) =>
+      request('/admin/policy-exceptions', {
+        schema: PolicyExceptionSchema,
+        method: 'POST',
+        body,
+      }),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.policyExceptions });
+      void client.invalidateQueries({ queryKey: queryKeys.audit });
     },
   });
 }
