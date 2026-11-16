@@ -42,12 +42,14 @@ function setup(routes: Parameters<typeof fakeDb>[0] = ROUTES) {
   const backups = { tickSchedules: vi.fn(async () => undefined) };
   const integration = { reconcileIdentityNetworks: vi.fn(async () => undefined) };
   const governance = { expireOverdueBreakGlass: vi.fn(async () => [] as { id: string }[]) };
+  const pipelines = { stepsFor: vi.fn(() => ['resolve', 'render', 'plan', 'apply', 'record']) };
 
   const service = new SchedulerService(
     db.pool,
     CONFIG,
     metrics as never,
     jobs as never,
+    pipelines as never,
     outbox as never,
     anchor as never,
     audit as never,

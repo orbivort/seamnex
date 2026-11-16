@@ -37,7 +37,13 @@ import {
   PRODUCT_ACCOUNT_SERVICE,
   type ProductAccountService,
 } from '../modules/m24-sign-in-relay/relay.contract';
+import {
+  ENVIRONMENT_DRIFT,
+  type EnvironmentDriftService,
+} from '../modules/m22-catalog-repository/environment-drift.contract';
+import { AppError } from '../common/problem/app-error';
 import { RunMirrorService } from '../modules/m13-workflow/run-mirror.service';
+import { PipelineRegistry } from './pipeline-registry';
 
 /**
  * The scheduler role (deliverable 1.4/1.5): the only place that runs repeatable platform work.
@@ -55,12 +61,17 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
   private lastNotificationAt = 0;
   private lastIdentityReconcileAt = 0;
   private lastRelaySweepAt = 0;
+  private lastDriftSweepAt = 0;
+  /** `instanceId → epoch ms` of the last repair request, so one drift cannot queue a loop of jobs. */
+  private readonly driftRepairs = new Map<string, number>();
 
   constructor(
     @Inject(PG_POOL) private readonly pool: Pool,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     @Inject(METRICS) private readonly metrics: Metrics,
     @Inject(JobService) private readonly jobs: JobService,
+    /** The stage list of each kind; a drift repair queues the same `reconfigure` an operator would. */
+    @Inject(PipelineRegistry) private readonly pipelines: PipelineRegistry,
     @Inject(OutboxService) private readonly outbox: OutboxService,
     @Inject(AuditAnchorJob) private readonly anchor: AuditAnchorJob,
     /**
@@ -114,6 +125,14 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
     @Optional()
     @Inject(RunMirrorService)
     private readonly runMirror?: RunMirrorService,
+    /**
+     * FR-1.29 / NFR-3.6. `drift_record` is M22's table, so the producer lives there and the cadence
+     * — and the decision to repair — lives here. Optional for the same reason as the others: a graph
+     * without the catalog repository still has jobs to schedule.
+     */
+    @Optional()
+    @Inject(ENVIRONMENT_DRIFT)
+    private readonly drift?: EnvironmentDriftService,
   ) {}
 
   /**
@@ -135,6 +154,7 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
       ['integration', this.integration],
       ['sign-in relay', this.relayAccounts],
       ['workflow mirror', this.runMirror],
+      ['environment drift', this.drift],
     ]
       .filter(([, dependency]) => dependency === undefined)
       .map(([name]) => name);
@@ -199,6 +219,7 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
       await this.tickBackupSchedules();
       await this.reconcileIdentityNetworks();
       await this.sweepRelayAccounts();
+      await this.reconcileDrift();
     } catch (error) {
       this.logger.error(
         { err: error instanceof Error ? error.message : String(error) },
@@ -329,6 +350,133 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
         { err: error instanceof Error ? error.message : String(error) },
         'sign-in relay account sweep failed',
       );
+    });
+  }
+
+  /**
+   * FR-1.29 / NFR-3.6 — observe, then repair only what the repository can repair.
+   *
+   * The pass records what the running containers actually carry, audits only what is *new* (a
+   * permanent drift must not write an audit row every interval), and repairs declarative drift in
+   * the one direction the state-authority rule allows:
+   *
+   *   - `repo_ahead` — the declaration moved after the last apply, so a `reconfigure` re-renders it
+   *     from the repository and the next scan proves the repair;
+   *   - `runtime_ahead` — someone changed the container outside the platform. Reverting that
+   *     silently would erase the only trace of the change, so the finding stays open for an
+   *     operator, which is what AC-43 requires ("reported as drift, not applied silently").
+   *
+   * Definition drift is repaired by re-committing the recorded projection; a tree that cannot be
+   * written keeps the flag and keeps blocking `start`.
+   */
+  private async reconcileDrift(): Promise<void> {
+    const drift = this.drift;
+    if (drift === undefined) return;
+    const now = Date.now();
+    if (now - this.lastDriftSweepAt < this.config.SEAMNEX_DRIFT_INTERVAL_MS) return;
+    this.lastDriftSweepAt = now;
+
+    for (const instanceId of await drift.scannable()) {
+      let result: Awaited<ReturnType<EnvironmentDriftService['scan']>>;
+      try {
+        result = await drift.scan(instanceId);
+      } catch (error) {
+        this.logger.warn(
+          { instanceId, err: error instanceof Error ? error.message : String(error) },
+          'drift scan failed; the instance keeps its previous findings',
+        );
+        continue;
+      }
+      if (!result.observed) continue;
+
+      if (result.created.length > 0) {
+        await this.appendDriftAudit('instance.drift.detected', instanceId, {
+          variables: result.created,
+        });
+      }
+      const repairable = result.detected.filter((finding) => finding.direction === 'repo_ahead');
+      if (repairable.length === 0) continue;
+      await this.requestDriftRepair(
+        instanceId,
+        repairable.map((finding) => finding.varName),
+      );
+    }
+
+    for (const instanceId of await drift.definitionDrift()) {
+      try {
+        const written = await drift.reconcileDefinition(instanceId, 'system');
+        if (written === null) continue;
+        await this.appendDriftAudit('instance.definition.reconciled', instanceId, {
+          path: written.path,
+          contentHash: written.contentHash,
+        });
+      } catch (error) {
+        this.logger.warn(
+          { instanceId, err: error instanceof Error ? error.message : String(error) },
+          'definition drift could not be reconciled; start keeps refusing until it is',
+        );
+      }
+    }
+  }
+
+  /**
+   * Queue the same `reconfigure` an operator would, from the registered stage list.
+   *
+   * `INSTANCE_BUSY` is expected, not exceptional: `deployment_job_one_active_per_instance` is the
+   * real guard against two repairs, and the cooldown keeps this pass from asking again immediately.
+   */
+  private async requestDriftRepair(
+    instanceId: string,
+    variables: readonly string[],
+  ): Promise<void> {
+    const last = this.driftRepairs.get(instanceId);
+    if (last !== undefined && Date.now() - last < this.config.SEAMNEX_DRIFT_REPAIR_COOLDOWN_MS) {
+      return;
+    }
+    const steps = this.pipelines.stepsFor('reconfigure');
+    if (steps.length === 0) return;
+
+    try {
+      const created = await this.jobs.create({
+        kind: 'reconfigure',
+        instanceId,
+        requestedBy: 'system',
+        payload: { action: 'reconfigure', reason: 'environment-drift', variables },
+        steps,
+      });
+      this.driftRepairs.set(instanceId, Date.now());
+      await this.appendDriftAudit('instance.drift.repair_requested', instanceId, {
+        jobId: created.job.id,
+        variables,
+      });
+      this.logger.log({ instanceId, jobId: created.job.id, variables }, 'drift repair queued');
+    } catch (error) {
+      if (error instanceof AppError && error.code === 'INSTANCE_BUSY') {
+        this.logger.debug({ instanceId }, 'drift repair skipped: another job holds the instance');
+        return;
+      }
+      this.logger.error(
+        { instanceId, err: error instanceof Error ? error.message : String(error) },
+        'drift repair could not be queued',
+      );
+    }
+  }
+
+  /** Drift evidence names variables, never values. */
+  private async appendDriftAudit(
+    action: string,
+    instanceId: string,
+    detail: Record<string, unknown>,
+  ): Promise<void> {
+    if (this.audit === undefined) return;
+    await this.audit.append({
+      action,
+      actorType: 'system',
+      actorId: 'm22-environment-drift',
+      targetType: 'instance',
+      targetId: instanceId,
+      outcome: 'success',
+      detail,
     });
   }
 

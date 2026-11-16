@@ -286,7 +286,9 @@ describe('RouteTableService dispatch', () => {
       requestDouble({ params: { id: 'i1', exportId: '20261116T103100Z-1a2b3c4d' } }),
     );
 
-    expect(reply.headers['content-disposition']).toBe('attachment; filename="x_Set-Cookie_sid_stolen"');
+    expect(reply.headers['content-disposition']).toBe(
+      'attachment; filename="x_Set-Cookie_sid_stolen"',
+    );
     expect(reply.headers['set-cookie']).toBeUndefined();
 
     await readAll(reply.sent[0]);

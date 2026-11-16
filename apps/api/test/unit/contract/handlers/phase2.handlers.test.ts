@@ -22,7 +22,7 @@ function services() {
       plan: vi.fn().mockResolvedValue({ diff: [] }),
       importEnv: vi.fn().mockResolvedValue({ imported: 2 }),
       profiles: vi.fn().mockResolvedValue([]),
-      instanceEnv: vi.fn().mockResolvedValue({ values: {} }),
+      instanceEnv: vi.fn().mockResolvedValue([]),
       updateInstanceEnv: vi.fn().mockResolvedValue({ diff: [] }),
     },
     executor: {
@@ -99,6 +99,14 @@ function services() {
     repository: {
       load: vi.fn().mockResolvedValue({ entries: [], envSchemas: [], revision: 'r1', invalid: [] }),
     },
+    // FR-1.29: the env screen's drift badge is the producer's open rows, not M03's proxy.
+    drift: {
+      scan: vi.fn().mockResolvedValue({ observed: true, detected: [], created: [], resolved: 0 }),
+      scannable: vi.fn().mockResolvedValue([]),
+      definitionDrift: vi.fn().mockResolvedValue([]),
+      openVarNames: vi.fn().mockResolvedValue(new Set<string>()),
+      reconcileDefinition: vi.fn().mockResolvedValue(null),
+    },
     // The relay's provisioning credential. Write-only by contract: both calls answer metadata.
     adminCredential: {
       status: vi.fn().mockResolvedValue({
@@ -152,6 +160,7 @@ beforeEach(() => {
     s.capacity as never,
     s.params as never,
     s.repository as never,
+    s.drift as never,
     s.adminCredential as never,
     s.accounts as never,
   ).handlers();
@@ -324,6 +333,25 @@ describe('instance handlers', () => {
   it('GET /instances/:id/plan honours an explicit action', async () => {
     await call('GET /instances/:id/plan', { params: { id: 'i1' }, query: { action: 'delete' } });
     expect(s.executor.plan).toHaveBeenCalledWith('i1', 'delete');
+  });
+
+  it('GET /instances/:id/env marks only the variables the producer has an open row for', async () => {
+    s.env.instanceEnv.mockResolvedValue([
+      { name: 'MAIL_HOST', drift: true },
+      { name: 'MAIL_PORT', drift: false },
+    ]);
+    s.drift.openVarNames.mockResolvedValue(new Set(['MAIL_PORT']));
+
+    const result = await call('GET /instances/:id/env', { params: { id: 'i1' } });
+
+    expect(s.drift.openVarNames).toHaveBeenCalledWith('i1');
+    expect(result).toEqual({
+      kind: 'body',
+      body: [
+        { name: 'MAIL_HOST', drift: false },
+        { name: 'MAIL_PORT', drift: true },
+      ],
+    });
   });
 });
 

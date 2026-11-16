@@ -1564,8 +1564,7 @@ export function buildOpenApiDocument(): OpenApiDocument {
       ...(operation.etag === true
         ? {
             ETag: {
-              description:
-                'Validator of this representation; replay it as `If-Match` on a write.',
+              description: 'Validator of this representation; replay it as `If-Match` on a write.',
               schema: { type: 'string' },
             },
           }

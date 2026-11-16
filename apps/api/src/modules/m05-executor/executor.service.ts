@@ -283,8 +283,7 @@ export class PostgresExecutorService implements ExecutorService {
     const records = await listExportRecords(
       exportsDirectory(this.config.SEAMNEX_INSTANCE_DATA_DIR, instanceId),
       {
-        onSkip: (fileName, reason) =>
-          this.logger.warn(`export ${fileName} skipped: ${reason}`),
+        onSkip: (fileName, reason) => this.logger.warn(`export ${fileName} skipped: ${reason}`),
       },
     );
     return records.map(toInstanceExport);
@@ -324,13 +323,20 @@ export class PostgresExecutorService implements ExecutorService {
    * unreachable the moment the instance is torn down would defeat the exit strategy it exists for.
    */
   private async assertInstanceExists(instanceId: string): Promise<void> {
-    const result = await this.pool.query<{ id: string }>(
-      `SELECT id FROM instance WHERE id = $1`,
-      [instanceId],
-    );
+    const result = await this.pool.query<{ id: string }>(`SELECT id FROM instance WHERE id = $1`, [
+      instanceId,
+    ]);
     if (result.rows[0] === undefined) throw notFound(instanceId);
   }
 
+  /**
+   * FR-1.29 — the environment drift of one instance.
+   *
+   * `scope = 'environment'` is part of the read, not a filter the screen applies: the panel is
+   * titled "Environment drift", the requirement is about the environment, and a definition-hash row
+   * shown there was labelled `varName: 'environment'` because nothing distinguished it. Definition
+   * drift keeps its own writer and its own audit trail; it is not an environment variable.
+   */
   async drift(instanceId: string): Promise<DriftRecord[]> {
     if (!isUuid(instanceId)) throw notFound(instanceId);
     const result = await this.pool.query<{
@@ -342,17 +348,17 @@ export class PostgresExecutorService implements ExecutorService {
       resolved_at: Date | null;
     }>(
       `SELECT id, detail, expected_hash, observed_hash, detected_at, resolved_at
-         FROM drift_record WHERE instance_id = $1 ORDER BY detected_at DESC`,
+         FROM drift_record
+        WHERE instance_id = $1 AND scope = 'environment'
+        ORDER BY detected_at DESC`,
       [instanceId],
     );
     return result.rows.map((row) => ({
       id: row.id,
-      varName: typeof row.detail.varName === 'string' ? row.detail.varName : 'environment',
+      varName: typeof row.detail.varName === 'string' ? row.detail.varName : 'unknown',
       declared: typeof row.detail.declared === 'string' ? row.detail.declared : row.expected_hash,
       observed: typeof row.detail.observed === 'string' ? row.detail.observed : row.observed_hash,
-      kind: (typeof row.detail.kind === 'string'
-        ? row.detail.kind
-        : 'mismatch') as DriftRecord['kind'],
+      kind: driftKind(row.detail.kind),
       detectedAt: row.detected_at.toISOString(),
       resolvedAt: row.resolved_at?.toISOString() ?? null,
     }));
@@ -533,6 +539,15 @@ function asEventModes(value: unknown): Instance['eventModes'] {
       interval === undefined ? { mode, label } : { mode, label, minimumIntervalMinutes: interval },
     ];
   });
+}
+
+/**
+ * `detail.kind` is JSON written by the producer, so it is narrowed rather than cast: a row whose
+ * kind is anything else would violate `DriftRecordSchema` on the client, and a contract violation
+ * surfaces as an empty panel, not as an error an operator can read.
+ */
+function driftKind(value: unknown): DriftRecord['kind'] {
+  return value === 'missing' || value === 'undeclared' || value === 'mismatch' ? value : 'mismatch';
 }
 
 function notFound(id: string): AppError {

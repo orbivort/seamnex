@@ -776,16 +776,16 @@ describe('export archive', () => {
 });
 
 describe('drift', () => {
-  it('projects a recorded drift with its declared and observed values', async () => {
+  it('projects an environment row with its declared and observed values', async () => {
     const { db, service } = setup([
       [
         'FROM drift_record',
         [
           {
             id: 'drift-1',
-            detail: { varName: 'DB_PASSWORD', declared: 'a', observed: 'b', kind: 'modified' },
-            expected_hash: 'h1',
-            observed_hash: 'h2',
+            detail: { varName: 'DB_PASSWORD', declared: 'a', observed: 'b', kind: 'mismatch' },
+            expected_hash: null,
+            observed_hash: null,
             detected_at: new Date('2026-01-05T00:00:00Z'),
             resolved_at: new Date('2026-01-06T00:00:00Z'),
           },
@@ -799,23 +799,26 @@ describe('drift', () => {
         varName: 'DB_PASSWORD',
         declared: 'a',
         observed: 'b',
-        kind: 'modified',
+        kind: 'mismatch',
         detectedAt: '2026-01-05T00:00:00.000Z',
         resolvedAt: '2026-01-06T00:00:00.000Z',
       },
     ]);
     expect(db.calls[0]?.params).toEqual([INSTANCE_ID]);
+    // FR-1.29 is an environment requirement; definition hashes are not environment variables and
+    // must not be relabelled as one.
+    expect(db.calls[0]?.sql).toContain(`scope = 'environment'`);
   });
 
-  it('falls back to the recorded hashes when the detail document is silent', async () => {
+  it('narrows a row whose kind is not part of the contract', async () => {
     const { service } = setup([
       [
         'FROM drift_record',
         [
           {
             id: 'drift-2',
-            detail: {},
-            expected_hash: 'h1',
+            detail: { varName: 'MAIL_HOST', kind: 'modified' },
+            expected_hash: null,
             observed_hash: null,
             detected_at: new Date('2026-01-05T00:00:00Z'),
             resolved_at: null,
@@ -827,8 +830,38 @@ describe('drift', () => {
     await expect(service.drift(INSTANCE_ID)).resolves.toEqual([
       {
         id: 'drift-2',
-        varName: 'environment',
-        declared: 'h1',
+        varName: 'MAIL_HOST',
+        declared: null,
+        observed: null,
+        kind: 'mismatch',
+        detectedAt: '2026-01-05T00:00:00.000Z',
+        resolvedAt: null,
+      },
+    ]);
+  });
+
+  it('never invents a variable name when the row has none', async () => {
+    const { service } = setup([
+      [
+        'FROM drift_record',
+        [
+          {
+            id: 'drift-3',
+            detail: {},
+            expected_hash: null,
+            observed_hash: null,
+            detected_at: new Date('2026-01-05T00:00:00Z'),
+            resolved_at: null,
+          },
+        ],
+      ],
+    ]);
+
+    await expect(service.drift(INSTANCE_ID)).resolves.toEqual([
+      {
+        id: 'drift-3',
+        varName: 'unknown',
+        declared: null,
         observed: null,
         kind: 'mismatch',
         detectedAt: '2026-01-05T00:00:00.000Z',

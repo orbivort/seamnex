@@ -1997,7 +1997,12 @@ describe('export', () => {
             source: 'instance',
             secret_ref: null,
           },
-          { var_name: 'SMTP_PASSWORD', value_enc: null, source: 'secret', secret_ref: 'secret://crm/smtp' },
+          {
+            var_name: 'SMTP_PASSWORD',
+            value_enc: null,
+            source: 'secret',
+            secret_ref: 'secret://crm/smtp',
+          },
           // An unset non-secret variable is not a credential: it must not be reported as one.
           { var_name: 'SMTP_USERNAME', value_enc: null, source: 'instance', secret_ref: null },
         ],
@@ -2049,9 +2054,9 @@ describe('export', () => {
     expect(env.secretNames).toEqual(['SMTP_PASSWORD']);
 
     // The staging tree held a plaintext copy of the database; the archive is the artefact.
-    expect(readdirSync(join(DATA_DIR, INSTANCE_ID, 'exports')).some((n) => n.startsWith('.staging-'))).toBe(
-      false,
-    );
+    expect(
+      readdirSync(join(DATA_DIR, INSTANCE_ID, 'exports')).some((n) => n.startsWith('.staging-')),
+    ).toBe(false);
 
     // AC-20 evidence: the audit row names the artefact a reviewer can go and fetch.
     expect(h.audit.append).toHaveBeenCalledWith(
@@ -2125,9 +2130,7 @@ describe('export', () => {
     const { sidecar } = exportFiles();
     expect(sidecar.includes).not.toContain('volumes');
     expect(sidecar.excluded).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ item: 'volumes/seamnex-crm-db-data' }),
-      ]),
+      expect.arrayContaining([expect.objectContaining({ item: 'volumes/seamnex-crm-db-data' })]),
     );
     expect(context.log).toHaveBeenCalledWith(
       'system',

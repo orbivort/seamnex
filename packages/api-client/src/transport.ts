@@ -45,7 +45,14 @@ export function createFetchTransport(options: FetchTransportOptions = {}): Trans
     headers,
   } = options;
 
-  return async ({ path, method, body, signal, headers: perRequest, timeoutMs: requestedTimeoutMs }) => {
+  return async ({
+    path,
+    method,
+    body,
+    signal,
+    headers: perRequest,
+    timeoutMs: requestedTimeoutMs,
+  }) => {
     const limitMs = requestedTimeoutMs ?? timeoutMs;
     const controller = new AbortController();
     const timer = setTimeout(() => {

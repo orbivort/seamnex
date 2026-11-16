@@ -541,6 +541,27 @@ const EnvironmentSchema = z
       .max(3_600_000)
       .default(300_000),
     /**
+     * FR-1.29 / NFR-3.6 — how often the drift pass observes running instances.
+     *
+     * Five minutes is a real cost (one container list plus an inspect per container per instance),
+     * so the floor is 30 s and the ceiling an hour. It is not a backup or a restore: a longer
+     * interval only delays the report, and the pass never stops an instance.
+     */
+    SEAMNEX_DRIFT_INTERVAL_MS: z.coerce.number().int().min(30_000).max(3_600_000).default(300_000),
+    /**
+     * How long one instance is left alone after a drift repair was requested.
+     *
+     * A reconfigure takes minutes. Without a cooldown every pass would queue another repair for the
+     * same instance, turning one drifted variable into a loop of container recreations; the active
+     * job constraint is the second line of defence, not the first.
+     */
+    SEAMNEX_DRIFT_REPAIR_COOLDOWN_MS: z.coerce
+      .number()
+      .int()
+      .min(60_000)
+      .max(86_400_000)
+      .default(3_600_000),
+    /**
      * An explicit container to join to an instance network before the first product call (the product
      * is only reachable as `http://<slug>:<port>` from that network).
      *

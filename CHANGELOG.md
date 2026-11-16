@@ -16,6 +16,24 @@ the same number through every manifest and the link definitions at the foot of t
 
 ### Added
 
+- **Environment drift is observed, and the declarative half of it is repaired** (`FR-1.29`, `FR-1.35`,
+  `NFR-3.6`, `AC-43`) — the drift endpoint, schema and console panel were complete while nothing
+  wrote a per-variable row, so the panel could only ever answer "no drift". M22 now compares every
+  running container's `Config.Env` against the declared environment and the applied render set, and
+  records one open row per drifted variable — missing, mismatched, or present but undeclared within
+  the product's own prefix — with the direction derived from that comparison (`repo_ahead` when the
+  declaration moved after apply, `runtime_ahead` when the container did, `unknown` when there is no
+  baseline) instead of a constant. Secrets are compared by presence only and recorded as
+  `<secret>`; a variable that stops drifting has its row closed, so the panel reflects the present. A
+  scheduler pass (`SEAMNEX_DRIFT_INTERVAL_MS`, 5 min) audits new findings and queues the instance's
+  own `reconfigure` for `repo_ahead` only, under a per-instance cooldown, while `runtime_ahead` stays
+  open for an operator because silently reverting it would erase the only trace of the change. The
+  same pass re-commits `instances/<slug>/instance.yaml` from the recorded projection when the file
+  drifted, which clears the flag that otherwise blocked `start` until the control plane restarted. An
+  instance whose containers cannot be inspected is reported as unobserved, never as clean. The
+  environment table's per-variable drift badge now reflects the open rows instead of a proxy, and the
+  drift panel no longer shows definition hashes relabelled as an "environment" variable
+  (`ADR-BE-28`; no route, contract or schema change).
 - **A full data export is an archive, not a description of one** (`FR-1.13`, `AC-20`, `NFR-6.3`) —
   the `export` action now dumps every database service in plain SQL (readable and loadable without
   this platform's tooling), archives every registered data volume, copies the applied render set and
@@ -26,7 +44,7 @@ the same number through every manifest and the link definitions at the foot of t
   database that cannot be dumped because the instance is not running, fails the job before the first
   helper runs and leaves no artefact, and `includes`/`excluded` are computed from what was written.
   Two reads make the archive reachable — `GET /instances/:id/exports` and `GET
-  /instances/:id/exports/:exportId/archive`, both `instance.lifecycle` (R1, the same capability that
+/instances/:id/exports/:exportId/archive`, both `instance.lifecycle` (R1, the same capability that
   creates it) — with the archive streamed under `Content-Disposition`, the manifest's byte count,
   `no-store`, and an `instance.export.downloaded` audit row; the console gained an Exports tab
   listing each archive with what it holds, what it leaves out and its checksum. The engine, dump and

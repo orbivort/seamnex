@@ -155,7 +155,8 @@ export function openInstanceExport(
   });
 }
 
-export function useInstancePlan(id: string, action: string | null) {  return useQuery({
+export function useInstancePlan(id: string, action: string | null) {
+  return useQuery({
     queryKey: [...queryKeys.instance(id), 'plan', action] as const,
     queryFn: ({ signal }) =>
       request(`/instances/${id}/plan?action=${action ?? 'upgrade'}`, {

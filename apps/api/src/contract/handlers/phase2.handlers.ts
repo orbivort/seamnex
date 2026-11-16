@@ -63,6 +63,10 @@ import {
   CATALOG_REPOSITORY,
   type CatalogRepositoryService,
 } from '../../modules/m22-catalog-repository/catalog-repo.contract';
+import {
+  ENVIRONMENT_DRIFT,
+  type EnvironmentDriftService,
+} from '../../modules/m22-catalog-repository/environment-drift.contract';
 import type { IntegrationMetadataPatch } from '../../modules/m01-catalog/catalog.contract';
 import { AppError } from '../../common/problem/app-error';
 
@@ -95,6 +99,7 @@ export class Phase2Handlers implements OperationGroup {
     @Inject(CAPACITY_SERVICE) private readonly capacity: CapacityService,
     @Inject(InstanceParamsService) private readonly params: InstanceParamsService,
     @Inject(CATALOG_REPOSITORY) private readonly repository: CatalogRepositoryService,
+    @Inject(ENVIRONMENT_DRIFT) private readonly drift: EnvironmentDriftService,
     @Inject(ADMIN_CREDENTIAL_SERVICE) private readonly adminCredential: AdminCredentialService,
     @Inject(PRODUCT_ACCOUNT_SERVICE) private readonly accounts: ProductAccountService,
   ) {}
@@ -275,7 +280,21 @@ export class Phase2Handlers implements OperationGroup {
       ],
       [
         key('GET', '/instances/:id/env'),
-        async (input) => body(await this.env.instanceEnv(param(input, 'id'))),
+        /**
+         * FR-1.29 — the per-variable badge is the open drift row, not a proxy.
+         *
+         * M03 owns the resolved value and M22 owns the drift rows, so the composition belongs here:
+         * teaching M03 to read `drift_record` would give one table two readers across a module edge
+         * for a boolean. The overlay only *narrows* what M03 returns — no value is recomputed.
+         */
+        async (input) => {
+          const instanceId = param(input, 'id');
+          const [values, drifted] = await Promise.all([
+            this.env.instanceEnv(instanceId),
+            this.drift.openVarNames(instanceId),
+          ]);
+          return body(values.map((value) => ({ ...value, drift: drifted.has(value.name) })));
+        },
       ],
       [
         key('PUT', '/instances/:id/env'),

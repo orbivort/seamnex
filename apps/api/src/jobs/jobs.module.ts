@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { IntegrationModule } from '../modules/m07-integration/integration.module';
 import { GovernanceModule } from '../modules/m18-governance/governance.module';
+import { CatalogRepositoryModule } from '../modules/m22-catalog-repository/catalog-repo.module';
 import { RelayModule } from '../modules/m24-sign-in-relay/relay.module';
 import { WorkflowModule } from '../modules/m13-workflow/workflow.module';
 import { JobService } from './job.service';
@@ -28,7 +29,18 @@ import { SyntheticPipeline } from './synthetic-pipeline';
   // table and the statement, so the scheduler calls `GOVERNANCE_WRITES` instead of UPDATE-ing it.
   // `WorkflowModule` is imported for the execution mirror (ADR-BE-12 D9): the scheduler owns the
   // cadence, the workflow module owns the n8n client and the run rows it settles.
-  imports: [IntegrationModule, GovernanceModule, RelayModule, WorkflowModule],
+  //
+  // `CatalogRepositoryModule` is imported for the drift pass only (FR-1.29 / NFR-3.6). It supplies
+  // `ENVIRONMENT_DRIFT`, because `drift_record` is M22's table; `ExecutorModule` is deliberately not
+  // imported — it imports this module, and the repair queues a job through `JobService` instead of
+  // calling the lifecycle service.
+  imports: [
+    IntegrationModule,
+    GovernanceModule,
+    CatalogRepositoryModule,
+    RelayModule,
+    WorkflowModule,
+  ],
   providers: [
     JobService,
     JobQueryService,

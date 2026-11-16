@@ -46,7 +46,11 @@ export type ExportManifest = {
   /** What was deliberately left out, and why. Empty is a real answer. */
   readonly excluded: readonly { readonly item: string; readonly reason: string }[];
   /** Every archived file with its digest; `manifest.json` itself is the only one absent. */
-  readonly files: readonly { readonly path: string; readonly sha256: string; readonly bytes: number }[];
+  readonly files: readonly {
+    readonly path: string;
+    readonly sha256: string;
+    readonly bytes: number;
+  }[];
   /** Sum of `files[].bytes`: the uncompressed size of what the archive holds. */
   readonly totalBytes: number;
 };
@@ -96,7 +100,11 @@ export function assertExportId(value: string): string {
       status: 422,
       detail: `"${value}" is not an export id.`,
       fieldErrors: [
-        { field: 'exportId', code: 'format', message: 'Expected an export id such as 20261116T103100Z-1a2b3c4d.' },
+        {
+          field: 'exportId',
+          code: 'format',
+          message: 'Expected an export id such as 20261116T103100Z-1a2b3c4d.',
+        },
       ],
       remediation: 'Read the export list and use the id it reports; nothing was read.',
     });
@@ -134,7 +142,10 @@ export function writeExportRecord(directory: string, record: ExportRecord): void
  */
 export async function listExportRecords(
   directory: string,
-  options: { readonly limit?: number; readonly onSkip?: (fileName: string, reason: string) => void } = {},
+  options: {
+    readonly limit?: number;
+    readonly onSkip?: (fileName: string, reason: string) => void;
+  } = {},
 ): Promise<ExportRecord[]> {
   const limit = options.limit ?? EXPORT_LIST_LIMIT;
   let entries: string[];
@@ -217,7 +228,8 @@ function parseRecord(value: unknown, exportId: string): ExportRecord | null {
   const record = value as Partial<ExportRecord>;
   if (record.version !== 1 || record.exportId !== exportId) return null;
   if (typeof record.exportedAt !== 'string') return null;
-  if (typeof record.instance?.id !== 'string' || typeof record.instance?.slug !== 'string') return null;
+  if (typeof record.instance?.id !== 'string' || typeof record.instance?.slug !== 'string')
+    return null;
   if (!Array.isArray(record.includes) || !Array.isArray(record.excluded)) return null;
   if (!Array.isArray(record.files) || typeof record.totalBytes !== 'number') return null;
   const archive = record.archive;

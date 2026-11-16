@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeDb } from '../../support/fakes';
 import type { AppConfig } from '../../../src/config/config';
+import { AppError } from '../../../src/common/problem/app-error';
 import { SchedulerService } from '../../../src/jobs/scheduler.service';
 
 /**
@@ -16,6 +17,8 @@ const CONFIG = {
   SEAMNEX_IDP_RECONCILE_INTERVAL_MS: 600_000,
   SEAMNEX_RELAY_SWEEP_INTERVAL_MS: 3_600_000,
   SEAMNEX_JOB_LOG_RETENTION_DAYS: 30,
+  SEAMNEX_DRIFT_INTERVAL_MS: 300_000,
+  SEAMNEX_DRIFT_REPAIR_COOLDOWN_MS: 3_600_000,
 } as unknown as AppConfig;
 
 function setup(options: { omit?: readonly string[]; routes?: Parameters<typeof fakeDb>[0] } = {}) {
@@ -30,6 +33,7 @@ function setup(options: { omit?: readonly string[]; routes?: Parameters<typeof f
   const jobs = {
     redispatchQueued: vi.fn(async () => 0),
     reapIdempotencyKeys: vi.fn(async () => 0),
+    create: vi.fn(async () => ({ job: { id: 'job-drift-1' }, created: true })),
   };
   const outbox = { dispatchBatch: vi.fn(async (): Promise<void> => undefined) };
   const anchor = { run: vi.fn(async () => undefined) };
@@ -48,12 +52,38 @@ function setup(options: { omit?: readonly string[]; routes?: Parameters<typeof f
     ? undefined
     : { expireOverdueBreakGlass: vi.fn(async () => [] as { id: string }[]) };
   const relayAccounts = omit.has('relay') ? undefined : { sweep: vi.fn(async () => undefined) };
+  const drift = omit.has('drift')
+    ? undefined
+    : {
+        scan: vi.fn(
+          async (): Promise<{
+            observed: boolean;
+            detected: {
+              instanceId: string;
+              varName: string;
+              kind: 'missing' | 'undeclared' | 'mismatch';
+              direction: 'repo_ahead' | 'runtime_ahead' | 'unknown';
+            }[];
+            created: string[];
+            resolved: number;
+          }> => ({ observed: true, detected: [], created: [], resolved: 0 }),
+        ),
+        scannable: vi.fn(async (): Promise<string[]> => []),
+        definitionDrift: vi.fn(async (): Promise<string[]> => []),
+        openVarNames: vi.fn(async () => new Set<string>()),
+        reconcileDefinition: vi.fn(
+          async (): Promise<{ path: string; contentHash: string } | null> => null,
+        ),
+      };
+  // The repair queues the same stage list an operator's reconfigure uses.
+  const pipelines = { stepsFor: vi.fn(() => ['resolve', 'render', 'plan', 'apply', 'record']) };
 
   const service = new SchedulerService(
     db.pool,
     CONFIG,
     metrics as never,
     jobs as never,
+    pipelines as never,
     outbox as never,
     anchor as never,
     audit as never,
@@ -62,6 +92,8 @@ function setup(options: { omit?: readonly string[]; routes?: Parameters<typeof f
     integration as never,
     governance as never,
     relayAccounts as never,
+    undefined,
+    drift as never,
   );
   return {
     db,
@@ -74,6 +106,8 @@ function setup(options: { omit?: readonly string[]; routes?: Parameters<typeof f
     integration,
     governance,
     relayAccounts,
+    drift,
+    pipelines,
     metrics,
     set,
     unsent,
@@ -474,5 +508,273 @@ describe('the relay account sweep', () => {
     await service.tick();
 
     expect(relayAccounts).toBeUndefined();
+  });
+});
+
+describe('drift pass', () => {
+  const ROUTES: Parameters<typeof fakeDb>[0] = [
+    ['seamnex_ensure_partition', []],
+    ['FROM pg_inherits', []],
+    ['GROUP BY state', []],
+  ];
+
+  const finding = (direction: 'repo_ahead' | 'runtime_ahead' | 'unknown') => ({
+    instanceId: 'inst-1',
+    varName: 'MAIL_HOST',
+    kind: 'mismatch' as const,
+    direction,
+  });
+
+  it('runs on its own cadence rather than on every pass', async () => {
+    const { drift, service } = setup({ routes: ROUTES });
+
+    await service.tick();
+    await service.tick();
+    expect(drift?.scannable).toHaveBeenCalledOnce();
+
+    vi.setSystemTime(new Date('2026-03-04T09:05:00.000Z'));
+    await service.tick();
+    expect(drift?.scannable).toHaveBeenCalledTimes(2);
+  });
+
+  it('audits a new finding and queues the reconfigure the repository can repair', async () => {
+    const { audit, drift, jobs, service } = setup({ routes: ROUTES });
+    drift?.scannable.mockResolvedValue(['inst-1']);
+    drift?.scan.mockResolvedValue({
+      observed: true,
+      detected: [finding('repo_ahead')],
+      created: ['MAIL_HOST'],
+      resolved: 0,
+    });
+
+    await service.tick();
+
+    expect(audit?.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'instance.drift.detected',
+        targetId: 'inst-1',
+        detail: { variables: ['MAIL_HOST'] },
+      }),
+    );
+    expect(jobs.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'reconfigure',
+        instanceId: 'inst-1',
+        requestedBy: 'system',
+        payload: { action: 'reconfigure', reason: 'environment-drift', variables: ['MAIL_HOST'] },
+        steps: ['resolve', 'render', 'plan', 'apply', 'record'],
+      }),
+    );
+    expect(audit?.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'instance.drift.repair_requested',
+        detail: { jobId: 'job-drift-1', variables: ['MAIL_HOST'] },
+      }),
+    );
+  });
+
+  it('records a runtime-side change without reverting it', async () => {
+    const { audit, drift, jobs, service } = setup({ routes: ROUTES });
+    drift?.scannable.mockResolvedValue(['inst-1']);
+    drift?.scan.mockResolvedValue({
+      observed: true,
+      detected: [finding('runtime_ahead')],
+      created: ['MAIL_HOST'],
+      resolved: 0,
+    });
+
+    await service.tick();
+
+    expect(jobs.create).not.toHaveBeenCalled();
+    expect(audit?.append).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'instance.drift.detected' }),
+    );
+  });
+
+  it('repairs one instance at most once per cooldown', async () => {
+    const { drift, jobs, service } = setup({ routes: ROUTES });
+    drift?.scannable.mockResolvedValue(['inst-1']);
+    drift?.scan.mockResolvedValue({
+      observed: true,
+      detected: [finding('repo_ahead')],
+      created: [],
+      resolved: 0,
+    });
+
+    await service.tick();
+    vi.setSystemTime(new Date('2026-03-04T09:05:00.000Z'));
+    await service.tick();
+
+    expect(jobs.create).toHaveBeenCalledOnce();
+  });
+
+  it('treats a busy instance as expected and records no repair', async () => {
+    const { audit, drift, jobs, service } = setup({ routes: ROUTES });
+    drift?.scannable.mockResolvedValue(['inst-1']);
+    drift?.scan.mockResolvedValue({
+      observed: true,
+      detected: [finding('repo_ahead')],
+      created: [],
+      resolved: 0,
+    });
+    jobs.create.mockRejectedValueOnce(
+      new AppError({ code: 'INSTANCE_BUSY', status: 409, detail: 'busy' }),
+    );
+
+    await expect(service.tick()).resolves.toBeUndefined();
+
+    expect(audit?.append).not.toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'instance.drift.repair_requested' }),
+    );
+  });
+
+  it('re-commits definition drift and audits the repair', async () => {
+    const { audit, drift, service } = setup({ routes: ROUTES });
+    drift?.definitionDrift.mockResolvedValue(['inst-2']);
+    drift?.reconcileDefinition.mockResolvedValue({
+      path: 'instances/shop/instance.yaml',
+      contentHash: 'abc',
+    });
+
+    await service.tick();
+
+    expect(drift?.reconcileDefinition).toHaveBeenCalledWith('inst-2', 'system');
+    expect(audit?.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'instance.definition.reconciled',
+        targetId: 'inst-2',
+        detail: { path: 'instances/shop/instance.yaml', contentHash: 'abc' },
+      }),
+    );
+  });
+
+  it('keeps the definition flag when the repair fails', async () => {
+    const { audit, drift, service } = setup({ routes: ROUTES });
+    drift?.definitionDrift.mockResolvedValue(['inst-2']);
+    drift?.reconcileDefinition.mockRejectedValueOnce(new Error('read-only file system'));
+
+    await expect(service.tick()).resolves.toBeUndefined();
+
+    expect(audit?.append).not.toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'instance.definition.reconciled' }),
+    );
+  });
+
+  it('skips an instance it could not observe', async () => {
+    const { audit, drift, jobs, service } = setup({ routes: ROUTES });
+    drift?.scannable.mockResolvedValue(['inst-1']);
+    drift?.scan.mockResolvedValue({ observed: false, detected: [], created: [], resolved: 0 });
+
+    await service.tick();
+
+    expect(jobs.create).not.toHaveBeenCalled();
+    expect(audit?.append).not.toHaveBeenCalled();
+  });
+
+  it('keeps a failing scan out of the pass', async () => {
+    const { drift, service } = setup({ routes: ROUTES });
+    drift?.scannable.mockResolvedValue(['inst-1']);
+    drift?.scan.mockRejectedValueOnce(new Error('database down'));
+
+    await expect(service.tick()).resolves.toBeUndefined();
+  });
+
+  it('keeps a scan failure that arrives as a string out of the pass', async () => {
+    const { drift, service } = setup({ routes: ROUTES });
+    drift?.scannable.mockResolvedValue(['inst-1']);
+    drift?.scan.mockRejectedValueOnce('driver closed the socket');
+
+    await expect(service.tick()).resolves.toBeUndefined();
+  });
+
+  it('keeps a definition repair failure that arrives as a string out of the pass', async () => {
+    const { drift, service } = setup({ routes: ROUTES });
+    drift?.definitionDrift.mockResolvedValue(['inst-2']);
+    drift?.reconcileDefinition.mockRejectedValueOnce('read-only file system');
+
+    await expect(service.tick()).resolves.toBeUndefined();
+  });
+
+  it('keeps a queue failure that arrives as a string inside the pass', async () => {
+    const { drift, jobs, service } = setup({ routes: ROUTES });
+    drift?.scannable.mockResolvedValue(['inst-1']);
+    drift?.scan.mockResolvedValue({
+      observed: true,
+      detected: [finding('repo_ahead')],
+      created: [],
+      resolved: 0,
+    });
+    jobs.create.mockRejectedValueOnce('pool closed');
+
+    await expect(service.tick()).resolves.toBeUndefined();
+  });
+
+  it('is skipped when the module is absent', async () => {
+    const { drift, service } = setup({ omit: ['drift'], routes: ROUTES });
+
+    await service.tick();
+
+    expect(drift).toBeUndefined();
+  });
+
+  it('works without an audit chain to write to', async () => {
+    const { drift, jobs, service } = setup({ omit: ['audit'], routes: ROUTES });
+    drift?.scannable.mockResolvedValue(['inst-1']);
+    drift?.scan.mockResolvedValue({
+      observed: true,
+      detected: [finding('repo_ahead')],
+      created: ['MAIL_HOST'],
+      resolved: 0,
+    });
+
+    await service.tick();
+
+    expect(jobs.create).toHaveBeenCalledOnce();
+  });
+
+  it('leaves the definition alone when the instance stopped carrying the flag', async () => {
+    const { audit, drift, service } = setup({ routes: ROUTES });
+    drift?.definitionDrift.mockResolvedValue(['inst-2']);
+    drift?.reconcileDefinition.mockResolvedValue(null);
+
+    await service.tick();
+
+    expect(audit?.append).not.toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'instance.definition.reconciled' }),
+    );
+  });
+
+  it('queues nothing when no pipeline registers the reconfigure stages', async () => {
+    const { drift, jobs, pipelines, service } = setup({ routes: ROUTES });
+    drift?.scannable.mockResolvedValue(['inst-1']);
+    drift?.scan.mockResolvedValue({
+      observed: true,
+      detected: [finding('repo_ahead')],
+      created: [],
+      resolved: 0,
+    });
+    pipelines.stepsFor.mockReturnValue([]);
+
+    await service.tick();
+
+    expect(jobs.create).not.toHaveBeenCalled();
+  });
+
+  it('keeps an unexpected queue failure inside the pass', async () => {
+    const { audit, drift, jobs, service } = setup({ routes: ROUTES });
+    drift?.scannable.mockResolvedValue(['inst-1']);
+    drift?.scan.mockResolvedValue({
+      observed: true,
+      detected: [finding('repo_ahead')],
+      created: [],
+      resolved: 0,
+    });
+    jobs.create.mockRejectedValueOnce(new Error('pool exhausted'));
+
+    await expect(service.tick()).resolves.toBeUndefined();
+
+    expect(audit?.append).not.toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'instance.drift.repair_requested' }),
+    );
   });
 });

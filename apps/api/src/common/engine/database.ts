@@ -92,8 +92,7 @@ export function connectionEnvFrom(
   for (const row of rows) {
     const value = row.value_enc?.toString('utf8') ?? '';
     if (row.var_name === 'DATABASE_URL' && value.length > 0) env.PGURL = value;
-    if (engine !== 'postgres' && /^MYSQL_|^MARIADB_/.test(row.var_name))
-      env[row.var_name] = value;
+    if (engine !== 'postgres' && /^MYSQL_|^MARIADB_/.test(row.var_name)) env[row.var_name] = value;
   }
   if (engine === 'postgres' && env.PGURL === undefined) {
     // The catalog's own convention for a product database reached from its compose network: the

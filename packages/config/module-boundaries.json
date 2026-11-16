@@ -308,7 +308,7 @@
       "name": "Catalogue Repository Adapter",
       "dir": "m22-catalog-repository",
       "owns": ["catalog_commit", "drift_record", "instance_param"],
-      "mayImport": ["M01"],
+      "mayImport": ["M01", "M03"],
       "reads": ["instance", "scaffold_artefact", "instance_env_value"]
     },
     {

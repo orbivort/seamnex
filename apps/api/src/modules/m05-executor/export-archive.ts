@@ -1,7 +1,12 @@
 import { cpSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import type { ExecResult } from '../../common/exec/exec';
-import { connectionEnvFrom, dumpCommand, dumpExtension, engineOf } from '../../common/engine/database';
+import {
+  connectionEnvFrom,
+  dumpCommand,
+  dumpExtension,
+  engineOf,
+} from '../../common/engine/database';
 import { ensureDir, isFile, removeTree, sha256File, writeFileAtomic } from '../../common/fs/files';
 import { dockerMountSource } from '../../common/docker/mount';
 import { instanceNetwork } from '../../common/docker/naming';
@@ -103,7 +108,10 @@ export async function writeExportArchive(
   const stage = join(directory, `.staging-${exportId}`);
   ensureDir(stage);
 
-  const log = async (line: string, stream: 'stdout' | 'system' | 'stderr' = 'stdout'): Promise<void> => {
+  const log = async (
+    line: string,
+    stream: 'stdout' | 'system' | 'stderr' = 'stdout',
+  ): Promise<void> => {
     await options.log?.(stream, line);
   };
 
@@ -128,7 +136,8 @@ export async function writeExportArchive(
     if (subject.renderSet !== null && existsSync(subject.renderSet.directory)) {
       const target = join(stage, 'render');
       cpSync(subject.renderSet.directory, target, { recursive: true });
-      for (const relative of listFiles(target)) record(`render/${relative}`, join(target, relative));
+      for (const relative of listFiles(target))
+        record(`render/${relative}`, join(target, relative));
       includes.push('definition');
     } else {
       excluded.push({
@@ -198,25 +207,31 @@ export async function writeExportArchive(
     };
     const manifestFile = join(stage, 'manifest.json');
     writeFileAtomic(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`);
-    await log(`manifest written: ${files.length} file(s), ${manifest.totalBytes} bytes uncompressed`);
+    await log(
+      `manifest written: ${files.length} file(s), ${manifest.totalBytes} bytes uncompressed`,
+    );
 
     // ---- one archive ---------------------------------------------------------------------------
     const fileName = archiveFileName(exportId);
-    await runHelper(options, [
-      'run',
-      '--rm',
-      '-v',
-      `${mountSource(options, stage)}:/src:ro`,
-      '-v',
-      `${mountSource(options, directory)}:/out`,
-      HELPER_IMAGE,
-      'tar',
-      '-czf',
-      `/out/${fileName}`,
-      '-C',
-      '/src',
-      '.',
-    ], ARCHIVE_TIMEOUT_MS);
+    await runHelper(
+      options,
+      [
+        'run',
+        '--rm',
+        '-v',
+        `${mountSource(options, stage)}:/src:ro`,
+        '-v',
+        `${mountSource(options, directory)}:/out`,
+        HELPER_IMAGE,
+        'tar',
+        '-czf',
+        `/out/${fileName}`,
+        '-C',
+        '/src',
+        '.',
+      ],
+      ARCHIVE_TIMEOUT_MS,
+    );
 
     const archive = join(directory, fileName);
     const bytes = statSync(archive).size;
@@ -281,7 +296,9 @@ async function dumpDatabases(
     }
     record(`database/${name}.${dumpExtension('plain')}`, file);
     written += 1;
-    await log(`${service.service}: ${service.engine} dump written (${basename(file)}, export ${exportId})`);
+    await log(
+      `${service.service}: ${service.engine} dump written (${basename(file)}, export ${exportId})`,
+    );
   }
   return written;
 }
@@ -297,7 +314,8 @@ async function archiveVolumes(
   if (subject.volumes.length === 0) {
     excluded.push({
       item: 'volumes',
-      reason: 'the applied definition declares no named data volume, so there is no file data to capture',
+      reason:
+        'the applied definition declares no named data volume, so there is no file data to capture',
     });
     return 0;
   }
@@ -314,7 +332,10 @@ async function archiveVolumes(
         item: `volumes/${volume}`,
         reason: 'the daemon no longer holds this volume, so it contributed no data',
       });
-      await log(`volume ${volume} is registered but absent from the daemon; not captured`, 'system');
+      await log(
+        `volume ${volume} is registered but absent from the daemon; not captured`,
+        'system',
+      );
       continue;
     }
     const file = `${safeName(volume)}.tar.gz`;
@@ -370,7 +391,9 @@ function listFiles(root: string): string[] {
 }
 
 function safeName(value: string): string {
-  return SAFE_NAME.test(value) && !value.includes('..') ? value : value.replace(/[^A-Za-z0-9_.-]/g, '_');
+  return SAFE_NAME.test(value) && !value.includes('..')
+    ? value
+    : value.replace(/[^A-Za-z0-9_.-]/g, '_');
 }
 
 function lastMeaningfulLine(value: string): string {
@@ -458,7 +481,11 @@ function readmeFor(input: {
       ` (${input.databases} database dump(s), ${input.volumes} volume(s))`,
     ...(input.excluded.length === 0
       ? []
-      : ['', 'Deliberately not captured', ...input.excluded.map((entry) => `  ${entry.item}: ${entry.reason}`)]),
+      : [
+          '',
+          'Deliberately not captured',
+          ...input.excluded.map((entry) => `  ${entry.item}: ${entry.reason}`),
+        ]),
     '',
     'Secrets',
     '  The following values were injected at apply time and are NOT in this archive:',

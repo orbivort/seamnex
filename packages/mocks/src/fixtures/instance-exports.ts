@@ -56,10 +56,14 @@ export function instanceExportsFor(instanceId: string): InstanceExport[] {
       sha256: digest(`${suffix.slice(0, 4)}ab`),
       includes: ['database', 'volumes', 'environment'],
       excluded: [
-        { item: 'secrets', reason: 'secret values are never exported; theirs are named in instance/env.json' },
+        {
+          item: 'secrets',
+          reason: 'secret values are never exported; theirs are named in instance/env.json',
+        },
         {
           item: 'definition',
-          reason: 'the applied render set directory was no longer on disk when the archive was packed',
+          reason:
+            'the applied render set directory was no longer on disk when the archive was packed',
         },
       ],
       renderSetId: null,

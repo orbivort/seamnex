@@ -77,7 +77,10 @@ const exportColumns = defineColumns<InstanceExport>([
       row.excluded.length === 0 ? (
         <span className="text-micro text-faint">—</span>
       ) : (
-        <span className="text-micro text-muted" title={row.excluded.map((e) => `${e.item}: ${e.reason}`).join('\n')}>
+        <span
+          className="text-micro text-muted"
+          title={row.excluded.map((e) => `${e.item}: ${e.reason}`).join('\n')}
+        >
           {row.excluded.map((entry) => entry.item).join(', ')}
         </span>
       ),
@@ -196,9 +199,9 @@ export function ExportsTab({ instance }: { instance: InstanceDetail }) {
         {(rows) => <DataTable columns={columns} rows={rows} rowKey={exportRowKey} dense />}
       </AsyncPanel>
       <InlineNote>
-        Archives are unencrypted files on the platform host and are not pruned automatically. Download
-        one, then remove it from the host when the business has its copy — a plaintext copy of the
-        whole dataset should not outlive its purpose.
+        Archives are unencrypted files on the platform host and are not pruned automatically.
+        Download one, then remove it from the host when the business has its copy — a plaintext copy
+        of the whole dataset should not outlive its purpose.
       </InlineNote>
     </Panel>
   );
