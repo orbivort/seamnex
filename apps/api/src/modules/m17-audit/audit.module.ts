@@ -4,9 +4,10 @@ import { SecretsModule } from '../m15-secrets/secrets.module';
 import { AnchorStore } from './anchor-store.service';
 import { AnchorSigner } from './anchor-signer';
 import { AuditAnchorJob } from './audit-anchor.job';
-import { AUDIT_SERVICE } from './audit.contract';
+import { AUDIT_SERVICE, OUTBOX_SERVICE } from './audit.contract';
 import { AuditQueryService } from './audit-query.service';
 import { PostgresAuditService } from './audit.service';
+import { OutboxService } from './outbox';
 
 /**
  * M17 — the audit chain (design §7.2). Cross-cutting: nearly every module appends to it.
@@ -25,8 +26,12 @@ import { PostgresAuditService } from './audit.service';
     AnchorSigner,
     AnchorStore,
     AuditAnchorJob,
+    // AD-18 — one outbox per process: producers inject the token, the scheduler dispatches the
+    // concrete service, and both must be the instance that holds the registered handlers.
+    OutboxService,
     { provide: AUDIT_SERVICE, useExisting: PostgresAuditService },
+    { provide: OUTBOX_SERVICE, useExisting: OutboxService },
   ],
-  exports: [AUDIT_SERVICE, AuditQueryService, AuditAnchorJob],
+  exports: [AUDIT_SERVICE, OUTBOX_SERVICE, OutboxService, AuditQueryService, AuditAnchorJob],
 })
 export class AuditModule {}

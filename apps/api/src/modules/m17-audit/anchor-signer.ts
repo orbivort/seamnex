@@ -6,7 +6,7 @@ import {
   sign,
   verify,
 } from 'node:crypto';
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { forwardRef, Inject, Injectable, Logger } from '@nestjs/common';
 import { SECRETS_SERVICE, type SecretsService } from '../m15-secrets/secrets.contract';
 import type { AuditAnchorSigning } from './audit.contract';
 
@@ -48,7 +48,10 @@ export class AnchorSigner {
   private readonly logger = new Logger('audit.anchor');
   private cached: Material | undefined;
 
-  constructor(@Inject(SECRETS_SERVICE) private readonly secrets: SecretsService) {}
+  // The reverse edge of the M15↔M17 cycle: the secret store audits its own reads through M17.
+  constructor(
+    @Inject(forwardRef(() => SECRETS_SERVICE)) private readonly secrets: SecretsService,
+  ) {}
 
   /**
    * Signs one anchor. A missing key is generated, a readable one is reused; an unreadable store
