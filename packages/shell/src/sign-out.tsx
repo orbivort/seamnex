@@ -94,11 +94,13 @@ export function SignOutDialog({
         result
           ? // Every dialog needs a description: without one the dialog opens with no context for
             // a screen reader, and Radix reports the missing `aria-describedby` in development.
-            'Your platform session has ended. Product sessions that do not support single logout are listed below with their expected lifetime.'
+            'Your platform session has ended. Products the identity provider was asked to sign out are named below, and any session that may persist is listed with the maximum time it can last.'
           : // The provider confirms before it ends its own session (the platform holds no id_token
             // to hint with), which is one more click than a user expects from a "Sign out" button.
-            // Saying so here is cheaper than an unexplained detour to the identity provider.
-            'This ends your platform session. Your identity provider will ask you to confirm before it ends its own session; products with single logout are signed out too, and the rest keep their own session for a bounded time.'
+            // Saying so here is cheaper than an unexplained detour to the identity provider. The
+            // claim is deliberately about the request, not the result: ending a product's session
+            // is the provider's asynchronous job, and this dialog never saw it happen.
+            'This ends your platform session and asks your identity provider to end its own. Products that support single logout are signed out there; any that cannot be are listed afterwards with the longest their session may persist.'
       }
       footer={
         result ? (
@@ -139,14 +141,38 @@ export function SignOutDialog({
       {result ? (
         <div className="space-y-3">
           <p className="text-body leading-relaxed text-text">{result.statement}</p>
+
+          {result.singleLogout.products.length > 0 ? (
+            <div className="space-y-1">
+              <p className="text-micro text-muted">
+                Signed out at the identity provider — the provider was asked to end these product
+                sessions:
+              </p>
+              <p className="text-body text-text">{result.singleLogout.products.join(', ')}</p>
+            </div>
+          ) : null}
+
           {result.residualSessions.length > 0 ? (
             <ul className="divide-y divide-line rounded-sm border border-line">
               {result.residualSessions.map((session) => (
                 <li
                   key={session.instanceId}
-                  className="flex items-center justify-between gap-3 px-3 py-2"
+                  className="flex items-start justify-between gap-3 px-3 py-2"
                 >
-                  <span className="text-body text-text">{session.product}</span>
+                  <span className="flex flex-col gap-0.5">
+                    <span className="text-body text-text">{session.product}</span>
+                    {/*
+                      AC-35: `singleLogout` on a *residual* session means the product declares
+                      support but the platform has no endpoint the provider could call. Saying so
+                      is what stops the row reading as "we signed you out here" when nobody did.
+                    */}
+                    {session.singleLogout ? (
+                      <span className="text-micro text-muted">
+                        Single logout declared, but no back-channel endpoint is registered, so the
+                        provider cannot end it.
+                      </span>
+                    ) : null}
+                  </span>
                   <span className="font-mono text-micro text-muted">
                     {/*
                       FR-3.8 / NB-4: never invent a lifetime the platform has not verified. The
@@ -166,12 +192,20 @@ export function SignOutDialog({
                 </li>
               ))}
             </ul>
-          ) : (
+          ) : result.singleLogout.products.length === 0 ? (
             <p className="flex items-center gap-2 text-body text-muted">
               <ShieldCheck className="size-4 text-success" aria-hidden /> No product sessions
               remain.
             </p>
+          ) : null}
+
+          {result.singleLogout.identityProviderEnded ? null : (
+            <p className="text-micro text-muted">
+              The identity provider could not be asked to end its session, so products that support
+              single logout kept theirs. Signing out at the provider itself ends them.
+            </p>
           )}
+
           <InlineNote>
             Session lifetimes come from each product's verified integration metadata. The platform
             never stores a product password.

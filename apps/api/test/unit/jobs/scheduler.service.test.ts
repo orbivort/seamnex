@@ -81,6 +81,10 @@ function setup(options: { omit?: readonly string[]; routes?: Parameters<typeof f
   const workflows = omit.has('workflow')
     ? undefined
     : { rotateDueCredentials: vi.fn(async () => ({ rotated: 0, skipped: 0 })) };
+  /** NFR-4.10: the retention pass reads `auditRetentionDays` from M09's settings document. */
+  const access = omit.has('settings')
+    ? undefined
+    : { settings: vi.fn(async () => ({ settings: { auditRetentionDays: 420 }, etag: 'e1' })) };
 
   const service = new SchedulerService(
     db.pool,
@@ -99,6 +103,8 @@ function setup(options: { omit?: readonly string[]; routes?: Parameters<typeof f
     undefined,
     drift as never,
     workflows as never,
+    undefined,
+    access as never,
   );
   return {
     db,
@@ -114,6 +120,7 @@ function setup(options: { omit?: readonly string[]; routes?: Parameters<typeof f
     drift,
     pipelines,
     workflows,
+    access,
     metrics,
     set,
     unsent,
@@ -275,11 +282,80 @@ describe('the pass', () => {
     await service.tick();
     expect(anchor.run).toHaveBeenCalledOnce();
 
-    // The anchor covers a day; the next day needs its own.
+    // The anchor covers a closed day; the next day needs its own, and it is the day that ended.
     vi.setSystemTime(new Date('2026-03-05T09:00:00.000Z'));
     await service.tick();
     expect(anchor.run).toHaveBeenCalledTimes(2);
-    expect(anchor.run).toHaveBeenLastCalledWith(new Date('2026-03-05T00:00:00.000Z'));
+    expect(anchor.run).toHaveBeenLastCalledWith(new Date('2026-03-04T00:00:00.000Z'));
+  });
+});
+
+/**
+ * NFR-4.10: `audit_retention_days` finally has a consumer, and every failure mode errs towards
+ * keeping evidence — an unreadable setting, or one below the twelve-month floor, drops nothing.
+ */
+describe('audit retention', () => {
+  const PARTITIONS = [
+    ['audit_event', 'audit_event_p202401'],
+    ['audit_event', 'audit_event_p202601'],
+  ];
+
+  it('drops months older than the configured retention and records the drop', async () => {
+    const { audit, db, service } = setup({
+      routes: [
+        ['seamnex_ensure_partition', []],
+        ['FROM pg_inherits', PARTITIONS.map(([, partition]) => ({ partition }))],
+        ['seamnex_drop_partition', []],
+      ],
+    });
+
+    await service.ensurePartitions();
+
+    const drops = db.calls.filter((call) => call.sql.includes('seamnex_drop_partition'));
+    expect(drops.map((call) => call.params)).toEqual([['audit_event', 'audit_event_p202401']]);
+    expect(audit?.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'audit.retention.enforced',
+        detail: { retentionDays: 420, partitions: ['audit_event_p202401'] },
+      }),
+    );
+  });
+
+  it('drops nothing when the settings cannot be read', async () => {
+    const { audit, db, service, access } = setup({
+      routes: [
+        ['seamnex_ensure_partition', []],
+        ['FROM pg_inherits', [{ partition: 'audit_event_p202401' }]],
+      ],
+    });
+    access?.settings.mockRejectedValue(new Error('settings unavailable'));
+
+    await service.ensurePartitions();
+
+    expect(db.calls.some((call) => call.sql.includes('seamnex_drop_partition'))).toBe(false);
+    expect(audit?.append).not.toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'audit.retention.enforced' }),
+    );
+  });
+
+  it('refuses a retention below the twelve-month floor rather than shortening it', async () => {
+    const { audit, db, service, access } = setup({
+      routes: [
+        ['seamnex_ensure_partition', []],
+        ['FROM pg_inherits', [{ partition: 'audit_event_p202401' }]],
+      ],
+    });
+    access?.settings.mockResolvedValue({
+      settings: { auditRetentionDays: 30 },
+      etag: 'e1',
+    } as never);
+
+    await service.ensurePartitions();
+
+    expect(db.calls.some((call) => call.sql.includes('seamnex_drop_partition'))).toBe(false);
+    expect(audit?.append).not.toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'audit.retention.enforced' }),
+    );
   });
 });
 

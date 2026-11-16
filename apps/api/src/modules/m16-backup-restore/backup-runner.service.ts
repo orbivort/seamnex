@@ -56,8 +56,8 @@ import {
   type PlatformArtefactKind,
   type PlatformManifest,
 } from './platform-manifest';
+import { BackupObjectStore } from '../../common/storage/object-store';
 import { dumpRemoteDatabase, restoreRemoteDatabase } from './remote-database';
-import { BackupObjectStore } from './s3.client';
 
 type BackupManifest = {
   version: 1;

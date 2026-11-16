@@ -270,8 +270,25 @@ export class PdpService {
       return false;
     }
 
-    // `instance` rule.
-    const instanceId = resource.type === 'instance' ? resource.id : null;
+    /*
+     * `instance` rule.
+     *
+     * A `self` resource from an instance-bound session *is* that session's instance: the launcher
+     * and the product deep link are the guest's own surface, and §5.2 grants R6 "one product"
+     * through `portal.launch`, whose rule is `instance`. Without this, `scoped` could never satisfy
+     * an instance rule on a `/me`-shaped read and the guest's only screen stayed a 403. The grant
+     * comparison below still runs, so R6 needs a binding to that exact instance — this is a
+     * resolution rule, not a weaker yes.
+     *
+     * It is general on purpose: a future instance-scoped capability read through `/me` means the
+     * same thing. Only `portal.launch` is in that position today.
+     */
+    const instanceId =
+      resource.type === 'instance'
+        ? resource.id
+        : resource.type === 'self' && context.instanceId !== null
+          ? context.instanceId
+          : null;
     if (instanceId === null) return false;
     // R6 is single-surface: a guest session is bound to exactly one instance.
     if (context.instanceId !== null && context.instanceId !== instanceId) return false;

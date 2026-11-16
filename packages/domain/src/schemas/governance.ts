@@ -50,6 +50,12 @@ export const AuditProofSchema = z.object({
   verifiedAt: TimestampSchema,
   anchoredDay: z.string().min(1),
   anchorSignature: z.string().min(1),
+  /**
+   * NFR-4.10: whether the stored signature covers the row it sits on. `null` when the day has no
+   * anchor yet or the row predates signing — "not verifiable" and "wrong" are different answers,
+   * and the screen shows them differently.
+   */
+  anchorSignatureValid: z.boolean().nullable().default(null),
   path: z.array(z.object({ seq: z.number().int().positive(), hash: z.string().min(1) })),
 });
 

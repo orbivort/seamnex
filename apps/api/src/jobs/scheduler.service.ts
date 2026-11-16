@@ -13,7 +13,12 @@ import type { AppConfig } from '../config/config';
 import { OutboxService } from '../modules/m17-audit/outbox';
 import { AuditAnchorJob } from '../modules/m17-audit/audit-anchor.job';
 import { JobService } from './job.service';
-import { dropExpiredJobLogPartitions, ensurePlatformPartitions } from '../common/db/partitions';
+import {
+  dropExpiredAuditEventPartitions,
+  dropExpiredJobLogPartitions,
+  ensurePlatformPartitions,
+} from '../common/db/partitions';
+import { lastClosedUtcDay } from '../modules/m17-audit/audit-anchor.job';
 import { METRICS } from '../common/metrics/metrics';
 import type { Metrics } from '../common/metrics/metrics';
 import { AUDIT_SERVICE, type AuditService } from '../modules/m17-audit/audit.contract';
@@ -45,6 +50,10 @@ import {
   OBSERVABILITY_SERVICE,
   type ObservabilityService,
 } from '../modules/m21-observability/observability.contract';
+import {
+  ACCESS_CONTROL_SERVICE,
+  type AccessControlService,
+} from '../modules/m09-access-control/access-control.contract';
 import { AppError } from '../common/problem/app-error';
 import { RunMirrorService } from '../modules/m13-workflow/run-mirror.service';
 import { WorkflowAuthoringService } from '../modules/m13-workflow/authoring.service';
@@ -156,6 +165,14 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
     @Optional()
     @Inject(OBSERVABILITY_SERVICE)
     private readonly observability?: ObservabilityService,
+    /**
+     * NFR-4.10 — `audit_retention_days` has to reach the partition drop, and M09 owns settings.
+     * Optional for the same reason as the others: an unreadable or absent settings source must skip
+     * the pass, never fall back to a default that deletes audit data nobody asked it to delete.
+     */
+    @Optional()
+    @Inject(ACCESS_CONTROL_SERVICE)
+    private readonly access?: AccessControlService,
   ) {}
 
   /**
@@ -172,6 +189,7 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
      */
     const absent = [
       ['audit', this.audit],
+      ['audit retention', this.access],
       ['notification', this.notifications],
       ['backup', this.backups],
       ['integration', this.integration],
@@ -257,11 +275,20 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
     }
   }
 
+  /**
+   * NFR-4.10 — one signed anchor per *closed* day.
+   *
+   * The day is marked anchored only after `run` returns, so a failed off-host copy is retried on the
+   * next pass: the anchor row is already immutable, and re-running it is a no-op that only repeats
+   * the copy. Marking first would have turned one transient object-store outage into a day with no
+   * off-host evidence.
+   */
   private async anchorOncePerDay(): Promise<void> {
-    const today = new Date().toISOString().slice(0, 10);
-    if (this.lastAnchorDay === today) return;
-    await this.anchor.run(new Date(`${today}T00:00:00.000Z`));
-    this.lastAnchorDay = today;
+    const closed = lastClosedUtcDay(new Date());
+    const day = closed.toISOString().slice(0, 10);
+    if (this.lastAnchorDay === day) return;
+    await this.anchor.run(closed);
+    this.lastAnchorDay = day;
   }
 
   /**
@@ -315,6 +342,67 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
     for (const partition of dropped) {
       this.logger.log({ partition }, 'dropped expired job_log partition');
     }
+    await this.applyAuditRetention();
+  }
+
+  /**
+   * NFR-4.10 — apply `audit_retention_days` to `audit_event`.
+   *
+   * The setting existed and had no consumer: the console displayed it, an operator could change it,
+   * and audit partitions were kept forever. Two guards, both in the honest direction. An unreadable
+   * setting means the pass does not run — never "assume the default and delete". A value below the
+   * twelve-month floor is refused by the same function, so a row seeded before the schema floor
+   * cannot shorten retention either.
+   *
+   * The drop is DDL on a partition the API role does not own (the definer function handles it), and
+   * it is audited: an auditor has to be able to tell "nothing was old enough" from "nobody ran it".
+   */
+  private async applyAuditRetention(): Promise<void> {
+    if (this.access === undefined) return;
+    const chain = this.audit;
+
+    let retentionDays: number;
+    try {
+      retentionDays = (await this.access.settings()).settings.auditRetentionDays;
+    } catch (error) {
+      this.logger.warn(
+        { err: error instanceof Error ? error.message : String(error) },
+        'audit retention skipped: settings are unreadable, so nothing is dropped',
+      );
+      return;
+    }
+
+    let dropped: string[];
+    try {
+      dropped = await dropExpiredAuditEventPartitions(this.pool, retentionDays);
+    } catch (error) {
+      this.logger.error(
+        { err: error instanceof Error ? error.message : String(error) },
+        'audit retention failed; expired partitions were not dropped',
+      );
+      return;
+    }
+    if (dropped.length === 0) return;
+
+    for (const partition of dropped) {
+      this.logger.log({ partition, retentionDays }, 'dropped expired audit_event partition');
+    }
+    await chain
+      ?.append({
+        action: 'audit.retention.enforced',
+        actorType: 'system',
+        actorId: 'scheduler',
+        targetType: 'audit_event',
+        targetId: dropped.join(','),
+        outcome: 'success',
+        detail: { retentionDays, partitions: dropped },
+      })
+      .catch((error: unknown) => {
+        this.logger.error(
+          { err: error instanceof Error ? error.message : String(error) },
+          'audit partitions were dropped but the retention row could not be appended',
+        );
+      });
   }
 
   /**

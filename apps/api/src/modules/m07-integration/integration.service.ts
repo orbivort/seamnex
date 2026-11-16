@@ -356,16 +356,22 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
 
     await withTransaction(this.pool, async (tx) => {
       await this.audit.lockChain(tx);
+      /*
+       * FR-3.8: the same endpoint value that is handed to Keycloak is stored here, because sign-out
+       * can only claim a product was notified when the provider has somewhere to notify it. One
+       * source of truth: a value that is not registered above is not recorded below.
+       */
       await tx.query(
         `INSERT INTO idp_client
-           (instance_id, client_id, client_secret_ref, protocol, redirect_uris, access_token_lifespan_seconds, offline_access_disabled)
-         VALUES ($1, $2, $3, $4, $5::text[], 300, true)
+           (instance_id, client_id, client_secret_ref, protocol, redirect_uris, access_token_lifespan_seconds, offline_access_disabled, backchannel_logout_url)
+         VALUES ($1, $2, $3, $4, $5::text[], 300, true, $6)
          ON CONFLICT (instance_id) DO UPDATE
             SET client_id = EXCLUDED.client_id, client_secret_ref = EXCLUDED.client_secret_ref,
                 protocol = EXCLUDED.protocol, redirect_uris = EXCLUDED.redirect_uris,
                 access_token_lifespan_seconds = EXCLUDED.access_token_lifespan_seconds,
-                offline_access_disabled = EXCLUDED.offline_access_disabled`,
-        [instanceId, clientId, stored.id, protocol, redirectUris],
+                offline_access_disabled = EXCLUDED.offline_access_disabled,
+                backchannel_logout_url = EXCLUDED.backchannel_logout_url`,
+        [instanceId, clientId, stored.id, protocol, redirectUris, backchannelLogoutUrl],
       );
       await this.audit.append(
         {

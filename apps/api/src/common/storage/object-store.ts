@@ -13,14 +13,19 @@ import {
 import { Inject, Injectable } from '@nestjs/common';
 import { APP_CONFIG } from '../../config/config.module';
 import type { AppConfig } from '../../config/config';
-import { requireAdapters } from '../../common/adapters';
+import { requireAdapters } from '../adapters';
 
 /**
- * ADR-BE-11 / 4C.1 — the backup target.
+ * ADR-BE-11 / 4C.1 — the object store, and the platform's backup target.
  *
  * Path-style addressing is forced: VersityGW (the development target) does not answer virtual-host
  * URLs, and a real S3 endpoint accepts both. Signature v4 is the SDK's job — the hand-rolled probe
  * in `scripts/check-s3.mjs` proved the endpoint, not a client worth maintaining.
+ *
+ * It lives in `common/` rather than inside M16 because it is infrastructure, not recovery logic:
+ * M17 needs somewhere off-host to put the daily audit anchor (NFR-4.10), and M16 is not in M17's
+ * `mayImport`. Reaching into another module's client would have been a boundary violation; a second
+ * S3 implementation would have been worse.
  */
 @Injectable()
 export class BackupObjectStore {

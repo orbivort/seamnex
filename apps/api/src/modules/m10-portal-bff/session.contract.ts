@@ -56,6 +56,18 @@ export type SessionCreateInput = {
 };
 
 /**
+ * FR-3.8 / AC-35 — the two halves of what sign-out did to product sessions.
+ *
+ * They are returned together because they are one question answered by one query: the products the
+ * identity provider was asked to notify, and the ones that may still hold a session. Assembling the
+ * statement from two snapshots would let a product appear in neither list.
+ */
+export type SignOutProductSessions = {
+  readonly endedByProvider: readonly string[];
+  readonly residual: readonly ResidualSession[];
+};
+
+/**
  * M10 owns the Redis session (design §7.2). The interface deliberately exposes the lifetime in
  * seconds so the route layer can set the cookie without querying `settings` a second time.
  */
@@ -66,8 +78,17 @@ export interface SessionService {
   kill(sid: string, reason: string): Promise<void>;
   /** Terminates every session for a subject; used when a user is disabled (AC-12). */
   killSubject(sub: string, reason: string): Promise<number>;
-  /** FR-3.8: only verified `integration_metadata` contributes; otherwise `maxRemainingMinutes` is null. */
-  residualSessions(sub: string): Promise<ResidualSession[]>;
+  /**
+   * FR-3.8 / AC-35: only verified `integration_metadata` contributes; otherwise
+   * `maxRemainingMinutes` is null. A product is excluded from the residual set only when the
+   * identity provider was actually asked to end it (`identityProviderEnded`) *and* a back-channel
+   * logout endpoint is registered for it — a declaration the provider cannot act on is not a
+   * logout.
+   */
+  signOutProductSessions(
+    sub: string,
+    outcome?: { identityProviderEnded: boolean },
+  ): Promise<SignOutProductSessions>;
   /** Idle lifetime in seconds, from `settings` with a 60 s cache. */
   idleSeconds(): Promise<number>;
   /** Absolute lifetime in seconds, from `settings` with a 60 s cache. */

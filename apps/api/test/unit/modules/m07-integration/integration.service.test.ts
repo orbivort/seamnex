@@ -505,12 +505,15 @@ describe('registering the identity client', () => {
       backchannelLogoutUrl: 'http://crm.seamnex.local:8020/api/v1/Oidc/action/backchannelLogout',
       groupClaim: 'groups',
     });
+    // FR-3.8: the back-channel endpoint is recorded with the client, because sign-out can only
+    // claim a product was notified when the provider has somewhere to notify it.
     expect(statement(db, 'INSERT INTO idp_client')?.params).toEqual([
       CRM,
       'seamnex-crm',
       'secret-1',
       'oidc',
       ['http://crm.seamnex.local:8020/oauth-callback.php'],
+      'http://crm.seamnex.local:8020/api/v1/Oidc/action/backchannelLogout',
     ]);
     // Which value the client was registered with: the operator's own variable, not a generated one.
     expect(audit.append.mock.calls[0]?.[0]).toMatchObject({

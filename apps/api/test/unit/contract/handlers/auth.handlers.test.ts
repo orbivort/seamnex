@@ -69,12 +69,13 @@ function services() {
       create: vi.fn().mockResolvedValue(record()),
       kill: vi.fn().mockResolvedValue(undefined),
       idleSeconds: vi.fn().mockResolvedValue(1_800),
-      residualSessions: vi.fn().mockResolvedValue([]),
+      signOutProductSessions: vi.fn().mockResolvedValue({ endedByProvider: [], residual: [] }),
     },
     provider: {
       name: 'stub' as 'stub' | 'oidc',
       exchangeCode: vi.fn().mockResolvedValue(CLAIMS),
       authConfig: vi.fn().mockResolvedValue(AUTH_CONFIG),
+      endSessions: vi.fn().mockResolvedValue({ ended: true }),
     },
     audit: { append: vi.fn().mockResolvedValue({ seq: '1', hash: 'h' }) },
   };
@@ -396,27 +397,91 @@ describe('POST /me/logout', () => {
     expect(s.sessions.kill).not.toHaveBeenCalled();
   });
 
-  it('names the residual sessions that have no verified lifetime', async () => {
-    s.sessions.residualSessions.mockResolvedValue([
-      { product: 'mail', maxRemainingMinutes: null },
-      { product: 'chat', maxRemainingMinutes: 30 },
-    ]);
+  /** FR-3.8/AC-35: the product sessions are computed from what the provider call actually did. */
+  it('asks the provider to end the session before deciding what is residual', async () => {
+    await call('POST /me/logout');
+
+    expect(s.provider.endSessions).toHaveBeenCalledWith('sub-1');
+    expect(s.sessions.signOutProductSessions).toHaveBeenCalledWith('sub-1', {
+      identityProviderEnded: true,
+    });
+    expect(s.audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'auth.signout',
+        detail: expect.objectContaining({ identityProviderEnded: true }),
+      }),
+    );
+  });
+
+  it('names the products the provider was asked to end, and never claims delivery', async () => {
+    s.sessions.signOutProductSessions.mockResolvedValue({
+      endedByProvider: ['EspoCRM'],
+      residual: [],
+    });
 
     const result = await call('POST /me/logout');
 
     expect(result).toMatchObject({
       kind: 'body',
       body: {
-        statement: expect.stringContaining('1 product session(s) have no verified lifetime'),
+        singleLogout: { identityProviderEnded: true, products: ['EspoCRM'] },
+        statement: expect.stringContaining(
+          'The identity provider was asked to end 1 product session(s)',
+        ),
+      },
+    });
+    expect(JSON.stringify(result)).not.toMatch(/signed out too|are signed out/i);
+  });
+
+  it('still completes, and says so, when the provider cannot end the session', async () => {
+    s.provider.endSessions.mockResolvedValue({
+      ended: false,
+      reason: 'Keycloak refused to end the user session 403.',
+    });
+    s.sessions.signOutProductSessions.mockResolvedValue({
+      endedByProvider: [],
+      residual: [{ product: 'EspoCRM', maxRemainingMinutes: 480 }],
+    });
+
+    const result = await call('POST /me/logout');
+
+    expect(s.sessions.kill).toHaveBeenCalled();
+    expect(result).toMatchObject({
+      kind: 'body',
+      body: {
+        singleLogout: { identityProviderEnded: false, products: [] },
+        statement: expect.stringContaining('could not be ended at the identity provider'),
+      },
+    });
+  });
+
+  it('names the residual sessions that have no verified lifetime', async () => {
+    s.sessions.signOutProductSessions.mockResolvedValue({
+      endedByProvider: [],
+      residual: [
+        { product: 'mail', maxRemainingMinutes: null },
+        { product: 'chat', maxRemainingMinutes: 30 },
+      ],
+    });
+
+    const result = await call('POST /me/logout');
+
+    expect(result).toMatchObject({
+      kind: 'body',
+      body: {
+        statement: expect.stringContaining('1 of 2 product session(s) have no verified lifetime'),
       },
     });
   });
 
   it('reports residual sessions that expire within their verified lifetime', async () => {
-    s.sessions.residualSessions.mockResolvedValue([
-      { product: 'mail', maxRemainingMinutes: 30 },
-      { product: 'chat', maxRemainingMinutes: 60 },
-    ]);
+    s.sessions.signOutProductSessions.mockResolvedValue({
+      endedByProvider: [],
+      residual: [
+        { product: 'mail', maxRemainingMinutes: 30 },
+        { product: 'chat', maxRemainingMinutes: 60 },
+      ],
+    });
 
     const result = await call('POST /me/logout');
 
@@ -424,5 +489,12 @@ describe('POST /me/logout', () => {
       kind: 'body',
       body: { statement: expect.stringContaining('2 product session(s) expire') },
     });
+  });
+
+  it('writes the sign-out audit row even when the chain write fails', async () => {
+    s.audit.append.mockRejectedValue(new Error('chain down'));
+
+    await expect(call('POST /me/logout')).resolves.toMatchObject({ kind: 'body' });
+    expect(s.audit.append).toHaveBeenCalled();
   });
 });

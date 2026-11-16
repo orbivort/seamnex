@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { DockerModule } from '../../common/docker/docker.module';
+import { StorageModule } from '../../common/storage/storage.module';
 import { JobsModule } from '../../jobs/jobs.module';
 import { IntegrationModule } from '../m07-integration/integration.module';
 import { SecretsModule } from '../m15-secrets/secrets.module';
@@ -7,7 +8,6 @@ import { AgeEncryptor } from './age';
 import { BACKUP_RESTORE_SERVICE } from './backup-restore.contract';
 import { BackupRunnerService } from './backup-runner.service';
 import { PostgresBackupRestoreService } from './backup-restore.service';
-import { BackupObjectStore } from './s3.client';
 
 /**
  * M16 — instance and platform backups, restores and the restore gate (4C).
@@ -22,9 +22,8 @@ import { BackupObjectStore } from './s3.client';
  * boundary forbids and the restore does not need.
  */
 @Module({
-  imports: [JobsModule, DockerModule, IntegrationModule, SecretsModule],
+  imports: [JobsModule, DockerModule, IntegrationModule, SecretsModule, StorageModule],
   providers: [
-    BackupObjectStore,
     AgeEncryptor,
     BackupRunnerService,
     { provide: BACKUP_RESTORE_SERVICE, useClass: PostgresBackupRestoreService },

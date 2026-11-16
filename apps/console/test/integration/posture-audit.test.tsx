@@ -142,7 +142,12 @@ describe('audit trail', () => {
     expect(within(drawer).getByText(`Chain proof · sequence ${newest.seq}`)).toBeDefined();
     expect(await within(drawer).findByText('SHA-256 hash chain')).toBeDefined();
     expect(within(drawer).getByText('Chain valid')).toBeDefined();
-    expect(within(drawer).getByText('Yes')).toBeDefined();
+    /*
+     * NFR-4.10: the drawer used to print the stored anchor signature, which proved only that a
+     * string was stored. It now also says whether that signature verifies, so "Yes" appears twice.
+     */
+    expect(within(drawer).getByText('Signature verifies')).toBeDefined();
+    expect(within(drawer).getAllByText('Yes')).toHaveLength(2);
     expect(within(drawer).getByText('Proof path')).toBeDefined();
   });
 

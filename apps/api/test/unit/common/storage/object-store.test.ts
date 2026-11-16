@@ -3,7 +3,7 @@ import type * as NodeFs from 'node:fs';
 import type { AppConfig } from '../../../../src/config/config';
 
 /**
- * The backup target. What this class owns is the guard, the bucket bootstrap and the projection of
+ * The object store. What this class owns is the guard, the bucket bootstrap and the projection of
  * SDK responses — the signature itself is the SDK's job, so the client is a double.
  */
 const state = vi.hoisted(() => ({
@@ -75,7 +75,7 @@ vi.mock('node:stream/promises', () => ({
   pipeline: vi.fn().mockResolvedValue(undefined),
 }));
 
-const { BackupObjectStore } = await import('../../../../src/modules/m16-backup-restore/s3.client');
+const { BackupObjectStore } = await import('../../../../src/common/storage/object-store');
 
 const CONFIG = {
   SEAMNEX_ADAPTERS_MODE: 'real',

@@ -36,6 +36,13 @@ describe('policy keys', () => {
     expect(POLICY_KEYS['POST /trigger/:token']).toBe('trigger.delivery');
   });
 
+  it('binds the launcher surface to the launch capability, not to the entitlement inventory', () => {
+    // §5.2: R6 reaches "launch entitled products" (one product) and not "view own entitlements".
+    expect(POLICY_KEYS['GET /me/launcher']).toBe('portal.launch');
+    expect(POLICY_KEYS['GET /portal/products/:slug']).toBe('portal.launch');
+    expect(POLICY_KEYS['GET /me/entitlements']).toBe('portal.view_entitlements');
+  });
+
   it('never names an any-of operation that the single-key table does not know', () => {
     for (const key of Object.keys(ANY_OF_POLICY_KEYS)) {
       expect(POLICY_KEYS[key], key).toBeDefined();
@@ -124,6 +131,12 @@ describe('resourceForRequest', () => {
       id: 'wf-1',
     });
     expect(resourceForRequest('/me/entitlements', {})).toEqual({ type: 'self', id: '' });
+    // A deep link is the caller's own tile, not a platform resource: `platform` scope would refuse
+    // every scoped grant, which is exactly what the guest holds.
+    expect(resourceForRequest('/portal/products/:slug', { slug: 'espocrm-dev' })).toEqual({
+      type: 'self',
+      id: '',
+    });
     expect(resourceForRequest('/break-glass-sessions', { id: 'bg-1' })).toEqual({
       type: 'request',
       id: 'bg-1',

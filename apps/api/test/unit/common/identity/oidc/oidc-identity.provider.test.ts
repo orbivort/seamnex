@@ -1,6 +1,7 @@
 import { generateKeyPairSync, sign as signBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { loadConfig, type AppConfig } from '../../../../../src/config/config';
+import { AppError } from '../../../../../src/common/problem/app-error';
 import { challengeFor } from '../../../../../src/common/identity/pkce';
 import { OidcDiscovery } from '../../../../../src/common/identity/oidc/discovery';
 import { OidcIdentityProvider } from '../../../../../src/common/identity/oidc/oidc-identity.provider';
@@ -219,6 +220,7 @@ describe('the module surfaces the provider does or does not have', () => {
         seen = [sub, enabled];
         return Promise.resolve();
       },
+      endUserSessions: () => Promise.resolve(),
     };
 
     await wired({ admin }).setUserEnabled('cee4c1a0-0000-4000-8000-000000000001', false);
@@ -230,6 +232,42 @@ describe('the module surfaces the provider does or does not have', () => {
     await expect(wired({}).setUserEnabled('sub', false)).rejects.toMatchObject({
       code: 'UNAVAILABLE',
     });
+  });
+
+  it('ends the provider session so registered back-channel logouts fire (FR-3.8)', async () => {
+    const ended: string[] = [];
+    const admin = {
+      setUserEnabled: () => Promise.resolve(),
+      endUserSessions: (sub: string) => {
+        ended.push(sub);
+        return Promise.resolve();
+      },
+    };
+
+    await expect(wired({ admin }).endSessions('user-1')).resolves.toEqual({ ended: true });
+    expect(ended).toEqual(['user-1']);
+  });
+
+  it('reports a provider refusal instead of throwing, so sign-out still completes', async () => {
+    const admin = {
+      setUserEnabled: () => Promise.resolve(),
+      endUserSessions: () =>
+        Promise.reject(
+          new AppError({
+            code: 'ADAPTER_UNAVAILABLE',
+            detail: 'Keycloak refused to end the user session 403.',
+          }),
+        ),
+    };
+
+    await expect(wired({ admin }).endSessions('user-1')).resolves.toEqual({
+      ended: false,
+      reason: 'Keycloak refused to end the user session 403.',
+    });
+  });
+
+  it('reports single logout as unsupported when no admin client is wired', async () => {
+    await expect(wired({}).endSessions('user-1')).resolves.toMatchObject({ ended: false });
   });
 
   it('has no logout URL of its own: the SPA sends client_id and the redirect', () => {

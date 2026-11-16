@@ -145,26 +145,82 @@ export class AuthHandlers implements OperationGroup {
 
   private async logout(input: OperationInput): Promise<OperationResult> {
     const sub = input.context.subject.idpId;
-    // FR-3.8: the residual set comes from verified integration metadata, never from an estimate.
-    const residualSessions = await this.sessions.residualSessions(sub);
+
+    /*
+     * FR-3.8 / AC-35: end the session at the identity provider, not only here.
+     *
+     * That call is the whole of product single logout: when the provider session ends, Keycloak
+     * posts a logout token to every client that registered a back-channel endpoint, and the product
+     * ends its own session. Before this, the platform only killed its own session and the screen
+     * claimed the products had been signed out. `endSessions` answers rather than throws, because a
+     * provider outage must not leave the user signed in — and because the statement has to describe
+     * what happened either way.
+     */
+    const provider = await this.provider.endSessions(sub);
+    if (!provider.ended) {
+      this.logger.warn({
+        msg: 'product single logout was not requested',
+        sub,
+        reason: provider.reason ?? 'unknown',
+      });
+    }
+
+    const { endedByProvider, residual } = await this.sessions.signOutProductSessions(sub, {
+      identityProviderEnded: provider.ended,
+    });
     if (input.context.sessionId !== null) {
       await this.sessions.kill(input.context.sessionId, 'user signed out');
     }
     input.reply.header('set-cookie', clearSessionCookieHeaders(this.config));
 
-    const unverified = residualSessions.filter(
-      (session) => session.maxRemainingMinutes === null,
-    ).length;
-    const statement =
-      residualSessions.length === 0
-        ? 'Signed out. No product sessions remain.'
-        : unverified > 0
-          ? `Signed out. ${unverified} product session(s) have no verified lifetime; end them in the product.`
-          : `Signed out. ${residualSessions.length} product session(s) expire within their verified lifetime.`;
+    const unverified = residual.filter((session) => session.maxRemainingMinutes === null).length;
+    const statement = signOutStatement({
+      ended: provider.ended,
+      ...(provider.reason === undefined ? {} : { reason: provider.reason }),
+      endedProducts: endedByProvider.length,
+      residual: residual.length,
+      unverified,
+    });
+
+    /*
+     * FR-4.3: "authentication" is an audited event type, and a sign-out that handed sessions to the
+     * provider is exactly the kind of event an investigation looks for. The outcome is the platform
+     * session's — the user is out — while `identityProviderEnded` records the half that can fail
+     * without keeping them in. Best-effort, because the session is already gone.
+     */
+    await this.audit
+      .append({
+        action: 'auth.signout',
+        actorType: 'user',
+        actorId: sub,
+        targetType: 'subject',
+        targetId: sub,
+        outcome: 'success',
+        detail: {
+          provider: this.provider.name,
+          identityProviderEnded: provider.ended,
+          ...(provider.reason === undefined ? {} : { reason: provider.reason }),
+          productsEndedByProvider: endedByProvider.length,
+          residualSessions: residual.length,
+          residualWithoutVerifiedLifetime: unverified,
+        },
+      })
+      .catch((error: unknown) => {
+        this.logger.error({
+          msg: 'sign-out completed but the audit row could not be written',
+          sub,
+          err: error instanceof Error ? error.message : String(error),
+        });
+      });
 
     return {
       kind: 'body',
-      body: { signedOutAt: new Date().toISOString(), residualSessions, statement },
+      body: {
+        signedOutAt: new Date().toISOString(),
+        residualSessions: residual,
+        singleLogout: { identityProviderEnded: provider.ended, products: [...endedByProvider] },
+        statement,
+      },
       status: 200,
     };
   }
@@ -302,4 +358,46 @@ export class AuthHandlers implements OperationGroup {
     if (this.provider.name !== 'stub' || !code.startsWith('stub:')) return 'unknown';
     return `stub:${code.slice('stub:'.length).trim()}`;
   }
+}
+
+/**
+ * The sentence the sign-out screen shows, built only from what happened (FR-3.8, AC-35).
+ *
+ * The copy this replaces asserted that "products with single logout are signed out too" while the
+ * platform had never asked the provider to do anything. Every branch below names the actor: the
+ * provider *was asked*, or it could not be reached. Delivery is never claimed, because back-channel
+ * logout is asynchronous and the provider reports nothing about it.
+ */
+function signOutStatement(input: {
+  ended: boolean;
+  reason?: string;
+  endedProducts: number;
+  residual: number;
+  unverified: number;
+}): string {
+  if (input.residual === 0) {
+    return input.endedProducts > 0
+      ? `Signed out. The identity provider was asked to end ${input.endedProducts} product session(s); no product session remains.`
+      : 'Signed out. No product sessions remain.';
+  }
+
+  const persisted =
+    input.unverified > 0
+      ? `${input.unverified} of ${input.residual} product session(s) have no verified lifetime; end them in the product.`
+      : `${input.residual} product session(s) expire within their verified lifetime.`;
+
+  if (!input.ended) {
+    const why = input.reason === undefined ? '' : ` (${clip(input.reason)})`;
+    return `Signed out. Product sessions could not be ended at the identity provider${why}; ${persisted}`;
+  }
+
+  return input.endedProducts > 0
+    ? `Signed out. The identity provider was asked to end ${input.endedProducts} product session(s); ${persisted}`
+    : `Signed out. ${persisted}`;
+}
+
+/** A provider's refusal is a sentence, not a log line: keep it readable inside the statement. */
+function clip(value: string): string {
+  const trimmed = value.trim().replace(/[.。]$/, '');
+  return trimmed.length <= 160 ? trimmed : `${trimmed.slice(0, 157)}…`;
 }

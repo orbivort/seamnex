@@ -113,7 +113,13 @@ export const PlatformSettingsSchema = z.object({
   sessionIdleMinutes: z.number().int().positive(),
   sessionAbsoluteHours: z.number().int().positive(),
   metadataReviewDays: z.number().int().positive(),
-  auditRetentionDays: z.number().int().positive(),
+  /**
+   * NFR-4.10 requires audit records to be retained for at least twelve months, so the floor is a
+   * validation rule rather than a default: a setting that cannot satisfy the requirement must not be
+   * storable. The cap stops a typo (`4200`) from pinning every partition a deployment will ever
+   * create.
+   */
+  auditRetentionDays: z.number().int().min(365).max(3650),
   /**
    * FR-4.5 alerting thresholds, as a percentage of the declared shape (CPU, memory) or of the volume
    * quota (disk). They are settings rather than environment constants because the requirement says

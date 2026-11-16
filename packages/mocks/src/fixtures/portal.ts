@@ -436,8 +436,17 @@ export const LAUNCH_TARGETS: Record<string, LaunchTarget> = Object.fromEntries(
 
 export function logoutFor(role: PlatformRole, instances: Instance[]): LogoutResponse {
   const entitled = new Set(ENTITLED[role]);
-  const residualSessions = instances
-    .filter((instance) => entitled.has(instance.id))
+  const mine = instances.filter((instance) => entitled.has(instance.id));
+  /*
+   * FR-3.8 / AC-35: the split below is the one the API makes, from what the sign-out did rather
+   * than from what a product claims on its own. The demo has a single provider session, so every
+   * catalogued product that declares single logout is one the provider was asked to end; the rest
+   * keep a session the platform cannot reach and are listed with their verified maximum.
+   */
+  const endedByProvider = mine.filter(
+    (instance) => CATALOG_BY_KEY[instance.entryKey]?.integration.sloSupported === true,
+  );
+  const residualSessions = mine
     .flatMap((instance) => {
       const entry = CATALOG_BY_KEY[instance.entryKey];
       if (!entry || entry.integration.sloSupported) return [];
@@ -455,13 +464,21 @@ export function logoutFor(role: PlatformRole, instances: Instance[]): LogoutResp
     })
     .slice(0, 4);
 
+  const statement =
+    residualSessions.length === 0
+      ? endedByProvider.length === 0
+        ? 'You are signed out everywhere. No product sessions remain.'
+        : `You are signed out. The identity provider was asked to end ${endedByProvider.length} product session(s); no product session remains.`
+      : `You are signed out of the platform. The identity provider was asked to end ${endedByProvider.length} product session(s); the products below do not support single logout and end at the stated maximum.`;
+
   return {
     signedOutAt: at(0),
     residualSessions,
-    statement:
-      residualSessions.length === 0
-        ? 'You are signed out everywhere. No product sessions remain.'
-        : 'You are signed out of the platform. The products below do not support single logout; their sessions end at the stated maximum.',
+    singleLogout: {
+      identityProviderEnded: true,
+      products: endedByProvider.map((instance) => instance.product),
+    },
+    statement,
   };
 }
 

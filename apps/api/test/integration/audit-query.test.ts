@@ -4,6 +4,7 @@ import { createTestDatabase, skipUnlessDatabase, type TestDatabase } from '@seam
 import type { AuditEvent } from '@seamnex/domain';
 import { AuditQueryService } from '../../src/modules/m17-audit/audit-query.service';
 import type { AuditService } from '../../src/modules/m17-audit/audit.contract';
+import type { AnchorSigner } from '../../src/modules/m17-audit/anchor-signer';
 
 /**
  * Read-side coverage for the audit trail (FR-4.3, AC-15).
@@ -26,11 +27,18 @@ const STUB_AUDIT = {
   verify: () => Promise.resolve({ valid: true, checked: 0, firstBrokenSeq: null }),
 } as unknown as AuditService;
 
+/**
+ * The projection, not the cryptography: `AnchorSigner` is unit-tested against real Ed25519 keys,
+ * while this suite proves the proof drawer reads the stored signature and reports whether it
+ * verifies (NFR-4.10).
+ */
+const STUB_SIGNER = { verify: () => Promise.resolve(true) } as unknown as AnchorSigner;
+
 beforeAll(async () => {
   if (skipUnlessDatabase() !== false) return;
   database = await createTestDatabase();
   pool = database.pool;
-  audit = new AuditQueryService(pool, STUB_AUDIT);
+  audit = new AuditQueryService(pool, STUB_AUDIT, STUB_SIGNER);
 
   for (let index = 0; index < ROWS; index += 1) {
     await append('instance.deploy.succeeded');
@@ -114,6 +122,7 @@ describe.skipIf(skipUnlessDatabase() !== false)('audit trail read surface', () =
 
     expect(proof.anchoredDay).toBe(day);
     expect(proof.anchorSignature).toBe('anchor-signature-fixture');
+    expect(proof.anchorSignatureValid).toBe(true);
   });
 
   it('filters by a dotted action namespace as well as by the full action', async () => {

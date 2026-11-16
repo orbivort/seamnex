@@ -7,8 +7,10 @@ import type { Metrics } from '../../common/metrics/metrics';
 import { AppError } from '../../common/problem/app-error';
 import { maskDeep } from '../../common/logging/masking';
 import { currentRequestId } from '../../common/logging/logger';
+import { AnchorSigner } from './anchor-signer';
 import type {
   AuditAnchorExport,
+  AuditAnchorRecord,
   AuditAppendInput,
   AuditAppendResult,
   AuditService,
@@ -32,6 +34,11 @@ export class PostgresAuditService implements AuditService {
   constructor(
     @Inject(PG_POOL) private readonly pool: Pool,
     @Inject(METRICS) private readonly metrics: Metrics,
+    /*
+     * The signer is a constructor dependency, not a parameter of `anchor()`: an anchor without a
+     * signature is the defect this closes, so there is no path that can write one unsigned.
+     */
+    @Inject(AnchorSigner) private readonly signer: AnchorSigner,
   ) {}
 
   /**
@@ -151,21 +158,76 @@ export class PostgresAuditService implements AuditService {
     return { valid: firstBrokenSeq === null, checked: result.rowCount ?? 0, firstBrokenSeq };
   }
 
-  async anchor(day: Date = new Date()): Promise<void> {
+  /**
+   * NFR-4.10 / AC-15 — one signed, immutable anchor per closed day.
+   *
+   * Three properties, and each replaced a defect:
+   *
+   *   - **Signed.** The row carries an Ed25519 signature over its own `{day,lastSeq,lastHash}`,
+   *     made before the insert, so an anchor cannot be recomputed by someone who can write to this
+   *     database. The public key travels with the export, which is what lets an auditor verify.
+   *   - **Immutable.** `ON CONFLICT (day) DO NOTHING` rather than `DO UPDATE`. `0010_grants` revokes
+   *     UPDATE on this table, so the old upsert was only ever legal for the owner role; more to the
+   *     point, an anchor that can be advanced is not an anchor. Re-anchoring a closed day is a
+   *     no-op by design, and the first row is returned instead.
+   *   - **Closed day.** `day` is the day being closed, and the anchored sequence is the last event
+   *     *inside* it. Anchoring "today" at midnight recorded a boundary rather than a day.
+   *
+   * Must not be called inside a transaction that holds the chain lock: signing reads the key from
+   * the secret store, and that read appends its own audit row on another connection.
+   */
+  async anchor(day: Date = new Date()): Promise<AuditAnchorRecord | null> {
+    const dayKey = day.toISOString().slice(0, 10);
+    const start = new Date(`${dayKey}T00:00:00.000Z`);
+    const end = new Date(start.getTime() + 86_400_000);
+
     const result = await this.pool.query<{ seq: string; hash: string }>(
-      `SELECT seq, hash FROM audit_event WHERE ts < $1 ORDER BY seq DESC LIMIT 1`,
-      [day.toISOString()],
+      `SELECT seq, hash FROM audit_event
+        WHERE ts >= $1 AND ts < $2
+        ORDER BY seq DESC LIMIT 1`,
+      [start.toISOString(), end.toISOString()],
     );
     const last = result.rows[0];
-    if (last === undefined) return;
+    if (last === undefined) return null;
+
+    const signature = await this.signer.sign({
+      day: dayKey,
+      lastSeq: last.seq,
+      lastHash: last.hash,
+    });
 
     await this.pool.query(
-      `INSERT INTO audit_anchor (day, last_seq, last_hash)
-       VALUES ($1::date, $2::bigint, $3)
-       ON CONFLICT (day) DO UPDATE SET last_seq = EXCLUDED.last_seq, last_hash = EXCLUDED.last_hash
-       WHERE audit_anchor.last_seq < EXCLUDED.last_seq`,
-      [day.toISOString().slice(0, 10), last.seq, last.hash],
+      `INSERT INTO audit_anchor (day, last_seq, last_hash, signature)
+       VALUES ($1::date, $2::bigint, $3, $4)
+       ON CONFLICT (day) DO NOTHING`,
+      [dayKey, last.seq, last.hash, signature],
     );
+
+    /*
+     * Read back rather than echo: a concurrent writer may have anchored this day first, and the
+     * row that exists is the evidence — returning what we tried to write would report a signature
+     * the table does not hold.
+     */
+    const stored = await this.pool.query<{
+      day: string;
+      last_seq: string;
+      last_hash: string;
+      signature: string | null;
+      stored_at: Date;
+    }>(
+      `SELECT to_char(day, 'YYYY-MM-DD') AS day, last_seq, last_hash, signature, stored_at
+         FROM audit_anchor WHERE day = $1::date`,
+      [dayKey],
+    );
+    const row = stored.rows[0];
+    if (row === undefined) return null;
+    return {
+      day: row.day,
+      lastSeq: row.last_seq,
+      lastHash: row.last_hash,
+      signature: row.signature,
+      storedAt: row.stored_at.toISOString(),
+    };
   }
 
   /**
@@ -206,6 +268,11 @@ export class PostgresAuditService implements AuditService {
         signature: row.signature,
         storedAt: row.stored_at.toISOString(),
       })),
+      /*
+       * NFR-4.10: the public key travels with the anchors, because a signature nobody can check is
+       * a string. It is not a secret, and it is null on a deployment that has never anchored.
+       */
+      signing: await this.signer.describe(),
       chainHead:
         headRow === undefined
           ? null

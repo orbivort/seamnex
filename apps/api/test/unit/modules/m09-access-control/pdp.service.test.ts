@@ -323,6 +323,54 @@ describe('matrix and scope resolution', () => {
     ).resolves.toMatchObject({ allowed: false });
   });
 
+  /**
+   * §5.2 gives R6 one product through `portal.launch`, and the launcher/deep-link reads resolve to
+   * `self` rather than to an addressable instance. Resolving that `self` to the session's bound
+   * instance is what makes the guest's only surface reachable in live mode; the grant still has to
+   * name that instance, which the second case pins.
+   */
+  it('resolves a self resource to the instance an R6 session is bound to', async () => {
+    const { service } = setup({
+      grants: [{ role: 'R6', scopeType: 'instance', scopeId: 'inst-1', expiresAt: null }],
+    });
+
+    await expect(
+      service.decide({
+        context: context({ role: 'R6', instanceId: 'inst-1' }),
+        policyKey: 'portal.launch',
+        resource: { type: 'self', id: '' } as never,
+      }),
+    ).resolves.toMatchObject({ allowed: true });
+  });
+
+  it('refuses a self resource when the R6 grant names a different instance', async () => {
+    const { service } = setup({
+      grants: [{ role: 'R6', scopeType: 'instance', scopeId: 'other', expiresAt: null }],
+    });
+
+    await expect(
+      service.decide({
+        context: context({ role: 'R6', instanceId: 'inst-1' }),
+        policyKey: 'portal.launch',
+        resource: { type: 'self', id: '' } as never,
+      }),
+    ).resolves.toMatchObject({ allowed: false });
+  });
+
+  it('refuses a self resource from a session that is not instance-bound', async () => {
+    const { service } = setup({
+      grants: [{ role: 'R6', scopeType: 'instance', scopeId: 'inst-1', expiresAt: null }],
+    });
+
+    await expect(
+      service.decide({
+        context: context({ role: 'R6' }),
+        policyKey: 'portal.launch',
+        resource: { type: 'self', id: '' } as never,
+      }),
+    ).resolves.toMatchObject({ allowed: false });
+  });
+
   it('resolves a domain rule through the catalog domain of the instance', async () => {
     const { service } = setup({
       grants: [{ role: 'R3', scopeType: 'domain', scopeId: 'core', expiresAt: null }],

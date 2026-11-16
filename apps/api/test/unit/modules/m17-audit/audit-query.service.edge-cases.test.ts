@@ -33,7 +33,8 @@ function setup(routes: Parameters<typeof fakeDb>[0] = []) {
     lockChain: vi.fn(),
     denied: vi.fn(),
   };
-  return { db, service: new AuditQueryService(db.pool, audit as never) };
+  const signer = { verify: vi.fn(async () => true) };
+  return { db, service: new AuditQueryService(db.pool, audit as never, signer as never) };
 }
 
 describe('page', () => {

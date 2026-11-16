@@ -284,7 +284,7 @@ describe('killSubject', () => {
   });
 });
 
-describe('residualSessions', () => {
+describe('signOutProductSessions', () => {
   it('lists products with a verified lifetime, skipping one whose sign-in check failed', async () => {
     const { service } = setup({
       routes: [
@@ -298,6 +298,7 @@ describe('residualSessions', () => {
               slo_supported: true,
               verified_at: new Date('2026-01-01T00:00:00Z'),
               idp_client_id: 'client-1',
+              backchannel_logout_url: 'https://crm.example/api/v1/Oidc/action/backchannelLogout',
               sso_ok: true,
             },
             {
@@ -307,6 +308,7 @@ describe('residualSessions', () => {
               slo_supported: null,
               verified_at: null,
               idp_client_id: 'client-2',
+              backchannel_logout_url: null,
               sso_ok: null,
             },
             {
@@ -317,6 +319,7 @@ describe('residualSessions', () => {
               slo_supported: false,
               verified_at: null,
               idp_client_id: 'client-3',
+              backchannel_logout_url: null,
               sso_ok: false,
             },
           ],
@@ -324,22 +327,114 @@ describe('residualSessions', () => {
       ],
     });
 
-    await expect(service.residualSessions('uuid-1')).resolves.toEqual([
-      {
-        instanceId: 'inst-1',
-        product: 'EspoCRM',
-        maxRemainingMinutes: 480,
-        singleLogout: true,
-        verifiedAt: '2026-01-01T00:00:00.000Z',
-      },
-      {
-        instanceId: 'inst-2',
-        product: 'Mautic',
-        maxRemainingMinutes: null,
-        singleLogout: false,
-        verifiedAt: null,
-      },
-    ]);
+    await expect(service.signOutProductSessions('uuid-1')).resolves.toEqual({
+      endedByProvider: [],
+      residual: [
+        {
+          instanceId: 'inst-1',
+          product: 'EspoCRM',
+          maxRemainingMinutes: 480,
+          singleLogout: true,
+          verifiedAt: '2026-01-01T00:00:00.000Z',
+        },
+        {
+          instanceId: 'inst-2',
+          product: 'Mautic',
+          maxRemainingMinutes: null,
+          singleLogout: false,
+          verifiedAt: null,
+        },
+      ],
+    });
+  });
+
+  /**
+   * AC-35's correction: a product the identity provider was asked to end does not belong in the
+   * list of sessions that may persist. Only the third fact — a registered back-channel endpoint —
+   * makes the request reachable, so a declaration alone must not remove it.
+   */
+  it('drops a product the provider was asked to end, and names it', async () => {
+    const { service } = setup({
+      routes: [
+        [
+          'FROM entitlement e',
+          [
+            {
+              instance_id: 'inst-1',
+              product: 'EspoCRM',
+              session_max_minutes: 480,
+              slo_supported: true,
+              verified_at: new Date('2026-01-01T00:00:00Z'),
+              idp_client_id: 'client-1',
+              backchannel_logout_url: 'https://crm.example/backchannelLogout',
+              sso_ok: true,
+            },
+          ],
+        ],
+      ],
+    });
+
+    await expect(
+      service.signOutProductSessions('uuid-1', { identityProviderEnded: true }),
+    ).resolves.toEqual({ endedByProvider: ['EspoCRM'], residual: [] });
+  });
+
+  it('keeps a product that declares support but has no registered back-channel endpoint', async () => {
+    const { service } = setup({
+      routes: [
+        [
+          'FROM entitlement e',
+          [
+            {
+              instance_id: 'inst-1',
+              product: 'EspoCRM',
+              session_max_minutes: 480,
+              slo_supported: true,
+              verified_at: new Date('2026-01-01T00:00:00Z'),
+              idp_client_id: 'client-1',
+              backchannel_logout_url: null,
+              sso_ok: true,
+            },
+          ],
+        ],
+      ],
+    });
+
+    await expect(
+      service.signOutProductSessions('uuid-1', { identityProviderEnded: true }),
+    ).resolves.toEqual({
+      endedByProvider: [],
+      residual: [expect.objectContaining({ maxRemainingMinutes: 480, singleLogout: true })],
+    });
+  });
+
+  it('keeps every product when the provider was never asked', async () => {
+    const { service } = setup({
+      routes: [
+        [
+          'FROM entitlement e',
+          [
+            {
+              instance_id: 'inst-1',
+              product: 'EspoCRM',
+              session_max_minutes: 480,
+              slo_supported: true,
+              verified_at: new Date('2026-01-01T00:00:00Z'),
+              idp_client_id: 'client-1',
+              backchannel_logout_url: 'https://crm.example/backchannelLogout',
+              sso_ok: true,
+            },
+          ],
+        ],
+      ],
+    });
+
+    await expect(
+      service.signOutProductSessions('uuid-1', { identityProviderEnded: false }),
+    ).resolves.toEqual({
+      endedByProvider: [],
+      residual: [expect.objectContaining({ product: 'EspoCRM' })],
+    });
   });
 
   it('keeps a product whose sso check passed but which declares no logout support', async () => {
@@ -355,6 +450,7 @@ describe('residualSessions', () => {
               slo_supported: false,
               verified_at: new Date('2026-01-01T00:00:00Z'),
               idp_client_id: null,
+              backchannel_logout_url: null,
               sso_ok: false,
             },
           ],
@@ -362,9 +458,10 @@ describe('residualSessions', () => {
       ],
     });
 
-    await expect(service.residualSessions('uuid-1')).resolves.toEqual([
-      expect.objectContaining({ maxRemainingMinutes: 480, singleLogout: false }),
-    ]);
+    await expect(service.signOutProductSessions('uuid-1')).resolves.toEqual({
+      endedByProvider: [],
+      residual: [expect.objectContaining({ maxRemainingMinutes: 480, singleLogout: false })],
+    });
   });
 });
 

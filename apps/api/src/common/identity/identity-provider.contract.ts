@@ -83,6 +83,20 @@ export type AuthProviderConfig = {
   readonly redirectPath: string;
 };
 
+/**
+ * What ended a provider-side session, as far as the platform can honestly say.
+ *
+ * `ended` means the provider *accepted* the request. Back-channel logout is asynchronous: the
+ * provider mints a logout token per registered client and posts it, and reports nothing back about
+ * delivery. A statement claiming "signed out" would be the same false claim this seam was added to
+ * remove, so the result is named for the request, not for delivery.
+ */
+export type SessionEndResult = {
+  readonly ended: boolean;
+  /** Why the provider declined, for the sign-out statement. Never contains a secret. */
+  readonly reason?: string;
+};
+
 export interface IdentityProvider {
   readonly name: 'stub' | 'oidc';
   /** Resolves the authorization code to claims, or throws `MFA_REQUIRED` / `UNAUTHORIZED`. */
@@ -97,6 +111,15 @@ export interface IdentityProvider {
    * itself. The authority has to change where it lives; this call is that change.
    */
   setUserEnabled(sub: string, enabled: boolean): Promise<void>;
+  /**
+   * FR-3.8 / AC-35: ends the subject's session **at the provider**.
+   *
+   * It is what makes product single logout real: products that registered a back-channel logout
+   * endpoint are notified by the provider when its session ends, so the platform's job is to end
+   * that session rather than to call each product. Never throws — a provider that cannot be reached
+   * must not leave the user signed in, so the failure is a value the sign-out statement reports.
+   */
+  endSessions(sub: string): Promise<SessionEndResult>;
   /** Provider-side logout URL, or null when the provider has no browser logout endpoint. */
   logoutUrl(): string | null;
   /** The browser-facing sign-in parameters, resolved once per session read. */

@@ -83,6 +83,12 @@ const SCOPE_RULES: Partial<Record<Capability, ScopeRule>> = {
   'patch.view': 'domain',
   'posture.view': 'domain',
   'portal.sign_in': 'self',
+  /*
+   * The launch routes are addressable (`:instanceId`), so the rule stays `instance`. The launcher and
+   * the product deep link resolve to `self` instead: they are the caller's own surface, and the PDP
+   * resolves a `self` resource from an instance-bound session (R6) to that session's instance. That
+   * keeps §5.2's "one product" a *scoped* grant rather than a weaker yes.
+   */
   'portal.launch': 'instance',
   'portal.view_status': 'self',
   'access.request': 'self',
@@ -116,14 +122,25 @@ export const POLICY_KEYS: Readonly<Record<string, PolicyKey>> = {
   // Portal and own session
   'GET /me': 'auth.session.read',
   'GET /me/entitlements': 'portal.view_entitlements',
-  'GET /me/launcher': 'portal.view_entitlements',
+  /*
+   * §5.2 gives "view own entitlements" to R1–R5 only (`➖` for R6) and "launch entitled products" to
+   * R6 as one product. The launcher is the launch surface: binding it to `portal.view_entitlements`
+   * locked the guest — the one role whose only surface this is — out of it in live mode. What stays
+   * closed is the entitlement *inventory* (`/me/entitlements`), which is the row the matrix denies.
+   */
+  'GET /me/launcher': 'portal.launch',
   'POST /me/logout': 'auth.session.read',
   'GET /portal/status-banner': 'portal.view_status',
   'GET /portal/launch-targets/:instanceId': 'portal.launch',
   'POST /portal/launch-tickets/:instanceId': 'portal.launch',
   'POST /portal/launch-events/:instanceId': 'portal.launch',
   'GET /portal/requestable': 'access.request',
-  'GET /portal/products/:slug': 'portal.view_entitlements',
+  /*
+   * One tile, resolved from the caller's own entitlement — `portal.product` answers not-found for a
+   * slug the caller does not hold. It is the same surface as the launcher, so it carries the same
+   * key; `portal.view_entitlements` would again deny the guest its single product.
+   */
+  'GET /portal/products/:slug': 'portal.launch',
 
   // Catalog
   'GET /catalog': 'catalog.browse',
@@ -362,6 +379,12 @@ export function resourceForRequest(path: string, params: Record<string, string>)
   if (path.startsWith('/workflows') || path.startsWith('/workflow-runs'))
     return { type: 'workflow', id };
   if (path.startsWith('/me')) return { type: 'self', id: '' };
+  /*
+   * A product deep link resolves one tile the caller already holds, so the question is about the
+   * caller rather than about a platform resource. The default `platform` resource would refuse every
+   * scoped grant — including the guest's, whose entitlement is exactly what the slug names.
+   */
+  if (path.startsWith('/portal/products/')) return { type: 'self', id: '' };
   if (path.startsWith('/break-glass-sessions') || path.startsWith('/admin/access-requests')) {
     return { type: 'request', id };
   }

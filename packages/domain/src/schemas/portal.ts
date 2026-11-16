@@ -216,6 +216,12 @@ export const ResidualSessionSchema = z.object({
    * value was never verified, and the screen must say "not verified" rather than invent a time.
    */
   maxRemainingMinutes: z.number().int().nonnegative().nullable(),
+  /*
+   * Declared support, not delivered logout: a residual session only appears here when the platform
+   * could *not* end it, so `true` means "the product says it supports single logout but no
+   * back-channel endpoint is registered for it" — the screen has to phrase it that way instead of
+   * implying the session ended.
+   */
   singleLogout: z.boolean(),
   /**
    * When the integration metadata behind the number was verified, and by whom it was not. The screen
@@ -225,9 +231,23 @@ export const ResidualSessionSchema = z.object({
   verifiedAt: TimestampSchema.nullable().default(null),
 });
 
+/**
+ * FR-3.8 / AC-35 — what the platform asked the identity provider to do at sign-out.
+ *
+ * `identityProviderEnded` is the provider's answer, not delivery: back-channel logout is
+ * asynchronous and unacknowledged, so the wording this drives says "the identity provider was asked
+ * to end these", never "these products are signed out".
+ */
+export const SingleLogoutOutcomeSchema = z.object({
+  identityProviderEnded: z.boolean(),
+  /** Products the provider was asked to notify, by product name. Empty when the request failed. */
+  products: z.array(z.string().min(1)),
+});
+
 export const LogoutResponseSchema = z.object({
   signedOutAt: TimestampSchema,
   residualSessions: z.array(ResidualSessionSchema),
+  singleLogout: SingleLogoutOutcomeSchema,
   statement: z.string().min(1),
 });
 

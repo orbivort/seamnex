@@ -397,6 +397,21 @@ export function AuditPage() {
                   { label: 'Chain valid', value: chain.chainValid ? 'Yes' : 'No' },
                   { label: 'Anchor day', value: chain.anchoredDay },
                   { label: 'Anchor signature', value: chain.anchorSignature, mono: true },
+                  /*
+                   * NFR-4.10: printing the stored signature proved only that a string was stored.
+                   * Three answers the reader needs to keep apart — verified, not verified (the
+                   * signature does not cover this row), and not verifiable (no anchor, or an anchor
+                   * from before signing existed).
+                   */
+                  {
+                    label: 'Signature verifies',
+                    value:
+                      chain.anchorSignatureValid === null
+                        ? 'Not verifiable'
+                        : chain.anchorSignatureValid
+                          ? 'Yes'
+                          : 'No — the signature does not match this anchor',
+                  },
                   { label: 'Verified at', value: formatDateTime(chain.verifiedAt) },
                 ]}
               />

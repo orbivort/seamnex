@@ -1065,7 +1065,7 @@
         "tags": [
           "portal"
         ],
-        "x-policy-key": "portal.view_entitlements",
+        "x-policy-key": "portal.launch",
         "responses": {
           "200": {
             "description": "Success.",
@@ -1470,6 +1470,26 @@
                         "additionalProperties": false
                       }
                     },
+                    "singleLogout": {
+                      "type": "object",
+                      "properties": {
+                        "identityProviderEnded": {
+                          "type": "boolean"
+                        },
+                        "products": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        }
+                      },
+                      "required": [
+                        "identityProviderEnded",
+                        "products"
+                      ],
+                      "additionalProperties": false
+                    },
                     "statement": {
                       "type": "string",
                       "minLength": 1
@@ -1478,6 +1498,7 @@
                   "required": [
                     "signedOutAt",
                     "residualSessions",
+                    "singleLogout",
                     "statement"
                   ],
                   "additionalProperties": false
@@ -2279,7 +2300,7 @@
             }
           }
         ],
-        "x-policy-key": "portal.view_entitlements",
+        "x-policy-key": "portal.launch",
         "responses": {
           "200": {
             "description": "Success.",
@@ -24772,6 +24793,13 @@
                       "type": "string",
                       "minLength": 1
                     },
+                    "anchorSignatureValid": {
+                      "default": null,
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    },
                     "path": {
                       "type": "array",
                       "items": {
@@ -24804,6 +24832,7 @@
                     "verifiedAt",
                     "anchoredDay",
                     "anchorSignature",
+                    "anchorSignatureValid",
                     "path"
                   ],
                   "additionalProperties": false
@@ -29132,8 +29161,8 @@
                     },
                     "auditRetentionDays": {
                       "type": "integer",
-                      "exclusiveMinimum": 0,
-                      "maximum": 9007199254740991
+                      "minimum": 365,
+                      "maximum": 3650
                     },
                     "capacityCpuAlertPercent": {
                       "type": "integer",
@@ -29305,8 +29334,8 @@
                     },
                     "auditRetentionDays": {
                       "type": "integer",
-                      "exclusiveMinimum": 0,
-                      "maximum": 9007199254740991
+                      "minimum": 365,
+                      "maximum": 3650
                     },
                     "capacityCpuAlertPercent": {
                       "type": "integer",

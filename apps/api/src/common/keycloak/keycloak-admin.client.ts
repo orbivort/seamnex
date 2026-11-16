@@ -228,6 +228,30 @@ export class KeycloakAdminClient {
     await this.request('PUT', `/users/${encodeURIComponent(userId)}`, { enabled });
   }
 
+  /**
+   * FR-3.8 / AC-35 — ends every session this subject holds in the realm.
+   *
+   * This is the single logout the platform was missing: ending the provider session is what makes
+   * Keycloak post a logout token to each client that registered `backchannel.logout.url`, so the
+   * products end their own sessions instead of expiring quietly. "Global sign-out" is exactly the
+   * scope of the call — every browser and every product for this subject goes, which is what the
+   * user asked the button to do.
+   *
+   * A 204 is the accepted answer; an unknown user answers 404 and is tolerated, because the honest
+   * outcome for "this account no longer exists at the provider" is "there is nothing left to end",
+   * not a failed sign-out. A 403 is not tolerated: it means the admin client may not write sessions,
+   * and the caller has to say so rather than assume the products were notified.
+   */
+  async endUserSessions(userId: string): Promise<void> {
+    await this.adminRequest(
+      'POST',
+      `/realms/${this.config.SEAMNEX_KEYCLOAK_REALM}/users/${encodeURIComponent(userId)}/logout`,
+      undefined,
+      'Keycloak refused to end the user session',
+      [404],
+    );
+  }
+
   private async findClient(clientId: string): Promise<string | null> {
     const response = await this.request('GET', `/clients?clientId=${encodeURIComponent(clientId)}`);
     const rows = (await response.json()) as { id: string; clientId: string }[];

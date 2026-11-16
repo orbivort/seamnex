@@ -281,6 +281,39 @@ the same number through every manifest and the link definitions at the foot of t
 
 ### Fixed
 
+- **The guest can use the portal in live mode** (`FR-3.3`, `FR-3.5`, `AC-35`, ISSUE-28) — `/me/launcher`
+  and `/portal/products/:slug` were bound to `portal.view_entitlements`, whose R6 cell in §5.2 is
+  `none`, so the one surface the guest role exists for answered `403` while mock mode hid the defect.
+  Both reads now carry `portal.launch` — the row §5.2 gives R6 as "one product" — and `PdpService`
+  resolves a `self` resource from an instance-bound session to that session's instance, so the guest's
+  grant still has to name the instance it launches. `GET /me/entitlements` keeps
+  `portal.view_entitlements`, so "My access" stays closed to R6 exactly as the matrix says; no
+  capability cell changed. `docs/openapi.json` regenerated.
+- **Global sign-out performs product single logout, and reports only that** (`FR-3.8`, `AC-35`,
+  ISSUE-29) — the dialog claimed products with single logout were signed out while the platform killed
+  its own session and nothing else, and the residual list included those products anyway.
+  `POST /me/logout` now ends the **identity-provider** session (`IdentityProvider.endSessions` →
+  Keycloak admin `users/{id}/logout`), which is what makes the already-registered back-channel logout
+  fire; migration `0038` records `idp_client.backchannel_logout_url` so the platform knows which
+  products it can actually reach, and the residual list excludes a product only when the provider
+  accepted the request _and_ a verified `slo_supported` product has a registered endpoint. The response
+  gains `singleLogout: { identityProviderEnded, products }`, the dialog says "the identity provider was
+  asked to end these", and a provider failure leaves the person signed out with the failure named in
+  the statement. Sign-out now writes one `auth.signout` audit row. ADR-BE-32.
+- **The audit anchor is signed, immutable, copied off-host, and retention is applied** (`NFR-4.10`,
+  `FR-4.3`, `AC-15`, ISSUE-30) — `audit_anchor` held an unsigned hash in the database it protects, was
+  re-anchored by an upsert the `REVOKE UPDATE` grant forbade for the application role, reached the
+  object store only when an operator happened to schedule a backup, and `audit_retention_days` (420) was
+  read by nobody while `audit_event` months accumulated forever. The anchor is now one Ed25519-signed
+  row per **closed** day, written once (`ON CONFLICT DO NOTHING`) with the key sealed in the platform
+  secret store and the public half published in the export; `AnchorStore` copies it to
+  `audit-anchors/<day>.json` daily and retries a failed copy, recording `audit.anchor.offhost_failed` /
+  `audit.anchor.recorded`; the proof endpoint returns `anchorSignatureValid` and the console shows
+  verified / not verifiable instead of printing a string. The settings floor is 365 days, a legacy
+  shorter value is read as the floor, and the scheduler drops whole expired `audit_event` months,
+  refusing to run on an unreadable setting and recording `audit.retention.enforced` with the partitions.
+  The object-store client moved to `common/storage` so M17 can use it without crossing a module
+  boundary. ADR-BE-33.
 - **An event can start a workflow, and a poll actually polls** (`FR-5.4`, `NFR-2.8`, `AC-26`) — the
   delivery URL a registration printed was served by nothing, `accept()` had no route to reach it, and a
   delivery that did arrive started no run: event-driven start was documented and unreachable. `POST

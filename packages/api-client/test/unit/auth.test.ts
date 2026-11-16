@@ -157,6 +157,7 @@ describe('session reads', () => {
     const logout = capture({
       signedOutAt: '2026-11-05T08:00:00.000Z',
       residualSessions: [],
+      singleLogout: { identityProviderEnded: true, products: [] },
       statement: 'You are signed out everywhere.',
     });
     configureTransport(logout.transport);
