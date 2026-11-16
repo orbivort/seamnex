@@ -1,5 +1,10 @@
 import { http, HttpResponse } from 'msw';
-import { breakGlassStateAt, licenseGateVerdict, licenseTerms } from '@seamnex/domain';
+import {
+  breakGlassStateAt,
+  licenseGateVerdict,
+  licenseTerms,
+  mayApproveAccessMode,
+} from '@seamnex/domain';
 import type { BreakGlassSession, LicenseReviewRequest } from '@seamnex/domain';
 import { at } from '../fixtures/context';
 import { appendAudit, auditProofFor, getState } from '../store';
@@ -434,7 +439,9 @@ export const governanceHandlers = [
           'Refresh the list.',
         );
       }
-      if (session.accessMode === 'read_write' && role === 'R2') {
+      // The same rule the API enforces (FR-4.11, `ISSUE-05`): a scoped approver decides read-only
+      // elevations only. This used to be the *only* copy of it, which is what the review recorded.
+      if (!mayApproveAccessMode(role, session.accessMode)) {
         return problem(
           403,
           'APPROVAL_MODE_FORBIDDEN',

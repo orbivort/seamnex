@@ -57,6 +57,12 @@ const SCOPE_RULES: Partial<Record<Capability, ScopeRule>> = {
   'workflow.credentials': 'instance',
   'workflow.approve': 'request',
   'breakglass.request': 'request',
+  /*
+   * Role-level only. Whether *this* approver may decide *this* request depends on the elevation's
+   * access mode and target domain, which are row facts a policy decision never sees (every
+   * `/break-glass-sessions*` path resolves to `{type:'request'}`). FR-4.11's eligibility rule lives
+   * in `break-glass-approval.ts` and is enforced by m18 on the row it locks for the decision.
+   */
   'breakglass.approve': 'self',
   'recovery.view': 'domain',
   'license.manage': 'instance',

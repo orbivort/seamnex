@@ -92,6 +92,18 @@ the same number through every manifest and the link definitions at the foot of t
 
 ### Fixed
 
+- **Break-glass approver eligibility is enforced by the API, not only the console** (`FR-4.11`,
+  `AC-47`, `NFR-4.4`) — an approver whose `breakglass.approve` grant is scoped (the R2 auditor) may
+  approve a **read-only** elevation only, and a domain owner may approve an elevation only when one of
+  their grants covers the domain or instance it targets. Both rules are decided on the row the
+  decision transaction already locks, so the pending `access_mode` cannot be escalated between the
+  check and the `UPDATE`. A refusal answers `403 APPROVAL_MODE_FORBIDDEN` or `403
+APPROVAL_SCOPE_FORBIDDEN`, leaves the elevation `requested`, writes no `breakglass.approve` record
+  and writes an `access.denied` row instead; a rejection is never gated, so an auditor can still
+  decline a read-write request. The rule itself moved into `@seamnex/domain`
+  (`break-glass-approval.ts`), which is what the console button and the mock platform now read: they
+  had the only copy of it, which is why a caller that skipped the screen could have a read-write
+  elevation approved and audited as legitimate.
 - **Workflow write-target authority is enforced by the API, not only the mock** (`FR-5.9`, `AC-26`,
   `NFR-4.4`) — a definition may now be created, imported, edited, activated, disabled, duplicated,
   run, replayed, renamed or deleted only if the caller holds, for **every** product it writes to, R1

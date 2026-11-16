@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { BreakGlassSession, PlatformRole, PrivacyRequest } from '@seamnex/domain';
 import type { AppConfig } from '../../../../src/config/config';
+import type { AccessControlService } from '../../../../src/modules/m09-access-control/access-control.contract';
 import { GovernanceWritesService } from '../../../../src/modules/m18-governance/governance-writes.service';
 import { fakeDb, type QueryCall, type Row } from '../../../support/fakes';
 
@@ -23,6 +24,14 @@ const WHY = 'Investigating the failing nightly reconciliation job';
 const USERNAME = 'bg-018f0000';
 /** A fixed instant far enough ahead that "not expired" does not depend on when the suite runs. */
 const FUTURE = new Date('2029-01-01T00:00:00.000Z');
+/** `catalog_entry.domain` of `INSTANCE_ID`, as the test instance projects it. */
+const DOMAIN = 'Core Operations';
+
+type Grant = Awaited<ReturnType<AccessControlService['grantsFor']>>[number];
+
+function grant(role: PlatformRole, scopeType: Grant['scopeType'], scopeId: string | null): Grant {
+  return { role, scopeType, scopeId, expiresAt: null };
+}
 
 function setup(routes: Parameters<typeof fakeDb>[0] = []) {
   const db = fakeDb(routes);
@@ -34,6 +43,15 @@ function setup(routes: Parameters<typeof fakeDb>[0] = []) {
       checked: 3,
       firstBrokenSeq: null as string | null,
     })),
+    denied: vi.fn(async (_input: unknown) => undefined),
+  };
+  /*
+   * An empty grant set is not "no authority": it is the undocumented-in-test fallback the PDP and
+   * the workflow authority share — a subject with no `role_binding` row keeps the role its session
+   * carries as a platform-scoped grant. A case that needs a narrower grant resolves this mock.
+   */
+  const access = {
+    grantsFor: vi.fn(async (_subjectIdpId: string): Promise<Grant[]> => []),
   };
   const secrets = {
     put: vi.fn(
@@ -68,8 +86,9 @@ function setup(routes: Parameters<typeof fakeDb>[0] = []) {
     identity as never,
     portal as never,
     privacy as never,
+    access as never,
   );
-  return { db, audit, secrets, identity, portal, privacy, service };
+  return { db, audit, access, secrets, identity, portal, privacy, service };
 }
 
 function callFor(calls: readonly QueryCall[], matcher: string): QueryCall | undefined {
@@ -374,6 +393,8 @@ function decideRoutes(
 ): Parameters<typeof fakeDb>[0] {
   return [
     ['requester, state, access_mode', [session]],
+    // Approver eligibility resolves the target's domain on the decision transaction (FR-4.11).
+    ['FROM instance i', [{ domain: DOMAIN }]],
     ...extra,
     ['FROM break_glass_session b', [read]],
   ];
@@ -492,6 +513,146 @@ describe('decideBreakGlass approve', () => {
       ]),
     );
     await expect(service.decideBreakGlass(BG_ID, 'approve', ACTOR, 'R3')).resolves.toBeDefined();
+  });
+});
+
+/**
+ * FR-4.11 / AC-47 / NFR-4.4 — approver eligibility follows the request, not the role alone.
+ *
+ * `ISSUE-05` is this rule living only in the console: the API answered on the capability alone, so
+ * a caller that skipped the screen had a read-write elevation approved and audited as legitimate.
+ * Every refusal here is asserted on four axes: the code and status the caller sees, the `UPDATE`
+ * that must not be issued, the absence of a success audit row, and the `access.denied` row that
+ * replaces it.
+ */
+describe('decideBreakGlass approver eligibility', () => {
+  it('refuses a read-write elevation approved by an auditor', async () => {
+    const { db, audit, service } = setup(decideRoutes(bgSessionRow()));
+
+    await expect(service.decideBreakGlass(BG_ID, 'approve', ACTOR, 'R2')).rejects.toMatchObject({
+      code: 'APPROVAL_MODE_FORBIDDEN',
+      status: 403,
+      detail:
+        'R2 may approve read-only elevations only, and this request asks for read-write access.',
+      remediation: expect.stringContaining('Ask the owner of the affected domain'),
+    });
+
+    expect(issued(db.calls, APPROVE_UPDATE)).toBe(false);
+    expect(audit.append).not.toHaveBeenCalled();
+    expect(audit.denied).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorId: ACTOR,
+        targetType: 'break_glass_session',
+        targetId: BG_ID,
+        detail: {
+          policyKey: 'breakglass.approve',
+          reason: 'APPROVAL_MODE_FORBIDDEN',
+          role: 'R2',
+          accessMode: 'read_write',
+        },
+      }),
+    );
+  });
+
+  it('lets an auditor approve a read-only elevation', async () => {
+    const { audit, service } = setup(
+      decideRoutes(
+        bgSessionRow({ access_mode: 'read_only' }),
+        [
+          [APPROVE_UPDATE, { rows: [], rowCount: 1 }],
+          ['FROM settings WHERE key', [{ value: 30 }]],
+        ],
+        bgSessionRow({ access_mode: 'read_only', state: 'active' }),
+      ),
+    );
+
+    await expect(service.decideBreakGlass(BG_ID, 'approve', ACTOR, 'R2')).resolves.toMatchObject({
+      state: 'active',
+    });
+    expect(audit.denied).not.toHaveBeenCalled();
+  });
+
+  it('lets an auditor decline a read-write elevation it may not approve', async () => {
+    const { service } = setup(
+      decideRoutes(
+        bgSessionRow(),
+        [[REJECT_UPDATE, { rows: [], rowCount: 1 }]],
+        bgSessionRow({ state: 'rejected' }),
+      ),
+    );
+
+    // Declining is always safe: turning a scoped approver's refusal into a denial would leave the
+    // auditor able to see a read-write request and unable to stop it.
+    await expect(service.decideBreakGlass(BG_ID, 'reject', ACTOR, 'R2')).resolves.toMatchObject({
+      state: 'rejected',
+    });
+  });
+
+  it('lets a domain owner approve a read-write elevation in their own domain', async () => {
+    const { access, service } = setup(
+      decideRoutes(
+        bgSessionRow(),
+        [
+          [APPROVE_UPDATE, { rows: [], rowCount: 1 }],
+          ['FROM settings WHERE key', [{ value: 30 }]],
+        ],
+        bgSessionRow({ state: 'active' }),
+      ),
+    );
+    access.grantsFor.mockResolvedValueOnce([grant('R3', 'domain', DOMAIN)]);
+
+    await expect(service.decideBreakGlass(BG_ID, 'approve', ACTOR, 'R3')).resolves.toMatchObject({
+      state: 'active',
+    });
+  });
+
+  it('refuses a domain owner approving another domain', async () => {
+    const { access, db, audit, service } = setup(
+      decideRoutes(bgSessionRow({ access_mode: 'read_only' })),
+    );
+    access.grantsFor.mockResolvedValueOnce([grant('R3', 'domain', 'Revenue & Customer')]);
+
+    await expect(service.decideBreakGlass(BG_ID, 'approve', ACTOR, 'R3')).rejects.toMatchObject({
+      code: 'APPROVAL_SCOPE_FORBIDDEN',
+      status: 403,
+      detail: `The elevation targets ${DOMAIN}, which is outside the domains you own.`,
+      remediation: expect.stringContaining('Ask an approver who owns that domain'),
+    });
+
+    expect(issued(db.calls, APPROVE_UPDATE)).toBe(false);
+    expect(audit.append).not.toHaveBeenCalled();
+    expect(audit.denied).toHaveBeenCalledWith(
+      expect.objectContaining({
+        detail: expect.objectContaining({
+          policyKey: 'breakglass.approve',
+          reason: 'APPROVAL_SCOPE_FORBIDDEN',
+        }),
+      }),
+    );
+  });
+
+  it('refuses when the target domain cannot be resolved', async () => {
+    const { access, service } = setup(
+      decideRoutes(bgSessionRow({ instance_id: null, access_mode: 'read_only' })),
+    );
+    access.grantsFor.mockResolvedValueOnce([grant('R3', 'domain', DOMAIN)]);
+
+    // Fail closed: an elevation whose target cannot be resolved is not "everyone's domain".
+    await expect(service.decideBreakGlass(BG_ID, 'approve', ACTOR, 'R3')).rejects.toMatchObject({
+      code: 'APPROVAL_SCOPE_FORBIDDEN',
+      detail: expect.stringContaining('the affected product'),
+    });
+  });
+
+  it('does not read an unavailable binding set as platform-wide', async () => {
+    const { access, db, service } = setup(decideRoutes(bgSessionRow()));
+    access.grantsFor.mockRejectedValueOnce(new Error('role_binding unavailable'));
+
+    await expect(service.decideBreakGlass(BG_ID, 'approve', ACTOR, 'R3')).rejects.toMatchObject({
+      code: 'UNAVAILABLE',
+      detail: expect.stringContaining('role bindings could not be read'),
+    });
+    expect(issued(db.calls, APPROVE_UPDATE)).toBe(false);
   });
 });
 

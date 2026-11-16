@@ -346,6 +346,30 @@ export const PROBLEM_CATALOG = {
     remediation: 'The requester may not approve their own request. Ask an eligible approver.',
     slug: 'approval-required',
   },
+  /**
+   * FR-4.11 / AC-47 / NFR-4.4 — the approver holds `breakglass.approve` as `scoped` (an R2
+   * auditor) and the elevation asks for read-write access. Separate from `FORBIDDEN`: the role may
+   * approve, just not this mode, and the fix is a different approver rather than a different role.
+   */
+  APPROVAL_MODE_FORBIDDEN: {
+    status: 403,
+    title: 'This approver may not approve a read-write elevation',
+    remediation:
+      'Ask the owner of the affected domain to approve a read-write elevation; an auditor can decline it instead. The refusal was audited.',
+    slug: 'approval-mode-forbidden',
+  },
+  /**
+   * FR-4.11 / NFR-4.4 — the approver holds the capability, but no grant that covers the domain or
+   * instance the elevation targets. Naming the scope keeps the answer actionable: "not your
+   * domain" and "not your role" need different people.
+   */
+  APPROVAL_SCOPE_FORBIDDEN: {
+    status: 403,
+    title: 'This approver does not own the domain the elevation targets',
+    remediation:
+      'Ask an approver who owns that domain, or a platform administrator, to decide the request. The refusal was audited.',
+    slug: 'approval-scope-forbidden',
+  },
   ROLE_NOT_IMPLEMENTED: {
     status: 503,
     title: 'This process role is registered but idle',

@@ -12,10 +12,10 @@ import type { BreakGlassSession } from '@seamnex/domain';
 import {
   ACCESS_MODE_LABELS,
   BREAK_GLASS_STATE_LABELS,
-  accessFor,
   breakGlassStateAt,
   can,
   canMutate,
+  mayApproveAccessMode,
 } from '@seamnex/domain';
 import {
   Alert,
@@ -129,8 +129,7 @@ export function BreakGlassPage() {
    * role that holds `breakglass.revoke`. The two happened to line up; nothing kept them lined up.
    */
   const canRequest = can(session.role, 'breakglass.request');
-  const approveAccess = accessFor(session.role, 'breakglass.approve');
-  const canApprove = approveAccess !== 'none';
+  const canApprove = can(session.role, 'breakglass.approve');
   const canRevoke = canMutate(session.role, 'breakglass.revoke');
   const canReveal = can(session.role, 'breakglass.request');
   const hasAnyRight = canRequest || canApprove || canRevoke;
@@ -211,13 +210,18 @@ export function BreakGlassPage() {
   );
 
   /**
-   * A scoped approver (R2) may decide read-only elevations only. An enabled button that always
-   * answers 403 taught the operator nothing; the affordance states the rule instead.
+   * A scoped approver (R2) may **approve** read-only elevations only — the same rule the API refuses
+   * on, read from `@seamnex/domain` so the button and the server cannot disagree. An enabled button
+   * that always answers 403 taught the operator nothing; the affordance states the rule instead, and
+   * the server is what enforces it (FR-4.11, `ISSUE-05`).
+   *
+   * Approval only: declining a read-write request is not an escalation, and the API deliberately
+   * allows it, so `Reject` is not gated by the mode.
    */
-  const mayDecide = useCallback(
+  const mayApprove = useCallback(
     (row: BreakGlassSession): boolean =>
-      canApprove && !(row.accessMode === 'read_write' && approveAccess === 'scoped'),
-    [canApprove, approveAccess],
+      canApprove && mayApproveAccessMode(session.role, row.accessMode),
+    [canApprove, session.role],
   );
 
   /**
@@ -321,9 +325,9 @@ export function BreakGlassPage() {
                     <Button
                       size="sm"
                       variant="secondary"
-                      disabled={pending || !mayDecide(row)}
+                      disabled={pending || !mayApprove(row)}
                       title={
-                        mayDecide(row)
+                        mayApprove(row)
                           ? undefined
                           : 'Read-write elevation requires the domain owner of the affected domain.'
                       }
@@ -334,7 +338,7 @@ export function BreakGlassPage() {
                     <Button
                       size="sm"
                       variant="quiet"
-                      disabled={pending || !mayDecide(row)}
+                      disabled={pending}
                       onClick={() => decide(row, 'reject')}
                     >
                       Reject
@@ -376,7 +380,7 @@ export function BreakGlassPage() {
       canRevoke,
       canReveal,
       revealPendingId,
-      mayDecide,
+      mayApprove,
       decide,
       openReveal,
     ],

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import * as barrel from '../../src/index';
+import * as breakGlassApproval from '../../src/break-glass-approval';
 import * as capabilities from '../../src/capabilities';
 import * as capacity from '../../src/capacity';
 import * as contract from '../../src/contract';
@@ -44,6 +45,7 @@ import * as workflowSchema from '../../src/schemas/workflow';
  * which the second test catches.
  */
 const MODULES = [
+  ['break-glass-approval', breakGlassApproval],
   ['capabilities', capabilities],
   ['capacity', capacity],
   ['contract', contract],

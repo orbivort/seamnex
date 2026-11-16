@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import type {
   AccessRequest,
+  ApprovalGrant,
   AuditRangeVerification,
   BreakGlassReveal,
   BreakGlassSession,
@@ -13,14 +14,18 @@ import type {
   PolicyException,
   PrivacyRequest,
 } from '@seamnex/domain';
-import { accessFor, breakGlassStateAt } from '@seamnex/domain';
+import { accessFor, breakGlassApprovalRefusal, breakGlassStateAt } from '@seamnex/domain';
 import type { Pool } from 'pg';
 import { withTransaction, type Queryable } from '@seamnex/db';
 import { APP_CONFIG } from '../../config/config.module';
 import type { AppConfig } from '../../config/config';
 import { PG_POOL } from '../../database/database.module';
-import { AppError } from '../../common/problem/app-error';
+import { AppError, isAppError } from '../../common/problem/app-error';
 import { isUuid } from '../../common/http/uuid';
+import {
+  ACCESS_CONTROL_SERVICE,
+  type AccessControlService,
+} from '../m09-access-control/access-control.contract';
 import { AUDIT_SERVICE, type AuditService } from '../m17-audit/audit.contract';
 import { SECRETS_SERVICE, type SecretsService } from '../m15-secrets/secrets.contract';
 import {
@@ -57,6 +62,15 @@ const DECISIONS: ReadonlySet<string> = new Set(['approve', 'reject', 'revoke', '
 const DEFAULT_BREAK_GLASS_MINUTES = 60;
 
 /**
+ * What a refused approval must be able to say after the transaction that refused it has rolled back:
+ * the code the caller was answered with, and the mode it asked for. Written inside the transaction,
+ * read by `auditRefusedDecision` outside it.
+ */
+type BreakGlassRefusalMark = { code: string; accessMode: string };
+
+type BreakGlassDecisionOutcome = { refused?: BreakGlassRefusalMark };
+
+/**
  * 4F - governance, privacy and settings writes.
  *
  * Three rules that are structural rather than documentary:
@@ -71,6 +85,8 @@ const DEFAULT_BREAK_GLASS_MINUTES = 60;
  */
 @Injectable()
 export class GovernanceWritesService implements GovernanceWrites {
+  private readonly logger = new Logger('m18.governance.writes');
+
   constructor(
     @Inject(PG_POOL) private readonly pool: Pool,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
@@ -82,6 +98,8 @@ export class GovernanceWritesService implements GovernanceWrites {
     @Inject(PORTAL_BFF_SERVICE) private readonly portal: PortalBffService,
     /** Reads the DSAR back in the same shape the queue renders, so the two can never disagree. */
     @Inject(PrivacyQueueService) private readonly privacy: PrivacyQueueService,
+    /** Owns `role_binding`: approver eligibility is decided against the live grants (FR-4.11). */
+    @Inject(ACCESS_CONTROL_SERVICE) private readonly access: AccessControlService,
   ) {}
 
   // ---- break-glass ---------------------------------------------------------------------------
@@ -254,14 +272,38 @@ export class GovernanceWritesService implements GovernanceWrites {
     }
 
     /*
-     * One transaction for the decision, the row it moves, the accounts it revokes and the audit row
-     * it leaves. Three defects lived here: the read and the `UPDATE` were separate autocommit
-     * statements, so two approvers could both read `requested` and both decide; the `UPDATE` carried
-     * no state predicate, so the second decision silently overwrote `approver`; and the audit append
-     * was a third commit, so an elevation could move with no evidence. `FOR UPDATE` plus the
-     * predicate inside each `UPDATE` makes the decision single-use at the database, not at the
-     * caller — which is the only place it can be enforced.
+     * The refusal must leave evidence, and it cannot be written inside the transaction that raises
+     * it: `withTransaction` rolls back, and `auditOutcome` writes through `tx`. It is recorded after
+     * the rollback instead, best effort — an audit outage must not turn a refusal into an allow, and
+     * no `breakglass.approve` row can survive a refused decision.
      */
+    const outcome: BreakGlassDecisionOutcome = {};
+    try {
+      await this.applyDecision(id, action, actorId, role, outcome);
+    } catch (error) {
+      await this.auditRefusedDecision(id, actorId, role, outcome.refused, error);
+      throw error;
+    }
+
+    return this.breakGlass(id);
+  }
+
+  /**
+   * One transaction for the decision, the row it moves, the accounts it revokes and the audit row
+   * it leaves. Three defects lived here: the read and the `UPDATE` were separate autocommit
+   * statements, so two approvers could both read `requested` and both decide; the `UPDATE` carried
+   * no state predicate, so the second decision silently overwrote `approver`; and the audit append
+   * was a third commit, so an elevation could move with no evidence. `FOR UPDATE` plus the
+   * predicate inside each `UPDATE` makes the decision single-use at the database, not at the
+   * caller — which is the only place it can be enforced.
+   */
+  private async applyDecision(
+    id: string,
+    action: string,
+    actorId: string,
+    role: PlatformRole,
+    outcome: BreakGlassDecisionOutcome,
+  ): Promise<void> {
     await withTransaction(this.pool, async (tx) => {
       await this.audit.lockChain(tx);
 
@@ -269,9 +311,10 @@ export class GovernanceWritesService implements GovernanceWrites {
         requester: string;
         state: string;
         access_mode: string;
+        instance_id: string | null;
         expires_at: Date | null;
       }>(
-        `SELECT requester, state, access_mode, expires_at
+        `SELECT requester, state, access_mode, instance_id, expires_at
            FROM break_glass_session WHERE id = $1 FOR UPDATE`,
         [id],
       );
@@ -320,6 +363,34 @@ export class GovernanceWritesService implements GovernanceWrites {
             detail: 'The requester cannot approve their own elevation.',
             remediation:
               'Ask a second eligible approver; self-approval only applies when no second party exists.',
+          });
+        }
+        /*
+         * FR-4.11 / AC-47 / NFR-4.4 — approver eligibility follows the *request*, not the role
+         * alone: a `scoped` grant (the R2 auditor) approves read-only elevations only, and a `full`
+         * grant approves either mode but only for a domain the approver owns. `ISSUE-05` is this
+         * rule existing solely in the console: the API answered on the role's capability alone, so
+         * an auditor who skipped the screen had a read-write elevation approved and audited as
+         * legitimate.
+         *
+         * Decided on the row this transaction has locked, because `access_mode` stays mutable while
+         * the request is pending (0009 trigger) — a check before the transaction could approve a
+         * read-only request whose mode was escalated in between. Only `approve` is gated: declining
+         * a request is always safe, so `reject` stays open to every holder of the capability.
+         */
+        const refusal = breakGlassApprovalRefusal({
+          role,
+          accessMode: session.access_mode === 'read_only' ? 'read_only' : 'read_write',
+          grants: await this.approvalGrants(actorId, role),
+          target: await this.approvalTarget(tx, session.instance_id),
+        });
+        if (refusal !== null) {
+          outcome.refused = { code: refusal.code, accessMode: session.access_mode };
+          throw new AppError({
+            code: refusal.code,
+            status: 403,
+            detail: refusal.detail,
+            remediation: refusal.remediation,
           });
         }
         if (overdue) throw stateConflict('expired', 'approve');
@@ -389,8 +460,98 @@ export class GovernanceWritesService implements GovernanceWrites {
       await this.revokeProductAccounts(id, tx);
       await auditOutcome('breakglass.expire');
     });
+  }
 
-    return this.breakGlass(id);
+  /**
+   * Records an approval refused for approver eligibility (FR-4.11), after the decision transaction
+   * has rolled back.
+   *
+   * Best effort on purpose: an audit outage must not turn the refusal into an allow, and the refusal
+   * is still the answer when the row cannot be written. Nothing here is sensitive — the mode, the
+   * role and the refusing rule, never the justification.
+   */
+  private async auditRefusedDecision(
+    id: string,
+    actorId: string,
+    role: PlatformRole,
+    refused: BreakGlassRefusalMark | undefined,
+    error: unknown,
+  ): Promise<void> {
+    if (refused === undefined) return;
+    if (!isAppError(error) || error.code !== refused.code) return;
+    await this.audit
+      .denied({
+        actorType: 'user',
+        actorId,
+        targetType: 'break_glass_session',
+        targetId: id,
+        detail: {
+          policyKey: 'breakglass.approve',
+          reason: refused.code,
+          role,
+          accessMode: refused.accessMode,
+        },
+      })
+      .catch((auditError: unknown) => {
+        this.logger.error({
+          msg: 'refused break-glass approval could not be audited',
+          targetId: id,
+          reason: refused.code,
+          err: auditError instanceof Error ? auditError.message : String(auditError),
+        });
+      });
+  }
+
+  /**
+   * The approver's live grants, with the same fallback the PDP uses: a subject with no `role_binding`
+   * row keeps the role its session carries, otherwise a seeded demonstrator holds nothing.
+   *
+   * A database failure is **not** that fallback — reading "I could not check" as "platform-wide"
+   * would hand the approval to whoever asked during an outage. The decision is answered as retryable
+   * instead, and nothing is written.
+   */
+  private async approvalGrants(actorId: string, role: PlatformRole): Promise<ApprovalGrant[]> {
+    try {
+      const live = await this.access.grantsFor(actorId);
+      if (live.length > 0) {
+        return live.map((grant) => ({
+          role: grant.role,
+          scopeType: grant.scopeType,
+          scopeId: grant.scopeId,
+        }));
+      }
+    } catch (error) {
+      this.logger.error({
+        msg: 'role bindings unavailable; the break-glass decision was refused',
+        err: error instanceof Error ? error.message : String(error),
+      });
+      throw new AppError({
+        code: 'UNAVAILABLE',
+        detail: 'The approver role bindings could not be read, so no decision was taken.',
+        remediation: 'Retry shortly. The elevation is unchanged and can still be decided.',
+      });
+    }
+    return [{ role, scopeType: 'platform', scopeId: null }];
+  }
+
+  /**
+   * `catalog_entry.domain` of the instance the elevation targets. The session column is nullable and
+   * an entry may declare no domain; both are reported as `null`, which the rule refuses for an
+   * approver without a platform-scoped grant.
+   */
+  private async approvalTarget(
+    tx: Queryable,
+    instanceId: string | null,
+  ): Promise<{ instanceId: string | null; domain: string | null }> {
+    if (instanceId === null) return { instanceId: null, domain: null };
+    const result = await tx.query<{ domain: string | null }>(
+      `SELECT c.domain
+         FROM instance i
+         LEFT JOIN catalog_entry c ON c.key = i.entry_key
+        WHERE i.id = $1`,
+      [instanceId],
+    );
+    return { instanceId, domain: result.rows[0]?.domain ?? null };
   }
 
   /**

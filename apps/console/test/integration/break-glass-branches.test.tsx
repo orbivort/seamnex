@@ -199,6 +199,38 @@ describe('break-glass action refusals', () => {
       expect(getState().breakGlass.find((item) => item.id === 'bg-2292')?.state).toBe('rejected'),
     );
   });
+
+  it('surfaces the server refusal when the approver is not eligible for the mode', async () => {
+    primeActiveSession();
+    server.use(
+      http.post('/api/v1/break-glass-sessions/:id/approve', () =>
+        jsonProblem(
+          403,
+          'APPROVAL_MODE_FORBIDDEN',
+          'This approver may not approve a read-write elevation',
+          'R2 may approve read-only elevations only, and this request asks for read-write access.',
+        ),
+      ),
+    );
+
+    openAs('R3', '/governance/break-glass');
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Break-glass sessions' });
+
+    const row = rowOf(await screen.findByText('bg-2292'));
+    fireEvent.click(within(row).getByRole('button', { name: 'Approve' }));
+
+    /*
+     * The disabled button is an affordance; this is the answer a caller gets when it reaches the API
+     * anyway, which is exactly the path `ISSUE-05` left open. The row must also stay pending: a
+     * refused approval is not a grant.
+     */
+    expect(
+      await screen.findByText('This approver may not approve a read-write elevation'),
+    ).toBeDefined();
+    expect(screen.getByText(/may approve read-only elevations only/)).toBeDefined();
+    expect(getState().breakGlass.find((item) => item.id === 'bg-2292')?.state).toBe('requested');
+  });
 });
 
 /**
