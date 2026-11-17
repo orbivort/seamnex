@@ -1,6 +1,14 @@
 import { spawnSync } from 'node:child_process';
-import { X509Certificate } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { X509Certificate, createPublicKey } from 'node:crypto';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import path from 'node:path';
 
 /**
@@ -52,6 +60,25 @@ const CACHE_FILES = {
   cert: 'dev.crt',
   meta: 'dev.json',
 } as const;
+
+/**
+ * The lock that keeps two starters from minting into the same directory at once.
+ *
+ * `pnpm dev` runs the portal and the console through Turbo, which means two processes loading this
+ * module in their own Vite config factory, at the same instant, against one `temp/certs`. Without the
+ * lock both found the directory empty and both wrote `dev.key` and `dev.csr`; each then signed
+ * whichever request the other had left behind, so one server came up holding a certificate for a key
+ * it did not have (`ERR_OSSL_X509_KEY_VALUES_MISMATCH`, fatal in `server.https`) and the other found
+ * its request deleted (`openssl x509` could not read `dev.csr`) and fell back to http.
+ */
+const LOCK_FILE = '.generation.lock';
+
+/** A generation is a handful of `openssl` calls; a lock older than this belongs to a dead process. */
+const LOCK_STALE_MS = 60_000;
+
+/** Waiting is cheaper than a second generation: the winner's pair is reused as soon as it lands. */
+const LOCK_WAIT_MS = 20_000;
+const LOCK_POLL_MS = 50;
 
 /**
  * Binaries tried after `PATH`. On Windows `openssl` is not on `PATH` even when Git is installed, and on
@@ -173,7 +200,24 @@ function leafConfiguration(names: readonly string[], ips: readonly string[]): st
   ].join('\n');
 }
 
-/** A CA that is intact, self-signed, a CA, and not about to expire. */
+/**
+ * The two halves in `temp/certs` are one pair: the private key has to be the one the certificate's
+ * public key was cut from. Nothing else in the cache check looks at a key file, so a certificate
+ * signed for another process's key used to pass validation and then abort every start inside Node's
+ * TLS context — the one failure a developer cannot get past by retrying.
+ */
+function keyMatchesCert(keyFile: string, certificate: X509Certificate): boolean {
+  const fromKey = createPublicKey(readFileSync(keyFile)).export({ type: 'spki', format: 'der' });
+  const fromCert = certificate.publicKey.export({ type: 'spki', format: 'der' });
+  return fromKey.equals(fromCert);
+}
+
+/**
+ * A CA that is intact, self-signed, a CA, paired with its own key, and not about to expire.
+ *
+ * The key matters as much as the certificate: reusing a CA certificate whose key was lost or replaced
+ * would issue leaves that nothing can verify, and the pair would then be rejected on every start.
+ */
 function usableCa(caKey: string, caCert: string): boolean {
   if (!existsSync(caKey) || !existsSync(caCert)) return false;
 
@@ -182,7 +226,7 @@ function usableCa(caKey: string, caCert: string): boolean {
     if (!ca.ca) return false;
     if (Date.parse(ca.validTo) - Date.now() < RENEW_WHEN_DAYS_LEFT * DAY_MS) return false;
     // Self-signed and unmodified: the signature verifies against its own key.
-    return ca.verify(ca.publicKey);
+    return ca.verify(ca.publicKey) && keyMatchesCert(caKey, ca);
   } catch {
     return false;
   }
@@ -223,8 +267,16 @@ function isUsable(
 
     // The chain, not just the files: an issuer link and a signature that verifies are what a browser
     // checks. A leaf signed by a CA that has since been replaced fails here instead of in the browser.
-    if (!ca.checkIssued(leaf)) return false;
-    if (!ca.verify(leaf.publicKey)) return false;
+    // The direction is the API's: `checkIssued` asks whether the receiver was issued by the argument,
+    // and `verify` whether the receiver was signed by the given public key. Asking the CA instead
+    // reads "was the CA issued by the leaf", which is false for every real pair — and made this
+    // function reject the cached certificate on every start, so both dev servers re-minted one.
+    if (!leaf.checkIssued(ca)) return false;
+    if (!leaf.verify(ca.publicKey)) return false;
+
+    // And the key: a certificate is half of a pair, and Node refuses to build a TLS context from
+    // halves that were minted by different processes.
+    if (!keyMatchesCert(key, leaf)) return false;
 
     // `checkHost`/`checkIP` read the SAN the browser will read: a certificate whose files are intact
     // but whose extensions were lost fails here instead of in the browser.
@@ -339,6 +391,48 @@ function issueLeaf(
   return signed.ok ? { ok: true } : { ok: false, reason: signed.reason };
 }
 
+/** A lock left behind by a process that died mid-generation. */
+function isStaleLock(lockFile: string): boolean {
+  try {
+    return Date.now() - statSync(lockFile).mtimeMs > LOCK_STALE_MS;
+  } catch {
+    // Gone between the failed create and this stat: the next attempt simply takes it.
+    return false;
+  }
+}
+
+/**
+ * Takes the generation lock, waiting for a starter that got there first.
+ *
+ * The lock is a file created with `wx`, which is the only atomic "create if absent" every supported
+ * filesystem offers without a dependency. `false` means the caller must not mint: either the lock
+ * cannot be created at all, or it stayed held past `LOCK_WAIT_MS`. Degrading to http is deliberate —
+ * blocking the dev server for ever on a stale lock would be worse than a banner that says why.
+ */
+function acquireGenerationLock(lockFile: string): boolean {
+  const deadline = Date.now() + LOCK_WAIT_MS;
+
+  for (;;) {
+    try {
+      writeFileSync(lockFile, `${process.pid} ${new Date().toISOString()}\n`, { flag: 'wx' });
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return false;
+    }
+
+    if (isStaleLock(lockFile)) {
+      rmSync(lockFile, { force: true });
+      continue;
+    }
+
+    if (Date.now() >= deadline) return false;
+
+    // A sleep without a timer: this runs inside Vite's config factory, which cannot await. `Atomics.wait`
+    // on a buffer nobody shares blocks the thread for exactly this long and nothing else.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_POLL_MS);
+  }
+}
+
 /**
  * The certificate pair, generating it on first use.
  *
@@ -369,35 +463,64 @@ export function resolveDevCertificate(repoRoot: string): DevCertificateResult {
 
   mkdirSync(directory, { recursive: true });
 
-  // The CA is reused across leaf rotations: re-trusting a new anchor every year is the friction that
-  // makes a developer switch verification off entirely.
-  if (!usableCa(caKey, caCert)) {
-    const ca = issueCa(openssl, CACHE_FILES, directory);
-    if (!ca.ok) {
-      return { reason: `${ca.reason}; the dev servers will start over http` };
+  const lockFile = path.join(directory, LOCK_FILE);
+  if (!acquireGenerationLock(lockFile)) {
+    return {
+      reason:
+        `could not take ${LOCK_FILE} within ${LOCK_WAIT_MS / 1000}s, so no certificate was minted; ` +
+        'the dev servers will start over http. Delete temp/certs and re-run `pnpm dev`',
+    };
+  }
+
+  try {
+    // Checked again under the lock: the usual outcome of waiting is that the other process finished,
+    // and its pair is exactly the one this process wanted.
+    if (isUsable(key, cert, caKey, caCert, metaFile)) {
+      return { certificate: { key, cert, ca: caCert } };
     }
-  }
 
-  const leaf = issueLeaf(openssl, CACHE_FILES, directory);
-  if (!leaf.ok) {
-    return { reason: `${leaf.reason}; the dev servers will start over http` };
-  }
-
-  // The CA key is a private key like any other. Windows has no mode bits, so the call is best-effort.
-  for (const secret of [caKey, key]) {
-    try {
-      chmodSync(secret, 0o600);
-    } catch {
-      // Ignored: the files are under `temp/`, which is not shared.
+    // The CA is reused across leaf rotations: re-trusting a new anchor every year is the friction that
+    // makes a developer switch verification off entirely.
+    if (!usableCa(caKey, caCert)) {
+      const ca = issueCa(openssl, CACHE_FILES, directory);
+      if (!ca.ok) {
+        return { reason: `${ca.reason}; the dev servers will start over http` };
+      }
     }
+
+    const leaf = issueLeaf(openssl, CACHE_FILES, directory);
+    if (!leaf.ok) {
+      return { reason: `${leaf.reason}; the dev servers will start over http` };
+    }
+
+    // The CA key is a private key like any other. Windows has no mode bits, so the call is best-effort.
+    for (const secret of [caKey, key]) {
+      try {
+        chmodSync(secret, 0o600);
+      } catch {
+        // Ignored: the files are under `temp/`, which is not shared.
+      }
+    }
+
+    const meta: CertificateMeta = {
+      names: CERTIFICATE_NAMES,
+      ips: CERTIFICATE_IPS,
+      createdAt: new Date().toISOString(),
+    };
+    writeFileSync(metaFile, `${JSON.stringify(meta, null, 2)}\n`, 'utf8');
+
+    // Read back rather than assume: a pair that fails here would have crashed Vite inside Node's TLS
+    // setup, before any of this module's messages could be read. Reported as a reason, it is a banner.
+    if (!isUsable(key, cert, caKey, caCert, metaFile)) {
+      return {
+        reason:
+          'the generated certificate does not verify against its key or its CA; the dev servers will ' +
+          'start over http. Delete temp/certs and re-run `pnpm dev`',
+      };
+    }
+
+    return { certificate: { key, cert, ca: caCert } };
+  } finally {
+    rmSync(lockFile, { force: true });
   }
-
-  const meta: CertificateMeta = {
-    names: CERTIFICATE_NAMES,
-    ips: CERTIFICATE_IPS,
-    createdAt: new Date().toISOString(),
-  };
-  writeFileSync(metaFile, `${JSON.stringify(meta, null, 2)}\n`, 'utf8');
-
-  return { certificate: { key, cert, ca: caCert } };
 }

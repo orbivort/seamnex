@@ -125,6 +125,8 @@ change.
   `packages/domain/src/contract.ts`.
 - [`docs/operations/bootstrap.md`](docs/operations/bootstrap.md) — the host install runbook, and what
   the install deliberately does not do.
+- [`docs/operations/certificates.md`](docs/operations/certificates.md) — the development CA and leaf, how
+  to trust them, what each TLS warning means, and the edge's certificate modes.
 
 ## Contributing
 

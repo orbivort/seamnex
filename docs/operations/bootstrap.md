@@ -127,7 +127,8 @@ pnpm dev:console
 Then open `https://localhost:5174` and sign in as `dev-admin` — the dev servers speak TLS with a
 certificate issued by the development CA in `temp/certs`. Trust it once
 (`certutil -user -addstore Root temp\certs\dev-ca.crt` on Windows) and the warning stops for both SPAs;
-only the leaf is reissued each year, so the trust survives. The realm import provisions the
+only the leaf is reissued each year, so the trust survives. [Certificates](certificates.md) covers the
+other clients, the lifecycle and the warnings a rotated CA produces. The realm import provisions the
 development accounts (`dev-admin`, `dev-auditor`, `dev-owner`, `dev-product`, `dev-user`, `dev-guest`);
 their role bindings come from the seed. This is the platform's current identity story and it is a
 limitation, not a hidden convenience — see [what this does not do](#what-this-does-not-do).

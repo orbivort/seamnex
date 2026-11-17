@@ -373,6 +373,19 @@ the same number through every manifest and the link definitions at the foot of t
 
 ### Fixed
 
+- **The dev servers reuse the certificate they minted, and two of them starting at once no longer
+  corrupt it** (`NFR-4.1`, ISSUE-07) — `isUsable()` asked the chain checks in the wrong direction:
+  `ca.checkIssued(leaf)` and `ca.verify(leaf.publicKey)` read "was the CA issued by the leaf", which is
+  false for every real pair, so the cache in `temp/certs` was rejected on every start and both SPAs
+  re-minted a leaf. Turbo starts the portal and the console as two processes over that one directory, so
+  the second `openssl x509 -req` read a request the first had already deleted (the console fell back to
+  http) while one server ended up holding a certificate for the other's key
+  (`ERR_OSSL_X509_KEY_VALUES_MISMATCH`, fatal in `server.https`) — the first `pnpm dev` on a checkout
+  could not start the portal. The chain checks now run on the leaf, the cache also verifies that
+  `dev.key` is the certificate's own key and that `dev-ca.key` is the CA's, generation is serialised by
+  `temp/certs/.generation.lock` (created `wx`, reclaimed after 60 s, and the waiter re-checks the cache
+  under it rather than minting a second pair), and a pair that does not verify is reported as a reason
+  instead of being handed to Vite, where it failed before any message could be read.
 - **The dev stack accepts the HTTPS origins the TLS switch introduced, and a generated router cannot
   outlive its route** (`NFR-4.1`, ISSUE-07) — `APP_ORIGINS` in `docker/compose.dev.yml` still listed
   only the plain origins, so the console's sign-in and every cookie-authenticated write were answered
