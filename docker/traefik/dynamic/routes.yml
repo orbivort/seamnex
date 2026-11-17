@@ -1,12 +1,20 @@
-# Static dev routes. Phase 4D replaces these with generated `instance_route` files; Phase 4C adds
-# the restore gate (`published: false` on every product router).
+# Static development routes. Phase 4D replaces the product routes with generated
+# `instance_route` files; Phase 4C adds the restore gate (`published: false` on every product
+# router).
+#
+# This file is a **development** asset and is mounted only by `docker/compose.dev.yml`. It is not
+# the shape a deployment serves: the platform's projection writes one document per instance into
+# its own dynamic directory, and those documents carry their own TLS and header configuration
+# (NFR-4.1). `tls: {}` here means "the edge's default certificate", which is what the dev stack
+# presents; a production edge issues a real one through `certificatesResolvers.seamnex`.
 http:
   routers:
     api:
       rule: 'PathPrefix(`/api/v1`)'
-      entryPoints: [web]
+      entryPoints: [websecure]
       service: api
       middlewares: [security-headers]
+      tls: {}
 
   services:
     api:
@@ -17,7 +25,10 @@ http:
   middlewares:
     security-headers:
       headers:
-        stsSeconds: 0
+        # HSTS is only honoured over TLS, so it is safe to send unconditionally and wrong to send
+        # as zero: a browser that saw `max-age=0` once would drop the policy for the host.
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
         contentTypeNosniff: true
         frameDeny: true
         browserXssFilter: true

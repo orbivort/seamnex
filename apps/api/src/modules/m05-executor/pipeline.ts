@@ -66,6 +66,8 @@ type InstanceRow = {
   source_path: 'compose' | 'dockerfile' | 'scaffold' | null;
   /** `instance_route.host`; null until the first `integrate` stage materialises the route. */
   route_host: string | null;
+  /** `instance_route.tls_mode`; null until the first `integrate` stage materialises the route. */
+  route_tls_mode: string | null;
 };
 
 type RunState = {
@@ -301,7 +303,7 @@ export class DeploymentPipeline implements OnModuleInit {
     if (state.source === undefined) throw new Error('render ran before resolve');
     await this.setState(state.instance.id, 'rendering');
 
-    const route = routeOf(state.instance);
+    const route = routeOf(state.instance, this.config.SEAMNEX_EDGE_TLS_MODE);
     const resources = resourcesOf(state.instance);
     const renderSet = await this.renderer.render({
       instanceId: state.instance.id,
@@ -1309,7 +1311,7 @@ export class DeploymentPipeline implements OnModuleInit {
     // every host-dependent value a re-render produces.
     const result = await this.pool.query<InstanceRow>(
       `SELECT i.id, i.entry_key, i.slug, i.domain_route, i.profile_key, i.state, i.payload,
-              i.source_path, r.host AS route_host
+              i.source_path, r.host AS route_host, r.tls_mode AS route_tls_mode
          FROM instance i
          LEFT JOIN instance_route r ON r.instance_id = i.id
         WHERE i.id = $1 AND i.deleted_at IS NULL`,
@@ -1572,7 +1574,12 @@ function stage(
   return { name, step, run };
 }
 
-function routeOf(instance: InstanceRow): RenderRoute {
+/**
+ * The edge mode is the last fallback, not a constant: an instance deployed before the route row
+ * carried a truthful `tls_mode` still renders the certificate the deployment actually serves
+ * (ISSUE-07). The relational column wins whenever it exists.
+ */
+function routeOf(instance: InstanceRow, edgeTlsMode: RenderRoute['tlsMode']): RenderRoute {
   const route = (instance.payload.route ?? {}) as Partial<RenderRoute>;
   return {
     // Relational truth first, then the deploy-time snapshot, then the column written at insert.
@@ -1581,7 +1588,10 @@ function routeOf(instance: InstanceRow): RenderRoute {
       instance.route_host ?? (typeof route.host === 'string' ? route.host : instance.domain_route),
     pathPrefix: route.pathPrefix ?? null,
     publishModel: route.publishModel ?? 'subdomain',
-    tlsMode: route.tlsMode ?? 'acme',
+    tlsMode:
+      instance.route_tls_mode === 'acme' || instance.route_tls_mode === 'internal'
+        ? instance.route_tls_mode
+        : (route.tlsMode ?? edgeTlsMode),
     authMode: route.authMode ?? 'native',
   };
 }

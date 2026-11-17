@@ -437,7 +437,9 @@ export class InstanceLifecycleService {
             host: this.hostFor(input.slug),
             pathPrefix: null,
             publishModel: 'subdomain',
-            tlsMode: 'acme',
+            // The deploy-time snapshot has to agree with what the edge actually serves; the literal
+            // 'acme' here claimed a certificate resolver nothing had configured (ISSUE-07).
+            tlsMode: this.config.SEAMNEX_EDGE_TLS_MODE,
             authMode: label('guaranteeClass', 'native'),
           },
           owner: payload.owner ?? { id: input.actorId, name: input.actorId },

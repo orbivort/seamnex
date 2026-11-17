@@ -90,7 +90,8 @@ export function ForbiddenRoles() {
   const portalBase =
     typeof configuredPortal === 'string' && configuredPortal.length > 0
       ? configuredPortal.replace(/\/+$/, '')
-      : 'http://localhost:5173';
+      : // The dev servers speak TLS (ADR-BE-39); a bare `http` default would link to a closed port.
+        'https://localhost:5173';
   return (
     <Panel className="mx-auto mt-6 max-w-2xl">
       <PanelHeader

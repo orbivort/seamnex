@@ -130,7 +130,11 @@ const EnvironmentSchema = z
     APP_ORIGINS: z
       .string()
       .min(1)
-      .default('http://localhost:5173,http://localhost:5174,http://localhost:8080'),
+      // The two dev SPAs are served over TLS (ADR-BE-39), so their `https` origins are the ones a
+      // browser actually sends; the `http` pair stays for a tab opened before the switch.
+      .default(
+        'https://localhost:5173,https://localhost:5174,http://localhost:5173,http://localhost:5174,http://localhost:8080',
+      ),
     /**
      * 4D — the OIDC relying party.
      *
@@ -181,7 +185,13 @@ const EnvironmentSchema = z
      * cookie to `shop.localhost` — Chromium scopes such a cookie to the `localhost` host alone.
      */
     SESSION_COOKIE_DOMAIN: z.string().min(1).optional(),
-    /** Production is HTTPS-only; the development stack runs on plain localhost. */
+    /**
+     * Production is HTTPS-only and refuses to boot without this (see the `NODE_ENV` refinements).
+     *
+     * Development keeps it off by design, not by oversight: the API's own port is still published as
+     * plain HTTP for the SPAs' proxy and for `curl`, and a host without OpenSSL serves the SPAs over
+     * HTTP — where a `Secure` cookie is dropped and sign-in fails with no error a developer can read.
+     */
     SESSION_COOKIE_SECURE: booleanish.default(false),
     /**
      * How long a launch ticket stays redeemable. The portal mints one per open, so this only has to
@@ -347,7 +357,25 @@ const EnvironmentSchema = z
      * it: a route written for an edge that is not on the network would be a published 502.
      */
     SEAMNEX_EDGE_CONTAINER: z.string().default(''),
-    SEAMNEX_TRAEFIK_ACME_EMAIL: z.string().default(''),
+    /**
+     * NFR-4.1 / ISSUE-07 — the certificate the edge actually presents for a route, written onto
+     * `instance_route.tls_mode` and projected into the router's `tls` block.
+     *
+     * `acme` means Traefik's `seamnex` resolver issues and renews one certificate per product host;
+     * `internal` means the edge serves its own certificate. The column was previously written as
+     * the literal `'acme'`, so every route claimed a certificate resolver that no committed asset
+     * configured. The enum is exactly the column's constraint on purpose: there is no `none`,
+     * because NFR-4.1 does not permit a plain-HTTP route (ADR-BE-39).
+     */
+    SEAMNEX_EDGE_TLS_MODE: z.enum(['acme', 'internal']).default('acme'),
+    /**
+     * The ACME contact address Traefik is started with. It is not read by this process — the edge
+     * consumes it as a static CLI flag — but it is validated here because this is the only place
+     * that fails before a deployment instead of inside the edge's log. Empty is legitimate: a
+     * deployment whose routes never name the resolver (the development stack) requests nothing. A
+     * malformed address is not: Let's Encrypt would reject the registration, not the request.
+     */
+    SEAMNEX_TRAEFIK_ACME_EMAIL: z.union([z.literal(''), z.email()]).default(''),
     /**
      * FR-1.35 — where the operator's edge keeps the parts the platform does not own: the static
      * Traefik configuration, the ACME store (`acme.json`) or an internal CA's material. Where TLS
@@ -496,7 +524,7 @@ const EnvironmentSchema = z
     /**
      * 4D.2: how a *browser* addresses a published product route. The platform publishes no host
      * port, so the edge owns the scheme and the port. `https` on 443 is the production default; the
-     * dev edge terminates plain HTTP on 127.0.0.1:8020 and sets `http` + `8020`. A hardcoded
+     * dev edge terminates TLS on 127.0.0.1:8443 and sets `https` + `8443`. A hardcoded
      * `https://<host>` made every launch link point at a port nothing was listening on.
      */
     SEAMNEX_PRODUCT_URL_SCHEME: z.enum(['http', 'https']).default('https'),
@@ -757,6 +785,21 @@ const EnvironmentSchema = z
         code: 'custom',
         path: ['SESSION_COOKIE_SECURE'],
         message: 'SESSION_COOKIE_SECURE must be enabled when NODE_ENV=production',
+      });
+    }
+    /*
+     * NFR-4.1 / ISSUE-07: the platform writes this scheme into every launch link *and* into the OIDC
+     * redirect URI a product is registered with. A production boot with `http` therefore advertises
+     * a plain-HTTP product address that the edge does not serve — the exact claim the review found,
+     * arrived at through configuration rather than a hard-coded literal. Refuse it the way the other
+     * insecure production defaults are refused, instead of logging a warning nobody reads.
+     */
+    if (value.NODE_ENV === 'production' && value.SEAMNEX_PRODUCT_URL_SCHEME !== 'https') {
+      context.addIssue({
+        code: 'custom',
+        path: ['SEAMNEX_PRODUCT_URL_SCHEME'],
+        message:
+          'the edge terminates TLS on every route; production must set SEAMNEX_PRODUCT_URL_SCHEME=https (ADR-BE-39)',
       });
     }
     /*
@@ -1080,6 +1123,18 @@ export function describeConfig(config: AppConfig): Record<string, unknown> {
     // The resolved tree, not the configured string: "the catalogue is absent" is the diagnosis an
     // operator has to make from this line, and a relative value cannot answer which directory was read.
     catalogRepoPath: config.SEAMNEX_CATALOG_REPO_PATH,
+    /*
+     * NFR-4.1 / ISSUE-07: where a product opens and how the edge certifies it. These two settings
+     * decide both the launch link and `instance_route.tls_mode`, and a `.env` copied before the edge
+     * served TLS (http + 8020) stays silently wrong until someone clicks a dead link. Publishing
+     * them at boot makes the drift visible in the first line of the log instead of in a browser.
+     */
+    productUrl: `${config.SEAMNEX_PRODUCT_URL_SCHEME}://<slug>.${config.SEAMNEX_INGRESS_DOMAIN}${
+      config.SEAMNEX_PRODUCT_URL_PORT === '' ? '' : `:${config.SEAMNEX_PRODUCT_URL_PORT}`
+    }`,
+    edgeTlsMode: config.SEAMNEX_EDGE_TLS_MODE,
+    // Presence only: the address is the operator's, and the boot line is not a place to copy it.
+    acmeContactConfigured: config.SEAMNEX_TRAEFIK_ACME_EMAIL !== '',
   };
 }
 

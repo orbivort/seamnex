@@ -284,7 +284,7 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
         secretVariable ?? 'client_secret',
         secret,
       ));
-    // The browser-facing base URL, not an assumed one: the dev edge serves HTTP on :8020 and the
+    // The browser-facing base URL, not an assumed one: the dev edge serves HTTPS on :8443 and the
     // product derives its own redirect URI from the same site URL, so a mismatch here is a login that
     // can never complete.
     const baseUrl = publicBaseUrl(
@@ -427,16 +427,24 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
     }
     const authMode = declared;
 
+    /*
+     * NFR-4.1 / ISSUE-07: the certificate mode is a property of the deployment's edge, not of the
+     * route. Writing the literal `'acme'` claimed a resolver that no committed asset configured, so
+     * the instance screen reported "ACME wildcard" for a host served over plain HTTP.
+     */
+    const tlsMode = this.config.SEAMNEX_EDGE_TLS_MODE;
+
     await withTransaction(this.pool, async (tx) => {
       await this.audit.lockChain(tx);
       await tx.query(
         `INSERT INTO instance_route (instance_id, host, path_prefix, publish_model, tls_mode, auth_mode, published)
-         VALUES ($1, $2, $3, $4, 'acme', $5, $6)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (instance_id) DO UPDATE
             SET host = EXCLUDED.host, path_prefix = EXCLUDED.path_prefix,
-                publish_model = EXCLUDED.publish_model, auth_mode = EXCLUDED.auth_mode,
+                publish_model = EXCLUDED.publish_model, tls_mode = EXCLUDED.tls_mode,
+                auth_mode = EXCLUDED.auth_mode,
                 published = EXCLUDED.published, updated_at = now()`,
-        [instanceId, host, pathPrefix, publishModel, authMode, input.published ?? true],
+        [instanceId, host, pathPrefix, publishModel, tlsMode, authMode, input.published ?? true],
       );
       await this.audit.append(
         {
@@ -446,7 +454,7 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
           targetType: 'instance',
           targetId: instanceId,
           outcome: 'success',
-          detail: { host, pathPrefix, publishModel, authMode },
+          detail: { host, pathPrefix, publishModel, tlsMode, authMode },
         },
         tx,
       );
@@ -835,11 +843,19 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
     const result = await this.pool.query<{ instance_id: string }>(
       `SELECT instance_id FROM instance_route`,
     );
-    for (const row of result.rows) await this.projectInstance(row.instance_id);
+    const kept = new Set<string>();
+    for (const row of result.rows) {
+      const slug = await this.projectInstance(row.instance_id);
+      if (slug !== null) kept.add(slug);
+    }
+    // The database is the only truth about which routes exist, so a document it does not account for
+    // is stale by definition — including the ones written before the edge terminated TLS (ISSUE-07).
+    this.traefik.prune(kept);
     return result.rowCount ?? 0;
   }
 
-  private async projectInstance(instanceId: string): Promise<void> {
+  /** Returns the slug whose document now reflects the database, or `null` when no route is published. */
+  private async projectInstance(instanceId: string): Promise<string | null> {
     const result = await this.pool.query<{
       host: string;
       path_prefix: string | null;
@@ -847,16 +863,18 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
       published: boolean;
       gated: boolean;
       auth_mode: string;
+      tls_mode: string;
       slug: string;
       payload: Record<string, unknown>;
     }>(
-      `SELECT r.host, r.path_prefix, r.publish_model, r.published, r.gated, r.auth_mode, i.slug, i.payload
+      `SELECT r.host, r.path_prefix, r.publish_model, r.published, r.gated, r.auth_mode, r.tls_mode,
+              i.slug, i.payload
          FROM instance_route r JOIN instance i ON i.id = r.instance_id
         WHERE r.instance_id = $1`,
       [instanceId],
     );
     const row = result.rows[0];
-    if (row === undefined) return;
+    if (row === undefined) return null;
 
     // The router lives on the edge network, the product on its own instance network. A published
     // route is only real if the edge is attached to that network, so the projection joins the two
@@ -881,7 +899,14 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
        */
       bootstrapAddress: this.config.SEAMNEX_BOOTSTRAP_URL,
       authMode: authModeOf(row.auth_mode),
+      /*
+       * The row is the record of what this route runs behind, and the projection reproduces it. The
+       * deployment setting is only a fallback for a row written before the column was populated.
+       */
+      tlsMode: row.tls_mode === 'internal' ? 'internal' : 'acme',
     });
+
+    return row.slug;
   }
 
   /**

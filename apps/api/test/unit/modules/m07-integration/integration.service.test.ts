@@ -32,6 +32,8 @@ const CONFIG = {
   SEAMNEX_SSO_EVIDENCE_TTL_MINUTES: 60,
   SEAMNEX_INGRESS_DOMAIN: 'seamnex.local',
   SEAMNEX_EDGE_CONTAINER: 'seamnex-edge',
+  // NFR-4.1 / ISSUE-07: the certificate mode the deployment's edge runs, projected onto each route.
+  SEAMNEX_EDGE_TLS_MODE: 'acme',
   // ADR-BE-22: one deployment-wide bootstrap origin; the relay role is a different value here.
   SEAMNEX_BOOTSTRAP_URL: 'http://auth-gateway:8090',
 };
@@ -118,8 +120,8 @@ function keycloakFake(overrides: Record<string, unknown> = {}): {
   ) as unknown as { upsertClient: Mock; realmReachable: Mock; deleteClient: Mock };
 }
 
-function traefikFake(): { write: Mock; remove: Mock } {
-  return { write: vi.fn(), remove: vi.fn() };
+function traefikFake(): { write: Mock; remove: Mock; prune: Mock } {
+  return { write: vi.fn(), remove: vi.fn(), prune: vi.fn() };
 }
 
 function ssoProbeFake(overrides: Record<string, unknown> = {}): { verify: Mock } {
@@ -218,6 +220,7 @@ function projectionRow(overrides: Record<string, unknown> = {}): Record<string, 
     published: true,
     gated: false,
     auth_mode: 'native',
+    tls_mode: 'acme',
     slug: 'crm',
     payload: { httpPort: 8080 },
     ...overrides,
@@ -756,6 +759,7 @@ describe('materialising a route', () => {
       'crm.seamnex.local',
       null,
       'subdomain',
+      'acme',
       'native',
       true,
     ]);
@@ -771,6 +775,7 @@ describe('materialising a route', () => {
       'shop.example.test',
       '/app',
       'subpath',
+      'acme',
       'native',
       true,
     ]);
@@ -790,9 +795,35 @@ describe('materialising a route', () => {
       'crm.seamnex.local',
       '/app',
       'subdomain',
+      'acme',
       'native',
       false,
     ]);
+  });
+
+  /**
+   * NFR-4.1 / ISSUE-07: the route records the certificate the deployment's edge actually serves.
+   * The literal `'acme'` it used to write claimed a resolver nothing had configured, and the
+   * overview screen repeated the claim to the operator.
+   */
+  it('records the deployment’s edge certificate mode and re-writes it on conflict', async () => {
+    const { db, service } = materialise({
+      config: { SEAMNEX_EDGE_TLS_MODE: 'internal' },
+      routes: [
+        ['LEFT JOIN instance_route r', [instanceRow()]],
+        ['FROM catalog_entry WHERE key', [{ guarantee_class: 'native' }]],
+        ['INSERT INTO instance_route', []],
+        ['instance_route r JOIN instance i', [projectionRow({ tls_mode: 'internal' })]],
+        ['FROM instance_route WHERE instance_id', [routeRow({ tls_mode: 'internal' })]],
+      ],
+    });
+
+    await service.materialiseRoute(CRM, {}, ACTOR);
+
+    const insert = statement(db, 'INSERT INTO instance_route');
+    expect(insert?.params[4]).toBe('internal');
+    // A re-materialised route follows the deployment, so the update has to carry the column too.
+    expect(insert?.sql).toMatch(/tls_mode = EXCLUDED\.tls_mode/);
   });
 
   it('follows the catalog entry rather than the caller when no auth mode is named', async () => {
@@ -809,7 +840,7 @@ describe('materialising a route', () => {
     await expect(service.materialiseRoute(CRM, {}, ACTOR)).resolves.toMatchObject({
       authMode: 'fa_gate',
     });
-    expect(statement(db, 'INSERT INTO instance_route')?.params[4]).toBe('fa_gate');
+    expect(statement(db, 'INSERT INTO instance_route')?.params[5]).toBe('fa_gate');
   });
 
   it('refuses an auth mode that contradicts the catalog entry', async () => {
@@ -842,7 +873,7 @@ describe('materialising a route', () => {
 
     await service.materialiseRoute(CRM, { authMode: 'fa_header' }, ACTOR);
 
-    expect(statement(db, 'INSERT INTO instance_route')?.params[4]).toBe('fa_header');
+    expect(statement(db, 'INSERT INTO instance_route')?.params[5]).toBe('fa_header');
   });
 
   it('defaults an entry with no catalog row to native', async () => {
@@ -858,7 +889,7 @@ describe('materialising a route', () => {
 
     await service.materialiseRoute(CRM, {}, ACTOR);
 
-    expect(statement(db, 'INSERT INTO instance_route')?.params[4]).toBe('native');
+    expect(statement(db, 'INSERT INTO instance_route')?.params[5]).toBe('native');
   });
 
   it('reports an internal error when the route row cannot be read back', async () => {
@@ -1500,6 +1531,9 @@ describe('the route projection', () => {
 
     await expect(service.projectAll()).resolves.toBe(1);
     expect(traefik.write).toHaveBeenCalledOnce();
+    // The database is the only truth about which routes exist, so everything it did not just write
+    // is stale — including documents left on the pre-TLS `web` entrypoint (ISSUE-07).
+    expect(traefik.prune).toHaveBeenCalledWith(new Set(['crm']));
   });
 
   it('still boots when the projection fails', async () => {
@@ -1543,7 +1577,26 @@ describe('the route projection', () => {
       forwardAuthAddress: 'http://auth-gateway:8090/verify',
       bootstrapAddress: 'http://auth-gateway:8090',
       authMode: 'native',
+      tlsMode: 'acme',
     });
+  });
+
+  /**
+   * ISSUE-07: the column, not a constant, decides how the edge terminates TLS. A deployment whose
+   * edge serves its own certificate must project that, or the router asks ACME for a host it cannot
+   * validate.
+   */
+  it('projects the certificate mode recorded on the row', async () => {
+    const { traefik, service } = build({
+      routes: [
+        ['SELECT instance_id FROM instance_route', [{ instance_id: CRM }]],
+        ['instance_route r JOIN instance i', [projectionRow({ tls_mode: 'internal' })]],
+      ],
+    });
+
+    await service.projectAll();
+
+    expect(traefik.write.mock.calls[0]?.[0]).toMatchObject({ tlsMode: 'internal' });
   });
 
   it('falls back to port 80 and to the native auth mode for a row that declares neither', async () => {
@@ -1604,6 +1657,8 @@ describe('the route projection', () => {
     await service.projectAll();
 
     expect(traefik.write).not.toHaveBeenCalled();
+    // A row whose instance cannot be read projects nothing, so its document is stale too.
+    expect(traefik.prune).toHaveBeenCalledWith(new Set());
   });
 
   it('publishes a route even when the edge could not join the network', async () => {

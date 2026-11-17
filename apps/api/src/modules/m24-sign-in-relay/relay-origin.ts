@@ -23,8 +23,8 @@ export function internalOriginFor(slug: string, payload: Record<string, unknown>
  * three, and builds its own redirects from them (measured — see `platform/upstream/D09-01`).
  *
  * The port is stripped from `routeHost` first. The edge forwards the browser's `Host` verbatim, and a
- * browser includes a non-default port (`openproject.localhost:8020`), so appending the configured
- * port to it produced `…:8020:8020`. Two symptoms, both silent until a real launch: Rails answers
+ * browser includes a non-default port (`openproject.localhost:8443`), so appending the configured
+ * port to it produced `…:8443:8443`. Two symptoms, both silent until a real launch: Rails answers
  * `422` to an `Origin` it cannot match, and `new URL()` throws on the malformed port in the
  * provisioning client. The configured port is the deployment's public port, so it wins either way.
  */

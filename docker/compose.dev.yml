@@ -53,7 +53,13 @@ x-api-environment: &api-environment
   AUTH_INTERNAL_URL: ${AUTH_INTERNAL_URL:-http://keycloak:8080/realms/seamnex}
   AUTH_CLIENT_ID: ${AUTH_CLIENT_ID:-seamnex-platform-ui}
   AUTH_SCOPES: ${AUTH_SCOPES:-openid profile email groups}
-  APP_ORIGINS: http://localhost:5173,http://localhost:5174,http://localhost:8080
+  # ADR-BE-39: both SPAs are served over TLS (`https://localhost:5173`, `https://localhost:5174`), so
+  # the `https` origins are the ones a browser actually sends. Listing only the `http` pair made the
+  # origin allowlist reject every unsafe request from the console — sign-in and the CSRF guard both
+  # answer ORIGIN_REJECTED — while Keycloak's realm already registered the `https` redirect URIs. The
+  # `http` entries stay for a tab opened before the switch and for a host without OpenSSL, where Vite
+  # falls back to plain HTTP.
+  APP_ORIGINS: ${APP_ORIGINS:-https://localhost:5173,https://localhost:5174,http://localhost:5173,http://localhost:5174,http://localhost:8080}
   SESSION_COOKIE_SECURE: '0'
   # Traefik is the only way into these containers on the dev network, so the edge is a trusted
   # proxy and `request.ip` is the client's address (which is what the sign-in rate limit keys on).
@@ -79,11 +85,16 @@ x-api-environment: &api-environment
   # `localhost` is the only suffix a browser resolves to loopback without a hosts entry
   # (`<slug>.localhost`, RFC 6761), so a fresh checkout reaches a deployed product with no setup step.
   SEAMNEX_INGRESS_DOMAIN: ${SEAMNEX_INGRESS_DOMAIN:-localhost}
-  # The dev edge terminates plain HTTP on 127.0.0.1:8020 — there is no ACME certificate on a
-  # laptop — so the launch links the portal renders have to say exactly that. A hardcoded
-  # `https://<host>` pointed the browser at 443, where nothing is listening.
-  SEAMNEX_PRODUCT_URL_SCHEME: ${SEAMNEX_PRODUCT_URL_SCHEME:-http}
-  SEAMNEX_PRODUCT_URL_PORT: ${SEAMNEX_PRODUCT_URL_PORT:-8020}
+  # The dev edge terminates TLS on 127.0.0.1:8443 with its own internal certificate: no public DNS
+  # name on a laptop can satisfy ACME. The launch links the portal renders, the OIDC redirect URIs
+  # and the relay origin therefore have to say exactly that, or the browser is pointed at a port
+  # nothing listens on.
+  SEAMNEX_PRODUCT_URL_SCHEME: ${SEAMNEX_PRODUCT_URL_SCHEME:-https}
+  SEAMNEX_PRODUCT_URL_PORT: ${SEAMNEX_PRODUCT_URL_PORT:-8443}
+  # NFR-4.1 / ISSUE-07: which certificate mode the edge actually runs. It is written onto every
+  # `instance_route` row, so "acme" means a resolver issued that host's certificate and "internal"
+  # means the edge's own. The dev edge has no ACME resolver in play, and saying so is the point.
+  SEAMNEX_EDGE_TLS_MODE: ${SEAMNEX_EDGE_TLS_MODE:-internal}
   SEAMNEX_TRAEFIK_DYNAMIC_DIR: /etc/traefik/dynamic
   # FR-2.6 / AC-45. M21 writes one `file_sd` target per instance here; Prometheus mounts the same
   # directory read-only. The scrape address is the API's compose name, not `localhost`: Prometheus
@@ -224,6 +235,10 @@ volumes:
   grafanadata:
   lokidata:
   promdata:
+  # The edge's ACME store (`acme.json`). Losing it forces re-issue on the next start rather than
+  # losing a route, but a restore that cannot re-issue during an outage keeps the old file, so it is
+  # part of the platform backup set (FR-1.35).
+  acmedata:
 
 services:
   postgres:
@@ -357,12 +372,25 @@ services:
     image: traefik:v3.3
     command:
       - --configFile=/etc/traefik/traefik.yml
+      # NFR-4.1 / ISSUE-07. The ACME contact address cannot be interpolated into the static YAML
+      # file, so it travels as a static flag. The resolver is declared in that file and only
+      # referenced by routers whose `tls_mode` is `acme`; the dev stack routes with the internal
+      # certificate, so an empty address here requests no certificate and no DNS name is needed.
+      - --certificatesresolvers.seamnex.acme.email=${SEAMNEX_TRAEFIK_ACME_EMAIL:-}
     ports:
-      - '127.0.0.1:8020:80'
+      # TLS only. Port 80 is deliberately not published: it exists inside the edge for the ACME
+      # HTTP-01 challenge and for the redirect to `websecure`, and that redirect resolves to the
+      # target entrypoint's port (443) — so publishing 80 on any other host port would produce a
+      # redirect to a port nothing listens on.
+      - '127.0.0.1:8443:443'
       - '127.0.0.1:8081:8080'
     volumes:
       - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
       - ./traefik/dynamic:/etc/traefik/dynamic:ro
+      # The certificate store is a named volume, not a bind mount under `temp/`: Traefik refuses a
+      # store that is not mode 0600, and a Docker Desktop bind mount reports 0777 for a file that is
+      # 0600 on disk. A volume keeps the mode the edge set.
+      - acmedata:/acme
     networks: [seamnex-control]
     healthcheck:
       # `traefik healthcheck` asks the API for /ping, so the router tree is proven to be loaded;

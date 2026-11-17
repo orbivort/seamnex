@@ -70,8 +70,11 @@ pnpm dev:web          # both SPAs against the mock API: the fastest inner loop
 - **Mock or live.** `VITE_API_MODE=mock` (the default) runs the deterministic MSW platform in the
   browser; `live` drives the same screens against `apps/api`. Both are first-class — a change that
   works in only one mode is incomplete.
-- **Ports.** Portal `:5173`, console `:5174`, API `:8080`. If a native PostgreSQL already holds
-  `5432`, move the container with `SEAMNEX_PG_HOST_PORT` and keep `DATABASE_URL` in step.
+- **Ports.** Portal `:5173` and console `:5174` over **HTTPS** (a leaf issued by the development CA in
+  `temp/certs`; trust `temp/certs/dev-ca.crt` once, see `packages/config/vite/dev-cert.ts`), API `:8080`
+  plain HTTP behind the Vite proxy.
+  If a native PostgreSQL already holds `5432`, move the container with `SEAMNEX_PG_HOST_PORT` and keep
+  `DATABASE_URL` in step.
 - **Cross-platform.** Scripts are plain Node and run on Linux, macOS and Windows in CI; bash-only
   syntax is a defect.
 

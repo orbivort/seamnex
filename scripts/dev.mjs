@@ -8,6 +8,7 @@ import {
   kcBootstrapDecision,
   stackDeclaresKeycloak,
 } from './lib/kc-admin.mjs';
+import { edgeConfigProblems, productUrlFor } from './lib/edge-config.mjs';
 import { ensureRootKey } from './lib/root-key.mjs';
 import { ensureRuntimeDirs } from './lib/runtime-dirs.mjs';
 
@@ -196,6 +197,35 @@ function migrate(env) {
   return true;
 }
 
+/**
+ * NFR-4.1 / ISSUE-07 — refuse a `.env` that still describes the pre-TLS edge (ADR-BE-39).
+ *
+ * `ensureEnvFile` only writes `.env` when it is missing, so an install created before the edge served
+ * TLS keeps `http` + `8020` and gains no `SEAMNEX_EDGE_TLS_MODE`. The rule lives in
+ * `lib/edge-config.mjs`; this function only decides the precedence (the file overrides an exported
+ * variable, the same order the dev servers get) and says what to do about it.
+ */
+function validateEdgeConfig(env) {
+  const effective = { ...process.env, ...env };
+  const problems = edgeConfigProblems(effective);
+  if (problems.length === 0) {
+    const { url, tlsMode } = productUrlFor(effective);
+    // Named with the command that starts the edge: `pnpm dev` starts the datastores only, so a reader
+    // who tries the URL after this line needs to know which process serves it.
+    log(
+      `products open at ${url} (edge tls mode: ${tlsMode}; the edge runs with \`pnpm dev:stack\`)`,
+    );
+    return true;
+  }
+
+  fail(
+    'the .env still describes the pre-TLS edge. Update these lines, then run `pnpm dev` again:\n' +
+      problems.map((problem) => `  - ${problem}`).join('\n') +
+      '\n  Frontend-only work does not need the stack: `pnpm dev:web`.',
+  );
+  return false;
+}
+
 function startDevServers(env) {
   log('starting portal, console and api (Ctrl+C stops them)');
   const child = spawn(PNPM, ['turbo', 'run', 'dev', '--parallel'], {
@@ -221,7 +251,8 @@ const env = readEnvFile();
 
 // Identity is reconciled before the API starts, so the first deploy of the session can register a
 // client: a deployment that runs without it succeeds and leaves the product on its own credential.
-const identityReady = startDatastores() && reconcileKeycloakAdminClient(env);
+const edgeReady = validateEdgeConfig(env);
+const identityReady = edgeReady && startDatastores() && reconcileKeycloakAdminClient(env);
 if (identityReady && migrate(env)) {
   startDevServers(env);
 }

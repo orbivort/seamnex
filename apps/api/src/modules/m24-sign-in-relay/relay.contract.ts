@@ -71,7 +71,7 @@ export type RelayAttemptInput = {
   readonly subjectIdpId: string;
   /** The route host as `instance_route.host` stores it, e.g. `openproject.localhost`. */
   readonly routeHost: string;
-  /** The origin a browser uses (`http://openproject.localhost:8020`), for `Origin`/`Referer`. */
+  /** The origin a browser uses (`https://openproject.localhost:8443`), for `Origin`/`Referer`. */
   readonly publicOrigin: string;
 };
 

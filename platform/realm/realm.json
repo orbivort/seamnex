@@ -121,15 +121,23 @@
       "protocol": "openid-connect",
       "attributes": {
         "pkce.code.challenge.method": "S256",
-        "post.logout.redirect.uris": "http://localhost:5173/*##http://localhost:5174/*##http://localhost:8080/*",
+        "post.logout.redirect.uris": "https://localhost:5173/*##https://localhost:5174/*##http://localhost:5173/*##http://localhost:5174/*##http://localhost:8080/*",
         "require.pushed.authorization.requests": "false"
       },
       "redirectUris": [
+        "https://localhost:5173/sign-in",
+        "https://localhost:5174/sign-in",
         "http://localhost:5173/sign-in",
         "http://localhost:5174/sign-in",
         "http://localhost:8080/sign-in"
       ],
-      "webOrigins": ["http://localhost:5173", "http://localhost:5174", "http://localhost:8080"],
+      "webOrigins": [
+        "https://localhost:5173",
+        "https://localhost:5174",
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://localhost:8080"
+      ],
       "defaultClientScopes": [
         "profile",
         "email",

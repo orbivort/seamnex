@@ -1,5 +1,23 @@
-# Edge (dev). Traefik is the only component that publishes host ports (design §4.4).
-# Forward-auth middleware is added in Phase 4D; the restore gate in 4C. Phase 1 only routes the API.
+# Edge. Traefik is the only component that publishes host ports (design §4.4).
+#
+# TLS is not optional here. NFR-4.1 requires every external route to be served over TLS 1.2 or
+# higher with automatically renewed certificates, and plain HTTP only as a redirect. The edge
+# therefore has two entrypoints:
+#
+#   web       (:80)  ACME HTTP-01 challenge and the permanent redirect to `websecure` — nothing else
+#   websecure (:443) every user, API, product and webhook request (design §20.3)
+#
+# The routers this deployment serves carry their own TLS configuration — the platform's route
+# projection writes `tls.certResolver: seamnex` for an ACME route and `tls: {}` for one terminated
+# by the edge's internal certificate. Declaring the resolver here is what makes that reference
+# valid; a deployment whose routes never name it (the development stack, which has no public DNS
+# name to validate against) issues no certificate at all.
+#
+# The ACME contact address cannot be interpolated into a static YAML file: Traefik reads static
+# configuration from a file, from CLI flags and from `TRAEFIK_*` variables, and only the latter two
+# can be produced by the environment. `docker/compose.dev.yml` passes
+# `--certificatesresolvers.seamnex.acme.email` from `SEAMNEX_TRAEFIK_ACME_EMAIL`; an empty value is
+# accepted and means "no contact address", which the development stack relies on.
 
 api:
   dashboard: true
@@ -9,9 +27,38 @@ api:
 # `traefik healthcheck --ping`, which only passes once the router tree is loaded.
 ping: {}
 
+tls:
+  options:
+    default:
+      # NFR-4.1: TLS 1.2 or higher. Stated rather than inherited from the image default, so a
+      # later Traefik default cannot silently lower (or raise) the floor this deployment ships.
+      minVersion: VersionTLS12
+
 entryPoints:
   web:
     address: ':80'
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          # A permanent redirect is cached by the browser, which is the point: one round trip on the
+          # first visit and none after it. `web` is never published as a plain-HTTP surface.
+          permanent: true
+  websecure:
+    address: ':443'
+
+certificatesResolvers:
+  seamnex:
+    acme:
+      # The certificate store. It is the one edge artefact a restore cannot recreate without
+      # re-issuing, so it belongs in the platform backup set (FR-1.35, ISSUE-01).
+      storage: /acme/acme.json
+      # HTTP-01 issues one certificate per product host and needs no DNS-provider credential on the
+      # edge. The wildcard alternative (DNS-01) or an operator-supplied ingress is recorded in
+      # ADR-BE-39. `web` is reachable for exactly this challenge and the redirect above.
+      httpChallenge:
+        entryPoint: web
 
 providers:
   file:

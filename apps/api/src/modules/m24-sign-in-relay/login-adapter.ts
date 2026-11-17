@@ -25,7 +25,7 @@ import { orangeHrmLogin } from './adapters/orangehrm-login';
 export type SessionVerifyInput = {
   /** Internal origin on the instance network (`http://orangehrm:80`); never the public one. */
   readonly origin: string;
-  /** What a browser uses (`http://orangehrm.localhost:8020`), for `Host`, `Origin`, `Referer`. */
+  /** What a browser uses (`https://orangehrm.localhost:8443`), for `Host`, `Origin`, `Referer`. */
   readonly publicOrigin: string;
   /** The login this session is supposed to belong to. */
   readonly username: string;

@@ -325,6 +325,8 @@ describe('forbidden footer link', () => {
     render(<App />);
 
     const link = await screen.findByRole('link', { name: /Open the portal/ });
-    expect(link.getAttribute('href')).toBe('http://localhost:5173/?role=R5');
+    // `https`, because the dev servers speak TLS (ADR-BE-39): an `http` fallback would link to a port
+    // that only answers a TLS handshake.
+    expect(link.getAttribute('href')).toBe('https://localhost:5173/?role=R5');
   });
 });

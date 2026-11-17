@@ -113,6 +113,8 @@ function setup(routes: readonly Route[] = []) {
     SEAMNEX_INGRESS_DOMAIN: 'seamnex.local',
     SEAMNEX_PRODUCT_URL_SCHEME: 'https',
     SEAMNEX_PRODUCT_URL_PORT: '',
+    // The deploy-time snapshot records the certificate the edge actually serves (ISSUE-07).
+    SEAMNEX_EDGE_TLS_MODE: 'acme',
   } as unknown as AppConfig;
   const service = new InstanceLifecycleService(
     db.pool,

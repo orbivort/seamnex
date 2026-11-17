@@ -16,6 +16,39 @@ the same number through every manifest and the link definitions at the foot of t
 
 ### Added
 
+- **The edge terminates TLS on every route, and the mode it records is the mode it runs** (`NFR-4.1`,
+  `FR-2.5`, `AC-42`, `S-6`, ISSUE-07) — the only committed edge configuration served plain HTTP on
+  `:80` while `instance_route.tls_mode` was written as the SQL literal `'acme'` and the instance screen
+  reported "ACME wildcard". `docker/traefik/traefik.yml` now declares `websecure` on `:443`, a permanent
+  redirect from `:80` (which carries the ACME HTTP-01 challenge and nothing else) and
+  `certificatesResolvers.seamnex` storing to `/acme/acme.json`; the dev stack is TLS-only on
+  `127.0.0.1:8443` with the edge's own certificate and publishes no plain port. `SEAMNEX_EDGE_TLS_MODE`
+  (`acme` | `internal`) is written onto every route and projected into each router's `tls` block,
+  `SEAMNEX_TRAEFIK_ACME_EMAIL` is validated by the schema and consumed by the edge instead of being
+  dead configuration, and generated routers carry their own `stsSeconds: 31536000` headers rather than
+  a middleware that existed only in the development stack. `SECURITY.md` no longer disclaims TLS to
+  the operator. ADR-BE-39.
+- **The Vite dev servers speak TLS, and the start-up banner says `https://`** (`NFR-4.1`, ISSUE-07) —
+  `pnpm dev` advertised `http://localhost:5173` while the deployment edge refused plain HTTP, so the
+  URL a developer learned was the one the product does not serve. `packages/config/vite/dev-cert.ts`
+  mints a development CA and a leaf it issues for `localhost`, `*.localhost`, `127.0.0.1` and `::1`
+  into `temp/certs` on first start (through the `openssl` that ships with every supported host — no new
+  dependency, nothing secret committed), reuses both while they stay valid and reissues only the leaf,
+  so trusting `temp/certs/dev-ca.crt` once survives the yearly rotation. A self-signed leaf was the
+  first attempt and could not be verified by Chromium or Playwright at all, which left "turn
+  verification off" as the only way to exercise the stack. Both `server.https` and `preview.https` use
+  the leaf. The shipped realm accepts `https://localhost:5173|5174` as redirect URIs and
+  web origins, `APP_ORIGINS` includes them (the CSRF check and the redirect-URI allowlist compare the
+  browser's `Origin`), and the console's portal link falls back to `https://localhost:5173`. A host
+  without OpenSSL keeps working over HTTP and the dev server says why.
+- **A `.env` written before the edge served TLS can no longer point products at port 8020** (`NFR-4.1`,
+  `FR-2.5`, ISSUE-07) — `.env` is only written when it is missing, so an existing install kept
+  `http` + `8020` and advertised a port the stack no longer publishes, in launch links and in the OIDC
+  redirect URI each product is registered with. `pnpm dev` now refuses to start until the product URL
+  and `SEAMNEX_EDGE_TLS_MODE` match the shipped edge (with the exact lines to change, and `pnpm dev:web`
+  named for work that does not involve the stack); the API warns about the same mismatch at boot,
+  refuses it under `NODE_ENV=production`, and the boot line reports `productUrl`, `edgeTlsMode` and
+  whether an ACME contact address is configured.
 - **A registry is trusted because a revision says so, and every product image is scanned before it
   starts** (`NFR-4.16`, `NFR-4.6`, `S-10`, ISSUE-08) — the console asserted "Trusted registry
   allow-list verified." while the deploy pipeline pulled whatever the compose file named, and S-10's
@@ -340,6 +373,16 @@ the same number through every manifest and the link definitions at the foot of t
 
 ### Fixed
 
+- **The dev stack accepts the HTTPS origins the TLS switch introduced, and a generated router cannot
+  outlive its route** (`NFR-4.1`, ISSUE-07) — `APP_ORIGINS` in `docker/compose.dev.yml` still listed
+  only the plain origins, so the console's sign-in and every cookie-authenticated write were answered
+  `ORIGIN_REJECTED` while the shipped realm already registered the `https` redirect URIs; the compose
+  default now matches `.env.example` and the schema default. The route projection also only ever wrote
+  documents: one whose row was deleted stayed in the dynamic directory, and after every router moved to
+  `websecure` those leftovers named an entrypoint no deployment publishes (19 stale plain-HTTP routers
+  in the checked-out stack). `TraefikRouteWriter.prune()` deletes each `instance-<slug>.yml` the
+  boot-time `projectAll()` did not just write; hand-written documents in the same directory are left
+  alone.
 - **A transient job failure retries itself, and a dead worker no longer blocks its instance** (`NFR-6.5`,
   ISSUE-31) — every queued job carried `attempts: 1` and nothing above the queue retried it, so a
   registry restart became an operator task, and a worker that died mid-stage left its row `running` for

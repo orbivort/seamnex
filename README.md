@@ -42,9 +42,11 @@ pnpm bootstrap:check    # verifies an existing install; changes nothing
 ```
 
 It is idempotent: a second run converges instead of duplicating, and it never rotates a credential or
-overwrites `.env`. The step-by-step procedure, the timing budget, the verification checklist, the
-recovery paths and the list of what this install does **not** do (TLS, production identities, a hosted
-console) are in [`docs/dev-reference/operations/bootstrap.md`](docs/dev-reference/operations/bootstrap.md).
+overwrites `.env`. Deployed products are served over TLS by the edge (`https://<slug>.localhost:8443`
+on the install, with its own certificate). The step-by-step procedure, the timing budget, the
+verification checklist, the recovery paths and the list of what this install does **not** do
+(certificate issuance, production identities, a hosted console) are in
+[`docs/operations/bootstrap.md`](docs/operations/bootstrap.md).
 
 ## Usage
 
@@ -66,8 +68,13 @@ surface.
 ### Against the real API
 
 Set `VITE_API_MODE=live` in the root `.env`, restart the dev server, and open
-<http://localhost:5174/sign-in>. Sign-in is OIDC against Keycloak, which the container stack provides
-(`AUTH_PROVIDER=stub` is a development-only fallback for a host without it).
+<https://localhost:5174/sign-in>. Both dev servers speak TLS with a certificate issued by a development
+CA generated into `temp/certs` on first start. Trust that CA once —
+`certutil -user -addstore Root temp\certs\dev-ca.crt` on Windows,
+`sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain temp/certs/dev-ca.crt`
+on macOS — and the warning stops for every port and every subsequent `pnpm dev`, because only the leaf
+is reissued (yearly) while the CA is kept for ten. Sign-in is OIDC against Keycloak, which the container
+stack provides (`AUTH_PROVIDER=stub` is a development-only fallback for a host without it).
 
 The seeded realm ships six identities, one per platform role; the password matches the username:
 
@@ -116,8 +123,8 @@ change.
 
 - [`docs/openapi.json`](docs/openapi.json) — generated OpenAPI document for `/api/v1`, produced from
   `packages/domain/src/contract.ts`.
-- [`docs/dev-reference/operations/bootstrap.md`](docs/dev-reference/operations/bootstrap.md) — the host
-  install runbook, and what the install deliberately does not do.
+- [`docs/operations/bootstrap.md`](docs/operations/bootstrap.md) — the host install runbook, and what
+  the install deliberately does not do.
 
 ## Contributing
 

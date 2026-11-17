@@ -24,7 +24,7 @@ import type { RelayFailure } from './relay.contract';
 export type ProductLoginInput = {
   /** Internal origin on the instance network (`http://openproject:80`); never the public one. */
   readonly origin: string;
-  /** What a browser uses (`http://openproject.localhost:8020`), for `Host`, `Origin`, `Referer`. */
+  /** What a browser uses (`https://openproject.localhost:8443`), for `Host`, `Origin`, `Referer`. */
   readonly publicOrigin: string;
   readonly username: string;
   /** The user's product password. Read from the secret store immediately before the attempt. */

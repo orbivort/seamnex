@@ -106,6 +106,8 @@ function setup(routes: readonly Route[] = [], options: { readonly dataDir?: stri
   const config = {
     SEAMNEX_INSTANCE_DATA_DIR: options.dataDir ?? './temp/instances',
     SEAMNEX_USAGE_SAMPLE_RETENTION_DAYS: 30,
+    // The fallback for a route row written before `tls_mode` carried the truth (ISSUE-07).
+    SEAMNEX_EDGE_TLS_MODE: 'acme',
   };
   // NFR-4.6: the images route merges the retained scan; an empty list is "never scanned", which is
   // exactly the state a fresh instance is in.

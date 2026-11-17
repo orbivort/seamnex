@@ -575,7 +575,10 @@ export class PostgresExecutorService implements ExecutorService {
         host: row.route_host ?? text(asRecord(payload.route) ?? {}, 'host') ?? row.domain_route,
         pathPrefix: row.route_path_prefix ?? '/',
         publishModel: (row.route_publish_model ?? 'subdomain') as Instance['route']['publishModel'],
-        tlsMode: (row.route_tls_mode ?? 'acme') as Instance['route']['tlsMode'],
+        // The row is authoritative; the deployment's edge mode covers a route written before the
+        // column carried the truth (ISSUE-07).
+        tlsMode: (row.route_tls_mode ??
+          this.config.SEAMNEX_EDGE_TLS_MODE) as Instance['route']['tlsMode'],
         authMode: (row.route_auth_mode ??
           text(entry, 'guaranteeClass') ??
           'native') as Instance['route']['authMode'],

@@ -621,7 +621,7 @@ export class PostgresPortalBffService extends Repository implements PortalBffSer
 
   /**
    * The URL a browser opens. The scheme and port belong to the edge, not to the product, so they
-   * come from configuration: production terminates TLS on 443, the dev edge serves HTTP on 8020.
+   * come from configuration: production terminates TLS on 443, the dev edge serves HTTPS on 8443.
    * Hardcoding `https://<host>` produced a link to a port nothing listened on in a dev stack.
    */
   private urlOf(row: TileRow): string {

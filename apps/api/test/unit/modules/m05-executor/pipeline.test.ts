@@ -238,6 +238,8 @@ function setup(routes: readonly Route[] = [], configOverrides: Record<string, un
     SEAMNEX_INSTANCE_DATA_DIR: DATA_DIR,
     // One path serves both sides on this host, which is the normal deployment.
     SEAMNEX_DOCKER_PATH_MAP: '',
+    // The certificate the deployment's edge serves, used when a legacy payload names none (ISSUE-07).
+    SEAMNEX_EDGE_TLS_MODE: 'acme',
     ...configOverrides,
   } as unknown as AppConfig;
 

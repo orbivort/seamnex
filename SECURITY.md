@@ -1,8 +1,8 @@
 # Security policy
 
 **Applies to:** this repository — `apps/api`, `apps/portal`, `apps/console` and `packages/*` ·
-**Owner:** platform maintainers and the security reviewer · **Last reviewed:** 2026-11-06 ·
-**Version:** 1.0
+**Owner:** platform maintainers and the security reviewer · **Last reviewed:** 2026-11-17 ·
+**Version:** 1.1
 
 Report vulnerabilities privately. This document covers the channel, what a report should contain, what
 we commit to, and what is in scope.
@@ -139,10 +139,15 @@ the component.
   in scope only when an instance presented as production exposes them — report that as "development
   affordance exposed in a production configuration", and we treat it as a packaging or documentation
   defect.
-- **Operator-side deployment decisions.** TLS termination, network exposure, host hardening,
-  identity-provider policy, secret storage, and disabling the documented safeguards on a self-hosted
-  instance are the operator's responsibility. Misconfiguration is not a vulnerability in this project
-  unless our own defaults, templates or documentation caused it.
+- **Operator-side deployment decisions.** The domain and DNS zone, CA reachability, network exposure,
+  host hardening, identity-provider policy, secret storage, and disabling the documented safeguards on
+  a self-hosted instance are the operator's responsibility. Misconfiguration is not a vulnerability in
+  this project unless our own defaults, templates or documentation caused it.
+- **TLS termination is not one of those decisions.** The shipped edge terminates TLS on every route,
+  serves plain HTTP only as a permanent redirect and an ACME challenge, and enforces HSTS on generated
+  routers (`ADR-BE-39`, NFR-4.1). A deployment of the shipped assets that exposes a product over plain
+  HTTP is a defect in this project: report it. The development stack's self-signed certificate is
+  covered by the development-affordance exception above.
 - **Third-party software.** Vulnerabilities in upstream products (`platform/upstream/*`, Keycloak,
   PostgreSQL, Redis, Traefik, n8n, the S3 target) belong upstream; we will relay a report but cannot
   patch them. Dependency advisories are tracked by Renovate, and a CVE in a direct dependency with no

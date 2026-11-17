@@ -11,8 +11,8 @@ import { resolveKey } from '@seamnex/domain';
  *   - EspoCRM calls back on `/oauth-callback.php`, not `/oauth2/callback`. Keycloak answered
  *     `invalid_redirect_uri` and the product's OIDC login could never complete, however correct the
  *     rest of the configuration was.
- *   - Scheme and port belong to the edge, not to the product. The dev edge serves plain HTTP on
- *     :8020, so a hardcoded `https://<host>` named a port nothing listens on.
+ *   - Scheme and port belong to the edge, not to the product. The dev edge terminates TLS on :8443,
+ *     so a hardcoded `https://<host>` named a port nothing listens on.
  */
 
 export type ProductUrlScheme = 'http' | 'https';

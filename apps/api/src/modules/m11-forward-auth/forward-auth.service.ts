@@ -40,7 +40,7 @@ export class CachedForwardAuthService implements ForwardAuthService {
 
   async decide(input: { host: string; path: string; sessionId: string | null }): Promise<Decision> {
     // Traefik forwards the client's Host verbatim, and a product that answers with an absolute
-    // redirect keeps the dev port on it (`shop.localhost:8020`). `instance_route.host` stores the
+    // redirect keeps the dev port on it (`shop.localhost:8443`). `instance_route.host` stores the
     // bare name, so an un-normalised host matched no route and a signed-in user was refused with
     // "host is not routed by the platform".
     const host = bareHost(input.host);
