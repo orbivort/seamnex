@@ -1,7 +1,13 @@
 import { Inject, Injectable } from '@nestjs/common';
-import type { PreviewBlocker } from '@seamnex/domain';
+
+import {
+  isTrustedImageReference,
+  untrustedRegistryMessage,
+  type PreviewBlocker,
+} from '@seamnex/domain';
 import type { Pool } from 'pg';
 import { isPinnedImage } from '../../common/compose/compose-policy';
+import { TrustedRegistriesReader } from '../../common/security/trusted-registries';
 import { PG_POOL } from '../../database/database.module';
 import { APP_CONFIG } from '../../config/config.module';
 import type { AppConfig } from '../../config/config';
@@ -70,6 +76,11 @@ export class PreflightService {
     @Inject(RENDERER_SERVICE) private readonly renderer: RendererService,
     @Inject(CAPACITY_SERVICE) private readonly capacity: CapacityService,
     @Inject(SOURCE_RESOLVER_SERVICE) private readonly sources: SourceResolverService,
+    /**
+     * NFR-4.16 — the allow-list the deploy will enforce. Read here so the wizard refuses for the
+     * same reason the pull path would, instead of admitting a deployment that fails at apply.
+     */
+    @Inject(TrustedRegistriesReader) private readonly trusted: TrustedRegistriesReader,
   ) {}
 
   async run(input: PreflightInput): Promise<PreflightResult> {
@@ -121,6 +132,22 @@ export class PreflightService {
         message: 'The catalogue records an image digest that is not a sha256 digest.',
         blocking: true,
       });
+    }
+    /*
+     * NFR-4.16: the catalogue's own image is checked as well as the compose services. An entry can
+     * point at a registry the allow-list has never approved even when its vendored compose file is
+     * fine, and the message names the exact namespace to add.
+     */
+    if (entry.packaging !== 'none' && imageRef !== null) {
+      const trustedEntries = await this.trusted.entries();
+      if (!isTrustedImageReference(imageRef, trustedEntries)) {
+        blockers.push({
+          code: 'image_untrusted_registry',
+          field: 'entryKey',
+          message: untrustedRegistryMessage(imageRef),
+          blocking: true,
+        });
+      }
     }
 
     // FR-1.17/FR-1.23: the source has to exist before a job can resolve it.

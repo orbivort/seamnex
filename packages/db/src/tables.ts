@@ -303,6 +303,33 @@ export type ImageArtefactRow = {
   created_at: Date;
 };
 
+/** 0039 / NFR-4.16: one append-only revision of the trusted-registry allow-list. */
+export type TrustedRegistryRevisionRow = {
+  id: string;
+  version: number;
+  content_hash: string;
+  entries: string[];
+  note: string | null;
+  created_by: string;
+  created_at: Date;
+};
+
+/** 0040 / NFR-4.6: a retained product-image scan, one row per instance/digest/scanner. */
+export type ImageScanResultRow = {
+  id: string;
+  instance_id: string;
+  image_ref: string;
+  image_digest: string;
+  scanner: string;
+  scanner_version: string;
+  verdict: 'passed' | 'blocked' | 'error';
+  blocking_severities: string[];
+  severity_counts: Record<string, number>;
+  findings: unknown[];
+  report_key: string | null;
+  scanned_at: Date;
+};
+
 export type EntitlementRow = {
   id: string;
   subject_idp_id: string;
@@ -581,6 +608,37 @@ export type PatchRecordRow = {
   latest_version: string | null;
   oldest_unapplied_security_days: number | null;
   checked_at: Date;
+  /** 0041: the advisory the last observation found, when one is open. */
+  advisory_id: string | null;
+  advisory_severity: 'critical' | 'high' | 'medium' | 'low' | 'unknown' | null;
+  advisory_url: string | null;
+  release_url: string | null;
+  /** 0041: `observed` when the scheduler wrote this row, `catalog` for the document fallback. */
+  source: 'observed' | 'catalog';
+  last_observed_at: Date | null;
+};
+
+/** 0041 / FR-2.12: an upstream advisory, open until a later observation stops seeing it. */
+export type PatchAdvisoryRow = {
+  id: string;
+  entry_key: string;
+  advisory_id: string;
+  severity: 'critical' | 'high' | 'medium' | 'low' | 'unknown';
+  summary: string;
+  url: string | null;
+  fixed_version: string | null;
+  published_at: Date | null;
+  observed_at: Date;
+  closed_at: Date | null;
+};
+
+/** 0042 / S-2: a recorded decision that lowered the native floor. */
+export type NativeFloorDecisionRow = {
+  id: string;
+  floor: number;
+  reason: string;
+  recorded_by: string;
+  recorded_at: Date;
 };
 
 export type BreakGlassSessionRow = {

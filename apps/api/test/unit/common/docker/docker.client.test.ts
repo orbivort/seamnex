@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '../../../../src/config/config';
 import { run, runOrThrow, spawnProcess } from '../../../../src/common/exec/exec';
@@ -6,6 +9,7 @@ import {
   DockerEngineClient,
   type ComposeProject,
 } from '../../../../src/common/docker/docker.client';
+import type { ImageTrustGuard } from '../../../../src/common/security/trusted-registries';
 
 /**
  * `DockerEngineClient` is the only path from the control plane to the host kernel, and most of its
@@ -91,8 +95,23 @@ function makeConfig(overrides: Record<string, unknown> = {}): AppConfig {
   } as unknown as AppConfig;
 }
 
-function makeClient(overrides: Record<string, unknown> = {}): DockerEngineClient {
-  return new DockerEngineClient(makeConfig(overrides));
+/**
+ * NFR-4.16 — the guard the client refuses to work without.
+ *
+ * A permissive stub is enough for the pull/build/compose cases, which are about argv and error
+ * mapping. The refusal itself has its own case (`refuses a pull the guard rejects`).
+ */
+function makeGuard(
+  assertTrusted: (reference: string, operation: string) => Promise<void> = async () => undefined,
+): ImageTrustGuard {
+  return { assertTrusted: vi.fn(assertTrusted) };
+}
+
+function makeClient(
+  overrides: Record<string, unknown> = {},
+  guard: ImageTrustGuard = makeGuard(),
+): DockerEngineClient {
+  return new DockerEngineClient(makeConfig(overrides), guard);
 }
 
 /** A daemon error in the shape dockerode rejects with. */
@@ -100,11 +119,25 @@ function statusError(statusCode: number): Error & { statusCode: number } {
   return Object.assign(new Error(`engine said ${statusCode}`), { statusCode });
 }
 
+/**
+ * The project has to exist on disk: `composeUp` re-reads every `image:` before starting anything
+ * (NFR-4.16), so a fixture with imaginary paths would test the guard's failure path instead of the
+ * argv it is meant to assert.
+ */
+const PROJECT_DIR = mkdtempSync(join(tmpdir(), 'seamnex-compose-'));
+writeFileSync(
+  join(PROJECT_DIR, 'compose.yaml'),
+  'services:\n  app:\n    image: shop:1.2\n',
+  'utf8',
+);
+writeFileSync(join(PROJECT_DIR, 'override.yaml'), 'services: {}\n', 'utf8');
+writeFileSync(join(PROJECT_DIR, '.env'), 'APP_ENV=production\n', 'utf8');
+
 const PROJECT: ComposeProject = {
   project: 'seamnex-shop',
-  directory: '/srv/seamnex/instances/shop',
-  files: ['/srv/seamnex/instances/shop/compose.yaml', '/srv/seamnex/instances/shop/override.yaml'],
-  envFiles: ['/srv/seamnex/instances/shop/.env'],
+  directory: PROJECT_DIR,
+  files: [join(PROJECT_DIR, 'compose.yaml'), join(PROJECT_DIR, 'override.yaml')],
+  envFiles: [join(PROJECT_DIR, '.env')],
 };
 
 beforeEach(() => {
@@ -608,6 +641,28 @@ describe('images', () => {
     await expect(makeClient().pull('missing:1')).rejects.toThrow('no such image');
   });
 
+  /**
+   * NFR-4.16 — the hard guard. Pre-flight can be bypassed by anything that queues a job, so the pull
+   * itself refuses a reference the allow-list does not carry, before the daemon is asked.
+   */
+  it('refuses a pull the allow-list rejects, without reaching the daemon', async () => {
+    const guard = makeGuard(async () => {
+      throw new Error('docker.io/bitnami is not a trusted registry namespace');
+    });
+
+    await expect(makeClient({}, guard).pull('bitnami/postgresql:16.4')).rejects.toThrow(
+      'not a trusted registry namespace',
+    );
+    expect(h.pull).not.toHaveBeenCalled();
+  });
+
+  it('refuses to pull when no guard is wired, rather than running unguarded', async () => {
+    const unguarded = new DockerEngineClient(makeConfig());
+
+    await expect(unguarded.pull('shop:1.2')).rejects.toThrow('trusted-registry guard is not wired');
+    expect(h.pull).not.toHaveBeenCalled();
+  });
+
   it('rejects when the progress stream reports an error', async () => {
     h.pull.mockImplementation((_ref: string, callback: (error: null, stream: unknown) => void) => {
       callback(null, {});
@@ -669,13 +724,13 @@ describe('compose CLI', () => {
         '--project-name',
         'seamnex-shop',
         '--project-directory',
-        '/srv/seamnex/instances/shop',
+        PROJECT.directory,
         '-f',
-        '/srv/seamnex/instances/shop/compose.yaml',
+        PROJECT.files[0],
         '-f',
-        '/srv/seamnex/instances/shop/override.yaml',
+        PROJECT.files[1],
         '--env-file',
-        '/srv/seamnex/instances/shop/.env',
+        PROJECT.envFiles[0],
         'up',
         '-d',
         '--remove-orphans',

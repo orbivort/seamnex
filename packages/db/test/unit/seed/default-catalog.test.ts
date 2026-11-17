@@ -83,6 +83,10 @@ describe('planDefaultCatalog', () => {
     const plan = planDefaultCatalog({ root, declarations: declarations(DEFAULT_PRODUCT_KEYS) });
 
     expect(plan.entries.map((entry) => entry.key)).toEqual([...DEFAULT_PRODUCT_KEYS]);
+    // The default set is the six products whose tree is vendored *and* whose environment is
+    // declared; the assertion above is derived from the constant so a seventh key cannot be added
+    // without a document and a declaration.
+    expect(DEFAULT_PRODUCT_KEYS).toHaveLength(6);
     expect(plan.entries.map((entry) => entry.path)).toEqual(
       DEFAULT_PRODUCT_KEYS.map((key) => join(root, 'catalog', `${key}.json`)),
     );
@@ -101,11 +105,13 @@ describe('planDefaultCatalog', () => {
 
     const plan = planDefaultCatalog({ root, declarations: declarations(DEFAULT_PRODUCT_KEYS) });
 
-    expect(plan.entries.map((entry) => entry.key)).toEqual(['D07-01', 'D09-01']);
+    expect(plan.entries.map((entry) => entry.key)).toEqual(
+      DEFAULT_PRODUCT_KEYS.filter((key) => key !== 'D01-01'),
+    );
     // The declaration is still planned: the *entry* exists (the tree declares it), so the file the
     // loader validates against is there, and the projector has something to apply. Stopping at the
     // entry skip was how a tree-owned product silently ended up with no environment schema.
-    expect(plan.environments.map((entry) => entry.key)).toEqual(['D01-01', 'D07-01', 'D09-01']);
+    expect(plan.environments.map((entry) => entry.key)).toEqual([...DEFAULT_PRODUCT_KEYS]);
     expect(plan.skipped[0]).toEqual({
       scope: 'entry',
       key: 'D01-01',
@@ -120,10 +126,17 @@ describe('planDefaultCatalog', () => {
     // not fail on somebody else's repository, and must not invent a declaration either.
     writeTree(root, { 'D01-01.json': { key: 'D01-01' } });
 
-    const plan = planDefaultCatalog({ root, declarations: declarations(['D07-01', 'D09-01']) });
+    const plan = planDefaultCatalog({
+      root,
+      declarations: declarations(DEFAULT_PRODUCT_KEYS.filter((key) => key !== 'D01-01')),
+    });
 
-    expect(plan.entries.map((entry) => entry.key)).toEqual(['D07-01', 'D09-01']);
-    expect(plan.environments.map((entry) => entry.key)).toEqual(['D07-01', 'D09-01']);
+    expect(plan.entries.map((entry) => entry.key)).toEqual(
+      DEFAULT_PRODUCT_KEYS.filter((key) => key !== 'D01-01'),
+    );
+    expect(plan.environments.map((entry) => entry.key)).toEqual(
+      DEFAULT_PRODUCT_KEYS.filter((key) => key !== 'D01-01'),
+    );
     expect(plan.skipped).toEqual([
       {
         scope: 'entry',
@@ -151,7 +164,9 @@ describe('planDefaultCatalog', () => {
 
     const plan = planDefaultCatalog({ root, declarations: declarations(DEFAULT_PRODUCT_KEYS) });
 
-    expect(plan.entries.map((entry) => entry.key)).toEqual(['D07-01', 'D09-01']);
+    expect(plan.entries.map((entry) => entry.key)).toEqual(
+      DEFAULT_PRODUCT_KEYS.filter((key) => key !== 'D01-01'),
+    );
     expect(plan.projections.map((entry) => entry.key)).toEqual([...DEFAULT_PRODUCT_KEYS]);
     // The row is built from the tree's own bytes, so the columns and the revision hash match a reload.
     expect(plan.projections[0]).toEqual({
@@ -169,7 +184,9 @@ describe('planDefaultCatalog', () => {
 
     // The loader reports it in `invalid[]` and the projector stops on that list, naming the file;
     // a row built from a document no schema accepted would be a projection of nothing.
-    expect(plan.projections.map((entry) => entry.key)).toEqual(['D07-01', 'D09-01']);
+    expect(plan.projections.map((entry) => entry.key)).toEqual(
+      DEFAULT_PRODUCT_KEYS.filter((key) => key !== 'D01-01'),
+    );
   });
 
   it('skips a product the tree already declares under its own name', () => {
@@ -178,7 +195,9 @@ describe('planDefaultCatalog', () => {
 
     const plan = planDefaultCatalog({ root, declarations: declarations(DEFAULT_PRODUCT_KEYS) });
 
-    expect(plan.entries.map((entry) => entry.key)).toEqual(['D01-01', 'D09-01']);
+    expect(plan.entries.map((entry) => entry.key)).toEqual(
+      DEFAULT_PRODUCT_KEYS.filter((key) => key !== 'D07-01'),
+    );
     expect(plan.skipped.map((skip) => skip.key)).toEqual(['D07-01']);
   });
 
@@ -188,7 +207,9 @@ describe('planDefaultCatalog', () => {
 
     const plan = planDefaultCatalog({ root, declarations: declarations(DEFAULT_PRODUCT_KEYS) });
 
-    expect(plan.environments.map((entry) => entry.key)).toEqual(['D07-01', 'D09-01']);
+    expect(plan.environments.map((entry) => entry.key)).toEqual(
+      DEFAULT_PRODUCT_KEYS.filter((key) => key !== 'D01-01'),
+    );
     // The projector's half is already on disk, so the log line about the next step must still fire.
     expect(plan.declarationsPresent).toBe(1);
     expect(plan.skipped).toEqual([
@@ -208,18 +229,18 @@ describe('planDefaultCatalog', () => {
       declarations: declarations(['D01-01', 'D09-01']),
     });
 
-    expect(plan.entries).toHaveLength(3);
+    expect(plan.entries).toHaveLength(DEFAULT_PRODUCT_KEYS.length);
     expect(plan.environments.map((entry) => entry.key)).toEqual(['D01-01', 'D09-01']);
-    // The seed was going to supply this product, so a declaration it cannot find is this build's
-    // gap: `requireCompleteDefaultSet` refuses the plan rather than seeding an entry with no schema.
-    expect(plan.skipped).toEqual([
-      {
-        scope: 'environment',
-        key: 'D07-01',
-        blocking: true,
-        reason: expect.stringContaining('no shipped declaration at'),
-      },
-    ]);
+    // The seed was going to supply each of these products, so a declaration it cannot find is this
+    // build's gap: `requireCompleteDefaultSet` refuses the plan rather than seeding an entry with no
+    // schema.
+    expect(plan.skipped.map((skip) => skip.key)).toEqual(
+      DEFAULT_PRODUCT_KEYS.filter((key) => key !== 'D01-01' && key !== 'D09-01'),
+    );
+    expect(plan.skipped.every((skip) => skip.blocking)).toBe(true);
+    expect(plan.skipped.every((skip) => skip.reason.includes('no shipped declaration at'))).toBe(
+      true,
+    );
   });
 
   it('skips a product whose vendored document is not in the checkout', () => {
@@ -242,7 +263,9 @@ describe('planDefaultCatalog', () => {
 
     // A product with no vendored document is not invented: nothing is written for it, and the
     // reason names the path an operator has to restore.
-    expect(plan.entries.map((entry) => entry.key)).toEqual(['D07-01', 'D09-01']);
+    expect(plan.entries.map((entry) => entry.key)).toEqual(
+      DEFAULT_PRODUCT_KEYS.filter((key) => key !== 'D01-01'),
+    );
     expect(plan.skipped[0]).toEqual({
       scope: 'entry',
       key: 'D01-01',
@@ -344,7 +367,8 @@ describe('applyDefaultCatalogPlan', () => {
 
     const written = applyDefaultCatalogPlan(plan);
 
-    expect(written).toHaveLength(6);
+    // One document and one declaration per product: the pair is what makes the entry projectable.
+    expect(written).toHaveLength(DEFAULT_PRODUCT_KEYS.length * 2);
     expect(existsSync(join(root, 'catalog', 'D01-01.json'))).toBe(true);
     expect(existsSync(join(root, 'catalog', 'env', 'D01-01.json'))).toBe(true);
     // What lands on disk is the fixture, byte for byte: a reload hashes these files.

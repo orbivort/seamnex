@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import {
   CatalogEntrySchema,
+  computeCatalogCoverage,
   isComposedEntryKey,
   isCredentialGranularity,
   isWriteEligible,
@@ -249,6 +250,31 @@ export class PostgresCatalogService implements CatalogService {
       .map((document) => document.key)
       .filter((key) => !isComposedEntryKey(key));
 
+    /*
+     * S-1 / S-2 / AC-01 — the verdict the reload serves.
+     *
+     * A declaration whose entry document is absent from the tree is *refused*, not tolerated: there
+     * is no row to attach it to, so the product it describes can never be deployed and calling the
+     * catalogue healthy would be a claim the tree does not support. The counts and the floor come
+     * from `computeCatalogCoverage`, the same function `GET /posture` and `pnpm check:catalog` use,
+     * so three surfaces cannot disagree about "6 of 12".
+     */
+    const documented = new Set(tree.documents.map((document) => document.key));
+    const coverage = computeCatalogCoverage({
+      entries: tree.documents.map((document) => ({
+        key: document.key,
+        guaranteeClass: document.guaranteeClass,
+        primaryInstanceId: document.primaryInstanceId,
+      })),
+      declaredEnvironments: tree.envSchemas.length,
+      refused: tree.envSchemas
+        .filter((file) => !documented.has(file.entryKey))
+        .map((file) => ({
+          key: file.entryKey,
+          reason: `catalog/env/${file.entryKey}.json declares an environment with no catalog/${file.entryKey}.json entry document in the working tree.`,
+        })),
+    });
+
     return {
       reloadedAt: new Date().toISOString(),
       revision: tree.revision,
@@ -259,6 +285,7 @@ export class PostgresCatalogService implements CatalogService {
       reconciled,
       invalid: [...tree.invalid],
       deprecated,
+      coverage,
     };
   }
 

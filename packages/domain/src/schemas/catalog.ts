@@ -496,6 +496,42 @@ export const ReloadEnvironmentResultSchema = z.object({
 
 export type ReloadEnvironmentResult = z.infer<typeof ReloadEnvironmentResultSchema>;
 
+/**
+ * S-1 / S-2 / AC-01 — what the catalogue can prove about itself.
+ *
+ * `entries` and `deployments` are different denominators on purpose: D5 and D6 share one ERPNext
+ * deployment, so an entry count credits that deployment twice and would overstate the native floor.
+ * `refused` names a declaration that cannot be projected (no entry document), which is the state the
+ * review found reported as a note instead of a refusal.
+ */
+export const CatalogCoverageSchema = z.object({
+  entries: z.number().int().nonnegative(),
+  deployments: z.number().int().nonnegative(),
+  /** `catalog/env/*.json` files present in the tree. */
+  declaredEnvironments: z.number().int().nonnegative(),
+  /** Declarations that resolve to a projected entry. */
+  documentedEnvironments: z.number().int().nonnegative(),
+  refused: z.array(
+    z.object({
+      key: z.string().min(1),
+      reason: z.string().min(1),
+    }),
+  ),
+  byClass: z.object({
+    native: z.number().int().nonnegative(),
+    fa_header: z.number().int().nonnegative(),
+    fa_delegated: z.number().int().nonnegative(),
+    fa_gate: z.number().int().nonnegative(),
+  }),
+  nativeDeployments: z.number().int().nonnegative(),
+  floor: z.number().int().nonnegative(),
+  baseline: z.number().int().nonnegative(),
+  floorMet: z.boolean(),
+  shortfall: z.number().int().nonnegative(),
+});
+
+export type CatalogCoverage = z.infer<typeof CatalogCoverageSchema>;
+
 /** FR-1.18 / DD-07: a repository reload reconciles the projection and reports the delta. */
 export const CatalogReloadResultSchema = z.object({
   reloadedAt: TimestampSchema,
@@ -522,6 +558,12 @@ export const CatalogReloadResultSchema = z.object({
    * answers "is this tree mid-migration?" without a second call.
    */
   deprecated: z.array(EntryKeySchema).optional(),
+  /**
+   * S-1 / S-2 / AC-01 — coverage and the native floor from the tree that was just projected, so the
+   * operator reads the verdict from the reload instead of a screen that hard-codes the target.
+   * Optional for the same back-compatibility reason as `environment`.
+   */
+  coverage: CatalogCoverageSchema.optional(),
 });
 
 export type CatalogEntry = z.infer<typeof CatalogEntrySchema>;

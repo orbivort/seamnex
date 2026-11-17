@@ -71,6 +71,7 @@ export * from './hooks/job-stream';
 export * from './hooks/backups';
 export * from './hooks/workflows';
 export * from './hooks/governance';
+export * from './hooks/security';
 export * from './hooks/admin';
 export * from './hooks/recovery';
 export * from './hooks/privacy';

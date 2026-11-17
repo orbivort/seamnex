@@ -14,7 +14,12 @@
       "owns": [],
       "reads": []
     },
-    { "dir": "common", "owns": [], "reads": [] },
+    {
+      "$comment": "NFR-4.16: the image-trust guard runs inside common/docker, so the cached allow-list reader names that one table. M02 still owns the writes and the audit row.",
+      "dir": "common",
+      "owns": [],
+      "reads": ["trusted_registry_revision"]
+    },
     { "dir": "config", "owns": [], "reads": [] },
     { "dir": "contract", "owns": [], "reads": [] },
     { "dir": "database", "owns": [], "reads": [] },
@@ -46,7 +51,14 @@
       "id": "M02",
       "name": "Source Resolver",
       "dir": "m02-source-resolver",
-      "owns": ["source_resolution", "source_file", "compose_policy", "scaffold_artefact"],
+      "owns": [
+        "source_resolution",
+        "source_file",
+        "compose_policy",
+        "scaffold_artefact",
+        "trusted_registry_revision"
+      ],
+      "$comment": "NFR-4.16: the allow-list is source policy, so the module that evaluates compose/Dockerfile evidence also owns its revision rows. The pull/build guard in common/docker reads the same state through this module's reader rather than holding a copy.",
       "mayImport": ["M01", "M22"],
       "reads": ["catalog_entry", "deployment_definition", "policy_exception"]
     },
@@ -85,7 +97,8 @@
         "instance_usage_sample",
         "deployment_job",
         "job_step",
-        "job_log"
+        "job_log",
+        "image_scan_result"
       ],
       "mayImport": ["M02", "M03", "M04", "M07", "M15", "M19"],
       "reads": [
@@ -267,6 +280,8 @@
       "owns": [
         "license_record",
         "patch_record",
+        "patch_advisory",
+        "native_floor_decision",
         "break_glass_session",
         "policy_exception",
         "maintenance_window",

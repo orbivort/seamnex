@@ -17,12 +17,14 @@ import {
   ForecastPointSchema,
   LicenseGateSchema,
   LicenseRecordSchema,
+  NativeFloorDecisionSchema,
   OperationsResponseSchema,
   PatchRecordSchema,
   PostureSummarySchema,
   RegistryEntrySchema,
+  UpstreamObservationResultSchema,
 } from '@seamnex/domain';
-import type { LicenseReviewRequest } from '@seamnex/domain';
+import type { LicenseReviewRequest, NativeFloorDecisionRequest } from '@seamnex/domain';
 import { request } from '../http';
 import { queryKeys } from '../query-keys';
 
@@ -140,6 +142,50 @@ export function usePosture() {
   return useQuery({
     queryKey: queryKeys.posture,
     queryFn: ({ signal }) => request('/posture', { schema: PostureSummarySchema, signal }),
+  });
+}
+
+/**
+ * FR-2.12 — run the upstream observation now.
+ *
+ * The result counts what the pass reached instead of reporting a bare success: "0 releases, 0
+ * advisories, 6 skipped" is a different answer from "6 entries observed", and an operator who pressed
+ * the button needs to tell them apart without reading the scheduler log.
+ */
+export function useObservePatchRegister() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      request('/patch-register/observe', {
+        schema: UpstreamObservationResultSchema,
+        method: 'POST',
+      }),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.patches });
+      void client.invalidateQueries({ queryKey: queryKeys.audit });
+    },
+  });
+}
+
+/**
+ * S-2 — record the owner decision that lowers the native floor.
+ *
+ * The response is the stored decision, so the screen shows who accepted the lower floor and when;
+ * the floor itself arrives on `GET /posture`, which this invalidates rather than patching in place.
+ */
+export function useRecordNativeFloorDecision() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (body: NativeFloorDecisionRequest) =>
+      request('/posture/native-floor/decision', {
+        schema: NativeFloorDecisionSchema,
+        method: 'POST',
+        body,
+      }),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.posture });
+      void client.invalidateQueries({ queryKey: queryKeys.audit });
+    },
   });
 }
 

@@ -1,4 +1,10 @@
-import { COMPOSE_RULES, type ComposeRule } from '@seamnex/domain';
+import {
+  COMPOSE_RULES,
+  isNonWaivableRule,
+  isTrustedImageReference,
+  untrustedRegistryMessage,
+  type ComposeRule,
+} from '@seamnex/domain';
 import { parseAllDocuments, stringify } from 'yaml';
 import type { ComposePatchEntry, ComposePolicyResult, ComposeViolation } from './policy-result';
 
@@ -43,6 +49,12 @@ function asRecord(value: unknown): AnyRecord | null {
 export function evaluateCompose(
   document: AnyRecord,
   waivedRules: ReadonlySet<ComposeRule> = new Set(),
+  /**
+   * NFR-4.16 allow-list. `null` means "not evaluated here" and is used by callers that hold no list
+   * (a unit test of another rule); every production path passes one, because an empty allow-list
+   * would refuse the platform's own images too.
+   */
+  trustedRegistries: readonly string[] | null = null,
 ): ComposePolicyResult {
   const violations: ComposeViolation[] = [];
   const patch: ComposePatchEntry[] = [];
@@ -115,6 +127,19 @@ export function evaluateCompose(
         detail: `service ${name} uses ${image}, which is not digest- or version-pinned.`,
       });
     }
+    // NFR-4.16. Checked even when `build:` is present: a service that builds and runs a tag from an
+    // untrusted registry still starts an image the allow-list never approved.
+    if (
+      image !== null &&
+      trustedRegistries !== null &&
+      !isTrustedImageReference(image, trustedRegistries)
+    ) {
+      violations.push({
+        rule: 'untrusted_registry',
+        service: name,
+        detail: untrustedRegistryMessage(image),
+      });
+    }
 
     const normalised = normalisePorts(service, name, patch);
     if (normalised.published > 0) publishedPorts += normalised.published;
@@ -138,10 +163,14 @@ export function evaluateCompose(
     }
   }
 
-  const waived = [...new Set(violations.map((item) => item.rule))].filter((rule) =>
-    waivedRules.has(rule),
+  // NFR-4.16 is not waivable: an exception would let a deployment proceed with an image the owner
+  // never approved, and the requirement's only remedy is adding the namespace.
+  const waived = [...new Set(violations.map((item) => item.rule))].filter(
+    (rule) => waivedRules.has(rule) && !isNonWaivableRule(rule),
   );
-  const blocking = violations.filter((item) => !waivedRules.has(item.rule));
+  const blocking = violations.filter(
+    (item) => isNonWaivableRule(item.rule) || !waivedRules.has(item.rule),
+  );
 
   return {
     verdict: blocking.length > 0 ? 'blocked' : waived.length > 0 ? 'unsafe_approved' : 'allowed',

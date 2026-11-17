@@ -8,7 +8,7 @@ import type {
   PolicyException,
   PostureSummary,
 } from '@seamnex/domain';
-import { licenseTerms } from '@seamnex/domain';
+import { licenseTerms, nativeFloorStatus } from '@seamnex/domain';
 import { at, daysAgo, hoursAgo } from './context';
 import { CATALOG_BY_KEY } from './catalog';
 import { INSTANCES } from './instances';
@@ -51,10 +51,32 @@ export const LICENSES: LicenseRecord[] = INSTANCES.map((instance) => {
   };
 });
 
+/**
+ * FR-2.12 — the register, with the provenance the observation pass produces.
+ *
+ * `NEVER_OBSERVED` stands for a deployment whose row still comes from the catalogue document: the
+ * screen has to be able to say "never observed" instead of printing two numbers and implying they
+ * were checked. It is one deployment rather than none so the state is visible in the demo.
+ */
+const NEVER_OBSERVED = 1;
+
+/**
+ * FR-2.12 — where an operator reads the release an observed version came from.
+ *
+ * Derived from the catalogue's `repoUrl` rather than written as a literal, so the register and the
+ * entry's own "Release notes" point at the same page. An entry with no repository gets `null`, which
+ * the screen renders as no link, instead of a URL that leads nowhere.
+ */
+export function releasesPageOf(entryKey: string): string | null {
+  const repoUrl = CATALOG_BY_KEY[entryKey]?.repoUrl;
+  return repoUrl === undefined ? null : `${repoUrl.replace(/\/+$/, '')}/releases`;
+}
+
 export const PATCHES: PatchRecord[] = INSTANCES.map((instance, index) => {
   const current = instance.currentVersion;
   const latest = instance.availableVersion ?? current;
   const behind = latest !== current;
+  const observed = index !== NEVER_OBSERVED;
   return {
     instanceId: instance.id,
     entryKey: instance.entryKey,
@@ -62,9 +84,24 @@ export const PATCHES: PatchRecord[] = INSTANCES.map((instance, index) => {
     currentVersion: current,
     latestVersion: latest,
     lastUpgradeAt: daysAgo(20 + index * 4),
-    oldestUnappliedSecurityDays: behind ? 12 + index * 2 : 0,
+    /*
+     * `null` is "nothing pending", and it is only correct for a row that was actually observed. The
+     * unobserved deployment keeps `null` too — but its `source` says `catalog`, which is the honest
+     * difference between "measured clean" and "never measured".
+     */
+    oldestUnappliedSecurityDays: behind ? 12 + index * 2 : null,
     severity: behind && index % 4 === 0 ? 'critical' : behind ? 'warning' : 'info',
     checkedAt: hoursAgo(3),
+    advisory: observed && behind && index % 4 === 0 ? `CVE-2026-3${1000 + index * 7}` : null,
+    /*
+     * The product's own releases page (`<repoUrl>/releases`), not a synthetic
+     * `github.com/releases/tag/…`: that path has no owner or repository, so it resolves to nothing.
+     * The tag page is deliberately not guessed either — several of these products tag without a `v`
+     * prefix, and a link that works for Nextcloud and 404s for EspoCRM is worse than the list page.
+     */
+    releaseUrl: observed && behind ? releasesPageOf(instance.entryKey) : null,
+    source: observed ? 'observed' : 'catalog',
+    lastObservedAt: observed ? hoursAgo(3) : null,
   };
 });
 
@@ -285,6 +322,12 @@ const forwardAuthDeployments = deployed.filter(
 ).length;
 // Unclassified cannot be claimed as SSO; it joins the proxy-gate bucket so the counts partition.
 const signInRequiredDeployments = deployed.length - nativeDeployments - forwardAuthDeployments;
+/** S-2: the same pure function the API serves, so the fixture cannot disagree with the platform. */
+const floorStatus = nativeFloorStatus({
+  native: nativeDeployments,
+  forwardAuth: forwardAuthDeployments,
+  signInRequired: signInRequiredDeployments,
+});
 const missingHealthChecks: PostureSummary['missingHealthChecks'] = [];
 
 export const POSTURE: PostureSummary = {
@@ -296,6 +339,18 @@ export const POSTURE: PostureSummary = {
     totalEntries: Object.keys(CATALOG_BY_KEY).length,
     // ADR-BE-22: no deployment holds a platform-managed product credential in the fixture.
     platformManagedCredentials: 0,
+    /*
+     * S-2 — the target travels with the counts. The screen used to hold `6` itself, so a floor that
+     * had been lowered by a recorded decision would still render as a shortfall.
+     */
+    nativeFloor: {
+      floor: floorStatus.floor,
+      baseline: floorStatus.baseline,
+      met: floorStatus.met,
+      shortfall: floorStatus.shortfall,
+    },
+    // The default floor applies here: no owner decision has been recorded in the fixture.
+    ownerDecision: null,
   },
   missingHealthChecks,
   unverifiedRestores: unverified.map((instance) => ({

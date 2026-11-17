@@ -31,7 +31,10 @@ describe('evaluateCompose: allowed files', () => {
     expect(result.patch).toEqual([]);
     expect(result.publishedPorts).toBe(0);
     expect(result.services).toEqual(['app']);
-    expect(COMPOSE_RULES).toHaveLength(5);
+    // NFR-4.16 added `untrusted_registry` to the vocabulary; with no allow-list supplied, the rule
+    // is not evaluated, so an unrelated rule's test still sees no violations.
+    expect(COMPOSE_RULES).toHaveLength(6);
+    expect(COMPOSE_RULES).toContain('untrusted_registry');
   });
 
   it('accepts a service that builds instead of naming an image', () => {

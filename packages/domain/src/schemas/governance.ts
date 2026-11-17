@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ComposeRuleSchema } from '../compose-rules';
+import { WaivableComposeRuleSchema } from '../compose-rules';
 import {
   ACCESS_MODES,
   ACCESS_REQUEST_KINDS,
@@ -143,6 +143,43 @@ export const PatchRecordSchema = z.object({
   oldestUnappliedSecurityDays: z.number().int().nonnegative().nullable(),
   severity: z.enum(SEVERITIES),
   checkedAt: TimestampSchema,
+  /**
+   * FR-2.12 — the advisory the last observation found, when one is open. Optional so a register
+   * written before ingestion existed still parses; `null` means observed and nothing open.
+   */
+  advisory: z.string().min(1).nullable().optional(),
+  /** Release notes link for `latestVersion` (FR-2.12 "surface … release notes links"). */
+  releaseUrl: z.string().min(1).nullable().optional(),
+  /**
+   * Provenance of the version pair. `observed` means the scheduler pass wrote this row; `catalog`
+   * means it is the catalogue document's fallback, which is what the review found being passed off
+   * as tracking. The register renders the difference rather than printing two numbers.
+   */
+  source: z.enum(['observed', 'catalog']).optional(),
+  /** When the platform last looked upstream; `null` means never observed. */
+  lastObservedAt: TimestampSchema.nullable().optional(),
+});
+
+/**
+ * FR-2.12 / FR-4.7 — one upstream observation pass, reported by what it actually reached.
+ *
+ * Counts rather than a bare success: a pass that reached no feed because every entry lacks a
+ * GitHub repository is not evidence of a healthy patch register, so `skipped` and `failed` are part
+ * of the answer and the console distinguishes them from `releases`.
+ */
+export const UpstreamObservationResultSchema = z.object({
+  observedAt: TimestampSchema,
+  entries: z.number().int().nonnegative(),
+  /** Entries whose upstream release metadata was refreshed. */
+  releases: z.number().int().nonnegative(),
+  /** Entries that gained or kept an open advisory. */
+  advisories: z.number().int().nonnegative(),
+  /** Entries with no feed mapping (no GitHub repository URL, no queryable package). */
+  skipped: z.number().int().nonnegative(),
+  /** Entries whose feed answered with an error; the previous observation is kept. */
+  failed: z.number().int().nonnegative(),
+  /** Instances whose `patch_record` row was written or refreshed. */
+  instancesUpdated: z.number().int().nonnegative(),
 });
 
 export const PostureSummarySchema = z.object({
@@ -167,6 +204,29 @@ export const PostureSummarySchema = z.object({
      * never enables it is not forced to render a number it has nothing to say about.
      */
     platformManagedCredentials: z.number().int().nonnegative().optional(),
+    /**
+     * S-2 — the floor the counts are measured against, served rather than hard-coded in the screen.
+     * `floor` is normally `NATIVE_FLOOR_DEPLOYMENTS` and differs only when an owner decision lowered
+     * it, which `ownerDecision` then names. Optional for back-compatibility with a stored summary.
+     */
+    nativeFloor: z
+      .object({
+        floor: z.number().int().nonnegative(),
+        baseline: z.number().int().nonnegative(),
+        met: z.boolean(),
+        shortfall: z.number().int().nonnegative(),
+      })
+      .optional(),
+    /** S-2's "recorded owner decision"; `null` when the default floor applies. */
+    ownerDecision: z
+      .object({
+        floor: z.number().int().nonnegative(),
+        reason: z.string().min(1),
+        recordedBy: z.string().min(1),
+        recordedAt: TimestampSchema,
+      })
+      .nullable()
+      .optional(),
   }),
   missingHealthChecks: z.array(z.object({ instanceId: IdSchema, product: z.string() })),
   unverifiedRestores: z.array(
@@ -194,6 +254,21 @@ export const PostureSummarySchema = z.object({
   totalInstances: z.number().int().nonnegative(),
   /** Verified-restore coverage only (NFR-3.5 quarter). Never display this as SSO coverage. */
   coveragePercent: z.number().min(0).max(100),
+});
+
+/**
+ * S-2 — lowering the native floor is an owner decision that has to be recorded, not a settings
+ * toggle. The reason minimum is the same floor the break-glass and policy-exception requests use:
+ * a decision nobody can read back is indistinguishable from a re-baseline.
+ */
+export const NativeFloorDecisionRequestSchema = z.object({
+  floor: z.number().int().nonnegative(),
+  reason: z.string().trim().min(20).max(1000),
+});
+
+export const NativeFloorDecisionSchema = NativeFloorDecisionRequestSchema.extend({
+  recordedBy: z.string().min(1),
+  recordedAt: TimestampSchema,
 });
 
 export const BreakGlassSessionSchema = z.object({
@@ -249,7 +324,7 @@ export const PolicyExceptionSchema = z.object({
  */
 export const PolicyExceptionRequestSchema = z.object({
   entryKey: EntryKeySchema,
-  rule: ComposeRuleSchema,
+  rule: WaivableComposeRuleSchema,
   /** FR-4.11's written justification, the same floor the break-glass request uses. */
   justification: z.string().min(20),
   /** A time box, not a permanent waiver: an expiry that has passed blocks the next deployment. */
@@ -338,7 +413,10 @@ export type LicenseRecord = z.infer<typeof LicenseRecordSchema>;
 export type LicenseGate = z.infer<typeof LicenseGateSchema>;
 export type LicenseReviewRequest = z.infer<typeof LicenseReviewRequestSchema>;
 export type PatchRecord = z.infer<typeof PatchRecordSchema>;
+export type UpstreamObservationResult = z.infer<typeof UpstreamObservationResultSchema>;
 export type PostureSummary = z.infer<typeof PostureSummarySchema>;
+export type NativeFloorDecision = z.infer<typeof NativeFloorDecisionSchema>;
+export type NativeFloorDecisionRequest = z.infer<typeof NativeFloorDecisionRequestSchema>;
 export type BreakGlassSession = z.infer<typeof BreakGlassSessionSchema>;
 export type PolicyException = z.infer<typeof PolicyExceptionSchema>;
 export type PolicyExceptionRequest = z.infer<typeof PolicyExceptionRequestSchema>;

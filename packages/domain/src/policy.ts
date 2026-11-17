@@ -204,6 +204,7 @@ export const POLICY_KEYS: Readonly<Record<string, PolicyKey>> = {
   'POST /backups/:id/verify': 'instance.backup',
   'POST /backups/:id/restore': 'instance.backup',
   'GET /instances/:id/images': 'instance.view_logs',
+  'GET /instances/:id/image-scan': 'instance.view_logs',
   'GET /instances/:id/plan': 'instance.lifecycle',
   'POST /instances': 'instance.deploy',
   'POST /instances/:id/:action': 'instance.lifecycle',
@@ -266,7 +267,14 @@ export const POLICY_KEYS: Readonly<Record<string, PolicyKey>> = {
    */
   'PUT /licenses/:instanceId/review': 'license.review',
   'GET /patch-register': 'patch.view',
+  /*
+   * FR-2.12: observing upstream is a platform-owner action (it prompts outbound calls and writes
+   * `patch_record`), so it takes the R1-only settings capability rather than the register's read key.
+   */
+  'POST /patch-register/observe': 'settings.manage',
   'GET /posture': 'posture.view',
+  /* S-2: lowering the floor is an owner decision, recorded and audited; R1 only. */
+  'POST /posture/native-floor/decision': 'settings.manage',
   /*
    * The register is read by all three parties to an elevation: the requester (R1), the auditor who
    * approves read-only grants (R2) and the domain owner who approves read-write grants (R3). No
@@ -299,6 +307,9 @@ export const POLICY_KEYS: Readonly<Record<string, PolicyKey>> = {
   'GET /admin/settings/alerts': 'settings.view',
   'PUT /admin/settings/alerts': 'alert.configure',
   'POST /admin/settings/alerts/:id/test': 'alert.configure',
+  /* NFR-4.16: the allow-list is platform-owner configuration; R2 reads it, only R1 changes it. */
+  'GET /security/trusted-registries': 'settings.view',
+  'POST /security/trusted-registries': 'settings.manage',
   'GET /admin/access-requests': 'entitlement.grant',
   'POST /admin/access-requests': 'access.request',
   'POST /admin/access-requests/:id/:decision': 'entitlement.grant',

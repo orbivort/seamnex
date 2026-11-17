@@ -42,13 +42,26 @@ export const DEFAULT_CATALOG_FIXTURES = join(import.meta.dirname, 'default-catal
 /**
  * The default set, in the order the console renders it.
  *
- * Selection is explicit rather than derived from the tree: these are the three products whose source
- * is vendored (`platform/upstream/<KEY>/`) *and* whose environment is declared
- * (`platform/catalog/env/<KEY>.json`), so a virgin stack can catalog, configure and deploy all three
+ * Selection is explicit rather than derived from the tree: these are the six products whose source is
+ * vendored (`platform/upstream/<KEY>/`) *and* whose environment is declared
+ * (`platform/catalog/env/<KEY>.json`), so a virgin stack can catalog, configure and deploy all six
  * without a network. `planDefaultCatalog` refuses to guess: a missing fixture or declaration is
  * reported per product, never silently substituted from somewhere else.
+ *
+ * The set used to hold three keys while the shipped declarations named six. The other three
+ * (D02-01, D06-01, D11-01) declared an environment nobody could project, so the catalogue advertised
+ * products that could never be deployed — the coverage finding this list closes. Adding a key here
+ * is only correct when its document and its declaration both exist; the gate
+ * (`pnpm check:catalog`) asserts that pairing.
  */
-export const DEFAULT_PRODUCT_KEYS = ['D01-01', 'D07-01', 'D09-01'] as const;
+export const DEFAULT_PRODUCT_KEYS = [
+  'D01-01',
+  'D02-01',
+  'D06-01',
+  'D07-01',
+  'D09-01',
+  'D11-01',
+] as const;
 
 export type DefaultProductKey = (typeof DEFAULT_PRODUCT_KEYS)[number];
 
@@ -219,13 +232,16 @@ export function planDefaultCatalog(input: {
     }
 
     if (!entryAvailable) {
-      // A declaration without its entry document is an artefact the loader refuses with "no catalog
-      // entry … is projected". The missing entry above is already blocking; this is the explanation,
-      // not a second failure.
+      /*
+       * A declaration with no entry document is the coverage defect itself: the declaration names
+       * an environment for a product that has no row, so the projector refuses it and the product
+       * can never deploy. It is reported as blocking, not as a note — a seed that exits `0` here is
+       * how a six-product catalogue came to hold three deployable entries.
+       */
       skipped.push({
         scope: 'environment',
         key,
-        blocking: false,
+        blocking: true,
         reason: `no entry document for ${key} to attach the declaration to`,
       });
       continue;

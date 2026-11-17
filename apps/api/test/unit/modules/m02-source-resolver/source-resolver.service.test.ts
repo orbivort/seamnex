@@ -157,13 +157,17 @@ function setup(options: SetupOptions = {}) {
     SEAMNEX_SOURCE_MIRROR_DIR: '',
     sourceAllowedHosts: ['git.example.test'],
   };
+  // NFR-4.16: permissive on purpose — these cases are about source resolution, and every reference
+  // they use resolves to `docker.io`, which is the entry the stub reports.
+  const trusted = { entries: vi.fn(async () => ['docker.io']) };
   const service = new FilesystemSourceResolver(
     config as unknown as AppConfig,
     db.pool,
     audit as never,
     catalog as never,
+    trusted as never,
   );
-  return { db, audit, catalog, config, instanceData, catalogRepo, root, service };
+  return { db, audit, catalog, config, instanceData, catalogRepo, root, service, trusted };
 }
 
 function writeTree(root: string, files: Record<string, string>): void {

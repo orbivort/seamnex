@@ -1,5 +1,11 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { breakGlassStateAt, licenseGateVerdict, licenseTerms } from '@seamnex/domain';
+import {
+  NATIVE_FLOOR_DEPLOYMENTS,
+  breakGlassStateAt,
+  licenseGateVerdict,
+  licenseTerms,
+  nativeFloorStatus,
+} from '@seamnex/domain';
 import type {
   BreakGlassSession,
   DsarRequest,
@@ -475,23 +481,35 @@ export class PostgresGovernanceService implements GovernanceService {
       created_at: Date;
       oldest_unapplied_security_days: number | null;
       checked_at: Date;
+      advisory_id: string | null;
+      advisory_severity: 'critical' | 'high' | 'medium' | 'low' | 'unknown' | null;
+      advisory_url: string | null;
+      release_url: string | null;
+      source: 'observed' | 'catalog' | null;
+      last_observed_at: Date | null;
     }>(
       `SELECT i.id AS instance_id, i.entry_key,
-              coalesce(i.payload->>'product', c.product, i.entry_key) AS product,
-              coalesce(p.current_version, c.payload->'upstream'->>'currentVersion') AS current_version,
-              coalesce(p.latest_version, c.payload->'upstream'->>'latestVersion') AS latest_version,
-              (SELECT max(r.applied_at)
-                 FROM render_set r
-                WHERE r.instance_id = i.id
-                  AND r.applied_at IS NOT NULL) AS last_upgrade_at,
-              i.created_at,
-              p.oldest_unapplied_security_days,
-              coalesce(p.checked_at, c.updated_at, i.updated_at) AS checked_at
-         FROM instance i
-         LEFT JOIN catalog_entry c ON c.key = i.entry_key
-         LEFT JOIN patch_record p ON p.instance_id = i.id
-        WHERE i.deleted_at IS NULL
-        ORDER BY product`,
+             coalesce(i.payload->>'product', c.product, i.entry_key) AS product,
+             coalesce(p.current_version, c.payload->'upstream'->>'currentVersion') AS current_version,
+             coalesce(p.latest_version, c.payload->'upstream'->>'latestVersion') AS latest_version,
+             (SELECT max(r.applied_at)
+                FROM render_set r
+               WHERE r.instance_id = i.id
+                 AND r.applied_at IS NOT NULL) AS last_upgrade_at,
+             i.created_at,
+             p.oldest_unapplied_security_days,
+             coalesce(p.checked_at, c.updated_at, i.updated_at) AS checked_at,
+             p.advisory_id,
+             p.advisory_severity,
+             p.advisory_url,
+             p.release_url,
+             p.source,
+             p.last_observed_at
+        FROM instance i
+        LEFT JOIN catalog_entry c ON c.key = i.entry_key
+        LEFT JOIN patch_record p ON p.instance_id = i.id
+       WHERE i.deleted_at IS NULL
+       ORDER BY product`,
     );
     return result.rows.map((row) => {
       const currentVersion = row.current_version ?? 'unknown';
@@ -515,6 +533,16 @@ export class PostgresGovernanceService implements GovernanceService {
             ? 'critical'
             : 'warning',
         checkedAt: row.checked_at.toISOString(),
+        // FR-2.12: the advisory and the release link the register is supposed to surface.
+        advisory: row.advisory_id,
+        releaseUrl: row.release_url,
+        /*
+         * FR-2.12's honesty line. `catalog` means these two numbers came from the entry document —
+         * which is what the register presented as "tracking" before the observation pass existed.
+         * The console prints the difference, so an unobserved instance cannot read as current.
+         */
+        source: row.source ?? 'catalog',
+        lastObservedAt: row.last_observed_at?.toISOString() ?? null,
       };
     });
   }
@@ -530,7 +558,7 @@ export class PostgresGovernanceService implements GovernanceService {
    * its date, not as "never verified".
    */
   async posture(): Promise<PostureSummary> {
-    const [instances, restores, stale, managed] = await Promise.all([
+    const [instances, restores, stale, managed, floorDecision] = await Promise.all([
       this.pool.query<{
         id: string;
         product: string;
@@ -566,6 +594,17 @@ export class PostgresGovernanceService implements GovernanceService {
        */
       this.pool.query<{ count: string }>(
         `SELECT count(DISTINCT instance_id)::text AS count FROM product_account`,
+      ),
+      /*
+       * S-2 — the floor in force. It is a row rather than a constant because the requirement allows
+       * a lower floor "only by a recorded owner decision", and a decision nobody can read back is a
+       * re-baseline. `null` means the default (6) applies.
+       */
+      this.pool.query<{ floor: number; reason: string; recorded_by: string; recorded_at: Date }>(
+        `SELECT floor, reason, recorded_by, recorded_at
+           FROM native_floor_decision
+          ORDER BY recorded_at DESC, id DESC
+          LIMIT 1`,
       ),
     ]);
 
@@ -603,6 +642,16 @@ export class PostgresGovernanceService implements GovernanceService {
       .filter((row) => row.ready === null)
       .map((row) => ({ instanceId: row.id, product: row.product }));
 
+    /*
+     * S-2 — the floor is served, not hard-coded in the screen. `nativeFloorStatus` is the same pure
+     * function the catalogue coverage and the gate use, so "6 of 12" cannot mean three things.
+     */
+    const decision = floorDecision.rows[0] ?? null;
+    const floor = nativeFloorStatus(
+      { native, forwardAuth, signInRequired },
+      decision?.floor ?? NATIVE_FLOOR_DEPLOYMENTS,
+    );
+
     return {
       generatedAt: new Date().toISOString(),
       sso: {
@@ -613,6 +662,21 @@ export class PostgresGovernanceService implements GovernanceService {
         // Deployments where the platform holds the product credential (ADR-BE-22). These stay in
         // `signInRequired`: the class does not change, and neither bucket above may claim them.
         platformManagedCredentials: Number(managed.rows[0]?.count ?? 0),
+        nativeFloor: {
+          floor: floor.floor,
+          baseline: floor.baseline,
+          met: floor.met,
+          shortfall: floor.shortfall,
+        },
+        ownerDecision:
+          decision === null
+            ? null
+            : {
+                floor: decision.floor,
+                reason: decision.reason,
+                recordedBy: decision.recorded_by,
+                recordedAt: decision.recorded_at.toISOString(),
+              },
       },
       missingHealthChecks,
       unverifiedRestores,

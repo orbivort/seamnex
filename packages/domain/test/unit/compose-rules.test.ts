@@ -3,8 +3,12 @@ import {
   COMPOSE_RULES,
   COMPOSE_RULE_LABELS,
   ComposeRuleSchema,
+  NON_WAIVABLE_RULES,
+  WAIVABLE_RULES,
+  WaivableComposeRuleSchema,
   composeRuleLabel,
   isComposeRule,
+  isNonWaivableRule,
 } from '../../src/compose-rules';
 
 /**
@@ -16,14 +20,32 @@ import {
  * labels are asserted together here.
  */
 describe('compose rules', () => {
-  it('names exactly the five constructs the policy refuses and nothing else', () => {
+  it('names exactly the six findings the policy refuses and nothing else', () => {
     expect([...COMPOSE_RULES]).toEqual([
       'network_mode_host',
       'privileged',
       'host_path_mount',
       'external_network',
       'unpinned_image',
+      'untrusted_registry',
     ]);
+  });
+
+  /**
+   * NFR-4.16 — `untrusted_registry` is in the vocabulary and outside the waivable set.
+   *
+   * Its only remedy is adding the namespace to the allow-list, so an exception that covered it would
+   * be a control that can be switched off from a form. The split is asserted here because it is the
+   * kind of rule a later change removes by accident.
+   */
+  it('keeps the untrusted-registry finding out of the waivable set', () => {
+    expect([...NON_WAIVABLE_RULES]).toEqual(['untrusted_registry']);
+    expect(isNonWaivableRule('untrusted_registry')).toBe(true);
+    expect(isNonWaivableRule('privileged')).toBe(false);
+    expect(WAIVABLE_RULES).toHaveLength(COMPOSE_RULES.length - 1);
+    expect(WAIVABLE_RULES).not.toContain('untrusted_registry');
+    expect(WaivableComposeRuleSchema.safeParse('untrusted_registry').success).toBe(false);
+    expect(WaivableComposeRuleSchema.safeParse('privileged').success).toBe(true);
   });
 
   it('describes every rule for the person granting an exception', () => {

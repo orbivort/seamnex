@@ -1,0 +1,108 @@
+{
+  "key": "D06-01",
+  "domain": "ERP & Business Operations",
+  "cluster": "Core Operations",
+  "product": "ERPNext",
+  "description": "One data model for finance, inventory, purchasing, manufacturing and projects, so the ledger and the operations that feed it cannot disagree.",
+  "repoUrl": "https://github.com/frappe/erpnext",
+  "licenseId": "GPL-3.0",
+  "stack": "Python / MariaDB",
+  "imageRef": "frappe/erpnext:v16.53.0",
+  "imageDigest": "sha256:b961d69ed3265f44f712f40be58a3e6a22c8662f61a7e1a8097765534e3e9be2",
+  "upstream": {
+    "currentVersion": "16.53.0",
+    "latestVersion": "16.53.0",
+    "advisory": null,
+    "releaseUrl": "https://github.com/frappe/erpnext/releases",
+    "checkedAt": "2026-11-01T01:00:00Z"
+  },
+  "guaranteeClass": "native",
+  "authMethod": "SAML 2.0 (Frappe social login)",
+  "packaging": "compose",
+  "packagingSource": "vendored definition (platform/upstream/D06-01): frappe_docker compose layout with MariaDB, two Redis instances, nginx, gunicorn, socket.io, two RQ workers and the bench scheduler @ v16.53.0",
+  "primaryInstanceId": null,
+  "sharedWith": ["D05-01"],
+  "httpPort": 8080,
+  "resources": {
+    "cpu": 4,
+    "memoryMb": 8192,
+    "diskMb": 40960
+  },
+  "dependencies": ["database", "cache", "worker"],
+  "volumes": [
+    {
+      "name": "sites",
+      "mountPath": "/home/frappe/frappe-bench/sites",
+      "quotaMb": 20480
+    },
+    {
+      "name": "db-data",
+      "mountPath": "/var/lib/mysql",
+      "quotaMb": 40960
+    }
+  ],
+  "integration": {
+    "apiBaseUrl": "https://erp.seamnex.local/api",
+    "authMethod": "API key and secret per user (Frappe token authentication)",
+    "guaranteeClassVerified": "native",
+    "operationInventory": [
+      {
+        "id": "todo.read",
+        "label": "Read to-dos and assignments",
+        "mode": "read",
+        "description": "List to-dos with their reference document, priority and assigned user.",
+        "path": "/api/resource/ToDo",
+        "method": "GET"
+      },
+      {
+        "id": "todo.write",
+        "label": "Create a to-do",
+        "mode": "write",
+        "description": "Create a to-do linked to a document for an assigned user.",
+        "path": "/api/resource/ToDo",
+        "method": "POST"
+      },
+      {
+        "id": "sales-order.read",
+        "label": "Read sales orders",
+        "mode": "read",
+        "description": "List sales orders with customer, currency and fulfilment status.",
+        "path": "/api/resource/Sales Order",
+        "method": "GET"
+      },
+      {
+        "id": "sales-order.write",
+        "label": "Create a sales order",
+        "mode": "write",
+        "description": "Create a submitted sales order for an existing customer and item.",
+        "path": "/api/resource/Sales Order",
+        "method": "POST"
+      }
+    ],
+    "eventModes": [
+      {
+        "mode": "webhook",
+        "label": "Document events through the Webhook doctype"
+      },
+      {
+        "mode": "poll",
+        "label": "Poll modified documents",
+        "minimumIntervalMinutes": 15
+      }
+    ],
+    "credentialGranularity": "account",
+    "sessionMaxMinutes": 480,
+    "sloSupported": false,
+    "verifiedBy": "Platform Administrator",
+    "verifiedAt": "2026-11-01T01:00:00Z",
+    "nextReviewAt": "2027-01-31T01:00:00Z",
+    "stale": false
+  },
+  "owner": {
+    "name": "Platform Administrator",
+    "team": "Finance & Operations",
+    "email": "erp-ops@seamnex.local"
+  },
+  "notes": "D05-01 (ERPNext Accounts) runs on this same deployment: one instance serves both domain entries, which is why S-2 counts deployments rather than entries. The first boot creates the site and installs the erpnext app, so a cold start can exceed the default verify window. Payroll is out of scope.",
+  "verifiedAt": "2026-11-01T01:00:00Z"
+}

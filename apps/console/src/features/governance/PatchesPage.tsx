@@ -1,10 +1,12 @@
 import { useMemo } from 'react';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
-import { usePatchRegister } from '@seamnex/api-client';
+import { ArrowUpRight, RefreshCw } from 'lucide-react';
+import { useObservePatchRegister, usePatchRegister } from '@seamnex/api-client';
 import { SEVERITIES, type PatchRecord, type Severity, type Tone } from '@seamnex/domain';
 import {
   Badge,
+  Button,
   DataTable,
   EmptyState,
   Page,
@@ -17,6 +19,7 @@ import {
 } from '@seamnex/ui';
 import { formatDateTime, formatRelative } from '@seamnex/utils';
 import { AsyncPanel } from '@seamnex/shell';
+import { useCapabilities } from '../../use-capabilities';
 
 /**
  * NFR-4.7 is the clock this register exists to track: a critical vulnerability is remediated within
@@ -59,6 +62,24 @@ function severityView(row: PatchRecord): { tone: Tone; label: string } {
   return { tone: 'positive', label: 'current' };
 }
 
+/**
+ * FR-2.12 — where the two version numbers came from.
+ *
+ * Before the observation pass the register printed `catalog_entry.payload.upstream` as if it had been
+ * measured. `catalog` is exactly that fallback, so the row says "never observed" instead of letting
+ * an unread document pass for a check.
+ */
+function provenance(row: PatchRecord): { text: string; observed: boolean } {
+  if (
+    row.source !== 'observed' ||
+    row.lastObservedAt === null ||
+    row.lastObservedAt === undefined
+  ) {
+    return { text: 'never observed upstream', observed: false };
+  }
+  return { text: `observed ${formatRelative(row.lastObservedAt)}`, observed: true };
+}
+
 const rowKey = (row: PatchRecord): string => row.instanceId;
 
 /**
@@ -92,7 +113,28 @@ const columns = defineColumns<PatchRecord>([
     header: 'Product',
     primary: true,
     // `renderPatchLink` supplies the link's type styles; the cell contributes the text only.
-    cell: (row) => row.product,
+    cell: (row) => {
+      const source = provenance(row);
+      return (
+        <span className="flex min-w-0 flex-col gap-0.5">
+          <span className="truncate">{row.product}</span>
+          <span
+            className={
+              source.observed
+                ? 'text-micro text-faint'
+                : 'text-micro font-medium text-warning-strong'
+            }
+            title={
+              source.observed
+                ? 'The platform read this from the upstream release feed.'
+                : 'These versions come from the catalogue document, which nothing has verified against upstream.'
+            }
+          >
+            {source.text}
+          </span>
+        </span>
+      );
+    },
   },
   {
     id: 'current',
@@ -116,16 +158,23 @@ const columns = defineColumns<PatchRecord>([
     cell: (row) => {
       if (postureOf(row) === 'unknown')
         return <span className="text-micro text-faint">unknown</span>;
+      const tone =
+        postureOf(row) === 'current' ? 'text-micro text-faint' : 'text-micro text-warning-strong';
+      // FR-2.12 "release notes links": the version an operator is told to move to is one click from
+      // the change it contains, and the link is the observed release rather than a constructed URL.
+      if (row.releaseUrl === null || row.releaseUrl === undefined) {
+        return <span className={tone}>{row.latestVersion}</span>;
+      }
       return (
-        <span
-          className={
-            postureOf(row) === 'current'
-              ? 'text-micro text-faint'
-              : 'text-micro text-warning-strong'
-          }
+        <a
+          href={row.releaseUrl}
+          target="_blank"
+          rel="noreferrer noopener"
+          className={`${tone} inline-flex items-center gap-1 hover:underline`}
         >
           {row.latestVersion}
-        </span>
+          <ArrowUpRight className="size-3 shrink-0" aria-hidden />
+        </a>
       );
     },
   },
@@ -182,6 +231,30 @@ const columns = defineColumns<PatchRecord>([
     },
   },
   {
+    /*
+     * FR-2.12 — the advisory the last observation found. "none open" is only printed for a row that
+     * was observed: an unobserved row has no advisory answer at all, and a dash says that without
+     * claiming there is nothing open.
+     */
+    id: 'advisory',
+    header: 'Advisory',
+    hideBelow: 'xl',
+    cell: (row) => {
+      if (row.advisory === null || row.advisory === undefined) {
+        return (
+          <span className="text-micro text-faint">
+            {provenance(row).observed ? 'none open' : '—'}
+          </span>
+        );
+      }
+      return (
+        <Badge tone={row.severity === 'critical' ? 'danger' : 'caution'} size="sm">
+          {row.advisory}
+        </Badge>
+      );
+    },
+  },
+  {
     id: 'severity',
     header: 'Severity',
     hideBelow: 'xl',
@@ -204,6 +277,11 @@ const columns = defineColumns<PatchRecord>([
 
 export function PatchesPage() {
   const patches = usePatchRegister();
+  const observe = useObservePatchRegister();
+  const { mutable } = useCapabilities();
+  // FR-2.12: running the pass writes the register and prompts outbound calls, which is R1's
+  // `settings.manage` — the same capability the route checks, so the button is never a tease.
+  const canObserve = mutable.has('settings.manage');
 
   const rows = useMemo(() => {
     // Worst first: the register is read to decide what to patch now, so a critical record must not
@@ -291,21 +369,39 @@ export function PatchesPage() {
           title="Version posture"
           description="Upgrades always take a verified pre-upgrade backup and offer a one-step rollback."
           actions={
-            oldestCheck === null ? null : (
-              <span
-                className={
-                  stale ? 'text-micro font-semibold text-warning-strong' : 'text-micro text-faint'
-                }
-                title={
-                  stale
-                    ? `The oldest version check in this register is ${formatDateTime(oldestCheck)}, so the ages below are stale.`
-                    : `Oldest version check: ${formatDateTime(oldestCheck)}.`
-                }
-              >
-                Checked {formatRelative(oldestCheck)}
-                {stale ? '· stale' : ''}
-              </span>
-            )
+            <div className="flex items-center gap-3">
+              {oldestCheck === null ? null : (
+                <span
+                  className={
+                    stale ? 'text-micro font-semibold text-warning-strong' : 'text-micro text-faint'
+                  }
+                  title={
+                    stale
+                      ? `The oldest version check in this register is ${formatDateTime(oldestCheck)}, so the ages below are stale.`
+                      : `Oldest version check: ${formatDateTime(oldestCheck)}.`
+                  }
+                >
+                  Checked {formatRelative(oldestCheck)}
+                  {stale ? '· stale' : ''}
+                </span>
+              )}
+              {canObserve ? (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => observe.mutate()}
+                  disabled={observe.isPending}
+                  icon={
+                    <RefreshCw
+                      className={observe.isPending ? 'animate-spin' : undefined}
+                      aria-hidden
+                    />
+                  }
+                >
+                  {observe.isPending ? 'Observing…' : 'Observe now'}
+                </Button>
+              ) : null}
+            </div>
           }
         />
         {/*
@@ -314,6 +410,23 @@ export function PatchesPage() {
           a blank panel (ERR-04). A first failure still replaces the panel, because there is no
           posture to stand behind.
         */}
+        {/*
+          FR-2.12: the pass reports what it reached, not a bare success. "0 releases, 6 skipped" is a
+          different answer from "6 entries observed", and an operator who pressed the button needs to
+          tell them apart without reading the scheduler log.
+        */}
+        {observe.data ? (
+          <p className="border-b border-line px-4 py-2 text-meta text-muted">
+            Observed {observe.data.entries} entries: {observe.data.releases} with a newer release,{' '}
+            {observe.data.advisories} with an open advisory, {observe.data.skipped} with no feed
+            {observe.data.failed > 0 ? `, ${observe.data.failed} unreachable` : ''}.
+          </p>
+        ) : null}
+        {observe.error ? (
+          <p role="alert" className="border-b border-line px-4 py-2 text-meta text-danger">
+            The observation could not run; the register keeps its previous values.
+          </p>
+        ) : null}
         <AsyncPanel
           query={patches}
           loading={

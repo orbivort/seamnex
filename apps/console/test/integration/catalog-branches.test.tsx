@@ -214,6 +214,64 @@ describe('catalog reload receipt', () => {
     expect(within(receipt as HTMLElement).getByText('env')).toBeDefined();
   });
 
+  /**
+   * S-1 / S-2 — the coverage verdict on the receipt.
+   *
+   * A reload that leaves a declared product undeployable is not a success just because every file it
+   * read was well-formed: the receipt has to say how much of the catalogue is documented, which
+   * declarations were refused, and what the floor is measured against.
+   */
+  it('states coverage, the refused declarations and the floor beside the delta', async () => {
+    server.use(
+      http.post('/api/v1/catalog/reload', () =>
+        HttpResponse.json({
+          reloadedAt: '2026-10-21T09:00:00.000Z',
+          revision: 'f00dc0de',
+          entries: 6,
+          added: 3,
+          changed: 0,
+          removed: 0,
+          reconciled: [],
+          environment: { added: 0, changed: 0, removed: 0, refused: [], applied: [] },
+          invalid: [],
+          coverage: {
+            entries: 6,
+            deployments: 5,
+            declaredEnvironments: 3,
+            documentedEnvironments: 1,
+            refused: [{ key: 'D07-01', reason: 'no entry document for the declaration' }],
+            byClass: { native: 2, fa_header: 2, fa_delegated: 0, fa_gate: 1 },
+            nativeDeployments: 2,
+            floor: 6,
+            baseline: 12,
+            floorMet: false,
+            shortfall: 4,
+          },
+        }),
+      ),
+    );
+
+    openAs('R1', '/catalog');
+    render(<App />);
+    await screen.findByText('Domain catalog');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Reload from repository' }));
+
+    const receipt = (await screen.findByText(/Repository reloaded at revision f00dc0de/)).closest(
+      'div',
+    );
+    const scope = receipt as HTMLElement;
+    expect(within(scope).getByText('3 declared')).toBeDefined();
+    expect(within(scope).getByText('1 documented')).toBeDefined();
+    expect(within(scope).getByText('1 refused')).toBeDefined();
+    // The floor is stated against the entries, not hidden on another screen.
+    expect(within(scope).getByText('2 native of 6 required')).toBeDefined();
+    expect(within(scope).getByText(/5 deployments, shared instances counted once/)).toBeDefined();
+    // The refused declaration is named with its remedy rather than counted.
+    expect(within(scope).getByText('entry document missing')).toBeDefined();
+    expect(within(scope).getByText(/Refused: no entry document for the declaration/)).toBeDefined();
+  });
+
   it('says nothing moved when the projection already matched the revision', async () => {
     // An older API omits the environment half entirely; the receipt must still read as a success
     // rather than printing "Environment: undefined added".
@@ -893,5 +951,55 @@ describe('scaffold draft tab', () => {
     fireEvent.click(within(panel).getByRole('button', { name: 'Retry' }));
 
     expect(await within(panel).findByText('Generated artefacts')).toBeDefined();
+  });
+});
+
+/**
+ * FR-1.9 — the per-volume quota is the number a deployment is refused against, so the two shapes an
+ * entry can take here are the two the screen has to keep apart: nothing declared at all, and a total
+ * that exceeds the disk reservation. The second used to be rendered as quietly as any other figure,
+ * which is how "declared 40 GB on a 20 GB shape" reached a pre-flight refusal with no warning.
+ */
+describe('entry detail and its volume declaration', () => {
+  it('says an entry declares no data volume instead of showing an empty list', async () => {
+    server.use(
+      http.get('/api/v1/catalog/D01-01', () => {
+        const entry = entryFor('D01-01');
+        return HttpResponse.json({ ...entry, volumes: [] });
+      }),
+    );
+
+    openAs('R1', '/catalog/D01-01');
+    render(<App />);
+    await screen.findByRole('heading', { name: /EspoCRM/ });
+
+    expect(
+      screen.getByText('This entry declares no data volume, so a backup holds the database only.'),
+    ).toBeDefined();
+    // A `0 B of 20 GB reserved` total would read as a shape with room to spare; nothing is claimed.
+    expect(screen.queryByText('Declared total')).toBeNull();
+  });
+
+  it('marks a declared volume total above the disk reservation as the refusal it is', async () => {
+    server.use(
+      http.get('/api/v1/catalog/D01-01', () => {
+        const entry = entryFor('D01-01');
+        return HttpResponse.json({
+          ...entry,
+          volumes: [{ name: 'app-data', mountPath: '/var/www/html/data', quotaMb: 40_960 }],
+        });
+      }),
+    );
+
+    openAs('R1', '/catalog/D01-01');
+    render(<App />);
+    await screen.findByRole('heading', { name: /EspoCRM/ });
+
+    const declared = screen.getByText('Declared total').closest('li');
+    const total = declared?.querySelector('span.font-mono');
+    // 40 GB declared against a 20 GB shape: the pre-flight refuses this, so the total carries the
+    // refusal colour rather than the muted grey of every other figure on the panel.
+    expect(total?.textContent).toBe('40.0 GB of 20.0 GB reserved');
+    expect(total?.className).toContain('text-danger');
   });
 });

@@ -1,10 +1,17 @@
+import { readFileSync } from 'node:fs';
 import Docker from 'dockerode';
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { APP_CONFIG } from '../../config/config.module';
 import type { AppConfig } from '../../config/config';
+import { parseAllDocuments } from 'yaml';
 import { requireAdapters } from '../adapters';
 import { run, runOrThrow, spawnProcess } from '../exec/exec';
 import { AppError } from '../problem/app-error';
+import {
+  IMAGE_TRUST_GUARD,
+  type ImageTrustGuard,
+  type ImageTrustOperation,
+} from '../security/trusted-registries';
 
 export type ContainerSummary = {
   readonly id: string;
@@ -82,7 +89,18 @@ export class DockerEngineClient {
   private readonly logger = new Logger('m05-docker');
   private readonly docker: Docker;
 
-  constructor(@Inject(APP_CONFIG) private readonly config: AppConfig) {
+  constructor(
+    @Inject(APP_CONFIG) private readonly config: AppConfig,
+    /**
+     * NFR-4.16 — the trusted-registry guard, injected rather than imported so the client keeps one
+     * dependency direction. Optional at the type level only: a client without it refuses to pull or
+     * build (see `assertTrustedImage`), because a guard that quietly disappears is the hole this
+     * control exists to close.
+     */
+    @Optional()
+    @Inject(IMAGE_TRUST_GUARD)
+    private readonly imageTrust?: ImageTrustGuard,
+  ) {
     this.docker = new Docker(
       connectionOf(config.SEAMNEX_DOCKER_HOST, config.SEAMNEX_DOCKER_TIMEOUT_MS),
     );
@@ -383,6 +401,9 @@ export class DockerEngineClient {
   }
 
   async pull(ref: string, onProgress?: (line: string) => Promise<void>): Promise<ImageIdentity> {
+    // NFR-4.16 at the last possible moment: pre-flight can be minutes old, and a queued job reaches
+    // this call without re-reading the plan. The guard is the control; the blocker is the advice.
+    await this.assertTrustedImage(ref, 'pull');
     this.guard();
     await new Promise<void>((resolve, reject) => {
       void this.docker.pull(ref, (error: Error | null, stream: NodeJS.ReadableStream) => {
@@ -435,6 +456,12 @@ export class DockerEngineClient {
     project: ComposeProject,
     onLine?: (line: string) => Promise<void>,
   ): Promise<void> {
+    /*
+     * `--quiet-pull` means `up` fetches whatever the project names, so this is the third fetch path
+     * NFR-4.16 has to cover. The images are read from the project's own files rather than trusted
+     * from a caller-provided list: a list can be stale, the files are what Compose will parse.
+     */
+    await this.assertProjectImagesTrusted(project);
     const result = await runOrThrow(
       'docker',
       composeArgs(project, ['up', '-d', '--remove-orphans', '--quiet-pull']),
@@ -517,6 +544,9 @@ export class DockerEngineClient {
     tag: string;
     labels?: Record<string, string>;
   }): Promise<void> {
+    // The tag is what enters the local store and later lands in a compose file, so it is the
+    // reference the allow-list can actually judge; the base image is the Dockerfile policy's job.
+    await this.assertTrustedImage(input.tag, 'build');
     const args = ['buildx', 'build', '--load', '-t', input.tag, '-f', input.dockerfile];
     for (const [key, value] of Object.entries(input.labels ?? {}))
       args.push('--label', `${key}=${value}`);
@@ -553,6 +583,49 @@ export class DockerEngineClient {
     return run(file, args, { env: this.dockerEnv(), timeoutMs });
   }
 
+  /**
+   * NFR-4.16 — refuse an image the allow-list does not name.
+   *
+   * Two refusals live here, deliberately: an entity outside the list, and a client with no guard
+   * wired at all. The second is the failure mode a "return early when undefined" guard would hide —
+   * a role that forgot `SecurityModule` would deploy anything, and the log line nothing reads is not
+   * a control.
+   */
+  private async assertTrustedImage(
+    reference: string | null,
+    operation: ImageTrustOperation,
+  ): Promise<void> {
+    if (reference === null || reference.trim().length === 0) return;
+    if (this.imageTrust === undefined) {
+      throw new AppError({
+        code: 'ADAPTER_UNAVAILABLE',
+        detail: `the trusted-registry guard is not wired in this process, so ${operation} of ${reference} cannot be authorised (NFR-4.16).`,
+        remediation:
+          'Import SecurityModule into the process root so the allow-list reader is available; the guard is never optional.',
+      });
+    }
+    await this.imageTrust.assertTrusted(reference, operation);
+  }
+
+  /** Every `image:` a project will start, read from the files Compose itself will parse. */
+  private async assertProjectImagesTrusted(project: ComposeProject): Promise<void> {
+    const seen = new Set<string>();
+    for (const file of project.files) {
+      const content = readFileSync(file, 'utf8');
+      for (const document of parseAllDocuments(content)) {
+        const rendered = document.toJS({ maxAliasCount: 100 }) as unknown;
+        const services = asRecord(asRecord(rendered)?.services);
+        if (services === null) continue;
+        for (const raw of Object.values(services)) {
+          const image = asRecord(raw)?.image;
+          if (typeof image !== 'string' || seen.has(image)) continue;
+          seen.add(image);
+          await this.assertTrustedImage(image, 'start');
+        }
+      }
+    }
+  }
+
   private dockerEnv(): NodeJS.ProcessEnv {
     return { DOCKER_HOST: this.config.SEAMNEX_DOCKER_HOST, DOCKER_CLI_HINTS: 'false' };
   }
@@ -582,6 +655,13 @@ export class DockerEngineClient {
       cause: error,
     });
   }
+}
+
+/** A YAML node as an object, or `null` when it is anything else. */
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
 }
 
 function composeArgs(project: ComposeProject, command: readonly string[]): string[] {

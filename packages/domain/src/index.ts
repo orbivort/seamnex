@@ -12,6 +12,9 @@ export * from './break-glass-approval';
 export * from './workflow-authority';
 export * from './capacity';
 export * from './version';
+export * from './image-registry';
+export * from './posture';
+export * from './catalog-coverage';
 export * from './routes';
 export * from './contract';
 
@@ -30,6 +33,7 @@ export * from './schemas/identity';
 export * from './schemas/workflow';
 export * from './schemas/field-discovery';
 export * from './schemas/governance';
+export * from './schemas/security';
 export * from './schemas/capacity';
 export * from './schemas/registry';
 export * from './schemas/observability';

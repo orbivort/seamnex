@@ -50,6 +50,7 @@ import { ContainersTab } from './tabs/ContainersTab';
 import { DriftTab } from './tabs/DriftTab';
 import { EnvironmentTab } from './tabs/EnvironmentTab';
 import { ExportsTab } from './tabs/ExportsTab';
+import { ImageSecurityTab } from './tabs/ImageSecurityTab';
 import { IntegrationTab } from './tabs/IntegrationTab';
 import { JobsTab } from './tabs/JobsTab';
 import { ObservabilityTab } from './tabs/ObservabilityTab';
@@ -419,6 +420,9 @@ export function InstanceDetailPage() {
         tabs={[
           { value: 'overview', label: 'Overview' },
           { value: 'containers', label: 'Containers' },
+          // NFR-4.6: the scan report is as sensitive as a log excerpt, and `GET
+          // /instances/:id/image-scan` binds to the same `instance.view_logs`. Same gate, same reason.
+          ...(canReadTelemetry ? [{ value: 'image-security', label: 'Image security' }] : []),
           ...(canReadTelemetry ? [{ value: 'observability', label: 'Observability' }] : []),
           ...(canReadEnv ? [{ value: 'env', label: 'Environment' }] : []),
           { value: 'drift', label: 'Drift' },
@@ -436,6 +440,11 @@ export function InstanceDetailPage() {
         <TabPanel value="containers" className="pt-3">
           <ContainersTab instance={data} />
         </TabPanel>
+        {canReadTelemetry ? (
+          <TabPanel value="image-security" className="pt-3">
+            <ImageSecurityTab instance={data} />
+          </TabPanel>
+        ) : null}
         {canReadTelemetry ? (
           <TabPanel value="observability" className="pt-3">
             <ObservabilityTab instance={data} />

@@ -1,6 +1,8 @@
 import type { z } from 'zod';
 import {
   type ImageSchema,
+  type ImageScanReport,
+  type ImageScanSummary,
   type InstanceExportSchema,
   type InstancePlanSchema,
   type DeployPreview,
@@ -21,6 +23,33 @@ export type ExportArchive = {
 };
 
 export const EXECUTOR_SERVICE = Symbol('seamnex.m05.executor');
+
+/**
+ * NFR-4.6 / S-10 — retained image scans.
+ *
+ * A separate token from the executor because the pipeline (a writer), the instance screen (a reader)
+ * and the scheduler's retention sweep (a deleter) all need it, and only the first is the executor.
+ */
+export const IMAGE_SCAN_SERVICE = Symbol('seamnex.m05.image-scan');
+
+export interface ImageScanService {
+  /**
+   * Scans every image the deployment will start, before `compose up`. Throws
+   * `IMAGE_SCAN_BLOCKED` on a blocking verdict or an unavailable scanner, unless
+   * `SEAMNEX_SCAN_FAIL_OPEN` says otherwise.
+   */
+  scanForDeploy(input: {
+    readonly instanceId: string;
+    readonly references: readonly string[];
+    readonly log?: (level: 'stdout' | 'system', line: string) => Promise<void>;
+  }): Promise<ImageScanSummary[]>;
+  /** The retained report for one digest; `NOT_FOUND` when the image was never scanned. */
+  report(instanceId: string, digest: string): Promise<ImageScanReport>;
+  /** Newest report per digest, merged into `GET /instances/:id/images`. */
+  summaries(instanceId: string): Promise<ReadonlyMap<string, ImageScanSummary>>;
+  /** S-10 retention; returns how many reports were deleted. */
+  prune(days: number): Promise<number>;
+}
 
 export type DeployInput = {
   readonly entryKey: string;

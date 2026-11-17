@@ -5,7 +5,7 @@ import { CAPACITY_HOST, CAPACITY_RESERVE } from '../fixtures/capacity';
 import { at } from '../fixtures/context';
 import { resolveEnv } from '../fixtures/env-plan';
 import { provisionInstance } from '../fixtures/provision';
-import { appendAudit, getState, refreshCapacity } from '../store';
+import { appendAudit, getState, imageScanSummaries, refreshCapacity } from '../store';
 import { BACKUP_STEPS, DEPLOY_STEPS, LIFECYCLE_STEPS, enqueueJob } from './job-factory';
 import { actorFor, deny, problem, readBody, requireCapability, roleOf } from './utils';
 
@@ -588,20 +588,28 @@ export const instanceHandlers = [
         'Refresh the list.',
       );
     }
+    /*
+     * NFR-4.6: the verdict travels with the digest. `null` — not omitted — means "this digest was
+     * never scanned", which the security tab renders as such rather than as a pass.
+     */
+    const scans = imageScanSummaries(instance.id);
     return HttpResponse.json([
       {
         digest: instance.imageDigest,
         version: instance.currentVersion,
-        state: 'running',
+        state: 'current',
         builtAt: instance.createdAt,
         artefact: instance.source.path === 'dockerfile' ? 'retained' : 'not-applicable',
+        scan: scans[instance.imageDigest] ?? null,
       },
       {
         digest: 'sha256:1c7a04e9b25d83f6a0e1c47d92b38f50c6a1d7e4b92f038c6d51e8a04b7c3a91',
         version: instance.availableVersion ?? instance.currentVersion,
-        state: 'retained',
+        state: 'previous',
         builtAt: at(-14 * 24 * 60),
         artefact: instance.source.path === 'dockerfile' ? 'retained' : 'not-applicable',
+        scan:
+          scans['sha256:1c7a04e9b25d83f6a0e1c47d92b38f50c6a1d7e4b92f038c6d51e8a04b7c3a91'] ?? null,
       },
     ]);
   }),

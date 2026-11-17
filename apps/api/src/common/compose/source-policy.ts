@@ -13,8 +13,9 @@ import type { ComposePatchEntry, ComposeViolation, SourcePolicyResult } from './
 export function evaluateComposeText(
   content: string,
   waived: ReadonlySet<ComposeRule>,
+  trustedRegistries: readonly string[] | null = null,
 ): SourcePolicyResult {
-  return evaluateCompose(parseCompose(content), waived);
+  return evaluateCompose(parseCompose(content), waived, trustedRegistries);
 }
 
 /**

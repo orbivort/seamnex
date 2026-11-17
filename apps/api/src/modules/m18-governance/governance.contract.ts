@@ -5,9 +5,12 @@ import type {
   LicenseRecord,
   LicenseReviewRequest,
   MaintenanceWindow,
+  NativeFloorDecision,
+  NativeFloorDecisionRequest,
   PatchRecord,
   PolicyException,
   PostureSummary,
+  UpstreamObservationResult,
 } from '@seamnex/domain';
 
 export const GOVERNANCE_SERVICE = Symbol('seamnex.m18.governance');
@@ -30,6 +33,42 @@ export interface GovernanceWrites {
   expireOverdueBreakGlass(): Promise<
     ReadonlyArray<{ readonly id: string; readonly instanceId: string | null }>
   >;
+
+  /**
+   * S-2 — records the owner decision that lowers the native floor.
+   *
+   * The method is on the write surface rather than exposed as a settings field because the decision
+   * *is* the control: the row and its audit entry are one transaction, and only a decision recorded
+   * here can make `nativeFloorStatus()` report a lower target.
+   */
+  recordNativeFloorDecision(
+    request: NativeFloorDecisionRequest,
+    actorId: string,
+  ): Promise<NativeFloorDecision>;
+}
+
+/**
+ * FR-2.12 / NFR-4.7 — the observation pass, as the scheduler and the on-demand route see it.
+ *
+ * Its own token for the same reason `GOVERNANCE_WRITES` exists: the scheduler needs to *run* the
+ * pass, and nothing that only reads the register should be able to.
+ */
+export const UPSTREAM_OBSERVER = Symbol('seamnex.m18.upstream-observer');
+
+export type UpstreamObservationActor = {
+  /** `system` for the scheduler pass, `user` for the operator-triggered route. */
+  readonly type: 'system' | 'user';
+  readonly id: string;
+};
+
+export interface UpstreamObserver {
+  /**
+   * Observes GitHub releases and OSV advisories for the catalogue, then writes the register.
+   *
+   * Throws `UNAVAILABLE` when tracking is disabled; a feed that answers badly is a counted outcome
+   * in the result, never an exception, so one unreachable upstream cannot abort the pass.
+   */
+  observe(actor: UpstreamObservationActor): Promise<UpstreamObservationResult>;
 }
 
 /** Owns licence_record, patch_record, break_glass_session, policy_exception, maintenance_window, dsar_request. */

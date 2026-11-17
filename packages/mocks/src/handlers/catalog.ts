@@ -1,5 +1,6 @@
 import { http, HttpResponse } from 'msw';
 import {
+  computeCatalogCoverage,
   isCredentialGranularity,
   isWorkflowEligible,
   isWriteEligible,
@@ -576,6 +577,20 @@ export const catalogHandlers = [
       // against the API.
       environment: { added: 0, changed: 0, removed: 0, refused: [], applied: [] },
       invalid: [],
+      /*
+       * S-1 / S-2 — the coverage strip on the receipt. Computed from the catalogue being served, not
+       * written as a literal: a fixed `floorMet: true` could never show the shortfall the strip
+       * exists to surface, and the console would look correct against a mock that lies.
+       */
+      coverage: computeCatalogCoverage({
+        entries: state.catalog.map((entry) => ({
+          key: entry.key,
+          guaranteeClass: entry.guaranteeClass,
+          primaryInstanceId: entry.primaryInstanceId,
+        })),
+        declaredEnvironments: state.catalog.length,
+        refused: [],
+      }),
     });
   }),
 

@@ -13,6 +13,8 @@ import type {
   EnvValue,
   IdpGroup,
   IdpUser,
+  ImageScanReport,
+  ImageScanSummary,
   Instance,
   InstanceDetail,
   InstanceStatus,
@@ -37,6 +39,7 @@ import type {
   Scenario,
   StatusBanner,
   SyncRun,
+  TrustedRegistryState,
   Workflow,
   WorkflowRun,
 } from '@seamnex/domain';
@@ -82,6 +85,7 @@ import {
 import { PRIVACY_REQUESTS } from './fixtures/privacy';
 import { PLATFORM_RESTORE_RUNS, RECOVERY_GATE } from './fixtures/recovery';
 import { REGISTRY } from './fixtures/registry';
+import { IMAGE_SCANS, TRUSTED_REGISTRIES } from './fixtures/security';
 import { WORKFLOWS } from './fixtures/workflows';
 import { WORKFLOW_RUNS } from './fixtures/workflow-runs';
 
@@ -120,6 +124,10 @@ export type MockState = {
   settings: PlatformSettings;
   banners: StatusBanner[];
   registry: RegistryEntry[];
+  /** NFR-4.16: the allow-list revision; mutable so the audited update route is demonstrable. */
+  trustedRegistries: TrustedRegistryState;
+  /** NFR-4.6: retained scans, one per instance and digest. */
+  imageScans: ImageScanReport[];
   recovery: {
     backups: Backup[];
     runs: PlatformRestoreRun[];
@@ -177,6 +185,8 @@ function buildBase(): MockState {
     settings: clone(PLATFORM_SETTINGS),
     banners: clone(STATUS_BANNERS),
     registry: clone(REGISTRY),
+    trustedRegistries: clone(TRUSTED_REGISTRIES),
+    imageScans: clone(IMAGE_SCANS),
     recovery: {
       backups: clone(BACKUPS.filter((backup) => backup.kind === 'platform')),
       runs: clone(PLATFORM_RESTORE_RUNS),
@@ -301,6 +311,7 @@ export function applyScenario(state: MockState, scenario: Scenario): MockState {
     state.workflows = [];
     state.workflowRuns = [];
     state.registry = [];
+    state.imageScans = [];
     state.recovery.runs = [];
     state.recovery.drills = [];
     state.privacy = [];
@@ -394,6 +405,35 @@ export function envFor(instanceId: string): EnvValue[] {
 
 export function driftFor(instanceId: string): DriftRecord[] {
   return current.drift[instanceId] ?? [];
+}
+
+/** NFR-4.16: the revision an update route replaces, read through one accessor. */
+export function trustedRegistryState(): TrustedRegistryState {
+  return current.trustedRegistries;
+}
+
+/** NFR-4.6: the newest retained report per digest, keyed by digest for the image list. */
+export function imageScanSummaries(instanceId: string): Record<string, ImageScanSummary> {
+  const summaries: Record<string, ImageScanSummary> = {};
+  for (const report of current.imageScans) {
+    if (report.instanceId !== instanceId) continue;
+    summaries[report.imageDigest] = {
+      verdict: report.verdict,
+      scanner: report.scanner,
+      scannerVersion: report.scannerVersion,
+      scannedAt: report.scannedAt,
+      severityCounts: report.severityCounts,
+      blockingSeverities: report.blockingSeverities,
+    };
+  }
+  return summaries;
+}
+
+/** The retained report for one digest; `undefined` means "never scanned", not "clean". */
+export function imageScanReport(instanceId: string, digest: string): ImageScanReport | undefined {
+  return current.imageScans.find(
+    (report) => report.instanceId === instanceId && report.imageDigest === digest,
+  );
 }
 
 export function detailFor(instanceId: string): InstanceDetail | undefined {

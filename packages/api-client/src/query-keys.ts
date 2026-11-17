@@ -39,6 +39,8 @@ export const queryKeys = {
   /** FR-1.13: the portable exports on disk, read from the catalogue the capture wrote. */
   instanceExports: (id: string) => ['instances', id, 'exports'] as const,
   images: (id: string) => ['instances', id, 'images'] as const,
+  /** NFR-4.6: the retained report is keyed by digest, so a re-tag cannot show yesterday's findings. */
+  imageScan: (id: string, digest: string) => ['instances', id, 'image-scan', digest] as const,
   jobs: ['jobs'] as const,
   job: (id: string) => ['jobs', id] as const,
   jobLogs: (id: string) => ['jobs', id, 'logs'] as const,
@@ -70,6 +72,8 @@ export const queryKeys = {
   maintenance: ['admin', 'maintenance-windows'] as const,
   policyExceptions: ['admin', 'policy-exceptions'] as const,
   dsar: ['admin', 'dsar'] as const,
+  /** NFR-4.16: the allow-list revision the pull/build guard is reading. */
+  trustedRegistries: ['security', 'trusted-registries'] as const,
   recovery: ['recovery'] as const,
   restoreStatus: ['recovery', 'restore-status'] as const,
   privacy: ['privacy'] as const,

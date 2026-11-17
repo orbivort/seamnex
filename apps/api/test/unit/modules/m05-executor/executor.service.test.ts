@@ -107,6 +107,12 @@ function setup(routes: readonly Route[] = [], options: { readonly dataDir?: stri
     SEAMNEX_INSTANCE_DATA_DIR: options.dataDir ?? './temp/instances',
     SEAMNEX_USAGE_SAMPLE_RETENTION_DAYS: 30,
   };
+  // NFR-4.6: the images route merges the retained scan; an empty list is "never scanned", which is
+  // exactly the state a fresh instance is in.
+  const scans = {
+    summaries: vi.fn(async () => new Map()),
+    scanForDeploy: vi.fn(async () => []),
+  };
   const service = new PostgresExecutorService(
     db.pool,
     planner as never,
@@ -115,8 +121,9 @@ function setup(routes: readonly Route[] = [], options: { readonly dataDir?: stri
     audit as never,
     docker as never,
     config as never,
+    scans as never,
   );
-  return { db, planner, lifecycleService, capacity, audit, docker, service };
+  return { db, planner, lifecycleService, capacity, audit, docker, service, scans };
 }
 
 /** The projection of one row, through the same `instances` query the fleet list uses. */
@@ -995,6 +1002,8 @@ describe('images', () => {
         state: 'current',
         builtAt: '2026-01-05T00:00:00.000Z',
         artefact: 'k2',
+        // NFR-4.6: no retained report for this digest — `null`, not "clean".
+        scan: null,
       },
       {
         digest: 'sha256:old',
@@ -1002,6 +1011,7 @@ describe('images', () => {
         state: 'previous',
         builtAt: '2026-01-01T00:00:00.000Z',
         artefact: 'k1',
+        scan: null,
       },
     ]);
     expect(db.calls[0]?.params).toEqual([INSTANCE_ID]);

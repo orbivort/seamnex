@@ -10,16 +10,19 @@ import type {
   MaintenanceWindow,
   MaintenanceWindowCreateRequest,
   MaintenanceWindowPatchRequest,
+  NativeFloorDecision,
+  NativeFloorDecisionRequest,
   PlatformRole,
   PolicyException,
   PolicyExceptionRequest,
   PrivacyRequest,
 } from '@seamnex/domain';
 import {
-  COMPOSE_RULES,
+  WAIVABLE_RULES,
   accessFor,
   breakGlassApprovalRefusal,
   breakGlassStateAt,
+  isAcceptableFloorDecision,
   isComposeRule,
 } from '@seamnex/domain';
 import type { Pool } from 'pg';
@@ -695,13 +698,21 @@ export class GovernanceWritesService implements GovernanceWrites {
     request: PolicyExceptionRequest,
     actorId: string,
   ): Promise<PolicyException> {
-    if (!isComposeRule(request.rule)) {
+    /*
+     * NFR-4.16's `untrusted_registry` is in the vocabulary but not in the waivable subset: its only
+     * remedy is adding a namespace to the allow-list, so offering it as a time-boxed exception would
+     * be the control NFR-4.16 names, disabled by paperwork.
+     */
+    if (
+      !isComposeRule(request.rule) ||
+      !(WAIVABLE_RULES as readonly string[]).includes(request.rule)
+    ) {
       throw new AppError({
         code: 'VALIDATION_FAILED',
         status: 422,
-        detail: `Unknown policy rule "${request.rule}".`,
-        remediation: `Use one of: ${COMPOSE_RULES.join(', ')}.`,
-        fieldErrors: [{ field: 'rule', code: 'unknown', message: 'Unknown policy rule.' }],
+        detail: `Policy rule "${request.rule}" cannot be waived.`,
+        remediation: `Use one of: ${WAIVABLE_RULES.join(', ')}. An image outside the trusted registry is fixed by adding its namespace to the allow-list (NFR-4.16), not by an exception.`,
+        fieldErrors: [{ field: 'rule', code: 'unknown', message: 'Not a waivable policy rule.' }],
       });
     }
 
@@ -1025,6 +1036,73 @@ export class GovernanceWritesService implements GovernanceWrites {
   }
 
   // ---- maintenance windows (CL-05) -------------------------------------------------------------
+
+  /**
+   * S-2 — record an owner decision that lowers the native floor.
+   *
+   * The requirement allows a lower floor "only by a recorded owner decision", so the record is the
+   * control: this refuses a floor at or above the default (that is not a decision, it is the
+   * default), refuses a reason short enough to be a shrug, and writes the audit row in the same
+   * transaction as the decision. Nothing lowers the number implicitly.
+   */
+  async recordNativeFloorDecision(
+    request: NativeFloorDecisionRequest,
+    actorId: string,
+  ): Promise<NativeFloorDecision> {
+    const reason = request.reason.trim();
+    if (!isAcceptableFloorDecision({ floor: request.floor, reason })) {
+      throw new AppError({
+        code: 'VALIDATION_FAILED',
+        status: 422,
+        detail:
+          'A lower floor needs an integer between 0 and the baseline (12), and a reason of at least 20 characters explaining what is accepted.',
+        remediation:
+          'State the deferral and its owner. The floor may only be lowered from 6, never raised by this route.',
+        fieldErrors: [
+          { field: 'reason', code: 'custom', message: 'Record the decision in words.' },
+        ],
+      });
+    }
+
+    const inserted = await withTransaction(this.pool, async (tx) => {
+      // Lock order: audit chain first, business rows second (AD-20).
+      await this.audit.lockChain(tx);
+      const row = await tx.query<{
+        id: string;
+        floor: number;
+        reason: string;
+        recorded_by: string;
+        recorded_at: Date;
+      }>(
+        `INSERT INTO native_floor_decision (floor, reason, recorded_by)
+         VALUES ($1, $2, $3)
+         RETURNING id, floor, reason, recorded_by, recorded_at`,
+        [request.floor, reason, actorId],
+      );
+      const record = row.rows[0];
+      if (record === undefined) throw internal('The native-floor decision was not recorded.');
+      await this.audit.append(
+        {
+          action: 'posture.native_floor.decided',
+          actorType: 'user',
+          actorId,
+          targetType: 'native_floor_decision',
+          targetId: record.id,
+          outcome: 'success',
+          detail: { floor: record.floor, reason: record.reason, previousDefault: 6 },
+        },
+        tx,
+      );
+      return record;
+    });
+
+    return {
+      floor: inserted.floor,
+      reason: inserted.reason,
+      recordedBy: inserted.recorded_by,
+      recordedAt: inserted.recorded_at.toISOString(),
+    };
+  }
 
   async createWindow(
     request: MaintenanceWindowCreateRequest,

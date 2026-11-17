@@ -5,6 +5,7 @@ import {
   CatalogEntrySchema,
   ScaffoldDraftSchema,
   isComposeRule,
+  isNonWaivableRule,
   type ScaffoldConfirmation,
   type ScaffoldDraft,
 } from '@seamnex/domain';
@@ -29,6 +30,7 @@ import {
 import { evaluateDockerfile } from '../../common/compose/dockerfile-policy';
 import { emptyPolicy, type SourcePolicyResult } from '../../common/compose/policy-result';
 import { evaluateComposeText } from '../../common/compose/source-policy';
+import { TrustedRegistriesReader } from '../../common/security/trusted-registries';
 import type {
   PolicyPreview,
   ResolveInput,
@@ -75,6 +77,11 @@ export class FilesystemSourceResolver implements SourceResolverService {
     @Inject(AUDIT_SERVICE) private readonly audit: AuditService,
     // `catalog_commit` is M22's table; recording a commit is its job, not this module's.
     @Inject(CATALOG_REPOSITORY) private readonly catalog: CatalogRepositoryService,
+    /**
+     * NFR-4.16 — the allow-list this module writes and the policies below evaluate. Read-only here;
+     * M02's `TrustedRegistryService` owns the revisions.
+     */
+    @Inject(TrustedRegistriesReader) private readonly trusted: TrustedRegistriesReader,
   ) {}
 
   async resolve(input: ResolveInput): Promise<ResolvedSource> {
@@ -111,17 +118,23 @@ export class FilesystemSourceResolver implements SourceResolverService {
      * client described.
      */
     const waivers = await this.waivers(entry.key);
+    // NFR-4.16: read once per resolution, so every path below judges against the same revision.
+    const trustedRegistries = await this.trusted.entries();
     let policy: SourcePolicyResult;
     let files: ResolvedSourceFile[];
 
     if (path === 'compose') {
       const composePath = detected.composeFile as string;
       files = retain(source.directory, [composePath, ...detected.envFiles]);
-      policy = this.evaluate(this.readCompose(composePath), waivers.rules);
+      policy = this.evaluate(this.readCompose(composePath), waivers.rules, trustedRegistries);
     } else if (path === 'dockerfile') {
       const dockerfilePath = detected.dockerfilePath as string;
       files = retain(source.directory, [dockerfilePath, ...detected.envFiles]);
-      policy = evaluateDockerfile(readFileSync(dockerfilePath, 'utf8'), new Set(waivers.rules));
+      policy = evaluateDockerfile(
+        readFileSync(dockerfilePath, 'utf8'),
+        new Set(waivers.rules),
+        trustedRegistries,
+      );
     } else {
       if (scaffold === null) {
         throw new AppError({
@@ -131,7 +144,7 @@ export class FilesystemSourceResolver implements SourceResolverService {
         });
       }
       files = writeScaffold(directory, scaffold.files);
-      policy = this.evaluateScaffold(files, waivers.rules);
+      policy = this.evaluateScaffold(files, waivers.rules, trustedRegistries);
     }
 
     const imageRef =
@@ -171,13 +184,20 @@ export class FilesystemSourceResolver implements SourceResolverService {
     };
   }
 
-  evaluate(composeContent: string, waived: readonly ComposeRule[]): ComposePolicyResult {
-    return evaluateCompose(parseCompose(composeContent), new Set(waived));
+  evaluate(
+    composeContent: string,
+    waived: readonly ComposeRule[],
+    trustedRegistries: readonly string[] | null = null,
+  ): ComposePolicyResult {
+    return evaluateCompose(parseCompose(composeContent), new Set(waived), trustedRegistries);
   }
 
   async previewPolicy(entryKey: string): Promise<PolicyPreview> {
     const entry = await this.entry(entryKey);
     const waivers = await this.waivers(entry.key);
+    // NFR-4.16: the preview must refuse for the same reason the deployment would, or the wizard
+    // promises a deploy that the pull path then blocks.
+    const trustedRegistries = await this.trusted.entries();
 
     const vendored = join(this.mirrorRoot(), entry.key);
     if (existsSync(vendored)) {
@@ -188,11 +208,13 @@ export class FilesystemSourceResolver implements SourceResolverService {
             ? evaluateComposeText(
                 readFileSync(detected.composeFile, 'utf8'),
                 new Set(waivers.rules),
+                trustedRegistries,
               )
             : detected.dockerfilePath !== null
               ? evaluateDockerfile(
                   readFileSync(detected.dockerfilePath, 'utf8'),
                   new Set(waivers.rules),
+                  trustedRegistries,
                 )
               : null;
         if (policy !== null) {
@@ -226,7 +248,7 @@ export class FilesystemSourceResolver implements SourceResolverService {
         content: file.content,
         sha256: '',
       }));
-      const policy = this.evaluateScaffold(files, waivers.rules);
+      const policy = this.evaluateScaffold(files, waivers.rules, trustedRegistries);
       return {
         verdict: policy.verdict,
         violations: policy.violations.map((violation) => ({
@@ -516,6 +538,9 @@ export class FilesystemSourceResolver implements SourceResolverService {
     const expired = new Map<ComposeRule, Date>();
     for (const row of result.rows) {
       if (!isComposeRule(row.rule)) continue;
+      // NFR-4.16 has no waiver: a row for a non-waivable rule is ignored rather than honoured, so a
+      // hand-written exception cannot disable the allow-list from inside the database.
+      if (isNonWaivableRule(row.rule)) continue;
       if (row.live) live.add(row.rule);
       else if (!expired.has(row.rule)) expired.set(row.rule, row.expires_at);
     }
@@ -543,12 +568,15 @@ export class FilesystemSourceResolver implements SourceResolverService {
   private evaluateScaffold(
     files: readonly ResolvedSourceFile[],
     waived: readonly ComposeRule[],
+    trustedRegistries: readonly string[] | null = null,
   ): SourcePolicyResult {
     const compose = files.find((file) => COMPOSE_CANDIDATES.includes(basename(file.path)));
-    if (compose !== undefined) return evaluateComposeText(compose.content, new Set(waived));
+    if (compose !== undefined) {
+      return evaluateComposeText(compose.content, new Set(waived), trustedRegistries);
+    }
     const dockerfile = files.find((file) => DOCKERFILE_CANDIDATES.includes(basename(file.path)));
     if (dockerfile !== undefined) {
-      return evaluateDockerfile(dockerfile.content, new Set(waived));
+      return evaluateDockerfile(dockerfile.content, new Set(waived), trustedRegistries);
     }
     // A draft with neither is a bare run definition: the platform generates the compose project, so
     // it publishes no port and binds no host path.

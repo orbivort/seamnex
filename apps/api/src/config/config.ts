@@ -436,6 +436,51 @@ const EnvironmentSchema = z
      * serves both, which is the case on a host that mounts the same tree at the same place.
      */
     SEAMNEX_DOCKER_PATH_MAP: z.string().default(''),
+
+    // ---- Image trust and scanning (NFR-4.6, NFR-4.16, S-10) -----------------------------------
+    /**
+     * NFR-4.16 — an override for the allow-list used before any `trusted_registry_revision` exists.
+     *
+     * Empty means "use the shipped document" (`packages/db/src/seed/trusted-registries.json`), which
+     * is the default an operator should edit through the audited route rather than here. A value
+     * replaces the shipped list entirely; the database revision is authoritative as soon as one is
+     * written, so this cannot widen a running platform.
+     */
+    SEAMNEX_TRUSTED_REGISTRIES: z.string().default(''),
+    /** NFR-4.6: scan every product image after pull/build and before containers start. */
+    SEAMNEX_SCAN_ENABLED: booleanish.default(true),
+    /**
+     * The scanner image itself. Pinned, and pulled through the same trusted-registry guard, which is
+     * why `docker.io/aquasec` is in the default allow-list above.
+     */
+    SEAMNEX_SCANNER_IMAGE: z.string().min(1).default('aquasec/trivy:0.57.1'),
+    /** Severities whose presence blocks the deployment; `CRITICAL` is NFR-4.6's block condition. */
+    SEAMNEX_SCAN_BLOCK_SEVERITIES: z.string().min(1).default('CRITICAL'),
+    SEAMNEX_SCAN_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(1_800_000).default(300_000),
+    /** Scratch tree the image tar and report live in; mounted into the scanner container by path map. */
+    SEAMNEX_SCAN_TMP_DIR: z.string().min(1).default('./temp/scans'),
+    /** Days a retained `image_scan_result` row is kept before the scheduler prunes it. */
+    SEAMNEX_SCAN_RETENTION_DAYS: z.coerce.number().int().min(1).max(3_650).default(90),
+    /**
+     * Fail-closed by default: a scanner that cannot run blocks the deployment. A scanner that
+     * silently skips is exactly the "scanned nothing, claimed compliant" defect S-10 records.
+     */
+    SEAMNEX_SCAN_FAIL_OPEN: booleanish.default(false),
+
+    // ---- Upstream release and advisory observation (FR-2.12, NFR-4.7) -------------------------
+    SEAMNEX_UPSTREAM_TRACKING_ENABLED: booleanish.default(true),
+    /** One pass per six hours by default: release feeds do not move faster, and the budget is shared. */
+    SEAMNEX_UPSTREAM_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .min(60_000)
+      .max(86_400_000)
+      .default(21_600_000),
+    SEAMNEX_UPSTREAM_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(60_000).default(10_000),
+    /** Egress allow-list for the observation client: only these hosts are ever contacted. */
+    SEAMNEX_UPSTREAM_ALLOWED_HOSTS: z.string().min(1).default('api.github.com,api.osv.dev'),
+    /** Entries examined per pass, so a large catalogue cannot hold the scheduler tick open. */
+    SEAMNEX_UPSTREAM_BATCH: z.coerce.number().int().min(1).max(200).default(25),
     /** `age` recipient used to encrypt every backup before it leaves the host. */
     SEAMNEX_AGE_RECIPIENT: z.string().default(''),
     SEAMNEX_AGE_IDENTITY_FILE: z.string().min(1).default('./temp/seamnex-age-identity'),
@@ -826,6 +871,12 @@ export type AppConfig = Readonly<
     readonly trustProxy: boolean | string[];
     /** Parsed `SEAMNEX_SOURCE_ALLOWED_HOSTS`, lower-cased. */
     readonly sourceAllowedHosts: readonly string[];
+    /** Parsed `SEAMNEX_TRUSTED_REGISTRIES`: `registry` or `registry/namespace`, lower-cased. */
+    readonly trustedRegistries: readonly string[];
+    /** Parsed `SEAMNEX_SCAN_BLOCK_SEVERITIES`, upper-cased (`CRITICAL`, `HIGH`). */
+    readonly scanBlockSeverities: readonly string[];
+    /** Parsed `SEAMNEX_UPSTREAM_ALLOWED_HOSTS`, lower-cased. */
+    readonly upstreamAllowedHosts: readonly string[];
     /**
      * The pool size this process must open, derived from `DATABASE_POOL_MAX` and the role. Never
      * read `DATABASE_POOL_MAX` directly for a pool: that applies the API ceiling to every worker.
@@ -884,6 +935,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
         ? ''
         : resolveFromRepoRoot(parsed.data.SEAMNEX_PROMETHEUS_TARGETS_DIR),
     SEAMNEX_BACKUP_TMP_DIR: resolveFromRepoRoot(parsed.data.SEAMNEX_BACKUP_TMP_DIR),
+    SEAMNEX_SCAN_TMP_DIR: resolveFromRepoRoot(parsed.data.SEAMNEX_SCAN_TMP_DIR),
     SEAMNEX_AGE_IDENTITY_FILE: resolveFromRepoRoot(parsed.data.SEAMNEX_AGE_IDENTITY_FILE),
     isProduction: parsed.data.NODE_ENV === 'production',
     isDevelopment: parsed.data.NODE_ENV !== 'production',
@@ -911,6 +963,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
         .map((path) => (path.startsWith('/') ? path : `/${path}`))[0] ?? '/sign-in',
     trustProxy: parseTrustProxy(parsed.data.TRUST_PROXY),
     sourceAllowedHosts: parsed.data.SEAMNEX_SOURCE_ALLOWED_HOSTS.split(',')
+      .map((host) => host.trim().toLowerCase())
+      .filter((host) => host.length > 0),
+    trustedRegistries: parsed.data.SEAMNEX_TRUSTED_REGISTRIES.split(',')
+      .map((entry) => entry.trim().toLowerCase().replace(/\/+$/, ''))
+      .filter((entry) => entry.length > 0),
+    scanBlockSeverities: parsed.data.SEAMNEX_SCAN_BLOCK_SEVERITIES.split(',')
+      .map((severity) => severity.trim().toUpperCase())
+      .filter((severity) => severity.length > 0),
+    upstreamAllowedHosts: parsed.data.SEAMNEX_UPSTREAM_ALLOWED_HOSTS.split(',')
       .map((host) => host.trim().toLowerCase())
       .filter((host) => host.length > 0),
     poolMax: poolMaxForRole(parsed.data.SEAMNEX_ROLE, parsed.data.DATABASE_POOL_MAX),

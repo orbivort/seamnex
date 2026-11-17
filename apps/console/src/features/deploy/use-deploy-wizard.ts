@@ -52,6 +52,12 @@ const BLOCKER_STEP: Record<PreviewBlockerCode, number> = {
   unknown_entry: 1,
   source_unresolved: 1,
   image_unpinned: 1,
+  /*
+   * NFR-4.16: the wizard cannot fix this one — the remedy is an allow-list revision on the security
+   * posture screen — so it points at step 0 (entry/source review), where the operator sees the
+   * namespace the message names and can stop the deploy.
+   */
+  image_untrusted_registry: 0,
   scaffold_unapproved: 1,
   policy_blocked: 1,
   route_conflict: 0,

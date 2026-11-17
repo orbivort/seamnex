@@ -175,7 +175,13 @@ export function CatalogPage() {
   const environment = reload.data?.environment;
   const refused = environment?.refused ?? [];
   const invalid = reload.data?.invalid ?? [];
-  const partial = refused.length > 0 || invalid.length > 0;
+  const coverage = reload.data?.coverage;
+  /*
+   * S-1: a declaration with no entry document is a refusal, not a note — the product cannot be
+   * deployed at all — so it makes the receipt partial for the same reason a refused environment file
+   * does.
+   */
+  const partial = refused.length > 0 || invalid.length > 0 || (coverage?.refused.length ?? 0) > 0;
   const envChanges = environment?.applied ?? [];
   const nothingMoved = reconciledChanges.length === 0 && envChanges.length === 0 && !partial;
 
@@ -241,6 +247,48 @@ export function CatalogPage() {
                 : ` Environment: ${environment.added} added, ${environment.changed} changed, ${environment.removed} removed.`}{' '}
               The repository remains authoritative over the control-plane projection.
             </span>
+
+            {/*
+              S-1 / S-2 — the coverage verdict on the receipt. Deliberately beside the delta rather
+              than on a separate screen: a reload that leaves three products undeployable reads as a
+              success unless the receipt says how much of the catalogue is actually documented.
+            */}
+            {coverage === undefined ? null : (
+              <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-current/15 pt-2">
+                <Badge tone="neutral" size="sm">
+                  {coverage.declaredEnvironments} declared
+                </Badge>
+                <Badge tone="positive" size="sm">
+                  {coverage.documentedEnvironments} documented
+                </Badge>
+                {coverage.refused.length === 0 ? null : (
+                  <Badge tone="danger" size="sm">
+                    {coverage.refused.length} refused
+                  </Badge>
+                )}
+                <Badge tone={coverage.floorMet ? 'positive' : 'caution'} size="sm">
+                  {coverage.nativeDeployments} native of {coverage.floor} required
+                </Badge>
+                <span className="text-micro">
+                  {coverage.deployments} deployments, shared instances counted once. The floor is
+                  S-2's; GET /posture serves the target in force.
+                </span>
+              </div>
+            )}
+
+            {coverage === undefined || coverage.refused.length === 0 ? null : (
+              <ul className="mt-2 space-y-1 border-t border-current/15 pt-2">
+                {coverage.refused.map((item) => (
+                  <li key={item.key} className="text-meta">
+                    <span className="font-mono font-medium">{item.key}</span>
+                    <Badge tone="danger" size="sm">
+                      entry document missing
+                    </Badge>
+                    <span className="block leading-snug">Refused: {item.reason}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
 
             {refused.length > 0 ? (
               <ul className="mt-2 space-y-1 border-t border-current/15 pt-2">

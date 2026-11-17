@@ -1,0 +1,90 @@
+{
+  "key": "D11-01",
+  "domain": "Data, Reporting & BI",
+  "cluster": "Enabling Platform",
+  "product": "Metabase",
+  "description": "Self-service dashboards and questions over the operator's own databases, so a report is a saved query rather than a spreadsheet mailed around.",
+  "repoUrl": "https://github.com/metabase/metabase",
+  "licenseId": "AGPL-3.0",
+  "stack": "JVM / PostgreSQL",
+  "imageRef": "metabase/metabase:v0.65.2",
+  "imageDigest": "sha256:b62ac14872e9992d28218a2264d99484e0707064aae9fb594d8fbb3bc1518a9e",
+  "upstream": {
+    "currentVersion": "0.65.2",
+    "latestVersion": "0.65.2",
+    "advisory": null,
+    "releaseUrl": "https://github.com/metabase/metabase/releases",
+    "checkedAt": "2026-11-01T01:00:00Z"
+  },
+  "guaranteeClass": "fa_gate",
+  "authMethod": "Proxy gate only - SSO is a paid tier; the free edition keeps its own login",
+  "packaging": "compose",
+  "packagingSource": "vendored definition (platform/upstream/D11-01) pinning the published all-in-one image @ v0.65.2 with a pinned PostgreSQL sidecar",
+  "primaryInstanceId": null,
+  "sharedWith": [],
+  "httpPort": 3000,
+  "resources": {
+    "cpu": 2,
+    "memoryMb": 4096,
+    "diskMb": 20480
+  },
+  "dependencies": ["database"],
+  "volumes": [
+    {
+      "name": "mb-pgdata",
+      "mountPath": "/var/lib/postgresql",
+      "quotaMb": 20480
+    }
+  ],
+  "integration": {
+    "apiBaseUrl": "https://insights.seamnex.local/api",
+    "authMethod": "API key per user (session token in the free edition)",
+    "guaranteeClassVerified": "fa_gate",
+    "operationInventory": [
+      {
+        "id": "dashboard.read",
+        "label": "Read dashboards",
+        "mode": "read",
+        "description": "List dashboards and their cards with the collection they belong to.",
+        "path": "/api/dashboard",
+        "method": "GET"
+      },
+      {
+        "id": "question.read",
+        "label": "Read questions",
+        "mode": "read",
+        "description": "List saved questions and fetch a question with its query definition.",
+        "path": "/api/card",
+        "method": "GET"
+      },
+      {
+        "id": "question.write",
+        "label": "Create a question",
+        "mode": "write",
+        "description": "Create a saved question against an existing database connection.",
+        "path": "/api/card",
+        "method": "POST"
+      }
+    ],
+    "eventModes": [
+      {
+        "mode": "none",
+        "label": "No event surface; dashboards and alerts are pulled"
+      }
+    ],
+    "credentialGranularity": "account",
+    "sessionMaxMinutes": 480,
+    "sloSupported": false,
+    "verifiedBy": "Platform Administrator",
+    "verifiedAt": "2026-11-01T01:00:00Z",
+    "nextReviewAt": "2027-01-31T01:00:00Z",
+    "stale": false
+  },
+  "owner": {
+    "name": "Platform Administrator",
+    "team": "Data & Insights",
+    "email": "data-ops@seamnex.local"
+  },
+  "notes": "The sidecar PostgreSQL is required: Metabase's embedded H2 store corrupts under concurrent use and loses saved questions. MB_ENCRYPTION_SECRET_KEY and MB_SESSION_SECRET_KEY must be supplied, otherwise data-source credentials are stored unencrypted and session tokens are forgeable.",
+  "verifiedAt": "2026-11-01T01:00:00Z"
+}

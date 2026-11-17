@@ -25,7 +25,9 @@ import type { Metrics } from '../common/metrics/metrics';
 import { AUDIT_SERVICE, type AuditService } from '../modules/m17-audit/audit.contract';
 import {
   GOVERNANCE_WRITES,
+  UPSTREAM_OBSERVER,
   type GovernanceWrites,
+  type UpstreamObserver,
 } from '../modules/m18-governance/governance.contract';
 import {
   NOTIFICATION_SERVICE,
@@ -55,6 +57,10 @@ import {
   ACCESS_CONTROL_SERVICE,
   type AccessControlService,
 } from '../modules/m09-access-control/access-control.contract';
+import {
+  IMAGE_SCAN_SERVICE,
+  type ImageScanService,
+} from '../modules/m05-executor/executor.contract';
 import { AppError } from '../common/problem/app-error';
 import { RunMirrorService } from '../modules/m13-workflow/run-mirror.service';
 import { WorkflowAuthoringService } from '../modules/m13-workflow/authoring.service';
@@ -79,6 +85,7 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
   private lastDriftSweepAt = 0;
   private lastCredentialSweepAt = 0;
   private lastScrapeReconcileAt = 0;
+  private lastUpstreamPassAt = 0;
   /** `instanceId → epoch ms` of the last repair request, so one drift cannot queue a loop of jobs. */
   private readonly driftRepairs = new Map<string, number>();
 
@@ -179,6 +186,20 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
     @Optional()
     @Inject(ACCESS_CONTROL_SERVICE)
     private readonly access?: AccessControlService,
+    /**
+     * S-10 — `image_scan_result` retention. M05 owns the table, so the delete lives there and only
+     * the cadence lives here, exactly like the audit-partition drop.
+     */
+    @Optional()
+    @Inject(IMAGE_SCAN_SERVICE)
+    private readonly imageScans?: ImageScanService,
+    /**
+     * FR-2.12 / NFR-4.7 — the patch register's observation pass. Optional like the rest: a process
+     * without M18 still schedules jobs, and the register then keeps whatever it last observed.
+     */
+    @Optional()
+    @Inject(UPSTREAM_OBSERVER)
+    private readonly upstream?: UpstreamObserver,
   ) {}
 
   /**
@@ -204,6 +225,8 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
       ['workflow credentials', this.workflows],
       ['environment drift', this.drift],
       ['observability scrapes', this.observability],
+      ['upstream tracking', this.upstream],
+      ['image scan retention', this.imageScans],
     ]
       .filter(([, dependency]) => dependency === undefined)
       .map(([name]) => name);
@@ -272,6 +295,7 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
       await this.sweepRelayAccounts();
       await this.rotateWorkflowCredentials();
       await this.reconcileDrift();
+      await this.observeUpstream();
     } catch (error) {
       this.logger.error(
         { err: error instanceof Error ? error.message : String(error) },
@@ -350,6 +374,67 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
       this.logger.log({ partition }, 'dropped expired job_log partition');
     }
     await this.applyAuditRetention();
+    await this.sweepImageScans();
+  }
+
+  /**
+   * S-10 — the retained scan reports are evidence, not a permanent archive.
+   *
+   * Kept for `SEAMNEX_SCAN_RETENTION_DAYS` so an operator can answer "what did we know on the day
+   * we deployed this?" without the table growing for the life of the platform. A failed delete is
+   * logged and retried on the next pass; it never fails the upkeep run that also drops partitions.
+   */
+  private async sweepImageScans(): Promise<void> {
+    if (this.imageScans === undefined) return;
+    const days = this.config.SEAMNEX_SCAN_RETENTION_DAYS;
+    try {
+      const deleted = await this.imageScans.prune(days);
+      if (deleted > 0) this.logger.log({ deleted, days }, 'pruned expired image scan reports');
+    } catch (error) {
+      this.logger.warn(
+        { err: error instanceof Error ? error.message : String(error), days },
+        'image scan retention failed; the reports are kept and the pass retries',
+      );
+    }
+  }
+
+  /**
+   * FR-2.12 / NFR-4.7 — one observation pass, guarded by a cadence floor.
+   *
+   * The interval lives here rather than in the service so an operator-triggered pass from the console
+   * is never silently skipped: the operator asked, the scheduler asked, and only the second is
+   * repeatable without a human. The guard is also what keeps a restart loop from turning every boot
+   * into an outbound burst against two public APIs.
+   *
+   * A failed pass is logged and never thrown: the register keeps its last observation rather than
+   * losing it because GitHub was slow, and the next tick retries.
+   */
+  private async observeUpstream(): Promise<void> {
+    const upstream = this.upstream;
+    if (upstream === undefined || !this.config.SEAMNEX_UPSTREAM_TRACKING_ENABLED) return;
+    const now = Date.now();
+    if (now - this.lastUpstreamPassAt < this.config.SEAMNEX_UPSTREAM_INTERVAL_MS) return;
+    this.lastUpstreamPassAt = now;
+
+    try {
+      const result = await upstream.observe({ type: 'system', id: 'scheduler' });
+      this.logger.log(
+        {
+          entries: result.entries,
+          releases: result.releases,
+          advisories: result.advisories,
+          skipped: result.skipped,
+          failed: result.failed,
+          instances: result.instancesUpdated,
+        },
+        'upstream observation pass completed',
+      );
+    } catch (error) {
+      this.logger.warn(
+        { err: error instanceof Error ? error.message : String(error) },
+        'upstream observation failed; the register keeps its previous observation',
+      );
+    }
   }
 
   /**

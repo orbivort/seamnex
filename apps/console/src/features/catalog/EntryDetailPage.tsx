@@ -212,7 +212,22 @@ export function EntryDetailPage() {
                 <DefinitionList
                   columns={2}
                   items={[
-                    { label: 'Upstream repository', value: data.repoUrl, mono: true },
+                    {
+                      label: 'Upstream repository',
+                      value:
+                        data.repoUrl === null ? (
+                          'None recorded'
+                        ) : (
+                          <a
+                            href={data.repoUrl}
+                            target="_blank"
+                            rel="noreferrer noopener"
+                            className="font-mono text-link hover:underline"
+                          >
+                            {data.repoUrl}
+                          </a>
+                        ),
+                    },
                     { label: 'Technology stack', value: data.stack },
                     { label: 'License', value: data.licenseId, hint: data.licenseNote },
                     { label: 'Packaging source', value: data.packagingSource },
@@ -352,8 +367,33 @@ export function EntryDetailPage() {
                       ? {}
                       : { hint: 'Tracked in the patch register until it is remediated.' }),
                   },
-                  { label: 'Release notes', value: data.upstream.releaseUrl, mono: true },
-                  { label: 'Checked', value: formatDateTime(data.upstream.checkedAt) },
+                  {
+                    label: 'Release notes',
+                    value:
+                      data.upstream.releaseUrl === null ? (
+                        'None recorded'
+                      ) : (
+                        <a
+                          href={data.upstream.releaseUrl}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                          className="font-mono text-link hover:underline"
+                        >
+                          {data.upstream.releaseUrl}
+                        </a>
+                      ),
+                  },
+                  {
+                    /*
+                     * FR-2.12 — provenance, stated explicitly. This timestamp belongs to the entry
+                     * document ("a person verified this"), not to the platform's own observation,
+                     * which lives on the patch register. Showing one date under both headings is how
+                     * "tracked upstream" came to mean "edited by hand".
+                     */
+                    label: 'Catalogue document',
+                    value: `stated ${formatDateTime(data.upstream.checkedAt)}`,
+                    hint: 'When a person last wrote these versions into the entry document. The platform’s own observation of releases and advisories is on the patch register.',
+                  },
                 ]}
               />
             </div>

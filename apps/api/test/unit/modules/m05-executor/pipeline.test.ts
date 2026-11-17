@@ -255,6 +255,9 @@ function setup(routes: readonly Route[] = [], configOverrides: Record<string, un
     integration as never,
     registry,
     outbox as never,
+    // NFR-4.6: scanning is off in these cases (`SEAMNEX_SCAN_ENABLED` is unset), so the stage is a
+    // no-op that reports "nothing scanned" rather than a pass.
+    { scanForDeploy: vi.fn(async () => []) } as never,
   );
   pipeline.onModuleInit();
 

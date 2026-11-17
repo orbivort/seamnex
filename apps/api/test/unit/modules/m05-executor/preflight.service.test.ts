@@ -62,14 +62,19 @@ function setup(
   const config = {
     SEAMNEX_INGRESS_DOMAIN: 'seamnex.local',
   } as unknown as AppConfig;
+  // NFR-4.16: permissive on purpose — this suite covers capacity, pins, variables and secrets, and
+  // its fixture entry comes from `registry.example.test`. The registry blocker has its own cases in
+  // `preflight.registry.test.ts`.
+  const trusted = { entries: vi.fn(async () => ['docker.io', 'registry.example.test']) };
   const service = new PreflightService(
     db.pool,
     config,
     renderer as never,
     capacity as never,
     sources as never,
+    trusted as never,
   );
-  return { db, renderer, capacity, sources, service };
+  return { db, renderer, capacity, sources, service, trusted };
 }
 
 function plan(overrides: Record<string, unknown> = {}) {

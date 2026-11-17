@@ -88,11 +88,19 @@ import {
   MaintenanceWindowCreateRequestSchema,
   MaintenanceWindowPatchRequestSchema,
   MaintenanceWindowSchema,
+  NativeFloorDecisionRequestSchema,
+  NativeFloorDecisionSchema,
   PatchRecordSchema,
   PolicyExceptionRequestSchema,
   PolicyExceptionSchema,
   PostureSummarySchema,
+  UpstreamObservationResultSchema,
 } from './schemas/governance';
+import {
+  ImageScanReportSchema,
+  TrustedRegistryStateSchema,
+  TrustedRegistryUpdateSchema,
+} from './schemas/security';
 import { CapacitySnapshotSchema, ForecastPointSchema } from './schemas/capacity';
 import { InstanceLogsSchema, ObservabilityReportSchema } from './schemas/observability';
 import {
@@ -813,6 +821,25 @@ const DECLARED_OPERATIONS: readonly DeclaredOperation[] = [
     tag: 'instances',
     response: z.array(ImageSchema),
   }),
+  /**
+   * NFR-4.6 / S-10: "a scan report is retrievable per deployment". The digest identifies which
+   * retained image is asked about — the same image may have been scanned under an older digest.
+   */
+  op({
+    method: 'GET',
+    path: '/instances/:id/image-scan',
+    summary: 'Retained vulnerability scan report for one image digest (NFR-4.6).',
+    tag: 'instances',
+    response: ImageScanReportSchema,
+    query: [
+      {
+        name: 'digest',
+        type: 'string',
+        required: true,
+        description: 'The image digest the report belongs to (`sha256:…`).',
+      },
+    ],
+  }),
   op({
     method: 'GET',
     path: '/instances/:id/plan',
@@ -1235,12 +1262,33 @@ const DECLARED_OPERATIONS: readonly DeclaredOperation[] = [
     tag: 'governance',
     response: z.array(PatchRecordSchema),
   }),
+  /**
+   * FR-2.12: the observation is what advances the register. The route exists so an operator can
+   * prove the feed works without waiting for the scheduler, and `settings.manage` (R1) matches the
+   * scheduler pass that performs the same work.
+   */
+  op({
+    method: 'POST',
+    path: '/patch-register/observe',
+    summary: 'Observe upstream releases and advisories now, then refresh the register (FR-2.12).',
+    tag: 'governance',
+    response: UpstreamObservationResultSchema,
+  }),
   op({
     method: 'GET',
     path: '/posture',
     summary: 'Posture summary: unverified restores, stale metadata, expiring certificates.',
     tag: 'governance',
     response: PostureSummarySchema,
+  }),
+  /** S-2: the floor may be lowered only by a recorded owner decision, never by editing the UI. */
+  op({
+    method: 'POST',
+    path: '/posture/native-floor/decision',
+    summary: 'Record an owner decision that lowers the S-2 native floor.',
+    tag: 'governance',
+    response: NativeFloorDecisionSchema,
+    request: NativeFloorDecisionRequestSchema,
   }),
   op({
     method: 'GET',
@@ -1411,6 +1459,26 @@ const DECLARED_OPERATIONS: readonly DeclaredOperation[] = [
     summary: 'Send a test delivery through one alert channel (CL-06).',
     tag: 'admin',
     response: AlertTestResultSchema,
+  }),
+  /**
+   * NFR-4.16 — the allow-list the pull/build guard reads. The read is `settings.view` (R1/R2) so the
+   * security posture screen can show the control, and the write is `settings.manage` (R1 only):
+   * "maintained by the platform owner" is one role, not a domain-scoped grant.
+   */
+  op({
+    method: 'GET',
+    path: '/security/trusted-registries',
+    summary: 'Current trusted-registry allow-list revision and its history (NFR-4.16).',
+    tag: 'admin',
+    response: TrustedRegistryStateSchema,
+  }),
+  op({
+    method: 'POST',
+    path: '/security/trusted-registries',
+    summary: 'Add or remove trusted registries/namespaces as a new audited revision.',
+    tag: 'admin',
+    response: TrustedRegistryStateSchema,
+    request: TrustedRegistryUpdateSchema,
   }),
   op({
     method: 'GET',

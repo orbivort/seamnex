@@ -16,11 +16,42 @@ export const COMPOSE_RULES = [
   'host_path_mount',
   'external_network',
   'unpinned_image',
+  /*
+   * NFR-4.16: an image outside the trusted-registry allow-list. It is a rule here so the evaluator,
+   * the console and the resolution evidence share one vocabulary — but it is **not waivable**:
+   * NFR-4.16's only remedy is adding the namespace to the allow-list, and a time-boxed exception
+   * that let a deployment proceed anyway would be the exact control the requirement names.
+   */
+  'untrusted_registry',
 ] as const;
 
 export type ComposeRule = (typeof COMPOSE_RULES)[number];
 
 export const ComposeRuleSchema = z.enum(COMPOSE_RULES);
+
+/**
+ * NFR-4.16 — the subset no `policy_exception` may waive.
+ *
+ * Kept out of the exception request schema and out of the waiver query, so a rule the platform
+ * cannot honestly waive is not offered to an approver in the first place.
+ */
+export const NON_WAIVABLE_RULES = ['untrusted_registry'] as const;
+
+export type NonWaivableRule = (typeof NON_WAIVABLE_RULES)[number];
+
+export type WaivableComposeRule = Exclude<ComposeRule, NonWaivableRule>;
+
+export function isNonWaivableRule(value: string): value is NonWaivableRule {
+  return (NON_WAIVABLE_RULES as readonly string[]).includes(value);
+}
+
+export const WAIVABLE_RULES: readonly WaivableComposeRule[] = COMPOSE_RULES.filter(
+  (rule): rule is WaivableComposeRule => !isNonWaivableRule(rule),
+);
+
+export const WaivableComposeRuleSchema = z.enum(
+  WAIVABLE_RULES as unknown as [WaivableComposeRule, ...WaivableComposeRule[]],
+);
 
 /**
  * What each rule means to the person granting an exception. The label is the rule's own wording:
@@ -53,6 +84,11 @@ export const COMPOSE_RULE_LABELS: Readonly<
     label: 'Unpinned image',
     description:
       'The image reference has no digest or version tag, so what runs can change silently.',
+  },
+  untrusted_registry: {
+    label: 'Untrusted registry',
+    description:
+      'The image comes from a registry or namespace outside the trusted-registry allow-list (NFR-4.16).',
   },
 };
 

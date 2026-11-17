@@ -36,14 +36,22 @@ const modulesRoot = join(srcRoot, 'modules');
  * Global by design, and the whole list of them. Configuration and the four pieces of
  * infrastructure every one of the nine roles builds are cross-cutting; everything else states its
  * edges.
+ *
+ * Two security modules joined the list for the same reason the infrastructure is on it: NFR-4.16's
+ * allow-list reader and NFR-4.6's scan service must reach every role that can pull, build or start
+ * an image — the executor, the scheduler's retention sweep and the API's pre-flight — and a module
+ * that forgot to import one would get an unwired guard, which is exactly the failure the two
+ * controls exist to prevent. Both are leaf providers, so they add no import cycle.
  */
 const INTENTIONALLY_GLOBAL = new Set([
   'AuditModule',
   'ConfigModule',
   'DatabaseModule',
   'IdentityModule',
+  'ImageScanModule',
   'MetricsModule',
   'RedisModule',
+  'SecurityModule',
 ]);
 
 type ModuleMeta = {

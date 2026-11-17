@@ -10,6 +10,7 @@ import {
 import { EntryKeySchema, IdSchema, NamedRefSchema, SlugSchema, TimestampSchema } from './common';
 import { JobLogLineSchema } from './job';
 import { EventModeSchema, ResourceShapeSchema } from './catalog';
+import { ImageScanSummarySchema } from './security';
 
 export const SourceResolutionSchema = z.object({
   path: z.enum(['compose', 'dockerfile', 'scaffold']),
@@ -233,6 +234,12 @@ export const ImageSchema = z.object({
   state: z.enum(['current', 'previous', 'available', 'pinned']),
   builtAt: TimestampSchema,
   artefact: z.string().min(1),
+  /**
+   * NFR-4.6 / S-10 — the newest retained scan of this digest. `null` is "not scanned yet" and is
+   * shown as such: an image with no report must not read as a passing one. Optional so a stored or
+   * mocked list written before scans existed still parses.
+   */
+  scan: ImageScanSummarySchema.nullable().optional(),
 });
 
 export const InstancePlanSchema = z.object({
@@ -353,6 +360,12 @@ export const PREVIEW_BLOCKER_CODES = [
   'unknown_entry',
   'source_unresolved',
   'image_unpinned',
+  /*
+   * NFR-4.16: the image is not from a trusted registry/namespace. A separate code from
+   * `policy_blocked` because the remedy is specific — a missing allow-list entry — and the wizard
+   * links to the screen that adds it.
+   */
+  'image_untrusted_registry',
   'env_invalid',
   'secret_unresolved',
   'capacity',

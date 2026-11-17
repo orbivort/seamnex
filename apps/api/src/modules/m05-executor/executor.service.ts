@@ -1,15 +1,17 @@
 import { statSync } from 'node:fs';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { DeployPreview, DriftRecord, Instance, InstanceDetail } from '@seamnex/domain';
-import type {
-  DeployInput,
-  DeployResult,
-  ExportArchive,
-  Image,
-  InstanceExport,
-  InstancePlan,
-  LifecycleInput,
-  PreviewInput,
+import {
+  IMAGE_SCAN_SERVICE,
+  type DeployInput,
+  type DeployResult,
+  type ExportArchive,
+  type Image,
+  type ImageScanService,
+  type InstanceExport,
+  type InstancePlan,
+  type LifecycleInput,
+  type PreviewInput,
 } from './executor.contract';
 import type { Pool } from 'pg';
 import { PG_POOL } from '../../database/database.module';
@@ -112,6 +114,8 @@ export class PostgresExecutorService implements ExecutorService {
     @Inject(AUDIT_SERVICE) private readonly audit: AuditService,
     @Inject(DockerEngineClient) private readonly docker: DockerEngineClient,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
+    /** NFR-4.6: the retained scan of each digest, merged into the image list. */
+    @Inject(IMAGE_SCAN_SERVICE) private readonly scans: ImageScanService,
   ) {}
 
   preview(input: PreviewInput): Promise<DeployPreview> {
@@ -466,12 +470,18 @@ export class PostgresExecutorService implements ExecutorService {
          FROM image_artefact WHERE instance_id = $1 ORDER BY created_at DESC`,
       [instanceId],
     );
+    /*
+     * NFR-4.6: the verdict travels with the image. `null` means "this digest was never scanned",
+     * which the screen renders as such — an image with no report must not read as a passing one.
+     */
+    const scans = await this.scans.summaries(instanceId);
     return result.rows.map((row, index) => ({
       digest: row.image_digest,
       version: row.source_revision ?? 'unversioned',
       state: index === 0 ? 'current' : 'previous',
       builtAt: row.created_at.toISOString(),
       artefact: row.object_key,
+      scan: scans.get(row.image_digest) ?? null,
     }));
   }
 

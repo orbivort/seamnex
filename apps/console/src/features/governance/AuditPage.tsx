@@ -40,11 +40,20 @@ const ACTIONS = [
   { value: 'instance', label: 'Instance lifecycle' },
   { value: 'job', label: 'Jobs' },
   { value: 'maintenance', label: 'Maintenance' },
+  // FR-2.12 / NFR-4.7: the register's own observation pass writes here, and an operator looking for
+  // "when did we learn about 5.4" was previously unable to filter for it at all.
+  { value: 'patch', label: 'Patch register' },
   { value: 'platform', label: 'Platform' },
   { value: 'policy_exception', label: 'Policy exceptions' },
+  // S-2: `posture.native_floor.decided` is the record that permits a lower floor.
+  { value: 'posture', label: 'Posture' },
   { value: 'privacy', label: 'Privacy' },
+  // NFR-4.16: the allow-list revision writes `security.trusted_registry.updated`.
+  { value: 'security', label: 'Image trust' },
   { value: 'secret', label: 'Secrets' },
   { value: 'settings', label: 'Settings' },
+  // FR-2.12: `upstream.release.observed` and `upstream.advisory.opened`.
+  { value: 'upstream', label: 'Upstream tracking' },
   { value: 'workflow', label: 'Workflow' },
 ];
 

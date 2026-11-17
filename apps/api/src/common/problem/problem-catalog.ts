@@ -278,6 +278,20 @@ export const PROBLEM_CATALOG = {
       'Set the entry httpPort to the port the product listens on inside its container; the left-hand side of a ports mapping is the host port and is never used.',
     slug: 'http-port-not-exposed',
   },
+  /**
+   * NFR-4.6 / S-10: a product image that failed its scan, or one the scanner could not inspect.
+   *
+   * `error` shares the code on purpose: "we could not look" blocks by default
+   * (`SEAMNEX_SCAN_FAIL_OPEN=false`), and the detail says which of the two happened so an operator
+   * is not sent to the wrong remedy.
+   */
+  IMAGE_SCAN_BLOCKED: {
+    status: 422,
+    title: 'The product image did not pass its vulnerability scan',
+    remediation:
+      'Upgrade the pinned image to a release that fixes the blocking findings, or (for a scanner failure) make the scanner image reachable and re-run the deployment.',
+    slug: 'image-scan-blocked',
+  },
   /** AC-07: refused before any container starts, with the shortfall stated. */
   CAPACITY_EXCEEDED: {
     status: 422,

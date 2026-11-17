@@ -14,7 +14,12 @@ import { CatalogEntrySchema, EnvSchemaFileSchema } from '@seamnex/domain';
  * lands in `catalog/env/`.
  */
 
-const PRODUCTS = ['D01-01', 'D07-01', 'D09-01'];
+/**
+ * The same six keys `DEFAULT_PRODUCT_KEYS` ships. Listing them here rather than importing the
+ * constant is deliberate: the pairing of document and declaration is what this test proves, and a
+ * derived list would keep passing if a key were dropped from both.
+ */
+const PRODUCTS = ['D01-01', 'D02-01', 'D06-01', 'D07-01', 'D09-01', 'D11-01'];
 
 function read(relative: string): unknown {
   return JSON.parse(readFileSync(fileURLToPath(new URL(relative, import.meta.url)), 'utf8'));
@@ -47,7 +52,7 @@ describe('development default catalog', () => {
     expect(parsed.data.variables.length).toBeGreaterThan(0);
   });
 
-  it('keeps the three products in different domains', () => {
+  it('keeps the six products in different domains', () => {
     const domains = PRODUCTS.map((key) => {
       const parsed = CatalogEntrySchema.safeParse(
         read(`../../../src/seed/default-catalog/${key}.json`),

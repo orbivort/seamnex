@@ -1,7 +1,26 @@
-import type { ScaffoldConfirmation, ScaffoldDraft } from '@seamnex/domain';
+import type {
+  ScaffoldConfirmation,
+  ScaffoldDraft,
+  TrustedRegistryState,
+  TrustedRegistryUpdate,
+} from '@seamnex/domain';
 import type { ComposePolicyResult, ComposeRule } from '../../common/compose/compose-policy';
 
 export const SOURCE_RESOLVER_SERVICE = Symbol('seamnex.m02.source-resolver');
+
+/** NFR-4.16 — the allow-list's maintenance surface; the read side is `common/security`. */
+export const TRUSTED_REGISTRY_SERVICE = Symbol('seamnex.m02.trusted-registry');
+
+export interface TrustedRegistryService {
+  state(): Promise<TrustedRegistryState>;
+  /**
+   * Applies an add/remove set as a new revision and audits it in the same transaction. Throws
+   * `VALIDATION_FAILED` for a no-op change or one that would empty the list.
+   */
+  update(input: { actorId: string; update: TrustedRegistryUpdate }): Promise<TrustedRegistryState>;
+  /** Entries in force, for callers that need the list without the revision history. */
+  entries(): Promise<readonly string[]>;
+}
 
 /**
  * Owns `source_resolution`, `source_file`, `compose_policy` and `scaffold_artefact`.
@@ -76,8 +95,17 @@ export interface SourceResolverService {
   ): Promise<ScaffoldConfirmation>;
   /** The draft the entry screen renders before a commit exists; `approvedBy` is null until confirmed. */
   scaffold(entryKey: string): Promise<ScaffoldDraft>;
-  /** The policy alone, for a dry run and for the compose-policy test. */
-  evaluate(composeContent: string, waived: readonly ComposeRule[]): ComposePolicyResult;
+  /**
+   * The policy alone, for a dry run and for the compose-policy test.
+   *
+   * `trustedRegistries` is the NFR-4.16 allow-list; omitting it skips that one rule, which is only
+   * correct for a caller evaluating a single rule in isolation.
+   */
+  evaluate(
+    composeContent: string,
+    waived: readonly ComposeRule[],
+    trustedRegistries?: readonly string[] | null,
+  ): ComposePolicyResult;
   /**
    * FR-1.11: the policy verdict for an entry that has not been deployed.
    *

@@ -64,10 +64,10 @@ describe('security posture', () => {
     render(<App />);
     await screen.findByRole('heading', { name: 'Security posture' });
 
+    // S-2: the panel states the counts against the floor the payload carries.
+    const floor = getState().posture.sso.nativeFloor?.floor ?? 6;
     expect(
-      await screen.findByText(
-        new RegExp(`Native floor \\(S-2\\): ${getState().posture.sso.native} of 6`),
-      ),
+      await screen.findByText(`${getState().posture.sso.native} of ${floor} required`),
     ).toBeDefined();
   });
 

@@ -216,6 +216,7 @@ export const ENTRY_SEEDS_B: EntrySeed[] = [
     authMethod: 'Proxy gate only: the product keeps its own credential (SSO is a paid tier)',
     packaging: 'dockerfile',
     packagingSource: 'repository Dockerfile @ v0.57.3',
+    imageRef: 'metabase/metabase:v0.57.3',
     primaryInstanceId: 'inst-insights',
     sharedWith: [],
     httpPort: 3000,

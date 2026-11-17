@@ -1,0 +1,110 @@
+{
+  "key": "D02-01",
+  "domain": "Marketing & Lead Generation",
+  "cluster": "Revenue & Customer",
+  "product": "Mautic",
+  "description": "Open-source marketing automation for a 5-100 person team: segments, campaigns, landing pages, lead scoring and e-mail journeys sent through the operator's own mail infrastructure.",
+  "repoUrl": "https://github.com/mautic/mautic",
+  "licenseId": "GPL-3.0",
+  "stack": "PHP / MySQL",
+  "imageRef": "mautic/mautic:7.2.2-apache",
+  "imageDigest": "sha256:83461b9ec7c109413281490180e1f96c379aa935bd92f80c68294f98487a9015",
+  "upstream": {
+    "currentVersion": "7.2.2",
+    "latestVersion": "7.2.2",
+    "advisory": null,
+    "releaseUrl": "https://github.com/mautic/mautic/releases",
+    "checkedAt": "2026-11-01T01:00:00Z"
+  },
+  "guaranteeClass": "fa_gate",
+  "authMethod": "Proxy gate only - Mautic keeps its own login (no OIDC/SAML in the free core)",
+  "packaging": "compose",
+  "packagingSource": "vendored render set (platform/upstream/D02-01) over the pinned mautic/mautic:7.2.2-apache image; the application layer is built on the host as seamnex/mautic:7.2.2 and carries the first-boot installer",
+  "primaryInstanceId": null,
+  "sharedWith": [],
+  "httpPort": 80,
+  "resources": {
+    "cpu": 2,
+    "memoryMb": 2048,
+    "diskMb": 20480
+  },
+  "dependencies": ["database", "worker"],
+  "volumes": [
+    {
+      "name": "mautic-config",
+      "mountPath": "/var/www/html/config",
+      "quotaMb": 1024
+    },
+    {
+      "name": "mautic-media",
+      "mountPath": "/var/www/html/docroot/media",
+      "quotaMb": 8192
+    },
+    {
+      "name": "mautic-logs",
+      "mountPath": "/var/www/html/var/logs",
+      "quotaMb": 2048
+    },
+    {
+      "name": "mautic-db",
+      "mountPath": "/var/lib/mysql",
+      "quotaMb": 8192
+    }
+  ],
+  "integration": {
+    "apiBaseUrl": "https://marketing.seamnex.local/api",
+    "authMethod": "HTTP basic / OAuth2 against a Mautic API user",
+    "guaranteeClassVerified": "fa_gate",
+    "operationInventory": [
+      {
+        "id": "contacts.read",
+        "label": "Read contacts",
+        "mode": "read",
+        "description": "List and fetch contacts with their segment memberships and consent fields.",
+        "path": "/api/contacts",
+        "method": "GET"
+      },
+      {
+        "id": "contacts.write",
+        "label": "Create or update contact",
+        "mode": "write",
+        "description": "Upsert a contact and add it to a segment.",
+        "path": "/api/contacts",
+        "method": "POST"
+      },
+      {
+        "id": "segments.read",
+        "label": "Read segments",
+        "mode": "read",
+        "description": "List segments and their member counts.",
+        "path": "/api/segments",
+        "method": "GET"
+      }
+    ],
+    "eventModes": [
+      {
+        "mode": "webhook",
+        "label": "Contact and campaign events"
+      },
+      {
+        "mode": "poll",
+        "label": "Poll for new contacts and form submissions",
+        "minimumIntervalMinutes": 15
+      }
+    ],
+    "credentialGranularity": "account",
+    "sessionMaxMinutes": 480,
+    "sloSupported": false,
+    "verifiedBy": "Platform Administrator",
+    "verifiedAt": "2026-11-01T01:00:00Z",
+    "nextReviewAt": "2027-01-31T01:00:00Z",
+    "stale": false
+  },
+  "owner": {
+    "name": "Platform Administrator",
+    "team": "Marketing Operations",
+    "email": "marketing-ops@seamnex.local"
+  },
+  "notes": "Campaign and segment mail is sent from a second container running the cron role; a web container alone renders the product but sends nothing. Deliverability (SPF, DKIM, DMARC) is an operator responsibility, not a platform one. The catalogue pins the upstream base image; the deployed tag is the vendored wrapper built from it.",
+  "verifiedAt": "2026-11-01T01:00:00Z"
+}

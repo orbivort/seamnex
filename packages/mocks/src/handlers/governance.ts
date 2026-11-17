@@ -1,12 +1,16 @@
 import { http, HttpResponse } from 'msw';
 import {
+  NATIVE_FLOOR_DEPLOYMENTS,
   breakGlassStateAt,
+  isAcceptableFloorDecision,
   licenseGateVerdict,
   licenseTerms,
   mayApproveAccessMode,
+  nativeFloorStatus,
 } from '@seamnex/domain';
 import type { BreakGlassSession, LicenseReviewRequest } from '@seamnex/domain';
 import { at } from '../fixtures/context';
+import { releasesPageOf } from '../fixtures/governance';
 import { appendAudit, auditProofFor, getState } from '../store';
 import {
   actorFor,
@@ -316,10 +320,125 @@ export const governanceHandlers = [
     return HttpResponse.json(getState().patches);
   }),
 
+  /**
+   * FR-2.12 — the on-demand observation pass.
+   *
+   * The mock does what the real pass does to the register: it stamps the provenance, the observation
+   * time and the release link. It deliberately does not invent a newer version: a feed that is not
+   * reachable is the state the screen has to survive, not a version bump.
+   */
+  http.post('/api/v1/patch-register/observe', ({ request }) => {
+    const role = roleOf(request);
+    const guard = requireCapability(role, 'settings.manage');
+    if (guard) return guard;
+
+    const patches = getState().patches;
+    let releases = 0;
+    let advisories = 0;
+    for (const patch of patches) {
+      const behind = patch.latestVersion !== patch.currentVersion;
+      patch.source = 'observed';
+      patch.lastObservedAt = at(0);
+      patch.checkedAt = at(0);
+      if (behind) {
+        releases += 1;
+        // The same derivation the fixture uses: a link to the product's releases, never a URL with no
+        // repository in it.
+        patch.releaseUrl = releasesPageOf(patch.entryKey) ?? patch.releaseUrl;
+        if (patch.advisory) advisories += 1;
+        // An observed deployment that is behind has an unapplied update; the age is what the row
+        // reports, and it survives the pass instead of being reset by it.
+        patch.oldestUnappliedSecurityDays = patch.oldestUnappliedSecurityDays ?? 9;
+      }
+    }
+
+    appendAudit({
+      action: 'patch.register.observed',
+      targetType: 'platform',
+      targetId: 'patch-register',
+      targetLabel: 'Patch register',
+      outcome: 'success',
+      detail: `Observed ${patches.length} deployments: ${releases} with a newer release, ${advisories} with an open advisory.`,
+      actor: actorFor(role),
+    });
+
+    return HttpResponse.json({
+      observedAt: at(0),
+      entries: patches.length,
+      releases,
+      advisories,
+      skipped: 0,
+      failed: 0,
+      instancesUpdated: patches.length,
+    });
+  }),
+
   http.get('/api/v1/posture', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'posture.view');
     if (guard) return guard;
     return HttpResponse.json(getState().posture);
+  }),
+
+  /**
+   * S-2 — the only path that may lower the served floor.
+   *
+   * It refuses a decision that is not a lower floor (the default is the floor; "raising" it would be
+   * a re-baseline dressed as a decision) and a reason too short to be a record of what was accepted.
+   */
+  http.post('/api/v1/posture/native-floor/decision', async ({ request }) => {
+    const role = roleOf(request);
+    const guard = requireCapability(role, 'settings.manage');
+    if (guard) return guard;
+
+    const body = await readBody<{ floor?: number; reason?: string }>(request);
+    const floor = Number(body.floor);
+    const reason = (body.reason ?? '').trim();
+
+    if (!isAcceptableFloorDecision({ floor, reason })) {
+      return problem(
+        422,
+        'VALIDATION_FAILED',
+        'That is not a recordable floor decision',
+        `A decision lowers the floor below ${NATIVE_FLOOR_DEPLOYMENTS}, gives a whole number, and states what is being accepted in at least 20 characters.`,
+        `Send a floor between 0 and ${NATIVE_FLOOR_DEPLOYMENTS - 1} with a written reason.`,
+        [{ field: 'reason', code: 'custom', message: 'A substantive reason is required.' }],
+      );
+    }
+
+    const posture = getState().posture;
+    const status = nativeFloorStatus(
+      {
+        native: posture.sso.native,
+        forwardAuth: posture.sso.forwardAuth,
+        signInRequired: posture.sso.signInRequired,
+      },
+      floor,
+    );
+    posture.sso.nativeFloor = {
+      floor: status.floor,
+      baseline: status.baseline,
+      met: status.met,
+      shortfall: status.shortfall,
+    };
+    const decision = {
+      floor,
+      reason,
+      recordedBy: actorFor(role).id,
+      recordedAt: at(0),
+    };
+    posture.sso.ownerDecision = decision;
+
+    appendAudit({
+      action: 'posture.native_floor.decided',
+      targetType: 'native_floor_decision',
+      targetId: `floor-${floor}`,
+      targetLabel: `Native floor ${floor}`,
+      outcome: 'success',
+      detail: `Floor lowered from ${NATIVE_FLOOR_DEPLOYMENTS} to ${floor}: ${reason}`,
+      actor: actorFor(role),
+    });
+
+    return HttpResponse.json(decision);
   }),
 
   http.get('/api/v1/break-glass-sessions', ({ request }) => {

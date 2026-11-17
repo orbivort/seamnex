@@ -11,10 +11,10 @@ import {
   usePolicyExceptions,
   useRequestPolicyException,
 } from '@seamnex/api-client';
-import type { ComposeRule, MaintenanceWindow } from '@seamnex/domain';
+import type { MaintenanceWindow, WaivableComposeRule } from '@seamnex/domain';
 import {
   COMPOSE_RULE_LABELS,
-  COMPOSE_RULES,
+  WAIVABLE_RULES,
   can,
   canMutate,
   composeRuleLabel,
@@ -641,7 +641,12 @@ function RequestExceptionDialog({ onClose }: { onClose: () => void }) {
   /* Minute granularity: the form decides on whole days, and a one-second tick would re-render it. */
   const now = useNow(60_000);
   const [entryKey, setEntryKey] = useState('');
-  const [rule, setRule] = useState<ComposeRule>('privileged');
+  /*
+   * NFR-4.16: only the waivable subset can be offered. `untrusted_registry` is a compose rule the
+   * evaluator emits, but its only remedy is a new allow-list revision — an exception request for it
+   * is refused by the API, so offering it here would be a form that cannot succeed.
+   */
+  const [rule, setRule] = useState<WaivableComposeRule>('privileged');
   const [justification, setJustification] = useState('');
   const [expiresOn, setExpiresOn] = useState(() =>
     toDateInputValue(new Date(now + DEFAULT_EXCEPTION_DAYS * 24 * 60 * 60 * 1_000)),
@@ -746,9 +751,9 @@ function RequestExceptionDialog({ onClose }: { onClose: () => void }) {
           <Select
             id="pe-rule"
             value={rule}
-            onChange={(event) => setRule(event.target.value as ComposeRule)}
+            onChange={(event) => setRule(event.target.value as WaivableComposeRule)}
           >
-            {COMPOSE_RULES.map((candidate) => (
+            {WAIVABLE_RULES.map((candidate) => (
               <option key={candidate} value={candidate}>
                 {COMPOSE_RULE_LABELS[candidate].label}
               </option>

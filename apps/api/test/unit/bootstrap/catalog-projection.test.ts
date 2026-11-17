@@ -36,6 +36,21 @@ function tree(overrides: Partial<CatalogWorkingTree> = {}): CatalogWorkingTree {
   };
 }
 
+/** The minimum an entry document needs for the coverage verdict: key, class, packaging, image. */
+function entry(key: string): CatalogEntry {
+  return {
+    key,
+    product: 'Mail',
+    domain: 'Communication',
+    stack: 'PHP',
+    packaging: 'compose',
+    guaranteeClass: 'native',
+    primaryInstanceId: null,
+    imageRef: 'registry.example.test/mail:1.2.3',
+    imageDigest: `sha256:${'a'.repeat(64)}`,
+  } as CatalogEntry;
+}
+
 describe('decideProjection', () => {
   it('refuses to project when a file the tree holds failed validation', () => {
     const decision = decideProjection({
@@ -119,15 +134,40 @@ describe('decideProjection', () => {
   it('applies a tree that declares variables, and names the revision it will stamp', () => {
     const decision = decideProjection({
       root: ROOT,
-      tree: tree({ envSchemas: [declaration('D01-01'), declaration('D07-01')] }),
+      tree: tree({
+        // S-1: a declaration is projectable only when its entry document is in the same tree.
+        documents: [entry('D01-01'), entry('D07-01')],
+        envSchemas: [declaration('D01-01'), declaration('D07-01')],
+      }),
       projectedEntries: 3,
     });
 
     expect(decision.apply).toBe(true);
     expect(decision.code).toBe(0);
     expect(decision.lines[0]).toBe(
-      'content-0123456789abcdef: 0 entries, 2 environment declarations',
+      'content-0123456789abcdef: 2 entries, 2 environment declarations',
     );
+  });
+
+  /**
+   * S-1 / AC-01 — the finding the review raised: three products declared an environment while no
+   * entry document existed, so the catalogue advertised what could never deploy. A note in the log is
+   * not a refusal; this case asserts the run stops and names the missing document.
+   */
+  it('refuses a declaration with no entry document instead of projecting the rest', () => {
+    const decision = decideProjection({
+      root: ROOT,
+      tree: tree({
+        documents: [entry('D01-01')],
+        envSchemas: [declaration('D01-01'), declaration('D07-01')],
+      }),
+      projectedEntries: 1,
+    });
+
+    expect(decision.apply).toBe(false);
+    expect(decision.code).toBe(1);
+    expect(decision.lines.join('\n')).toContain('D07-01');
+    expect(decision.lines.join('\n')).toContain('no entry document');
   });
 });
 

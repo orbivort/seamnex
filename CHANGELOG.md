@@ -16,6 +16,48 @@ the same number through every manifest and the link definitions at the foot of t
 
 ### Added
 
+- **A registry is trusted because a revision says so, and every product image is scanned before it
+  starts** (`NFR-4.16`, `NFR-4.6`, `S-10`, ISSUE-08) — the console asserted "Trusted registry
+  allow-list verified." while the deploy pipeline pulled whatever the compose file named, and S-10's
+  scan left no report behind. `packages/domain/src/image-registry.ts` is now the one parser for a
+  reference (`docker.io` implicit, single-segment names under `library`, ports kept, digests
+  stripped), and the allow-list it feeds is append-only `trusted_registry_revision` rows seeded from
+  `packages/db/src/seed/trusted-registries.json`, extended by an R1-only route that writes the
+  revision and its audit row in one transaction. Enforcement is layered — catalogue validation,
+  `untrusted_registry` in the compose and Dockerfile evaluators, an `image_untrusted_registry`
+  pre-flight blocker, and the guard inside `DockerEngineClient.pull/build/composeBuild/composeUp` that
+  closes the queued-job hole pre-flight leaves. The rule is non-waivable (`NON_WAIVABLE_RULES`):
+  NFR-4.16's only remedy is a new revision. After the image is available and before containers start,
+  the pipeline saves it and runs the pinned scanner through a bind-mounted work directory (the socket
+  proxy refuses the BuildKit session), persists the report in `image_scan_result` keyed by instance
+  and digest, reuses a `passed` report for an unchanged digest, blocks on
+  `SEAMNEX_SCAN_BLOCK_SEVERITIES` (critical by default), fails closed unless
+  `SEAMNEX_SCAN_FAIL_OPEN=true`, and prunes rows past `SEAMNEX_SCAN_RETENTION_DAYS`. The instance
+  screen gains an Image security tab whose "never scanned" is a state, not a pass. ADR-BE-36.
+- **The catalogue can prove its own coverage, and S-2's floor is data with a decision behind it**
+  (`FR-1.1`, `FR-2.16`, `S-1`, `S-2`, `AC-01`, ISSUE-11) — Mautic, ERPNext and Metabase declared an
+  environment and had no entry document, and the projection reported that as a note;
+  `NATIVE_FLOOR_DEPLOYMENTS = 6` lived inside a React page, so nothing could refuse anything against
+  it. The three documents now exist (`D02-01`, `D06-01`, `D11-01`, digests resolved against the
+  registry), `DEFAULT_PRODUCT_KEYS` holds six, and a declaration without a document is refused by the
+  seed, the projection and the reload receipt instead of printed. `computeCatalogCoverage()` in
+  `packages/domain` counts deployments rather than entries — D5 and D6 share one ERPNext instance —
+  and is served on `POST /catalog/reload` and `GET /posture` (`sso.nativeFloor`, `sso.ownerDecision`),
+  so the console, the API and `pnpm check:catalog` cannot disagree about "6 of 12". Lowering the floor
+  is a recorded `native_floor_decision` row with a reason and an audit event, taken by R1, which is
+  what S-2 permits; `pnpm check:catalog --require-floor` turns the shortfall into a failure where a
+  release check wants one. ADR-BE-37.
+- **The patch register advances by observation, not by editing an entry document** (`FR-2.12`,
+  `FR-4.7`, `NFR-4.7`, ISSUE-34) — `patch_record` had no writer, so "checked at" moved when somebody
+  edited JSON. A scheduler pass now asks each entry's GitHub releases and the OSV advisories for its
+  repository (bounded by a host allow-list, a timeout and a per-pass batch), writes `patch_record` per
+  instance with the current and available version, the release link and the lead advisory, keeps
+  `patch_advisory` per entry (closing one only when a later authoritative answer omits it), derives
+  the age of the oldest unapplied security update from the advisories that publish a fix, and audits
+  with `actorType: 'system'`. A failed feed writes nothing and keeps the previous observation, so an
+  outage never reads as "nothing pending"; `POST /patch-register/observe` runs the same pass on
+  demand. The register shows provenance ("observed 3 h ago", "never observed") and an `Observe now`
+  control, and `catalog_entry` is never rewritten by the pass. ADR-BE-38.
 - **A host install is one idempotent command, and a runbook that can be measured** (`NFR-6.2`,
   `NFR-6.3`, `S-9`, `AC-19`, ISSUE-32) — the repository documented three development modes and no
   install path, so "a clean host becomes a working platform through a single documented bootstrap" had

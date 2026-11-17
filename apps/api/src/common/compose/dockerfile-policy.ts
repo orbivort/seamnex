@@ -1,4 +1,9 @@
-import type { ComposeRule } from '@seamnex/domain';
+import {
+  isNonWaivableRule,
+  isTrustedImageReference,
+  untrustedRegistryMessage,
+  type ComposeRule,
+} from '@seamnex/domain';
 import { isPinnedImage } from './compose-policy';
 import type { ComposeViolation, SourcePolicyResult } from './policy-result';
 
@@ -23,6 +28,8 @@ import type { ComposeViolation, SourcePolicyResult } from './policy-result';
 export function evaluateDockerfile(
   content: string,
   waivedRules: ReadonlySet<ComposeRule> = new Set(),
+  /** NFR-4.16 allow-list; `null` means the caller holds no list and the rule is not evaluated. */
+  trustedRegistries: readonly string[] | null = null,
 ): SourcePolicyResult {
   const violations: ComposeViolation[] = [];
   const stages: string[] = [];
@@ -69,12 +76,22 @@ export function evaluateDockerfile(
         detail: `stage ${stage} builds from ${image}, which is not digest- or version-pinned.`,
       });
     }
+    // NFR-4.16: the base image is fetched at build time, so it is one of the two "pull" moments.
+    if (trustedRegistries !== null && !isTrustedImageReference(image, trustedRegistries)) {
+      violations.push({
+        rule: 'untrusted_registry',
+        service: stage,
+        detail: untrustedRegistryMessage(image),
+      });
+    }
   }
 
-  const waived = [...new Set(violations.map((item) => item.rule))].filter((rule) =>
-    waivedRules.has(rule),
+  const waived = [...new Set(violations.map((item) => item.rule))].filter(
+    (rule) => waivedRules.has(rule) && !isNonWaivableRule(rule),
   );
-  const blocking = violations.filter((item) => !waivedRules.has(item.rule));
+  const blocking = violations.filter(
+    (item) => isNonWaivableRule(item.rule) || !waivedRules.has(item.rule),
+  );
 
   return {
     verdict: blocking.length > 0 ? 'blocked' : waived.length > 0 ? 'unsafe_approved' : 'allowed',

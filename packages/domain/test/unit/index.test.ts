@@ -8,12 +8,15 @@ import * as contract from '../../src/contract';
 import * as credentialGranularity from '../../src/credential-granularity';
 import * as enums from '../../src/enums';
 import * as envRules from '../../src/env-rules';
+import * as catalogCoverage from '../../src/catalog-coverage';
+import * as imageRegistry from '../../src/image-registry';
 import * as labels from '../../src/labels';
 import * as licenseGate from '../../src/license-gate';
 import * as licenseTerms from '../../src/license-terms';
 import * as mappingExpression from '../../src/mapping-expression';
 import * as mappingTransform from '../../src/mapping-transform';
 import * as policy from '../../src/policy';
+import * as posture from '../../src/posture';
 import * as propagation from '../../src/propagation';
 import * as routes from '../../src/routes';
 import * as signInCopy from '../../src/sign-in-copy';
@@ -34,6 +37,7 @@ import * as portalSchema from '../../src/schemas/portal';
 import * as privacySchema from '../../src/schemas/privacy';
 import * as recoverySchema from '../../src/schemas/recovery';
 import * as registrySchema from '../../src/schemas/registry';
+import * as securitySchema from '../../src/schemas/security';
 import * as fieldDiscoverySchema from '../../src/schemas/field-discovery';
 import * as workflowSchema from '../../src/schemas/workflow';
 
@@ -53,15 +57,20 @@ const MODULES = [
   ['capacity', capacity],
   ['compose-rules', composeRules],
   ['contract', contract],
+  ['catalog-coverage', catalogCoverage],
   ['credential-granularity', credentialGranularity],
   ['enums', enums],
   ['env-rules', envRules],
+  // NFR-4.16: the one image-reference parser the API, the gates and the console share.
+  ['image-registry', imageRegistry],
   ['labels', labels],
   ['license-gate', licenseGate],
   ['license-terms', licenseTerms],
   ['mapping-expression', mappingExpression],
   ['mapping-transform', mappingTransform],
   ['policy', policy],
+  // S-2: the floor as data, plus the pure status function every surface calls.
+  ['posture', posture],
   ['propagation', propagation],
   ['routes', routes],
   ['sign-in-copy', signInCopy],
@@ -83,6 +92,8 @@ const MODULES = [
   ['schemas/privacy', privacySchema],
   ['schemas/recovery', recoverySchema],
   ['schemas/registry', registrySchema],
+  // NFR-4.16 / NFR-4.6: the allow-list state and the retained scan report.
+  ['schemas/security', securitySchema],
   ['schemas/workflow', workflowSchema],
 ] as const satisfies readonly (readonly [string, Record<string, unknown>])[];
 

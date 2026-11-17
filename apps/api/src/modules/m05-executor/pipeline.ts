@@ -38,6 +38,7 @@ import {
   type PlannerService,
 } from '../m04-planner/planner.contract';
 import { CAPACITY_SERVICE, type CapacityService } from '../m19-capacity/capacity.contract';
+import { IMAGE_SCAN_SERVICE, type ImageScanService } from './executor.contract';
 import {
   INTEGRATION_SERVICE,
   type IntegrationService,
@@ -122,6 +123,7 @@ export class DeploymentPipeline implements OnModuleInit {
     @Inject(INTEGRATION_SERVICE) private readonly integration: IntegrationService,
     @Inject(PipelineRegistry) private readonly pipelines: PipelineRegistry,
     @Inject(OUTBOX_SERVICE) private readonly outbox: Outbox,
+    @Inject(IMAGE_SCAN_SERVICE) private readonly images: ImageScanService,
   ) {}
 
   onModuleInit(): void {
@@ -457,6 +459,21 @@ export class DeploymentPipeline implements OnModuleInit {
       await context.log('stdout', `building from the definition: ${built.join(', ')}`);
       await this.docker.composeBuild(project, (line) => context.log('stdout', line));
     }
+
+    /*
+     * NFR-4.6 / S-10 — scan what is about to start, after every image is local and before any
+     * container exists. Placed here rather than in `prepull` because a build happens in this stage:
+     * a Dockerfile path has no image to scan until `build` has produced one.
+     */
+    const scanned = await this.images.scanForDeploy({
+      instanceId: state.instance.id,
+      references: imagesOf(renderSet),
+      log: (level, line) => context.log(level, line),
+    });
+    if (scanned.length > 0) {
+      await context.log('system', `${scanned.length} image(s) scanned; no blocking findings`);
+    }
+
     await this.docker.composeUp(project, (line) => context.log('stdout', line));
     await context.log('stdout', 'compose project applied');
     // FR-1.9 / FR-1.12: `compose up` is what creates the named volumes, so this is the first moment
@@ -1604,6 +1621,33 @@ function parseServices(renderSet: RenderSet): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Every `image:` the render set names, across the base file and the platform override.
+ *
+ * Both files are read because the split varies: an entry with a vendored compose keeps its images
+ * in the base document, while a scaffold's platform file can carry them instead. Scanning only the
+ * platform file would report "nothing to scan" for every vendored product.
+ */
+function imagesOf(renderSet: RenderSet): string[] {
+  const images = new Set<string>();
+  for (const file of renderSet.files) {
+    if (!file.path.endsWith('.yml') && !file.path.endsWith('.yaml')) continue;
+    let parsed: unknown;
+    try {
+      parsed = parseYaml(file.content);
+    } catch {
+      continue;
+    }
+    const services = (parsed as { services?: unknown } | null)?.services;
+    if (typeof services !== 'object' || services === null) continue;
+    for (const raw of Object.values(services as Record<string, unknown>)) {
+      const image = (raw as { image?: unknown } | null)?.image;
+      if (typeof image === 'string' && image.trim().length > 0) images.add(image.trim());
+    }
+  }
+  return [...images];
 }
 
 /** Services whose definition carries a `build:` section: only these need `compose build`. */

@@ -634,6 +634,12 @@ function patchRow(overrides: Row = {}): Row {
     created_at: new Date('2026-01-01T00:00:00.000Z'),
     oldest_unapplied_security_days: 45,
     checked_at: new Date('2026-06-01T00:00:00.000Z'),
+    // FR-2.12: the provenance columns the register now carries. `catalog` is the fallback — the row
+    // was projected from the entry document and no observation pass has written it.
+    advisory_id: null,
+    release_url: null,
+    source: 'catalog',
+    last_observed_at: null,
     ...overrides,
   };
 }
@@ -654,6 +660,11 @@ describe('patches', () => {
       oldestUnappliedSecurityDays: 45,
       severity: 'critical',
       checkedAt: '2026-06-01T00:00:00.000Z',
+      advisory: null,
+      releaseUrl: null,
+      // The row came from the catalogue document: the register says so rather than implying a check.
+      source: 'catalog',
+      lastObservedAt: null,
     });
   });
 
@@ -731,18 +742,23 @@ const RESTORES_QUERY = 'FROM restore_drill';
 const STALE_QUERY = 'FROM integration_metadata';
 /** ADR-BE-22: deployments whose product credential the platform holds. */
 const MANAGED_QUERY = 'FROM product_account';
+/** S-2: the most recent recorded decision, or no row when the default floor applies. */
+const FLOOR_QUERY = 'FROM native_floor_decision';
 
 function postureDb(options: {
   instances?: Row[];
   restores?: Row[];
   stale?: Row[];
   managed?: string;
+  /** S-2: a recorded decision that lowers the floor. */
+  decision?: Row[];
 }): Parameters<typeof fakeDb>[0] {
   return [
     [INSTANCES_QUERY, options.instances ?? []],
     [RESTORES_QUERY, options.restores ?? []],
     [STALE_QUERY, options.stale ?? []],
     [MANAGED_QUERY, [{ count: options.managed ?? '0' }]],
+    [FLOOR_QUERY, options.decision ?? []],
   ];
 }
 
@@ -801,6 +817,9 @@ describe('posture', () => {
       signInRequired: 1,
       totalEntries: 3,
       platformManagedCredentials: 0,
+      // S-2: the target travels with the counts, and no decision has lowered it.
+      nativeFloor: { floor: 6, baseline: 12, met: false, shortfall: 5 },
+      ownerDecision: null,
     });
     expect(summary.totalInstances).toBe(4);
     expect(summary.coveragePercent).toBe(25);
@@ -832,6 +851,48 @@ describe('posture', () => {
     expect(Number.isNaN(Date.parse(summary.generatedAt))).toBe(false);
   });
 
+  /**
+   * S-2 — "a lower floor only by a recorded owner decision, never a silent re-baseline."
+   *
+   * The screen cannot hold the number any more: the target, the shortfall and the decision travel in
+   * the payload, so a fleet measured against a lowered floor cannot be rendered as a shortfall.
+   */
+  it('serves the recorded decision as the floor in force', async () => {
+    const recordedAt = new Date('2026-02-01T00:00:00.000Z');
+    const { service } = setup(
+      postureDb({
+        instances: [
+          { id: 'A', product: 'Mail', entry_key: 'D01-01', guarantee_class: 'native', ready: true },
+          {
+            id: 'B',
+            product: 'Mail',
+            entry_key: 'D01-01',
+            guarantee_class: 'fa_header',
+            ready: true,
+          },
+        ],
+        decision: [
+          {
+            floor: 1,
+            reason: 'Accepting one native deployment while the ERPNext migration is in flight.',
+            recorded_by: 'usr-sofia',
+            recorded_at: recordedAt,
+          },
+        ],
+      }),
+    );
+
+    const summary = await service.posture();
+
+    expect(summary.sso.nativeFloor).toEqual({ floor: 1, baseline: 12, met: true, shortfall: 0 });
+    expect(summary.sso.ownerDecision).toEqual({
+      floor: 1,
+      reason: 'Accepting one native deployment while the ERPNext migration is in flight.',
+      recordedBy: 'usr-sofia',
+      recordedAt: recordedAt.toISOString(),
+    });
+  });
+
   it('reports zero coverage for an empty fleet instead of dividing by zero', async () => {
     const { service } = setup(postureDb({}));
 
@@ -849,6 +910,9 @@ describe('posture', () => {
         signInRequired: 0,
         totalEntries: 0,
         platformManagedCredentials: 0,
+        // An empty fleet is still measured against the floor; it is 6 short, not exempt.
+        nativeFloor: { floor: 6, baseline: 12, met: false, shortfall: 6 },
+        ownerDecision: null,
       },
     });
   });
