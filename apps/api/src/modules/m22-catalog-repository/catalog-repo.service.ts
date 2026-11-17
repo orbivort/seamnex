@@ -25,6 +25,7 @@ import type { CatalogRepositoryService, CatalogWorkingTree } from './catalog-rep
  * The revision is the Git head when the path is a repository and a content hash otherwise: the
  * loader must be testable in a temporary directory, and CI validates the same files. The hash covers
  * both artefact kinds, so an environment-only edit still produces a new revision.
+ * `docs/operations/catalog-repo-format.md` is the operator-facing statement of this layout.
  */
 @Injectable()
 export class WorkingTreeCatalogRepository implements CatalogRepositoryService {

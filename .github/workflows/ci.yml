@@ -74,6 +74,11 @@ jobs:
         run: pnpm audit --dev --audit-level high
       - name: migration pairs and numbering
         run: pnpm check:migrations
+      # The default set is data, so no type checks it: an entry document and the environment
+      # declaration beside it are only consistent if something compares them. The gate needs no
+      # database — it reads the two directories the seed reads.
+      - name: catalogue coverage and the native floor
+        run: pnpm check:catalog
       # Full, not `--affected`: a change to eslint.config.mjs or packages/config is not a
       # change to any package, so an affected filter would quietly skip the packages it governs.
       - name: lint (module boundaries)

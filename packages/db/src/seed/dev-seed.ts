@@ -15,7 +15,7 @@ import {
  * Deterministic development data: the identity mirror and the default catalogue.
  *
  * Scope: the `idp_user` directory mirror, the `idp_group` tree those users are members of, the
- * `role_binding` grants that hang off them, and the three products defined in `default-catalog.ts` —
+ * `role_binding` grants that hang off them, and the six products defined in `default-catalog.ts` —
  * written as `catalog/<KEY>.json` + `catalog/env/<KEY>.json` in the working tree and then projected
  * once, so a fresh stack can list and deploy a product without a network or an operator checkout.
  *
@@ -267,8 +267,8 @@ async function seedDefaultCatalog(client: PoolClient): Promise<void> {
   }
 
   /*
-   * Rows come from the *projections*, not from the writes: a tree that already declares the three
-   * documents writes nothing and still owes `catalog_entry` three rows. The previous loop read the
+   * Rows come from the *projections*, not from the writes: a tree that already declares the six
+   * documents writes nothing and still owes `catalog_entry` six rows. The previous loop read the
    * write list, so a reset database with an intact tree inserted zero rows and reported success.
    */
   let inserted = 0;
@@ -295,7 +295,7 @@ async function seedDefaultCatalog(client: PoolClient): Promise<void> {
     inserted += result.rowCount ?? 0;
     /*
      * The revision label follows the documented scheme rather than inventing a third kind
-     * (`docs/catalog-repo-format.md` §2.1: `git rev-parse HEAD`, or `content-<16 hex>` when the tree
+     * (`docs/operations/catalog-repo-format.md`: `git rev-parse HEAD`, or `content-<16 hex>` when the tree
      * has no `.git`). This tree has no `.git`, so the label is `content-…` — the same kind the loader
      * writes, over a per-file hash instead of the whole document set. The first `POST /catalog/reload`
      * therefore reports these entries as updated, which is the truth: they were seeded, not read from

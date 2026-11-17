@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { CatalogEntrySchema, resolveKey, type CatalogEntry } from '@seamnex/domain';
+import { REPOSITORY_ROOT } from '../env';
 
 /**
  * The catalogue a virgin development stack starts with.
@@ -22,22 +23,26 @@ import { CatalogEntrySchema, resolveKey, type CatalogEntry } from '@seamnex/doma
  *      would add a second document for a product that is already declared, and the loader resolves
  *      duplicate identities last-file-wins — a silent replacement, not an addition.
  *
- * **The entry documents are vendored here, under `packages/db/src/seed/default-catalog/`.** They are
+ * **The entry documents are vendored under `platform/default-catalog/<KEY>.json`.** They are
  * deliberately *not* copied into `platform/catalog/`: that directory is the shipped mirror of an
  * operator's catalogue (`platform/catalog/env/<KEY>.json` declarations, `platform/upstream/<KEY>/`
  * source trees), the API never reads it, and entry documents there would turn it into a catalog root
- * whose first reload projects three entries as if they were the whole catalogue and deletes the
- * rest. The seed owns what the seed starts; `platform/` stays what the operator ships.
+ * whose first reload projects six entries as if they were the whole catalogue and deletes the rest.
+ *
+ * A *sibling* of that mirror is safe where its root is not: the loader reads `<root>/catalog/*.json`
+ * and `<root>/catalog/env/*.json`, so `platform/default-catalog/` takes part in no reload whatever
+ * the configured root is — the hazard is a shape, and this directory does not have it. Content sits
+ * with the catalogue artefacts it is paired with (the declarations next door, the vendored source
+ * trees under `platform/upstream/`) instead of inside the persistence package, and `platform/` is
+ * excluded from the API build context: these are documents the seed writes on the host, never
+ * something the server serves from its own image.
  *
  * The env *declarations* are read from `platform/catalog/env/<KEY>.json` rather than duplicated
  * here, because they already live there as reviewed, tested artefacts. One owner per artefact.
  */
 
-/** Repository root from `packages/db/src/seed`; the same four levels `../env.ts` uses from `src`. */
-const REPO_ROOT = resolve(import.meta.dirname, '../../../..');
-
 /** The vendored entry documents, one per member of the default set. */
-export const DEFAULT_CATALOG_FIXTURES = join(import.meta.dirname, 'default-catalog');
+export const DEFAULT_CATALOG_FIXTURES = join(REPOSITORY_ROOT, 'platform', 'default-catalog');
 
 /**
  * The default set, in the order the console renders it.
@@ -52,7 +57,8 @@ export const DEFAULT_CATALOG_FIXTURES = join(import.meta.dirname, 'default-catal
  * (D02-01, D06-01, D11-01) declared an environment nobody could project, so the catalogue advertised
  * products that could never be deployed — the coverage finding this list closes. Adding a key here
  * is only correct when its document and its declaration both exist; the gate
- * (`pnpm check:catalog`) asserts that pairing.
+ * (`pnpm check:catalog`) asserts that pairing. The gate imports this list and the served schema
+ * rather than restating either, so it cannot drift from this module the way a second copy would.
  */
 export const DEFAULT_PRODUCT_KEYS = [
   'D01-01',
@@ -66,7 +72,7 @@ export const DEFAULT_PRODUCT_KEYS = [
 export type DefaultProductKey = (typeof DEFAULT_PRODUCT_KEYS)[number];
 
 /** Where the catalogue working tree lives for this process. */
-export const SHIPPED_DECLARATIONS = join(REPO_ROOT, 'platform', 'catalog', 'env');
+export const SHIPPED_DECLARATIONS = join(REPOSITORY_ROOT, 'platform', 'catalog', 'env');
 
 export type DefaultCatalogWrite = {
   readonly key: string;
@@ -132,8 +138,8 @@ export type DefaultCatalogPlan = {
  */
 export function catalogRepoRoot(configured: string | undefined): string {
   const value = (configured ?? '').trim();
-  if (value.length === 0) return join(REPO_ROOT, 'temp', 'catalog-repo');
-  return isAbsolute(value) ? value : resolve(REPO_ROOT, value);
+  if (value.length === 0) return join(REPOSITORY_ROOT, 'temp', 'catalog-repo');
+  return isAbsolute(value) ? value : resolve(REPOSITORY_ROOT, value);
 }
 
 /**

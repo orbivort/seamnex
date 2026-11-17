@@ -60,9 +60,9 @@ pnpm test               # unit tests inside each package
 pnpm test:coverage      # test coverage inside each package, shall meet global threshold
 ```
 
-Conditional gates — run the one your change touches: `pnpm check:migrations`, `check:route-policy`,
-`check:version`, `check:license`, `check:bundle`, `check:no-shim`, `check:test-tasks`.
-Report a gate you skipped as skipped; never claim a run that did not happen.
+Conditional gates — run the one your change touches: `pnpm check:migrations`, `check:catalog`,
+`check:route-policy`, `check:version`, `check:license`, `check:bundle`, `check:no-shim`,
+`check:test-tasks`. Report a gate you skipped as skipped; never claim a run that did not happen.
 
 ## Boundaries
 

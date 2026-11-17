@@ -24,7 +24,16 @@ const doubles = vi.hoisted(() => ({
 }));
 
 vi.mock('../../../src/client', () => ({ createPool: doubles.createPool }));
-vi.mock('../../../src/env', () => ({ loadRootEnv: doubles.loadRootEnv }));
+/*
+ * Only the `.env` load is doubled. `REPOSITORY_ROOT` is a path constant the seed resolves its
+ * fixtures against, and stubbing it would make the suite read a directory of the test's invention —
+ * the fixtures would then be "found" wherever the double said, which is the failure this suite is
+ * meant to catch.
+ */
+vi.mock('../../../src/env', async (importOriginal) => ({
+  ...(await importOriginal()),
+  loadRootEnv: doubles.loadRootEnv,
+}));
 
 const CONNECTION = 'postgres://seamnex:seamnex@localhost:5432/seamnex';
 const originalEnv = {

@@ -136,7 +136,8 @@ limitation, not a hidden convenience — see [what this does not do](#what-this-
 ### 4. Deploy one product
 
 This is S-9's second half and AC-19's evidence. From the console: **Deployments → New deployment**,
-choose a catalogue entry (the default set ships three), accept the plan and watch the job.
+choose a catalogue entry (the default set ships six — `D01-01`, `D02-01`, `D06-01`, `D07-01`,
+`D09-01`, `D11-01`), accept the plan and watch the job.
 
 A deployment that reaches `succeeded` proves the whole path: catalogue, render, policy, Docker, edge
 routing and the job queue. A deployment that stalls at `Resolve source` usually means the runtime

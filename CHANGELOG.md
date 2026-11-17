@@ -336,6 +336,21 @@ the same number through every manifest and the link definitions at the foot of t
 
 ### Changed
 
+- **The default catalogue's documents live beside the artefacts they pair with, and its gate is a real
+  gate** (`AC-01`, `S-1`, `S-2`) — the six entry documents moved from
+  `packages/db/src/seed/default-catalog/` to `platform/default-catalog/`, one directory from the
+  declarations (`platform/catalog/env/`) and the vendored source trees (`platform/upstream/`) they are
+  reviewed against. `@seamnex/db` keeps the seed module and materialises the same bytes; what changed
+  is the owner — a persistence package no longer carries product content, and the control-plane image
+  no longer carries a fixture set nothing in a container reads. `pnpm check:catalog` was rewritten from
+  a `.mjs` that could not import what it checked (it read `DEFAULT_PRODUCT_KEYS` by regex over the
+  seed's source and restated the served schema, the guarantee-class enum and the native floor as its own
+  copies) into `packages/db/scripts/check-catalog-coverage.ts`, which imports the key list, the two
+  directories, `CatalogEntrySchema`, `EnvSchemaFileSchema` and `computeCatalogCoverage` — the same
+  arithmetic the reload receipt and `GET /posture` serve. It now runs in CI's `quality` job and is
+  listed among the conditional gates in `AGENTS.md`, `docs/operations/catalog-repo-format.md` documents
+  the on-disk format both source comments had been citing as a file that did not exist, and
+  `docs/operations/bootstrap.md` no longer says the default set ships three. ADR-BE-21 amendment 3.
 - **Verification records the facts the screens now quote** (`FR-2.10`, `FR-2.14`, `FR-2.15`, `AC-41`,
   `AC-50`) — the verification request carried a subset of the facts FR-2.14 names, and an empty one
   still restarted the review clock, which is how a catalogue assumption came to read as a verified

@@ -36,7 +36,7 @@
     "db:seed": "pnpm --filter @seamnex/db seed",
     "catalog:project": "pnpm --filter @seamnex/api catalog:project",
     "check:migrations": "node scripts/check-migrations.mjs",
-    "check:catalog": "node scripts/check-catalog-coverage.mjs",
+    "check:catalog": "pnpm --filter @seamnex/db check:catalog",
     "check:license": "node scripts/check-license.mjs",
     "check:route-policy": "pnpm --filter @seamnex/api exec tsx scripts/check-route-policy.ts",
     "check:no-shim": "node scripts/check-no-dev-shim.mjs",
