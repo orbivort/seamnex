@@ -39,6 +39,33 @@ describe('derived identity environment values', () => {
   });
 
   it('derives nothing for an entry that declares no instance-shaped value', () => {
-    expect(derivedEnvValues({ ...base, entryKey: 'D11-01' })).toEqual({});
+    expect(derivedEnvValues({ ...base, entryKey: 'D07-01' })).toEqual({});
+  });
+
+  /*
+   * The rest of the table. Each of these was a catalog literal correct for exactly one deployment:
+   * the failure showed up as a product that answered its own placeholder vhost (`404`) or mailed a
+   * link to a host nobody serves, and only after the route moved.
+   */
+  it('moves both OpenProject host names together, as bare hosts', () => {
+    expect(derivedEnvValues({ ...base, entryKey: 'D09-01' })).toEqual({
+      OPENPROJECT_HOST__NAME: 'crm.localhost',
+      SERVER_NAME: 'crm.localhost',
+    });
+  });
+
+  it('derives the ERPNext site name as the bare route host', () => {
+    expect(derivedEnvValues({ ...base, entryKey: 'D06-01' })).toEqual({
+      ERPNEXT_SITE_NAME: 'crm.localhost',
+    });
+  });
+
+  it('derives the product URLs Mautic and Metabase print into their own output', () => {
+    expect(derivedEnvValues({ ...base, entryKey: 'D02-01' })).toEqual({
+      MAUTIC_SITE_URL: 'http://crm.localhost:8020',
+    });
+    expect(derivedEnvValues({ ...base, entryKey: 'D11-01' })).toEqual({
+      MB_SITE_URL: 'http://crm.localhost:8020',
+    });
   });
 });

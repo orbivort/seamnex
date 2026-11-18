@@ -90,3 +90,27 @@ A sibling directory is read by nothing.
 document and a declaration, every document and declaration belongs to a key, each document parses as
 the served schema and pins its image, and the coverage the set proves is reported against S-2's native
 floor.
+
+### When the working tree is gone
+
+The projection and the tree are two halves of one state, and they live in different places: the rows
+are in PostgreSQL's volume, the documents are under `SEAMNEX_CATALOG_REPO_PATH` (by default
+`./temp/catalog-repo`). Deleting `temp/`, moving the checkout or restoring a database onto another host
+can therefore keep one half and lose the other. Both steps that would repair it refuse by design —
+`pnpm db:seed` writes the default set only into an empty projection, and `pnpm catalog:project` stops
+rather than report "nothing to project".
+
+`pnpm catalog:restore` is the deliberate step. It writes the default tree back, and only when the two
+halves provably belong together:
+
+| Condition                                                     | Outcome                                    |
+| ------------------------------------------------------------- | ------------------------------------------ |
+| `<root>/catalog` exists                                       | nothing written; the tree is the authority |
+| `catalog_entry` is empty                                      | nothing written; `pnpm db:seed` seeds it   |
+| `catalog_entry` is exactly the keys of `DEFAULT_PRODUCT_KEYS` | both halves restored from `platform/`      |
+| any other key set                                             | refused, with the keys that do not line up |
+
+The last row is the important one: rows from a tree this repository cannot reproduce are restored from
+a checkout or a backup, never reconstructed by guesswork. Existing files are never replaced, so the
+command cannot overwrite a tree that appears while it runs. It writes files only — run
+`pnpm catalog:project` afterwards, or simply `pnpm dev`, which runs both.

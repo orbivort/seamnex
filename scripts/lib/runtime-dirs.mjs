@@ -13,6 +13,8 @@ import { join } from 'node:path';
  *   - `instances` — render sets and source checkouts (`EACCES` in the deploy job at "Resolve
  *     source");
  *   - `backups`, `age` — backup archives and the age identity;
+ *   - `scans` — the image tar and Trivy report written at "Apply" (NFR-4.6). Without it the scan
+ *     could not create its work directory and the job failed with IMAGE_SCAN_BLOCKED;
  *   - `traefik/dynamic` — the route projection's file provider.
  *
  * Creating them here, on the host, means the mount arrives with the host's ACL and the container
@@ -29,6 +31,9 @@ export function ensureRuntimeDirs(root, log = () => {}) {
     join('temp', 'instances'),
     join('temp', 'backups'),
     join('temp', 'age'),
+    // NFR-4.6: the scan scratch tree. Docker would create the mount root as root, and the API's
+    // `node` user then cannot `mkdir` the per-scan directory inside it.
+    join('temp', 'scans'),
     join('temp', 'traefik', 'dynamic'),
     join('temp', 'catalog-repo', 'instances'),
     // FR-2.6: the `file_sd` directory M21 writes and Prometheus watches. Created on the host for the

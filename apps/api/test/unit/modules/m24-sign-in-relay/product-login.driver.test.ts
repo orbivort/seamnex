@@ -110,6 +110,32 @@ describe('signInToProduct', () => {
     expect(seen[0]?.body).toContain('authenticity_token=csrf-1');
   });
 
+  it('tells the product the browser arrived over TLS, so its origin check accepts the POST', async () => {
+    /*
+     * The edge terminates TLS and reaches the product over plain HTTP. Rails compares the `Origin`
+     * we send against the request it thinks it received, so a `https` origin without this header is
+     * answered `422 Cross-Site Request Forgery` — the sign-in never reaches the password check.
+     * Measured on 17.9.6: identical POST, `422` with the CSRF message without the header and the
+     * credential screen with it.
+     */
+    const options = driver([
+      () => respond({ status: 200, body: LOGIN_PAGE }),
+      () => respond({ status: 302, location: '/' }),
+      () => respond({ status: 200, body: APP_PAGE }),
+    ]);
+
+    await signInToProduct(
+      { ...input, publicOrigin: 'https://openproject.localhost:8443' },
+      options,
+    );
+
+    const [, post] = fetchCalls(options)[1] as [string, RequestInit];
+    const headers = new Headers(post.headers);
+    expect(headers.get('x-forwarded-proto')).toBe('https');
+    expect(headers.get('origin')).toBe('https://openproject.localhost:8443');
+    expect(headers.get('host')).toBe('openproject.localhost:8443');
+  });
+
   it('fails closed when the login page lost its form, and never submits a password', async () => {
     const options = driver([
       () => respond({ status: 200, body: '<html><body>Maintenance</body></html>' }),

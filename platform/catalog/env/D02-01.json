@@ -7,10 +7,10 @@
   "variables": [
     {
       "name": "MAUTIC_SITE_URL",
-      "purpose": "Public URL the product is reached at, written into `local.php` by the first-boot installer. It is the base of every absolute URL Mautic puts in an e-mail — unsubscribe links, tracked links, landing pages — so it must be the published route including the edge port (`http://marketing.localhost:8020` on the development edge), not the container name. Installation-only: changing the route of a running instance has to be changed inside the product as well.",
+      "purpose": "Public URL the product is reached at, written into `local.php` by the first-boot installer. It is the base of every absolute URL Mautic puts in an e-mail — unsubscribe links, tracked links, landing pages — so it must be the published route including the edge port (`https://marketing.seamnex.localhost:8443` on the development edge), not the container name. Installation-only: changing the route of a running instance has to be changed inside the product as well.",
       "type": "url",
       "required": true,
-      "defaultValue": "http://mautic.localhost:8020",
+      "defaultValue": "https://mautic.seamnex.localhost:8443",
       "constraint": "Absolute URL, no trailing slash; must match the published route (`<slug>.<ingress domain>:<edge port>`)",
       "conditional": null,
       "secret": false,

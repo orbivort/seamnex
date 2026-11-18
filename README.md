@@ -42,8 +42,8 @@ pnpm bootstrap:check    # verifies an existing install; changes nothing
 ```
 
 It is idempotent: a second run converges instead of duplicating, and it never rotates a credential or
-overwrites `.env`. Deployed products are served over TLS by the edge (`https://<slug>.localhost:8443`
-on the install, with its own certificate). The step-by-step procedure, the timing budget, the
+overwrites `.env`. Deployed products are served over TLS by the edge (`https://<slug>.seamnex.localhost:8443`
+on the install, with the development CA's certificate). The step-by-step procedure, the timing budget, the
 verification checklist, the recovery paths and the list of what this install does **not** do
 (certificate issuance, production identities, a hosted console) are in
 [`docs/operations/bootstrap.md`](docs/operations/bootstrap.md).

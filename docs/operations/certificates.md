@@ -5,6 +5,11 @@ servers present, and the deployment edge that terminates TLS for the products (A
 page documents both: what is on disk, what issues what, how long it lives, how to trust it once, what each
 warning means, and the retention rule for the untracked material under `temp/certs`.
 
+In the development stack the two coincide: the edge serves the same leaf the dev servers do, so the one
+anchor trusted for `https://localhost:5173` also covers `https://<slug>.seamnex.localhost:8443` for every
+slug, present and future (see [name resolution](#name-resolution-which-a-certificate-cannot-fix), which is
+the half a certificate cannot solve).
+
 It is the operational companion to `packages/config/vite/dev-cert.ts`, which is the only code that mints
 anything. If this page and that module disagree, the module wins — and the page is the bug.
 
@@ -31,16 +36,16 @@ inputs and the CA serial stay behind as scratch.
 
 Measured from a current pair (`openssl x509 -in temp/certs/dev.crt -noout -text`), not paraphrased:
 
-| Field               | Development CA                     | Leaf                                                                     |
-| ------------------- | ---------------------------------- | ------------------------------------------------------------------------ |
-| Subject             | `CN=Seamnex development CA`        | `CN=localhost`                                                           |
-| Key                 | RSA 2048, SHA-256, self-signed     | RSA 2048, SHA-256, signed by the CA                                      |
-| Validity            | 10 years                           | 1 year                                                                   |
-| Basic constraints   | critical, `CA:TRUE, pathlen:0`     | critical, `CA:FALSE`                                                     |
-| Key usage           | critical, `keyCertSign`, `cRLSign` | critical, `digitalSignature`, `keyEncipherment`                          |
-| Extended key usage  | —                                  | `serverAuth`                                                             |
-| Subject alternative | —                                  | `DNS:localhost`, `DNS:*.localhost`, `IP:127.0.0.1`, `IP:0:0:0:0:0:0:0:1` |
-| Key identifiers     | `SKID` (hash)                      | `AKID` matching the CA's `SKID`, own `SKID`                              |
+| Field               | Development CA                     | Leaf                                                                                                       |
+| ------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| Subject             | `CN=Seamnex development CA`        | `CN=localhost`                                                                                             |
+| Key                 | RSA 2048, SHA-256, self-signed     | RSA 2048, SHA-256, signed by the CA                                                                        |
+| Validity            | 10 years                           | 1 year                                                                                                     |
+| Basic constraints   | critical, `CA:TRUE, pathlen:0`     | critical, `CA:FALSE`                                                                                       |
+| Key usage           | critical, `keyCertSign`, `cRLSign` | critical, `digitalSignature`, `keyEncipherment`                                                            |
+| Extended key usage  | —                                  | `serverAuth`                                                                                               |
+| Subject alternative | —                                  | `DNS:localhost`, `DNS:*.localhost`, `DNS:*.<SEAMNEX_INGRESS_DOMAIN>`, `IP:127.0.0.1`, `IP:0:0:0:0:0:0:0:1` |
+| Key identifiers     | `SKID` (hash)                      | `AKID` matching the CA's `SKID`, own `SKID`                                                                |
 
 `pathlen:0` keeps the anchor from signing another CA if `dev-ca.key` ever leaks out of `temp/`.
 
@@ -132,17 +137,19 @@ client pick the wrong one and report a signature failure that reads like a corru
 
 ## What each warning means
 
-| Symptom                                              | Cause                                                                                                                         | Fix                                                                        |
-| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| `ERR_CERT_AUTHORITY_INVALID` — issuer not trusted    | the CA was rotated (`temp/certs` deleted, leaf reissued under a new CA) and the store still holds the old one                 | trust `temp\certs\dev-ca.crt`, remove the stale entry, restart the browser |
-| The same error, first run ever                       | nothing was trusted yet                                                                                                       | the command above                                                          |
-| `ERR_CERT_COMMON_NAME_INVALID`                       | the URL is a Vite **Network** address (`https://192.168.x.x:5174`); `host: '0.0.0.0'` prints them, the SANs do not cover them | use `localhost`, or add the address to `CERTIFICATE_IPS` and re-mint       |
-| `ERR_CERT_DATE_INVALID`                              | clock skew (suspended VM, WSL drift) puts the leaf's `notBefore` in the future                                                | fix the clock; a reissue cannot help                                       |
-| `ERR_SSL_PROTOCOL_ERROR`, `ERR_CONNECTION_REFUSED`   | the server is on plain HTTP (no OpenSSL, generation refused) and the browser was upgraded                                     | read the `[vite] dev server starting over http: …` banner                  |
-| `ERR_OSSL_X509_KEY_VALUES_MISMATCH` in the terminal  | the key and the certificate on disk belong to different generations                                                           | delete `temp/certs`, re-run `pnpm dev` — the module now detects this       |
-| `unable to load certificate request input … dev.csr` | a second process deleted the CSR mid-signing                                                                                  | the generation lock prevents it; delete `temp/certs` if a lock is wedged   |
-| `could not take .generation.lock within 20s`         | a crashed process left the lock, or generation is genuinely stuck                                                             | wait for the 60 s staleness window, or delete `temp/certs`                 |
-| `does not verify against its key or its CA`          | generation produced a pair the module refuses to serve                                                                        | delete `temp/certs`, re-run, and report the banner if it repeats           |
+| Symptom                                                                                                   | Cause                                                                                                                                                                 | Fix                                                                                         |
+| --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `ERR_CERT_AUTHORITY_INVALID` — issuer not trusted                                                         | the CA was rotated (`temp/certs` deleted, leaf reissued under a new CA) and the store still holds the old one                                                         | trust `temp\certs\dev-ca.crt`, remove the stale entry, restart the browser                  |
+| The same error, first run ever                                                                            | nothing was trusted yet                                                                                                                                               | the command above                                                                           |
+| `ERR_CERT_COMMON_NAME_INVALID`                                                                            | the URL is a Vite **Network** address (`https://192.168.x.x:5174`), or a product host outside `SEAMNEX_INGRESS_DOMAIN` — the leaf carries `*.<domain>`, nothing wider | use `localhost`, add the address to `CERTIFICATE_IPS`, or publish under the configured zone |
+| `ERR_NAME_NOT_RESOLVED` in Node, `curl` or a Playwright API context, while the browser opens the same URL | the operating system resolver has no rule for the zone: browsers implement RFC 6761 on their own, `getaddrinfo` does not                                              | `pnpm dev:dns:apply` in an elevated shell, then `pnpm dev:dns`                              |
+| `ERR_CERT_DATE_INVALID`                                                                                   | clock skew (suspended VM, WSL drift) puts the leaf's `notBefore` in the future                                                                                        | fix the clock; a reissue cannot help                                                        |
+| A product URL shows `CN=TRAEFIK DEFAULT CERT`, untrusted and wrong host                                   | the edge's default certificate is not the mounted leaf: `temp/certs` was empty when the edge started, or the leaf was re-minted and the edge still holds the old one  | `pnpm dev:stack up -d traefik` after a mint; `restart traefik` after a reissue              |
+| `ERR_SSL_PROTOCOL_ERROR`, `ERR_CONNECTION_REFUSED`                                                        | the server is on plain HTTP (no OpenSSL, generation refused) and the browser was upgraded                                                                             | read the `[vite] dev server starting over http: …` banner                                   |
+| `ERR_OSSL_X509_KEY_VALUES_MISMATCH` in the terminal                                                       | the key and the certificate on disk belong to different generations                                                                                                   | delete `temp/certs`, re-run `pnpm dev` — the module now detects this                        |
+| `unable to load certificate request input … dev.csr`                                                      | a second process deleted the CSR mid-signing                                                                                                                          | the generation lock prevents it; delete `temp/certs` if a lock is wedged                    |
+| `could not take .generation.lock within 20s`                                                              | a crashed process left the lock, or generation is genuinely stuck                                                                                                     | wait for the 60 s staleness window, or delete `temp/certs`                                  |
+| `does not verify against its key or its CA`                                                               | generation produced a pair the module refuses to serve                                                                                                                | delete `temp/certs`, re-run, and report the banner if it repeats                            |
 
 A red interstitial is not a functional failure: after clicking through, the session is still TLS and
 `Secure` cookies still work. It is a habit failure — and scripted clients (Playwright, Node, `curl`) abort
@@ -184,14 +191,83 @@ Rules that follow from the table:
 The CA above signs nothing outside a checkout. Products are served by the edge, which owns its own
 certificate and its own mode (ADR-BE-39):
 
-| Mode       | Selected by                      | Behaviour                                                                                                                     |
-| ---------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `internal` | `SEAMNEX_EDGE_TLS_MODE=internal` | the edge presents its own certificate on `127.0.0.1:8443`; the browser accepts it once; this is the development stack default |
-| `acme`     | `SEAMNEX_EDGE_TLS_MODE=acme`     | Traefik obtains a certificate for the public name through `SEAMNEX_TRAEFIK_ACME_EMAIL`; needs public DNS and published 80/443 |
+| Mode       | Selected by                      | Behaviour                                                                                                                                         |
+| ---------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `internal` | `SEAMNEX_EDGE_TLS_MODE=internal` | the edge terminates with its own default certificate on `127.0.0.1:8443` — in the development stack the leaf from `temp/certs`; the stack default |
+| `acme`     | `SEAMNEX_EDGE_TLS_MODE=acme`     | Traefik obtains a certificate for the public name through `SEAMNEX_TRAEFIK_ACME_EMAIL`; needs public DNS and published 80/443                     |
 
 `instance_route.tls_mode` records the mode the route runs in, and the console reports it per instance. A
 development install has no public DNS name to validate, which is why ACME is listed as a gap in
 [`bootstrap.md`](bootstrap.md#what-this-does-not-do) rather than configured by default.
+
+### The development edge serves the same leaf
+
+A product route carries `tls: {}` (`tlsMode: 'internal'`), which Traefik reads as "terminate here with
+the default certificate". Left unset, that default is Traefik's own `CN=TRAEFIK DEFAULT CERT`: self-signed,
+with a SAN of `*.traefik.default`. A browser then reports an untrusted issuer **and** a hostname mismatch
+on the product URL, and scripted clients abort the handshake — the CA trusted for the dev servers was
+never presented by the edge at all.
+
+The development stack therefore points the edge at the leaf this page already describes:
+
+| Piece        | Where                                                                        |
+| ------------ | ---------------------------------------------------------------------------- |
+| Declaration  | `docker/traefik/dynamic/tls.yml` — `tls.stores.default`                      |
+| Certificate  | `temp/certs/dev.crt`, mounted read-only as `/certs/dev.crt`                  |
+| Private key  | `temp/certs/dev.key`, mounted read-only as `/certs/dev.key`                  |
+| Generated by | `packages/config/vite/dev-cert.ts`, run by `scripts/compose.mjs` before `up` |
+
+The leaf carries `DNS:*.<SEAMNEX_INGRESS_DOMAIN>`, which the development value puts at
+`*.seamnex.localhost`. **One wildcard, every slug, no re-mint per deployment** — but it has to be two
+labels deep. No verifier matches a wildcard whose base has no dot, so `*.localhost` would leave every
+product URL with `ERR_CERT_COMMON_NAME_INVALID`:
+
+```text
+# today's leaf, one label down: the shape that cannot work
+openssl verify -CAfile temp\certs\dev-ca.crt -verify_hostname espocrm.localhost temp\certs\dev.crt
+# CN=localhost
+# error 62 at 0 depth lookup: hostname mismatch
+
+# the shipped shape: a scratch CA with SAN DNS:*.seamnex.localhost
+openssl verify -CAfile ca.crt -verify_hostname orangehrm.seamnex.localhost leaf.crt   # leaf.crt: OK
+```
+
+That is why `.env.example` defaults `SEAMNEX_INGRESS_DOMAIN` to `seamnex.localhost` rather than
+`localhost`, and why the dev stack runs a DNS service next to the edge.
+
+### Name resolution, which a certificate cannot fix
+
+Browsers implement RFC 6761 themselves: Chrome, Edge and Firefox map **any** name ending in `.localhost`
+to loopback, at any depth, with no configuration — so `https://orangehrm.seamnex.localhost:8443` opens in
+a browser on a fresh machine. The operating system does not do this for subdomains (`dns.lookup` answers
+`ENOTFOUND` for `orangehrm.localhost` and `orangehrm.seamnex.localhost` alike), which is what breaks Node,
+`curl` and Playwright's API context.
+
+`docker/dns` closes that gap without a hosts file:
+
+| Piece        | Where                                                                |
+| ------------ | -------------------------------------------------------------------- |
+| Server       | `dns` service in `docker/compose.dev.yml`, CoreDNS pinned by tag     |
+| Zone         | `docker/dns/Corefile`, rendered from `SEAMNEX_INGRESS_DOMAIN`        |
+| Answer       | `<anything>.<zone>` → `127.0.0.1` (and `::1` for AAAA), nothing else |
+| Host wiring  | `pnpm dev:dns:apply` — one Windows NRPT rule scoped to the zone      |
+| Verification | `pnpm dev:dns` — service answer and OS answer, reported separately   |
+| Removal      | `pnpm dev:dns:revert`                                                |
+
+The rule is scoped to the one zone on purpose. Replacing the adapter's DNS servers would send every other
+lookup into the container, whose `forward` line points back at the host — a loop. With an NRPT rule the
+rest of the machine keeps its resolvers, and the rule is reversible by name. On macOS and Linux the CLI
+prints the equivalent per-zone resolver entry instead of editing it.
+
+Three consequences worth knowing:
+
+- **A refusal is not fatal.** Without OpenSSL nothing is minted, `scripts/compose.mjs` prints the reason and
+  the start continues; the edge then falls back to `CN=TRAEFIK DEFAULT CERT`, which is the old behaviour.
+- **Browsers need nothing; scripts need the rule.** An unconfigured host still opens product URLs in a
+  browser and fails them in `curl` — `pnpm dev:dns` says which of the two is missing.
+- **A re-minted leaf needs a restart.** The file provider watches YAML in the dynamic directory, not the
+  mounted pair, so `pnpm dev:stack restart traefik` applies a new leaf — the same restart
+  [`bootstrap.md`](bootstrap.md) records for routes on Docker Desktop.
 
 ## References
 

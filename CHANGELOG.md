@@ -16,6 +16,22 @@ the same number through every manifest and the link definitions at the foot of t
 
 ### Added
 
+- **A lost catalogue working tree can be restored instead of leaving `pnpm dev` unrecoverable**
+  (`FR-2.6`, `NFR-6.3`) — the projection lives in PostgreSQL's volume and the documents live in
+  `SEAMNEX_CATALOG_REPO_PATH` (default `./temp/catalog-repo`), so deleting `temp/`, moving the checkout
+  or restoring a database onto another host kept one half and lost the other. Both repair steps then
+  refused by design: `pnpm db:seed` writes the default set only into an empty projection, and
+  `pnpm catalog:project` stopped with `no catalogue working tree … while 6 catalog entries are
+projected`, telling the operator that restoring the tree "is a deliberate step, not a retry" and
+  naming no step — a documented dead end, reproduced on a stack whose `catalog_entry` held exactly the
+  six default keys. `pnpm catalog:restore` is that step: it writes `catalog/<KEY>.json` and
+  `catalog/env/<KEY>.json` back from `platform/default-catalog/` and `platform/catalog/env/`, and only
+  when the two halves provably belong together — `catalog/` absent _and_ `catalog_entry` holding
+  exactly `DEFAULT_PRODUCT_KEYS`. A tree that is present, an empty projection, or any other key set is
+  refused with the keys that do not line up, because those rows came from a checkout or a backup this
+  repository cannot reproduce; existing files are never replaced. The projector's message now names the
+  command, and the scripts no longer pair `shell: true` with an argument array, which is where
+  `pnpm dev` printed `[DEP0190]` on every Windows start.
 - **The edge terminates TLS on every route, and the mode it records is the mode it runs** (`NFR-4.1`,
   `FR-2.5`, `AC-42`, `S-6`, ISSUE-07) — the only committed edge configuration served plain HTTP on
   `:80` while `instance_route.tls_mode` was written as the SQL literal `'acme'` and the instance screen
@@ -388,6 +404,36 @@ the same number through every manifest and the link definitions at the foot of t
 
 ### Fixed
 
+- **The sign-in relay presents the product with the scheme the browser used** (`NFR-4.1`, `FR-2.16`,
+  ISSUE-07) — moving every route to TLS left the relay and the provisioning client speaking plain HTTP
+  to the container while sending `Origin: https://<host>:<port>`. Rails compares that header against
+  the request it thinks it received, so every product POST was rejected as cross-site forgery before
+  the credential was read: OpenProject's `relay.admin_credential.bootstrap_failed` recorded
+  `form_changed` ("the login form rejected its CSRF token"), the account stayed `failed`, and
+  the six-hour bootstrap quiet period made the retry look dead. `makeCall` in
+  `product-login.driver.ts` — shared by the password driver, the OrangeHRM driver and the
+  administrator-token bootstrap — now sends `X-Forwarded-Proto` from the configured public origin, so
+  the product computes the same base URL the edge published. Measured on 17.9.6 through the TLS-only
+  edge: the identical POST answers `422` with the CSRF message without the header and reaches the
+  credential check with it.
+- **Product URLs are trusted, resolved and covered by one certificate** (`NFR-4.1`, ISSUE-07) — every
+  `internal` route carries `tls: {}`, and with no ACME resolver in play Traefik answered the product URL
+  with its own `CN=TRAEFIK DEFAULT CERT`: a self-signed issuer with a SAN of `*.traefik.default`, i.e. an
+  untrusted issuer _and_ a hostname mismatch on the URL the portal launches a product with. The
+  development CA trusted for `https://localhost:5173` was never presented, so the interstitial could not
+  be avoided and Playwright, Node and `curl` refused the handshake outright.
+  `docker/traefik/dynamic/tls.yml` now points the default TLS store at the leaf
+  `packages/config/vite/dev-cert.ts` mints and `docker/compose.dev.yml` mounts `temp/certs` read-only for
+  it. That leaf carries `DNS:*.<SEAMNEX_INGRESS_DOMAIN>` — one wildcard for every slug, no re-mint per
+  deployment — which is why the development zone moved one label down to `seamnex.localhost`: no verifier
+  matches a wildcard whose base has no dot (`openssl verify -verify_hostname espocrm.localhost` →
+  `error 62 hostname mismatch`; Chromium → `ERR_CERT_COMMON_NAME_INVALID`), so `<slug>.localhost` could
+  only ever be certified one host at a time. The operating system does not implement RFC 6761 for
+  subdomains at all, so `docker/dns` (CoreDNS, `127.0.0.1:53`) answers the zone for Node, `curl` and
+  Playwright, and `pnpm dev:dns` reports what is missing: a Windows NRPT rule scoped to the zone
+  (`--apply`, reversible with `--revert`), never a rewrite of the adapter's resolvers — that would loop
+  through the container's own `forward` line. Browsers need none of it. Existing installs are told about
+  the zone change by `pnpm dev`, and the hosts stored on `instance_route` have to move with it.
 - **The dev servers reuse the certificate they minted, and two of them starting at once no longer
   corrupt it** (`NFR-4.1`, ISSUE-07) — `isUsable()` asked the chain checks in the wrong direction:
   `ca.checkIssued(leaf)` and `ca.verify(leaf.publicKey)` read "was the CA issued by the leaf", which is
@@ -555,6 +601,16 @@ WORKFLOW_WRITE_NOT_PERMITTED` naming the target and the missing authority, and w
 - **Mock catalog quotas fit their shape** — the sample entry declared 40 GB of volumes on a 20 GB
   disk reservation, a configuration the platform now refuses; the fixture totals 19 GB, matching the
   seeded catalog.
+- **A deployment no longer stops in "Apply" because the image scanner had nowhere to write**
+  (`NFR-4.6`, `S-10`, ISSUE-08) — inside the API container the relative `SEAMNEX_SCAN_TMP_DIR` default
+  resolved against `/app`, which `WORKDIR` creates as root while the process runs as `node`, so the
+  first `mkdir` failed with `EACCES` and the job ended `IMAGE_SCAN_BLOCKED` before any container
+  started; had it succeeded, the path was not a host mount, so the daemon would have bound an empty
+  directory into the scanner. `docker/compose.dev.yml` now pins `/var/lib/seamnex/scans` and mounts
+  `temp/scans` there, `ensureRuntimeDirs` creates that host directory before `up` (the same rule the
+  other runtime trees follow), and the `SEAMNEX_SCAN_*` policy variables are forwarded from `.env`
+  instead of being dead configuration — the same class of gap that hid the path. The Trivy database
+  the scanner still cannot reach is recorded as ISSUE-53, not fixed here.
 
 ## [0.1.0] - 2026-11-13
 

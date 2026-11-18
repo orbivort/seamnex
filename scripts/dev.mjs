@@ -9,6 +9,7 @@ import {
   stackDeclaresKeycloak,
 } from './lib/kc-admin.mjs';
 import { edgeConfigProblems, productUrlFor } from './lib/edge-config.mjs';
+import { pnpmCommandLine } from './lib/pnpm.mjs';
 import { ensureRootKey } from './lib/root-key.mjs';
 import { ensureRuntimeDirs } from './lib/runtime-dirs.mjs';
 
@@ -66,14 +67,7 @@ function readEnvFile() {
 /**
  * `docker` is a real `docker.exe`, so it is spawned without a shell and its arguments — which
  * include the absolute `.env` path — never reach `cmd.exe` quoting.
- *
- * `pnpm` on Windows is a `.cmd` shim, and since Node's fix for CVE-2024-27980 a `.cmd` cannot be
- * spawned with `shell: false` (it fails with `EINVAL`). That one command keeps a shell; every
- * argument it is given is a literal flag, so there is nothing to interpolate.
  */
-const PNPM = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
-const PNPM_SHELL = process.platform === 'win32';
-
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: root,
@@ -81,6 +75,20 @@ function run(command, args, options = {}) {
     ...options,
   });
   return result.status === 0;
+}
+
+/**
+ * A pnpm subcommand. `lib/pnpm.mjs` builds the command line, so no call site pairs `shell: true`
+ * with an argument array (DEP0190) — pnpm is a `.cmd` shim on Windows and cannot be spawned without
+ * a shell there, but the arguments are literals that need no escaping.
+ */
+function runPnpm(args, options = {}) {
+  return spawnSync(pnpmCommandLine(args), {
+    cwd: root,
+    stdio: 'inherit',
+    shell: true,
+    ...options,
+  });
 }
 
 function dockerAvailable() {
@@ -149,10 +157,7 @@ function reconcileKeycloakAdminClient(env) {
 
 function migrate(env) {
   log('applying schema migrations');
-  const status = spawnSync(PNPM, ['--filter', '@seamnex/db', 'migrate:up'], {
-    cwd: root,
-    stdio: 'inherit',
-    shell: PNPM_SHELL,
+  const status = runPnpm(['--filter', '@seamnex/db', 'migrate:up'], {
     env: { ...process.env, DATABASE_URL: env.DATABASE_URL },
   });
   if (status.status !== 0) {
@@ -161,10 +166,7 @@ function migrate(env) {
   }
 
   log('seeding development data');
-  const seeded = spawnSync(PNPM, ['--filter', '@seamnex/db', 'seed'], {
-    cwd: root,
-    stdio: 'inherit',
-    shell: PNPM_SHELL,
+  const seeded = runPnpm(['--filter', '@seamnex/db', 'seed'], {
     env: { ...process.env, DATABASE_URL: env.DATABASE_URL },
   });
   // The seed's status used to be dropped, so a stack whose default catalogue failed to materialise
@@ -184,10 +186,7 @@ function migrate(env) {
    * Idempotent by content hash, so a warm stack pays one read per file and writes nothing.
    */
   log('projecting the default environment schemas');
-  const projected = spawnSync(PNPM, ['catalog:project'], {
-    cwd: root,
-    stdio: 'inherit',
-    shell: PNPM_SHELL,
+  const projected = runPnpm(['catalog:project'], {
     env: { ...process.env, DATABASE_URL: env.DATABASE_URL },
   });
   if (projected.status !== 0) {
@@ -228,10 +227,10 @@ function validateEdgeConfig(env) {
 
 function startDevServers(env) {
   log('starting portal, console and api (Ctrl+C stops them)');
-  const child = spawn(PNPM, ['turbo', 'run', 'dev', '--parallel'], {
+  const child = spawn(pnpmCommandLine(['turbo', 'run', 'dev', '--parallel']), {
     cwd: root,
     stdio: 'inherit',
-    shell: PNPM_SHELL,
+    shell: true,
     env: { ...process.env, ...env },
   });
 

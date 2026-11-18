@@ -4,6 +4,7 @@ import { copyFileSync, existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { parseEnv } from 'node:util';
+import { pnpmCommandLine } from './lib/pnpm.mjs';
 
 /**
  * NFR-6.2 / NFR-6.3 — one documented bootstrap, idempotent and re-runnable.
@@ -37,10 +38,18 @@ const waitSeconds = numberArgument('--wait', 240);
 
 /**
  * `pnpm` is a `.cmd` shim on Windows and cannot be spawned without a shell there (Node's fix for
- * CVE-2024-27980 returns EINVAL). `docker` is a real executable everywhere and keeps its argv.
+ * CVE-2024-27980 returns EINVAL), so its command line is built by `lib/pnpm.mjs` and spawned as a
+ * string — never as an argv array beside `shell: true`, which Node deprecated as DEP0190.
+ * `docker` is a real executable everywhere and keeps its argv.
  */
-const PNPM = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
-const PNPM_SHELL = process.platform === 'win32';
+function runPnpm(args, options = {}) {
+  return spawnSync(pnpmCommandLine(args), {
+    cwd: root,
+    encoding: 'utf8',
+    shell: true,
+    ...options,
+  });
+}
 
 /**
  * The published API port. `docker/compose.dev.yml` maps `127.0.0.1:8080` to the container's 8080
@@ -116,7 +125,7 @@ function checkNode() {
 
 function checkPnpm() {
   const declared = manifest.packageManager ?? '';
-  const result = run(PNPM, ['--version'], { shell: PNPM_SHELL });
+  const result = runPnpm(['--version']);
   if (result.status !== 0) {
     fail(
       'pnpm is not on PATH. Enable Corepack (`corepack enable`) and run `corepack prepare ' +
@@ -196,7 +205,7 @@ function installWorkspace() {
     ['generating the mock service worker (untracked)', ['mocks:init']],
   ]) {
     log(label);
-    const result = spawnSync(PNPM, args, { cwd: root, stdio: 'inherit', shell: PNPM_SHELL });
+    const result = runPnpm(args, { stdio: 'inherit' });
     if ((result.status ?? 1) !== 0) {
       fail(`"pnpm ${args.join(' ')}" failed; nothing after it can run against this tree.`);
       return false;
@@ -237,10 +246,8 @@ function projectData(env) {
     ['projecting the default environment schemas', ['catalog:project']],
   ]) {
     log(label);
-    const result = spawnSync(PNPM, args, {
-      cwd: root,
+    const result = runPnpm(args, {
       stdio: 'inherit',
-      shell: PNPM_SHELL,
       env: { ...process.env, DATABASE_URL: databaseUrl },
     });
     if ((result.status ?? 1) !== 0) {

@@ -8,7 +8,7 @@
       "purpose": "Public URL the product is reached at. It is also the base of the OIDC redirect URI (`<siteUrl>/oauth-callback.php`), so it must match both the registered client and the published route. The platform derives it from the instance's own route at deploy time — the value below is only what the entry screen shows before an instance exists — so an instance under another slug or domain gets its own URL without an override. Override it only when the product is deliberately reached at a different address than its route; a value that disagrees with the route makes Keycloak refuse the authorization request with `invalid_redirect_uri`. Applied at first install only — the image writes `siteUrl` once, so changing the route of a running instance needs the value set inside the product as well.",
       "type": "url",
       "required": true,
-      "defaultValue": "http://espocrm.localhost:8020",
+      "defaultValue": "https://espocrm.seamnex.localhost:8443",
       "constraint": "Absolute URL, no trailing slash; must match the registered redirect URI",
       "rule": {
         "pattern": "^https?://[^/]+$",

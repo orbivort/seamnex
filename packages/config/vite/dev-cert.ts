@@ -26,6 +26,10 @@ import path from 'node:path';
  * every one of those clients something it can be pointed at (`temp/certs/dev-ca.crt`), once, and the
  * leaf keeps the SANs a browser needs (`localhost`, `*.localhost`, both loopback IPs).
  *
+ * The same leaf is what the development edge serves on 8443 (`docker/traefik/dynamic/tls.yml`), which
+ * is why it also carries `DNS:*.<SEAMNEX_INGRESS_DOMAIN>`: a product host has to be matched by a
+ * wildcard, and only a wildcard with at least two labels is accepted — see `ingressDomain()` below.
+ *
  * Why it shells out to `openssl` instead of a package: Node has no certificate builder, and a vendored
  * ASN.1 writer is exactly the kind of homegrown crypto a review should reject. `openssl` is present on
  * every Linux and macOS host and ships with Git for Windows, so the alternative — a new dependency —
@@ -38,6 +42,37 @@ import path from 'node:path';
 /** Everything the dev servers are addressed by: `localhost`, its subdomains and both loopback IPs. */
 const CERTIFICATE_NAMES = ['localhost', '*.localhost'] as const;
 const CERTIFICATE_IPS = ['127.0.0.1', '::1'] as const;
+
+/**
+ * The product suffix the development edge serves, mirrored from `SEAMNEX_INGRESS_DOMAIN`.
+ *
+ * `pnpm dev` exports the root `.env` into every child it starts, and `scripts/compose.mjs` sets the
+ * same variable before it mints, so this is the value the API and the route projection use.
+ */
+const DEFAULT_INGRESS_DOMAIN = 'seamnex.localhost';
+
+function ingressDomain(): string {
+  const configured = process.env.SEAMNEX_INGRESS_DOMAIN?.trim();
+  return configured !== undefined && configured.length > 0 ? configured : DEFAULT_INGRESS_DOMAIN;
+}
+
+/**
+ * The names the leaf has to carry: the dev servers' own, plus the wildcard the edge terminates
+ * products with.
+ *
+ * A product host cannot ride on `*.localhost` — no verifier accepts a wildcard whose base has no dot
+ * (measured: `openssl verify -verify_hostname espocrm.localhost` answers `error 62 hostname
+ * mismatch`, Chromium `ERR_CERT_COMMON_NAME_INVALID`). The edge therefore serves
+ * `<slug>.<ingress domain>`, where `*.<ingress domain>` covers every slug with one certificate and no
+ * per-product step. The DNS side of that name is `docker/dns` plus `pnpm dev:dns`.
+ */
+function certificateNames(): readonly string[] {
+  const names = new Set<string>(CERTIFICATE_NAMES);
+  const domain = ingressDomain();
+  // A wildcard needs two labels to be matched; a single-label domain would only add dead weight.
+  if (domain.includes('.')) names.add(`*.${domain}`);
+  return [...names];
+}
 
 /** Regenerate this long before `-days` runs out, so an expired certificate cannot surprise a demo. */
 const RENEW_WHEN_DAYS_LEFT = 7;
@@ -243,6 +278,7 @@ function isUsable(
   caKey: string,
   caCert: string,
   metaFile: string,
+  requiredNames: readonly string[] = CERTIFICATE_NAMES,
 ): boolean {
   if (!existsSync(key) || !existsSync(cert) || !existsSync(metaFile)) return false;
 
@@ -251,7 +287,7 @@ function isUsable(
     const names = meta.names ?? [];
     const ips = meta.ips ?? [];
     if (
-      !CERTIFICATE_NAMES.every((name) => names.includes(name)) ||
+      !requiredNames.every((name) => names.includes(name)) ||
       !CERTIFICATE_IPS.every((ip) => ips.includes(ip))
     ) {
       return false;
@@ -279,8 +315,13 @@ function isUsable(
     if (!keyMatchesCert(key, leaf)) return false;
 
     // `checkHost`/`checkIP` read the SAN the browser will read: a certificate whose files are intact
-    // but whose extensions were lost fails here instead of in the browser.
-    return leaf.checkHost('localhost') !== undefined && leaf.checkIP('127.0.0.1') !== undefined;
+    // but whose extensions were lost fails here instead of in the browser. Concrete names only —
+    // `checkHost` does not expand a wildcard, so `*.localhost` would fail here while being present.
+    const concrete = requiredNames.filter((name) => !name.includes('*'));
+    return (
+      concrete.every((name) => leaf.checkHost(name) !== undefined) &&
+      leaf.checkIP('127.0.0.1') !== undefined
+    );
   } catch {
     return false;
   }
@@ -336,6 +377,7 @@ function issueLeaf(
   openssl: string,
   files: typeof CACHE_FILES,
   directory: string,
+  names: readonly string[],
 ): { ok: true } | { ok: false; reason: string } {
   const caKey = path.join(directory, files.caKey);
   const caCert = path.join(directory, files.caCert);
@@ -343,7 +385,7 @@ function issueLeaf(
   const cert = path.join(directory, files.cert);
   const request = path.join(directory, 'dev.csr');
   const configuration = path.join(directory, 'dev.cnf');
-  writeFileSync(configuration, leafConfiguration(CERTIFICATE_NAMES, CERTIFICATE_IPS), 'utf8');
+  writeFileSync(configuration, leafConfiguration(names, CERTIFICATE_IPS), 'utf8');
 
   // Any half-written pair from an interrupted run would otherwise be read as "cached but corrupt".
   rmSync(key, { force: true });
@@ -447,8 +489,9 @@ export function resolveDevCertificate(repoRoot: string): DevCertificateResult {
   const key = path.join(directory, CACHE_FILES.key);
   const cert = path.join(directory, CACHE_FILES.cert);
   const metaFile = path.join(directory, CACHE_FILES.meta);
+  const names = certificateNames();
 
-  if (isUsable(key, cert, caKey, caCert, metaFile)) {
+  if (isUsable(key, cert, caKey, caCert, metaFile, names)) {
     return { certificate: { key, cert, ca: caCert } };
   }
 
@@ -475,7 +518,7 @@ export function resolveDevCertificate(repoRoot: string): DevCertificateResult {
   try {
     // Checked again under the lock: the usual outcome of waiting is that the other process finished,
     // and its pair is exactly the one this process wanted.
-    if (isUsable(key, cert, caKey, caCert, metaFile)) {
+    if (isUsable(key, cert, caKey, caCert, metaFile, names)) {
       return { certificate: { key, cert, ca: caCert } };
     }
 
@@ -488,7 +531,7 @@ export function resolveDevCertificate(repoRoot: string): DevCertificateResult {
       }
     }
 
-    const leaf = issueLeaf(openssl, CACHE_FILES, directory);
+    const leaf = issueLeaf(openssl, CACHE_FILES, directory, names);
     if (!leaf.ok) {
       return { reason: `${leaf.reason}; the dev servers will start over http` };
     }
@@ -503,7 +546,7 @@ export function resolveDevCertificate(repoRoot: string): DevCertificateResult {
     }
 
     const meta: CertificateMeta = {
-      names: CERTIFICATE_NAMES,
+      names,
       ips: CERTIFICATE_IPS,
       createdAt: new Date().toISOString(),
     };
@@ -511,7 +554,7 @@ export function resolveDevCertificate(repoRoot: string): DevCertificateResult {
 
     // Read back rather than assume: a pair that fails here would have crashed Vite inside Node's TLS
     // setup, before any of this module's messages could be read. Reported as a reason, it is a banner.
-    if (!isUsable(key, cert, caKey, caCert, metaFile)) {
+    if (!isUsable(key, cert, caKey, caCert, metaFile, names)) {
       return {
         reason:
           'the generated certificate does not verify against its key or its CA; the dev servers will ' +

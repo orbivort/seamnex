@@ -72,7 +72,7 @@ RUN { \
 
 # --- platform additions ---------------------------------------------------------------------------
 #
-# Two deliberate changes to the upstream Dockerfile, both recorded in README.md:
+# Three deliberate changes to the upstream Dockerfile, all recorded in README.md:
 #
 #   1. `VOLUME ["/var/www/html"]` is **removed**. It declares the whole application — including the
 #      `lib/confs` configuration an install writes — as an anonymous volume. Compose materialises
@@ -82,7 +82,17 @@ RUN { \
 #   2. The entrypoint installs the product once before Apache starts (`seamnex-bootstrap.sh`). Upstream
 #      expects a human to complete the web installer; the platform declares the database and admin
 #      values the installer needs, so the install runs at boot instead of waiting for a browser.
+#   3. `HTTPS` is derived from the edge's `X-Forwarded-Proto`. The edge terminates TLS and reaches this
+#      container over plain HTTP, so without the rule the product builds every absolute URL — the
+#      installer redirect, the post-login location, password-reset links — as `http://`, and a browser
+#      on `https://<host>:8443` is sent to the same host on a scheme nothing listens on. Scoped to the
+#      header rather than to an address because the edge's address on the instance network is dynamic;
+#      only the edge can reach this container, which is the trust boundary that makes it safe.
 COPY seamnex-install-once.php /usr/local/bin/seamnex-install-once.php
 COPY seamnex-bootstrap.sh /usr/local/bin/seamnex-bootstrap.sh
-RUN chmod 0755 /usr/local/bin/seamnex-bootstrap.sh
+RUN chmod 0755 /usr/local/bin/seamnex-bootstrap.sh \
+	&& printf '%s\n' \
+		'# Platform: the edge terminates TLS and forwards X-Forwarded-Proto.' \
+		'SetEnvIf X-Forwarded-Proto "^https$" HTTPS=on' \
+		> /etc/apache2/conf-enabled/seamnex-forwarded-proto.conf
 ENTRYPOINT ["/usr/local/bin/seamnex-bootstrap.sh"]

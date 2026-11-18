@@ -75,7 +75,8 @@ export function decideProjection(input: {
           lines: [
             `no catalogue working tree at ${root} while ${projectedEntries} catalog entries are projected`,
             '  either the seed and this process resolved different roots, or the tree was removed while the projection stayed',
-            '  the seed only writes into an empty projection, so restoring it is a deliberate step, not a retry',
+            '  if the projection is the default set, `pnpm catalog:restore` writes the tree back from the vendored documents,',
+            '  then run `pnpm catalog:project` again; re-seeding is not the fix, because the seed only writes into an empty projection',
           ],
         };
   }

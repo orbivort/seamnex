@@ -10,7 +10,7 @@
       "purpose": "Absolute base URL Metabase uses for every link it generates: password-reset mails, dashboard subscriptions, alert links and the OAuth/redirect material. The image's fallback is the value of the incoming `Host` header, so behind an edge that forwards `Host: <slug>` the generated links point at a host the browser cannot reach on this deployment. Set it to the published route — `<scheme>://<slug>.<SEAMNEX_INGRESS_DOMAIN>:<SEAMNEX_PRODUCT_URL_PORT>`. A wrong value does not stop the sign-in page from loading; it surfaces later as a reset link that fails, which is why it is declared rather than left to the image default.",
       "type": "url",
       "required": true,
-      "defaultValue": "http://metabase.localhost:8020",
+      "defaultValue": "https://metabase.seamnex.localhost:8443",
       "constraint": "Absolute URL with scheme and host, no trailing slash; must equal the published route",
       "conditional": "change it together with the route slug — the edge rewrites the host, the application does not",
       "secret": false,

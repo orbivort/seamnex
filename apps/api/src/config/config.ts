@@ -516,11 +516,15 @@ const EnvironmentSchema = z
 
     /** 4D.2: the zone product routes are published under when an instance does not name a host. */
     /**
-     * `localhost`, not a made-up zone: RFC 6761 reserves the name and every mainstream browser maps
-     * `<slug>.localhost` to loopback, so a product route resolves on a fresh machine with no hosts
-     * file. A real zone is still the production value — see `.env.example`.
+     * Two labels deep, not `<slug>.localhost`. The product certificate comes from the development CA
+     * and has to cover every slug with one name: `*.<domain>` is matched by OpenSSL and Chromium only
+     * when at least two labels follow the wildcard, so `*.localhost` is inert and `*.seamnex.localhost`
+     * is not. `seamnex.localhost` is still under the RFC 6761 name, so a browser resolves it to
+     * loopback with no hosts file; the operating system resolver does not, and `docker/dns` answers
+     * `*.<domain>` for it (`pnpm dev:dns`). A real zone is still the production value — see
+     * `.env.example`.
      */
-    SEAMNEX_INGRESS_DOMAIN: z.string().min(1).default('localhost'),
+    SEAMNEX_INGRESS_DOMAIN: z.string().min(1).default('seamnex.localhost'),
     /**
      * 4D.2: how a *browser* addresses a published product route. The platform publishes no host
      * port, so the edge owns the scheme and the port. `https` on 443 is the production default; the

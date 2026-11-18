@@ -47,6 +47,37 @@ const DERIVATIONS: Readonly<Record<string, Derivation>> = {
     ESPOCRM_SITE_URL: origin(context),
     ESPOCRM_CONFIG_OIDC_CLIENT_ID: `seamnex-${context.slug}`,
   }),
+
+  /**
+   * Mautic. Same reasoning as D1: the site URL is the base of every link the product mails out, and
+   * the catalog default names one deployment's route.
+   */
+  'D02-01': (context) => ({ MAUTIC_SITE_URL: origin(context) }),
+
+  /**
+   * ERPNext. The value is a Frappe *site name* — bare host, no scheme, no port — and the product
+   * builds absolute URLs from it, so it has to be this instance's host and nothing else.
+   */
+  'D06-01': (context) => ({ ERPNEXT_SITE_NAME: context.host }),
+
+  /**
+   * OpenProject. `OPENPROJECT_HOST__NAME` is copied into Rails' `config.hosts` and Apache's
+   * `ServerName`, and the platform's relay reaches the product by container alias with the *public*
+   * host in the `Host` header. A catalog default that disagrees with the route is therefore not a
+   * cosmetic mismatch: Apache answers its `_default_` vhost with `404`, the administrator token
+   * cannot be derived, and automated sign-in fails with `product_unavailable`. Both names have to
+   * move together — separate them and the vhost and Rails disagree.
+   */
+  'D09-01': (context) => ({
+    OPENPROJECT_HOST__NAME: context.host,
+    SERVER_NAME: context.host,
+  }),
+
+  /**
+   * Metabase. Links it generates (password resets, subscriptions, alerts) come from this base, so a
+   * stale value surfaces days later as a reset link that points at another host.
+   */
+  'D11-01': (context) => ({ MB_SITE_URL: origin(context) }),
 };
 
 export function derivedEnvValues(context: DerivedEnvContext): Record<string, string> {

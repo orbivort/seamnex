@@ -7,10 +7,10 @@
   "variables": [
     {
       "name": "ERPNEXT_SITE_NAME",
-      "purpose": "Name of the single ERPNext site, and the value the image's nginx pins `FRAPPE_SITE_NAME_HEADER` to (`server_name`, the `X-Frappe-Site-Name` upstream header and the `try_files /<site>/public/...` prefix all read it). Keep it equal to the route host — `<slug>.<SEAMNEX_INGRESS_DOMAIN>`, for example `erp.localhost` — because the product builds absolute URLs from `host_name`, which the first-boot bootstrap sets to `http://<ERPNEXT_SITE_NAME>`. A mismatch does not break the deployment, it produces links that point at a host the browser cannot resolve. A **bare host, with no scheme and no port**: the value is a Frappe *site name*, so it names the directory `sites/<name>`, the argument to `bench new-site`, nginx's `server_name` and the `try_files /<name>/public/` prefix. `http://erp.localhost:8020` is not a valid site name and fails the first boot at `bench new-site` instead of producing a site — the same URL-shaped mistake the D9 default carried, there rejected by Rails with `400 Invalid host_name configuration`.",
+      "purpose": "Name of the single ERPNext site, and the value the image's nginx pins `FRAPPE_SITE_NAME_HEADER` to (`server_name`, the `X-Frappe-Site-Name` upstream header and the `try_files /<site>/public/...` prefix all read it). Keep it equal to the route host — `<slug>.<SEAMNEX_INGRESS_DOMAIN>`, for example `erp.seamnex.localhost` — because the product builds absolute URLs from `host_name`, which the first-boot bootstrap sets to `http://<ERPNEXT_SITE_NAME>`. A mismatch does not break the deployment, it produces links that point at a host the browser cannot resolve. A **bare host, with no scheme and no port**: the value is a Frappe *site name*, so it names the directory `sites/<name>`, the argument to `bench new-site`, nginx's `server_name` and the `try_files /<name>/public/` prefix. `http://erp.seamnex.localhost:8443` is not a valid site name and fails the first boot at `bench new-site` instead of producing a site — the same URL-shaped mistake the D9 default carried, there rejected by Rails with `400 Invalid host_name configuration`.",
       "type": "string",
       "required": true,
-      "defaultValue": "erpnext.localhost",
+      "defaultValue": "erpnext.seamnex.localhost",
       "constraint": "Valid hostname (letters, digits, dots, dashes); no scheme, no port; created once on first start and not renamed afterwards",
       "conditional": null,
       "secret": false,

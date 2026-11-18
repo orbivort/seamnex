@@ -1,0 +1,28 @@
+# NFR-4.1 / ISSUE-07 — the development edge's default certificate.
+#
+# Every `internal` route the platform projects carries `tls: {}` (ADR-BE-39), which Traefik reads as
+# "terminate here with the default certificate". Unset, that default is Traefik's own self-signed
+# `CN=TRAEFIK DEFAULT CERT`, whose only SAN is `*.traefik.default`: a browser reports an untrusted
+# issuer *and* a hostname mismatch, and a scripted client refuses the handshake outright — so
+# `https://<slug>.localhost:8443` was unusable for Playwright, Node and `curl` even after a human
+# clicked through the interstitial.
+#
+# The pair below is the leaf `packages/config/vite/dev-cert.ts` mints, mounted read-only from
+# `temp/certs` by `docker/compose.dev.yml` and issued by the `Seamnex development CA` a developer trusts
+# once. It names `localhost`, `127.0.0.1`, `::1` **and every product host the edge serves** — `*.localhost`
+# alone is not enough, because no verifier accepts a wildcard whose base has no dot (OpenSSL: `error 62
+# hostname mismatch`; Chromium: `ERR_CERT_COMMON_NAME_INVALID`). `scripts/compose.mjs` collects those hosts
+# from the projected `instance-*.yml` routes and passes them to the mint before `up`.
+#
+# A re-minted leaf (annually, when `CERTIFICATE_NAMES` changes, or when a product is added) is not
+# re-read by the file provider: `docker compose -f docker/compose.dev.yml restart traefik` applies it,
+# the same caveat the dynamic directory already has on Docker Desktop (docs/operations/bootstrap.md).
+#
+# Development only. This file is mounted by `docker/compose.dev.yml` and nothing else; a deployment
+# gets its certificates from `certificatesResolvers.seamnex` (docker/traefik/traefik.yml).
+tls:
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /certs/dev.crt
+        keyFile: /certs/dev.key

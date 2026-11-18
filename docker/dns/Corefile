@@ -1,0 +1,26 @@
+# Development wildcard DNS for product routes (NFR-4.1 / ISSUE-07).
+#
+# A browser resolves any name under `.localhost` to loopback by itself, so this service is not needed
+# for Chrome, Edge or Firefox. Everything that asks the operating system — Node, `curl`, Playwright's
+# API context, a CI container — gets NXDOMAIN, because no platform resolver implements RFC 6761 for
+# subdomains of `localhost`. This answers `<anything>.<zone>` with loopback so those clients work too.
+#
+# The zone is `SEAMNEX_INGRESS_DOMAIN` (`{...}` is CoreDNS's own environment substitution, in a text
+# file; compose renders `${...}` before the file is read). Keep the two spellings distinct: they are
+# handled by different programs at different times.
+#
+# `forward` points at the container's `/etc/resolv.conf`, which Docker fills with its embedded resolver
+# and that forwards to the host's adapters. This is only safe because the host adapters are *not*
+# rewritten: `pnpm dev:dns --apply` adds a Windows NRPT rule scoped to this one zone, so the operating
+# system sends only `<zone>` names here. Pointing the adapter itself at 127.0.0.1 would make every
+# other lookup travel back into this block and loop.
+.:53 {
+    template IN A {$SEAMNEX_DNS_ZONE} {
+        answer "{{ .Name }} 60 IN A 127.0.0.1"
+    }
+    template IN AAAA {$SEAMNEX_DNS_ZONE} {
+        answer "{{ .Name }} 60 IN AAAA ::1"
+    }
+    forward . /etc/resolv.conf
+    errors
+}

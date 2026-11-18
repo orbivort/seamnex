@@ -82,9 +82,12 @@ x-api-environment: &api-environment
   # §8.2 O9), so it is a deployment-wide setting, not a per-product one.
   SEAMNEX_VERIFY_TIMEOUT_MS: ${SEAMNEX_VERIFY_TIMEOUT_MS:-300000}
   SEAMNEX_INSTANCE_DATA_DIR: /var/lib/seamnex/instances
-  # `localhost` is the only suffix a browser resolves to loopback without a hosts entry
-  # (`<slug>.localhost`, RFC 6761), so a fresh checkout reaches a deployed product with no setup step.
-  SEAMNEX_INGRESS_DOMAIN: ${SEAMNEX_INGRESS_DOMAIN:-localhost}
+  # Two labels under the RFC 6761 name, not `<slug>.localhost`: a browser resolves either shape with no
+  # hosts entry, but the edge's certificate cannot cover the one-label form. `*.<domain>` is matched by
+  # OpenSSL and Chromium only when at least two labels follow the wildcard, so `*.localhost` would leave
+  # every product URL with `ERR_CERT_COMMON_NAME_INVALID`. The operating system resolver does not know
+  # `.localhost` at all; `docker/dns` answers this zone and `pnpm dev:dns` points the host at it.
+  SEAMNEX_INGRESS_DOMAIN: ${SEAMNEX_INGRESS_DOMAIN:-seamnex.localhost}
   # The dev edge terminates TLS on 127.0.0.1:8443 with its own internal certificate: no public DNS
   # name on a laptop can satisfy ACME. The launch links the portal renders, the OIDC redirect URIs
   # and the relay origin therefore have to say exactly that, or the browser is pointed at a port
@@ -193,6 +196,21 @@ x-api-environment: &api-environment
   # (`temp/backups` on the host), so `.env` carries the mapping; without it the helper mounts an
   # empty directory and the dump lands where the API cannot read it.
   SEAMNEX_DOCKER_PATH_MAP: ${SEAMNEX_DOCKER_PATH_MAP:-}
+  # NFR-4.6 / S-10. Literal, not `${SEAMNEX_SCAN_TMP_DIR}`: the root `.env` names the *host* tree
+  # (`./temp/scans`) for `pnpm dev`, and inside this container that relative path resolved against
+  # `/app` — which `WORKDIR` creates as root, so the first `mkdir` failed with EACCES and the job
+  # stopped at "Apply" with IMAGE_SCAN_BLOCKED. The scan tree is also what the daemon binds into the
+  # scanner container, so the `.env` path map needs the matching pair (see `.env.example`).
+  SEAMNEX_SCAN_TMP_DIR: /var/lib/seamnex/scans
+  # The scan policy, forwarded rather than restated so `.env` is authoritative: a scan setting named
+  # there that never reached the process was indistinguishable from its default. The root `.env`
+  # sets `SEAMNEX_SCAN_FAIL_OPEN=true` as a stopgap while the scanner cannot fetch its vulnerability
+  # database (ISSUE-53); the default here stays fail-closed, which is the shipped posture.
+  SEAMNEX_SCAN_ENABLED: ${SEAMNEX_SCAN_ENABLED:-true}
+  SEAMNEX_SCANNER_IMAGE: ${SEAMNEX_SCANNER_IMAGE:-aquasec/trivy:0.57.1}
+  SEAMNEX_SCAN_BLOCK_SEVERITIES: ${SEAMNEX_SCAN_BLOCK_SEVERITIES:-CRITICAL}
+  SEAMNEX_SCAN_FAIL_OPEN: ${SEAMNEX_SCAN_FAIL_OPEN:-false}
+  SEAMNEX_SCAN_RETENTION_DAYS: ${SEAMNEX_SCAN_RETENTION_DAYS:-90}
   SEAMNEX_AGE_RECIPIENT: ${SEAMNEX_AGE_RECIPIENT:-}
   SEAMNEX_AGE_IDENTITY_FILE: /var/lib/seamnex/age/identity
 
@@ -207,12 +225,17 @@ x-api-volumes: &api-volumes
   - ../temp/age:/var/lib/seamnex/age
   # FR-2.6: shared with Prometheus, which mounts it read-only. Created by `ensureRuntimeDirs`.
   - ../temp/prometheus-targets:/var/lib/seamnex/prometheus-targets
+  # NFR-4.6: the image tar and Trivy report. It has to be a host-mounted tree, not the image's own
+  # filesystem: the scanner container is a sibling `docker run` and the daemon resolves the bind
+  # source on the *host*, so an unmounted path gave the scanner an empty directory.
+  - ../temp/scans:/var/lib/seamnex/scans
   # Read-write: 4A.8 commits `instances/<slug>/instance.yaml` here before a job may apply. The
   # container runs as `node` (uid 1000) while the mount root is owned by the host, so the
   # `instances/` subdirectory is created by `scripts/dev.mjs` and `scripts/compose.mjs`
   # (`scripts/lib/runtime-dirs.mjs`) — creating it from inside the container fails with EACCES and
   # the deployment is refused with REPOSITORY_UNAVAILABLE. The same preparation covers `instances`,
-  # `backups`, `age` and `traefik/dynamic`, which the deploy job and the route projection write to.
+  # `backups`, `age`, `scans` and `traefik/dynamic`, which the deploy job and the route projection
+  # write to.
   - ../temp/catalog-repo:/var/lib/seamnex/catalog-repo
   # Vendored upstream trees are reviewed content, so they are mounted read-only: the resolver copies
   # from them and never writes to them.
@@ -368,6 +391,36 @@ services:
     # One-shot job: a retry loop would hide a realm that fails to apply.
     restart: 'no'
 
+  # NFR-4.1 / ISSUE-07 — wildcard DNS for product routes.
+  #
+  # A browser resolves `<slug>.<SEAMNEX_INGRESS_DOMAIN>` to loopback by itself (RFC 6761), so Chrome,
+  # Edge and Firefox need nothing from this service. Node, `curl` and Playwright's API context ask the
+  # operating system, which implements no such rule for subdomains of `localhost`, and get NXDOMAIN.
+  # This answers the zone — and only the zone — with loopback for them.
+  #
+  # Bound to 127.0.0.1 on purpose. On a Docker Desktop host `SharedAccess` (Internet Connection
+  # Sharing) already holds `0.0.0.0:53`; Windows still allows this more specific bind, and the service
+  # must never be reachable from another machine.
+  #
+  # The host sends only the zone here: `pnpm dev:dns --apply` adds a Windows NRPT rule for it. The
+  # adapter's own resolvers are left alone — replacing them would send every other lookup back into
+  # this container's `forward` line.
+  dns:
+    image: coredns/coredns:1.12.0
+    command: ['-conf', '/etc/coredns/Corefile']
+    environment:
+      # Substituted into the Corefile's `{$SEAMNEX_DNS_ZONE}` by CoreDNS, which reads the rendered
+      # text — distinct from compose's own `${...}` interpolation above it.
+      SEAMNEX_DNS_ZONE: ${SEAMNEX_INGRESS_DOMAIN:-seamnex.localhost}
+    ports:
+      - '127.0.0.1:53:53/udp'
+      - '127.0.0.1:53:53/tcp'
+    volumes:
+      - ./dns/Corefile:/etc/coredns/Corefile:ro
+    networks: [seamnex-control]
+    security_opt: [no-new-privileges:true]
+    logging: *default-logging
+
   traefik:
     image: traefik:v3.3
     command:
@@ -387,6 +440,16 @@ services:
     volumes:
       - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
       - ./traefik/dynamic:/etc/traefik/dynamic:ro
+      # NFR-4.1 / ISSUE-07: the certificate every `internal` route terminates with, named by
+      # `traefik/dynamic/tls.yml`. It is the leaf the dev servers already serve, so a product at
+      # `https://<slug>.localhost:8443` validates against the development CA trusted for
+      # `https://localhost:5173`; without it Traefik answers with its own `CN=TRAEFIK DEFAULT CERT`.
+      # The *directory* is mounted rather than the two files: Docker creates a directory at a missing
+      # bind-mount source, and `temp/certs/dev.crt` as a directory breaks the next mint as well as the
+      # edge. Read-only, and `dev-ca.key` sits in it — the edge never reads that file, and the pair has
+      # to be produced by exactly one mechanism (`packages/config/vite/dev-cert.ts`), which
+      # `scripts/compose.mjs` runs before `up`.
+      - ../temp/certs:/certs:ro
       # The certificate store is a named volume, not a bind mount under `temp/`: Traefik refuses a
       # store that is not mode 0600, and a Docker Desktop bind mount reports 0777 for a file that is
       # 0600 on disk. A volume keeps the mode the edge set.

@@ -53,6 +53,18 @@ export function edgeConfigProblems(env) {
       'SEAMNEX_EDGE_TLS_MODE=acme (or unset)  ->  internal (no CA can validate `.localhost`; the dev edge serves its own certificate)',
     );
   }
+  /*
+   * A wildcard needs two labels. The edge's certificate carries `*.<domain>`, and no verifier matches
+   * `*.localhost` — OpenSSL answers `error 62 hostname mismatch`, Chromium `ERR_CERT_COMMON_NAME_INVALID`.
+   * An install whose `.env` still says `localhost` therefore certifies nothing, and it says so here
+   * rather than in a browser on the first product the platform launches.
+   */
+  if (tlsMode === 'internal' && !domain.includes('.')) {
+    problems.push(
+      `SEAMNEX_INGRESS_DOMAIN=${domain}  ->  seamnex.localhost (the edge's certificate covers ` +
+        '`*.<domain>`, and a wildcard whose base has no dot is rejected by every browser and client)',
+    );
+  }
   if (scheme === 'https' && port === PRE_TLS_DEV_PORT) {
     problems.push(
       `SEAMNEX_PRODUCT_URL_PORT=${PRE_TLS_DEV_PORT}  ->  8443 (the dev edge terminates TLS on 8443, not on the old plain port)`,

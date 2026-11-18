@@ -37,6 +37,7 @@ Everything binds to `127.0.0.1`. Nothing in this install is reachable from anoth
 | 5432       | PostgreSQL                     | schema, seed, backups          |
 | 6379       | Redis                          | job queue, rate limits         |
 | 8443, 8081 | Traefik (product edge, TLS)    | deployed products              |
+| 53         | CoreDNS (product zone)         | resolving product hosts        |
 | 5678       | n8n                            | workflow steps                 |
 | 9000       | S3 gateway (VersityGW)         | backup artefacts               |
 | 8025, 1025 | Mailpit (SMTP and web)         | notifications, password resets |
@@ -44,17 +45,25 @@ Everything binds to `127.0.0.1`. Nothing in this install is reachable from anoth
 | 8091       | Relay                          | product bootstrap              |
 | 8092       | Broker proxy                   | workflow callbacks             |
 
-The edge serves products over TLS only, on `https://<slug>.localhost:8443`. The install has no public
-DNS name, so it presents the edge's own certificate and the browser asks you to accept it once — a
-development affordance, not the production shape (ADR-BE-39). Port 80 is deliberately not published:
-inside the edge it carries the ACME challenge and the redirect to HTTPS, which a real deployment
+The edge serves products over TLS only, on `https://<slug>.seamnex.localhost:8443`. The install has no
+public DNS name, so the edge terminates with the development leaf from `temp/certs`, which carries
+`DNS:*.seamnex.localhost` — one certificate for every slug, present and future, so the CA trusted once for
+`https://localhost:5173` covers product URLs too (see
+[`certificates.md`](certificates.md#the-development-edge-serves-the-same-leaf)). The zone is two labels
+deep because no verifier matches `*.localhost`; a browser resolves either shape on its own, and every
+other client needs the zone answered by `docker/dns` (`pnpm dev:dns:apply`, verified with `pnpm dev:dns`).
+That is a development affordance, not the production shape (ADR-BE-39). Port 80 is deliberately not
+published: inside the edge it carries the ACME challenge and the redirect to HTTPS, which a real deployment
 publishes instead (see [what this does not do](#what-this-does-not-do)).
 
 The edge reads its dynamic directory through the compose bind mount, and Docker Desktop on Windows does
 not deliver file-provider watch events for changes made on the host: a route the platform projects after
 the stack is up answers 404 (or keeps answering after it is gated) until the edge re-reads the directory.
 `docker compose -f docker/compose.dev.yml restart traefik` applies it. On Linux the watch works, so this
-is a development-host caveat rather than an edge design constraint.
+is a development-host caveat rather than an edge design constraint. A re-minted development certificate is
+in the same position on every host — the provider watches YAML, not the mounted pair — which is one
+restart a year, not one per deployment: the wildcard already covers a new product's host.
+`pnpm dev:stack restart traefik` re-mints and restarts in one command.
 
 An `.env` written before this change still says `SEAMNEX_PRODUCT_URL_SCHEME=http` and `_PORT=8020`, and
 has no `SEAMNEX_EDGE_TLS_MODE`; those values name a port the stack no longer publishes. `pnpm dev`
