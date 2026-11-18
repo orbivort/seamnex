@@ -86,6 +86,15 @@ describe('env-schema file', () => {
     ).toMatch(/not one of the declared options/);
   });
 
+  it('refuses a boolean default that no consumer would read as the flag it means', () => {
+    // The same authoring mistake an enum default is checked for: `True` loads, reaches a runtime that
+    // compares the text to `"true"`, and the feature it enables never turns on.
+    expect(
+      issuesOf(file([variable({ type: 'boolean', defaultValue: 'True' })])).join('\n'),
+    ).toMatch(/A boolean default is exactly "true" or "false"/);
+    expect(issuesOf(file([variable({ type: 'boolean', defaultValue: 'true' })]))).toEqual([]);
+  });
+
   it('refuses a required variable that only "none" may set and nothing supplies', () => {
     const issues = issuesOf(
       file([variable({ name: 'SITE_URL', required: true, overrideCeiling: 'none' })]),
@@ -290,6 +299,33 @@ describe('checkEnvValue', () => {
   it('says nothing when the declaration carries no rule at all', () => {
     const plain = { name: 'PLAIN', type: 'string' };
     expect(checkEnvValue(plain, 'anything')).toBeNull();
+  });
+
+  it('bounds a boolean by its type, which no `rule` may do', () => {
+    // The incident: `ORANGEHRM_INSTALLER_LICENSE_AGREED=True` was stored through the Environment
+    // drawer, and the entrypoint compares `getenv(...) !== 'true'`, so the install it was meant to
+    // permit never ran. A boolean has exactly two correct spellings and this is where they are kept.
+    const flag = { name: 'FEATURE_FLAG', type: 'boolean' };
+    expect(checkEnvValue(flag, 'true')).toBeNull();
+    expect(checkEnvValue(flag, 'false')).toBeNull();
+    for (const value of ['True', 'TRUE', 'yes', '1', 'on']) {
+      expect(checkEnvValue(flag, value)).toEqual({
+        code: 'invalid_type',
+        message: 'A boolean is exactly "true" or "false"; this value is neither.',
+      });
+    }
+    // An absent value stays `required`'s business, as for every other type.
+    expect(checkEnvValue(flag, null)).toBeNull();
+    expect(checkEnvValue(flag, '')).toBeNull();
+  });
+
+  it('bounds an enum by its declared options, and names them', () => {
+    const method = { name: 'METHOD', type: 'enum', options: ['Espo', 'ApiKey'] };
+    expect(checkEnvValue(method, 'ApiKey')).toBeNull();
+    expect(checkEnvValue(method, 'Oidc')).toEqual({
+      code: 'invalid_type',
+      message: 'Not one of the declared options: Espo, ApiKey.',
+    });
   });
 
   it('describes a pattern with its raw expression when the author gave no description', () => {

@@ -145,6 +145,15 @@ export function ReviewStep({
                       <ul className="mt-1 list-disc space-y-1 pl-4">
                         {group.blockers.map((blocker) => (
                           <li key={`${blocker.code}-${blocker.field ?? '—'}`}>
+                            {/* The field is what the operator has to go and change; without it a
+                                plan with three unanswered variables reads as three identical
+                                sentences. */}
+                            {blocker.field === null ? null : (
+                              <span className="font-mono text-micro text-muted">
+                                {blocker.field}
+                                {': '}
+                              </span>
+                            )}
                             {blocker.message}
                             {blocker.blocking ? (
                               <span className="ml-1 text-meta text-faint">(blocking)</span>

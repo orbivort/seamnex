@@ -67,7 +67,9 @@ describe('deployment tabs', () => {
     });
     fireEvent.click(within(drawer).getByRole('button', { name: 'Save and render diff' }));
 
-    expect(await screen.findByText(/Recreate required|Restart required/)).toBeDefined();
+    // The title follows what the API did, not which variable changed: a save with a diff is queued
+    // as a reconfigure job, and "Restart required" was advice no deployment could honour.
+    expect(await screen.findByText('Reconfigure queued')).toBeDefined();
   });
 
   it('asks before discarding an unapplied override', async () => {

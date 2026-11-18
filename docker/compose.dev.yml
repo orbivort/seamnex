@@ -76,6 +76,18 @@ x-api-environment: &api-environment
   SEAMNEX_ADAPTERS_MODE: real
   DOCKER_HOST: tcp://docker-socket-proxy:2375
   SEAMNEX_DOCKER_HOST: tcp://docker-socket-proxy:2375
+  # ADR-BE-40 §7. A build session is a hijacked connection (`Upgrade: tcp`), and the proxy above
+  # forwards allow-listed HTTP paths only — it answers a build `403` before a Dockerfile is read.
+  # Builds therefore go to the `buildkit` service, which speaks its own gRPC protocol and never sees
+  # the Engine socket. Empty keeps the daemon's own builder, for a host without the proxy.
+  SEAMNEX_BUILDKIT_ADDR: ${SEAMNEX_BUILDKIT_ADDR:-tcp://buildkit:1234}
+  # Package-manager mirrors the `build` stage forwards to a *product* image as `--build-arg` (the
+  # Dockerfile declares the argument; `docker/compose.dev.yml`'s own `api` build takes the first two
+  # for the platform image). Empty is upstream and is what CI uses. They are build-host properties:
+  # no image carries one, and a value in the render set would follow the instance to another host.
+  APK_MIRROR: ${APK_MIRROR:-}
+  APT_MIRROR: ${APT_MIRROR:-}
+  NPM_REGISTRY: ${NPM_REGISTRY:-}
   # How long `verify` waits for containers *and* an HTTP answer. The 300 s default fits a product
   # that starts in seconds; a first ERPNext install migrates a few hundred doctypes and does not.
   # Global until the catalog can carry a per-entry override (docs/catalog-and-deployment-operations.md
@@ -605,8 +617,9 @@ services:
     # this allow-list: containers, images, networks and volumes, POST for mutation, EXEC off.
     #
     # `EXEC=0` is not a convenience: container logs are read from the logs endpoint, never by running
-    # a shell inside a product. `BUILD=1` is required because BuildKit is driven by the CLI, which
-    # reaches the daemon through the same proxy.
+    # a shell inside a product. `BUILD=1` allows the plain `POST /build` request; it does **not** make
+    # a BuildKit build work, because that needs a hijacked session the allow-list refuses with `403`
+    # (see `buildkit` below and ADR-BE-40 §7).
     image: tecnativa/docker-socket-proxy:0.3.0
     environment:
       CONTAINERS: '1'
@@ -633,6 +646,63 @@ services:
       retries: 10
       start_period: 5s
     security_opt: [no-new-privileges:true]
+    logging: *default-logging
+    restart: unless-stopped
+
+  buildkit:
+    # ADR-BE-40 §7 — the builder a deployment's `build` stage talks to.
+    #
+    # The proxy above cannot carry a build: BuildKit drives a hijacked connection (`Upgrade: tcp`)
+    # and the allow-list answers it `403`, which is how a `build` stage used to fail with
+    # `unable to upgrade to tcp, received 403` having read no Dockerfile at all. BuildKit's gRPC
+    # endpoint is its own protocol, so it needs no Engine session and no proxy in the middle.
+    #
+    # It is reached only from `seamnex-control` (nothing is published) and it never sees the Engine
+    # socket. An image reaches the host daemon through the CLI's `--load`, over the allow-listed
+    # image endpoints, so nothing is mounted into this container.
+    #
+    # `privileged` is what an OCI worker needs for the mount namespaces a `RUN` step uses. The
+    # version is pinned: a floating `buildx-stable-1` would make "the build that succeeded
+    # yesterday" unreproducible, and `pnpm check:images` would have nothing to verify.
+    image: moby/buildkit:v0.34.2
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        # BuildKit takes registry mirrors from a config file only, and `registry-mirrors` in the
+        # Engine's daemon.json is not read here. A network that reaches Docker Hub through a mirror
+        # therefore needs it rendered into the daemon's config; the value stays out of the
+        # repository because it is a property of the host, not of the platform.
+        #
+        # `SEAMNEX_REGISTRY_MIRROR` is therefore a comma-separated list,
+        # rendered as BuildKit's own array: they are tried in the order given and the next one is
+        # used when a mirror errors. Order is the operator's ranking, fastest first.
+        : > /etc/buildkit/buildkitd.toml
+        if [ -n "$${SEAMNEX_REGISTRY_MIRROR}" ]; then
+          list=''
+          for mirror in $$(printf '%s' "$${SEAMNEX_REGISTRY_MIRROR}" | tr ',' ' '); do
+            if [ -z "$${list}" ]; then
+              list="\"$${mirror}\""
+            else
+              list="$${list}, \"$${mirror}\""
+            fi
+          done
+          printf '[registry."docker.io"]\n  mirrors = [%s]\n' "$${list}" \
+            > /etc/buildkit/buildkitd.toml
+        fi
+        exec buildkitd --addr tcp://0.0.0.0:1234 --config /etc/buildkit/buildkitd.toml
+    environment:
+      SEAMNEX_REGISTRY_MIRROR: ${SEAMNEX_REGISTRY_MIRROR:-}
+    privileged: true
+    networks: [seamnex-control]
+    healthcheck:
+      # `debug workers` is the only endpoint that proves a worker is actually usable; a listening
+      # port reports healthy for a daemon whose worker failed to start.
+      test: ['CMD', 'buildctl', '--addr', 'tcp://127.0.0.1:1234', 'debug', 'workers']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     logging: *default-logging
     restart: unless-stopped
 
@@ -705,6 +775,11 @@ services:
       api:
         condition: service_healthy
       docker-socket-proxy:
+        condition: service_healthy
+      # The `build` stage of every deploy, reconfigure and upgrade lands here (ADR-BE-40 §7); a
+      # worker that starts first would register its builder against a daemon still coming up and
+      # report the first build as a failed one.
+      buildkit:
         condition: service_healthy
     # No HTTP probe, and the image's built-in check is disabled rather than inherited: it exits 0 for
     # every non-api role, so it would report "healthy" for a worker that consumes nothing. A green

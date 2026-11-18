@@ -91,6 +91,22 @@ if ($missing !== []) {
     exit(1);
 }
 
+/*
+ * The installer asks the person installing to accept OrangeHRM's licence. That acceptance is theirs:
+ * the platform may hand an operator every value the install needs, but it may not read a licence on
+ * their behalf and answer "yes". The install therefore refuses before it writes anything, and Apache
+ * still starts (see seamnex-bootstrap.sh), so the product's own installer is reachable and says the
+ * same thing in the browser.
+ */
+if (env('ORANGEHRM_INSTALLER_LICENSE_AGREED', 'false') !== 'true') {
+    logLine(
+        'cannot install: ORANGEHRM_INSTALLER_LICENSE_AGREED is not "true", so no licence acceptance is ' .
+        'recorded. Set it on the instance once an operator has read the release archive\'s LICENSE and ' .
+        'accepts its terms; until then the web installer is reachable on this route.'
+    );
+    exit(1);
+}
+
 if (!waitForDatabase()) {
     exit(1);
 }
@@ -130,6 +146,7 @@ $yaml = "database:\n"
     . '  registrationConsent: ' . (env('ORANGEHRM_REGISTRATION_CONSENT', 'false') === 'true' ? 'true' : 'false') . "\n"
     . "\n"
     . "license:\n"
+    // Reached only when the operator set ORANGEHRM_INSTALLER_LICENSE_AGREED above.
     . "  agree: y\n";
 
 if (@file_put_contents(INSTALLER_CONFIG, $yaml) === false) {

@@ -7,610 +7,228 @@ Format: [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) · Versio
 [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) · Licence: [GPL-3.0-only](LICENSE). The
 version is the git tag (`vX.Y.Z`). The entries under `## [Unreleased]` become the next released section
 in the `release-prepare` pull request, which leaves a fresh empty `## [Unreleased]` above it and moves
-the same number through every manifest and the link definitions at the foot of this file.
+the same number through every manifest and the link definitions at the foot of this file. Each entry
+states one reader-visible outcome in at most four lines, names the requirement ids and ADR it
+implements, and puts what an operator must do under `### Upgrade notes`.
 
 [Repository](https://github.com/orbivort/seamnex) · [Issues](https://github.com/orbivort/seamnex/issues) ·
 [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 
 ## [Unreleased]
 
+### Upgrade notes
+
+Action required when upgrading an existing install; everything else is additive.
+
+- Every catalogue entry: record the digest of the artefact actually published, in the same commit as
+  the tag. A pin that no longer matches its registry now blocks the deployment instead of being
+  ignored, as does a host holding a locally built image with no repository digest.
+- Existing `.env`: point the product URL at the TLS edge and set `SEAMNEX_EDGE_TLS_MODE`. `pnpm dev`
+  refuses to start until they match, and the API refuses under `NODE_ENV=production`.
+- Development hosts: the zone is now `seamnex.localhost`, so the hosts stored on `instance_route`
+  must move with it; trust `temp/certs/dev-ca.crt` once, and run `pnpm dev:dns --apply` where Node,
+  `curl` or Playwright must resolve the zone (`--revert` undoes the rule).
+- A platform restore without `SEAMNEX_PLATFORM_RESTORE_DB_URL` records `pnpm restore:platform-db` as
+  an outstanding operator step, and the run cannot end `complete`.
+- Audit retention now has a 365-day floor: a shorter stored `audit_retention_days` is read as the
+  floor.
+
 ### Added
 
-- **A lost catalogue working tree can be restored instead of leaving `pnpm dev` unrecoverable**
-  (`FR-2.6`, `NFR-6.3`) — the projection lives in PostgreSQL's volume and the documents live in
-  `SEAMNEX_CATALOG_REPO_PATH` (default `./temp/catalog-repo`), so deleting `temp/`, moving the checkout
-  or restoring a database onto another host kept one half and lost the other. Both repair steps then
-  refused by design: `pnpm db:seed` writes the default set only into an empty projection, and
-  `pnpm catalog:project` stopped with `no catalogue working tree … while 6 catalog entries are
-projected`, telling the operator that restoring the tree "is a deliberate step, not a retry" and
-  naming no step — a documented dead end, reproduced on a stack whose `catalog_entry` held exactly the
-  six default keys. `pnpm catalog:restore` is that step: it writes `catalog/<KEY>.json` and
-  `catalog/env/<KEY>.json` back from `platform/default-catalog/` and `platform/catalog/env/`, and only
-  when the two halves provably belong together — `catalog/` absent _and_ `catalog_entry` holding
-  exactly `DEFAULT_PRODUCT_KEYS`. A tree that is present, an empty projection, or any other key set is
-  refused with the keys that do not line up, because those rows came from a checkout or a backup this
-  repository cannot reproduce; existing files are never replaced. The projector's message now names the
-  command, and the scripts no longer pair `shell: true` with an argument array, which is where
-  `pnpm dev` printed `[DEP0190]` on every Windows start.
-- **The edge terminates TLS on every route, and the mode it records is the mode it runs** (`NFR-4.1`,
-  `FR-2.5`, `AC-42`, `S-6`, ISSUE-07) — the only committed edge configuration served plain HTTP on
-  `:80` while `instance_route.tls_mode` was written as the SQL literal `'acme'` and the instance screen
-  reported "ACME wildcard". `docker/traefik/traefik.yml` now declares `websecure` on `:443`, a permanent
-  redirect from `:80` (which carries the ACME HTTP-01 challenge and nothing else) and
-  `certificatesResolvers.seamnex` storing to `/acme/acme.json`; the dev stack is TLS-only on
-  `127.0.0.1:8443` with the edge's own certificate and publishes no plain port. `SEAMNEX_EDGE_TLS_MODE`
-  (`acme` | `internal`) is written onto every route and projected into each router's `tls` block,
-  `SEAMNEX_TRAEFIK_ACME_EMAIL` is validated by the schema and consumed by the edge instead of being
-  dead configuration, and generated routers carry their own `stsSeconds: 31536000` headers rather than
-  a middleware that existed only in the development stack. `SECURITY.md` no longer disclaims TLS to
-  the operator. ADR-BE-39.
-- **The Vite dev servers speak TLS, and the start-up banner says `https://`** (`NFR-4.1`, ISSUE-07) —
-  `pnpm dev` advertised `http://localhost:5173` while the deployment edge refused plain HTTP, so the
-  URL a developer learned was the one the product does not serve. `packages/config/vite/dev-cert.ts`
-  mints a development CA and a leaf it issues for `localhost`, `*.localhost`, `127.0.0.1` and `::1`
-  into `temp/certs` on first start (through the `openssl` that ships with every supported host — no new
-  dependency, nothing secret committed), reuses both while they stay valid and reissues only the leaf,
-  so trusting `temp/certs/dev-ca.crt` once survives the yearly rotation. A self-signed leaf was the
-  first attempt and could not be verified by Chromium or Playwright at all, which left "turn
-  verification off" as the only way to exercise the stack. Both `server.https` and `preview.https` use
-  the leaf. The shipped realm accepts `https://localhost:5173|5174` as redirect URIs and
-  web origins, `APP_ORIGINS` includes them (the CSRF check and the redirect-URI allowlist compare the
-  browser's `Origin`), and the console's portal link falls back to `https://localhost:5173`. A host
-  without OpenSSL keeps working over HTTP and the dev server says why.
-- **A `.env` written before the edge served TLS can no longer point products at port 8020** (`NFR-4.1`,
-  `FR-2.5`, ISSUE-07) — `.env` is only written when it is missing, so an existing install kept
-  `http` + `8020` and advertised a port the stack no longer publishes, in launch links and in the OIDC
-  redirect URI each product is registered with. `pnpm dev` now refuses to start until the product URL
-  and `SEAMNEX_EDGE_TLS_MODE` match the shipped edge (with the exact lines to change, and `pnpm dev:web`
-  named for work that does not involve the stack); the API warns about the same mismatch at boot,
-  refuses it under `NODE_ENV=production`, and the boot line reports `productUrl`, `edgeTlsMode` and
-  whether an ACME contact address is configured.
-- **A registry is trusted because a revision says so, and every product image is scanned before it
-  starts** (`NFR-4.16`, `NFR-4.6`, `S-10`, ISSUE-08) — the console asserted "Trusted registry
-  allow-list verified." while the deploy pipeline pulled whatever the compose file named, and S-10's
-  scan left no report behind. `packages/domain/src/image-registry.ts` is now the one parser for a
-  reference (`docker.io` implicit, single-segment names under `library`, ports kept, digests
-  stripped), and the allow-list it feeds is append-only `trusted_registry_revision` rows seeded from
-  `packages/db/src/seed/trusted-registries.json`, extended by an R1-only route that writes the
-  revision and its audit row in one transaction. Enforcement is layered — catalogue validation,
-  `untrusted_registry` in the compose and Dockerfile evaluators, an `image_untrusted_registry`
-  pre-flight blocker, and the guard inside `DockerEngineClient.pull/build/composeBuild/composeUp` that
-  closes the queued-job hole pre-flight leaves. The rule is non-waivable (`NON_WAIVABLE_RULES`):
-  NFR-4.16's only remedy is a new revision. After the image is available and before containers start,
-  the pipeline saves it and runs the pinned scanner through a bind-mounted work directory (the socket
-  proxy refuses the BuildKit session), persists the report in `image_scan_result` keyed by instance
-  and digest, reuses a `passed` report for an unchanged digest, blocks on
-  `SEAMNEX_SCAN_BLOCK_SEVERITIES` (critical by default), fails closed unless
-  `SEAMNEX_SCAN_FAIL_OPEN=true`, and prunes rows past `SEAMNEX_SCAN_RETENTION_DAYS`. The instance
-  screen gains an Image security tab whose "never scanned" is a state, not a pass. ADR-BE-36.
-- **The catalogue can prove its own coverage, and S-2's floor is data with a decision behind it**
-  (`FR-1.1`, `FR-2.16`, `S-1`, `S-2`, `AC-01`, ISSUE-11) — Mautic, ERPNext and Metabase declared an
-  environment and had no entry document, and the projection reported that as a note;
-  `NATIVE_FLOOR_DEPLOYMENTS = 6` lived inside a React page, so nothing could refuse anything against
-  it. The three documents now exist (`D02-01`, `D06-01`, `D11-01`, digests resolved against the
-  registry), `DEFAULT_PRODUCT_KEYS` holds six, and a declaration without a document is refused by the
-  seed, the projection and the reload receipt instead of printed. `computeCatalogCoverage()` in
-  `packages/domain` counts deployments rather than entries — D5 and D6 share one ERPNext instance —
-  and is served on `POST /catalog/reload` and `GET /posture` (`sso.nativeFloor`, `sso.ownerDecision`),
-  so the console, the API and `pnpm check:catalog` cannot disagree about "6 of 12". Lowering the floor
-  is a recorded `native_floor_decision` row with a reason and an audit event, taken by R1, which is
-  what S-2 permits; `pnpm check:catalog --require-floor` turns the shortfall into a failure where a
-  release check wants one. ADR-BE-37.
+- **A deployment builds its own image, and starts only the digest the catalogue pinned** (`FR-1.5`,
+  `FR-1.7`, `NFR-4.16`, `ADR-BE-40`) — `deploy`, `reconfigure` and `upgrade` gain a `build` stage
+  between admission and `apply`, now the only place an image comes into existence: any `dockerfile`,
+  `scaffold` or Compose `build:` source is built once, on every host that may run the container,
+  through BuildKit rather than the socket proxy, which refuses a build session. `apply` verifies the
+  ids the build produced before and after `up` and refuses a tag that is not this run's output with
+  `IMAGE_DIGEST_MISMATCH`, before a container exists. The registry pin is compared with the
+  repository digest and the local pin with the image id, and an absent build is a failure rather
+  than a pass. The recorded digest is a trust-on-first-use baseline reported as drift — a rebuild
+  legitimately changes it, a substituted tag does not — and an appliance export carries the image.
+- **A registry is trusted because a revision says so, and every image is scanned before it starts**
+  (`NFR-4.16`, `NFR-4.6`, `S-10`, `ADR-BE-36`) — one parser for an image reference and one
+  append-only `trusted_registry_revision` allow-list, enforced in the catalogue, the policy
+  evaluators, pre-flight and the engine client, so a queued job cannot bypass it; the rule is
+  non-waivable, because the only remedy is a new revision. Before containers start the image is
+  scanned, the report is kept per digest and reused while the digest is unchanged, a critical
+  finding blocks the deployment unless `SEAMNEX_SCAN_FAIL_OPEN=true`, and the instance screen gains
+  an Image security tab whose "never scanned" is a state, not a pass.
+- **The catalogue can be restored, and can prove its own coverage** (`FR-1.1`, `FR-2.6`, `FR-2.16`,
+  `S-2`, `ADR-BE-37`) — `pnpm catalog:restore` puts the six default entry documents back, and only
+  when the projection holds exactly those keys; anything else is refused with the keys that do not
+  line up. Mautic, ERPNext and Metabase now have entry documents, a declared deployment without one
+  is refused instead of noted, and `computeCatalogCoverage()` counts deployments, so the console,
+  the API and `pnpm check:catalog --require-floor` cannot disagree about "6 of 12". Lowering the
+  floor is a recorded decision taken by R1.
+- **The edge, the dev servers and the portal link are HTTPS on one certificate and one zone**
+  (`NFR-4.1`, `FR-2.5`, `AC-42`, `ISSUE-07`, `ADR-BE-39`) — `websecure` on `:443` with a permanent
+  redirect on `:80` that carries only the ACME challenge, a resolver persisting to
+  `/acme/acme.json`, and a TLS-only dev stack. `SEAMNEX_EDGE_TLS_MODE` is written onto every route
+  and into each generated router instead of a constant, and `SEAMNEX_TRAEFIK_ACME_EMAIL` is consumed
+  rather than dead configuration. The Vite servers mint a development CA and leaf into `temp/certs`
+  (trusted once) and advertise `https://`; the zone is `seamnex.localhost`, so one wildcard
+  certificate covers every product, and `docker/dns` with `pnpm dev:dns` resolves it for Node,
+  `curl` and Playwright. `pnpm dev` refuses a `.env` that still points at `http` + `8020`, and the
+  API refuses the same mismatch in production.
+- **A host install is one idempotent command, with a runbook that can be measured** (`NFR-6.2`,
+  `NFR-6.3`, `S-9`, `AC-19`, `ADR-BE-35`) — `pnpm bootstrap` installs, creates what is missing,
+  brings the stack up, seeds the identity mirror and the catalogue, and verifies `/api/v1/readyz`;
+  `pnpm bootstrap:check` repeats the checks without changing anything. It never rotates a
+  credential, overwrites `.env` or deletes a volume, so a failed step is repaired by re-running it,
+  and its posture pass names what a working install can still be wrong about.
+  `docs/dev-reference/operations/bootstrap.md` is the procedure, with a timing budget inside AC-19's
+  sixty minutes.
+- **Every instance is observed, and capacity reports what is consumed** (`FR-4.5`, `FR-4.6`,
+  `AC-39`, `AC-45`, `ADR-BE-31`) — each entry's dashboards and alert rules are derived and
+  persisted, and one Prometheus target is published per instance and withdrawn with it; metrics and
+  masked logs are served per instance, and logging that is not configured says so instead of showing
+  an empty console. The status sampler reads real container and volume usage, so `GET /capacity`
+  reports consumed beside allocated at the thresholds R1 edits in settings (75/90/85 by default),
+  and the same read raises a warning at the threshold and a critical ten points past it. A daemon
+  failure is reported as unmeasured, never as idle.
 - **The patch register advances by observation, not by editing an entry document** (`FR-2.12`,
-  `FR-4.7`, `NFR-4.7`, ISSUE-34) — `patch_record` had no writer, so "checked at" moved when somebody
-  edited JSON. A scheduler pass now asks each entry's GitHub releases and the OSV advisories for its
-  repository (bounded by a host allow-list, a timeout and a per-pass batch), writes `patch_record` per
-  instance with the current and available version, the release link and the lead advisory, keeps
-  `patch_advisory` per entry (closing one only when a later authoritative answer omits it), derives
-  the age of the oldest unapplied security update from the advisories that publish a fix, and audits
-  with `actorType: 'system'`. A failed feed writes nothing and keeps the previous observation, so an
-  outage never reads as "nothing pending"; `POST /patch-register/observe` runs the same pass on
-  demand. The register shows provenance ("observed 3 h ago", "never observed") and an `Observe now`
-  control, and `catalog_entry` is never rewritten by the pass. ADR-BE-38.
-- **A host install is one idempotent command, and a runbook that can be measured** (`NFR-6.2`,
-  `NFR-6.3`, `S-9`, `AC-19`, ISSUE-32) — the repository documented three development modes and no
-  install path, so "a clean host becomes a working platform through a single documented bootstrap" had
-  nothing behind it. `pnpm bootstrap` now installs the workspace from the frozen lockfile, creates
-  `.env` only when absent, writes the root key and Keycloak credential files if missing, brings up the
-  stack through `scripts/compose.mjs` (schema, services, realm import, admin-client reconcile), seeds
-  the identity mirror and default catalogue, and verifies `/api/v1/readyz` with the dependencies it
-  reports; `pnpm bootstrap:check` repeats the checks without changing anything. It never rotates a
-  credential, overwrites `.env` or deletes a volume, so a failed step is repaired by re-running it.
-  Its posture pass names the things a working install can still be wrong about: the example database
-  password, `AUTH_PROVIDER=stub`, a loose root-key mode, a missing root key or Keycloak admin-client
-  secret, a `pnpm` drifting from the pinned minor, and a `PORT` that no longer matches the published
-  mapping.
-  `docs/dev-reference/operations/bootstrap.md` is the procedure: prerequisites, the ports the install
-  binds, a timing budget inside the requirement's sixty minutes, the AC-19 verification checklist, the
-  re-run and recovery table, and an explicit list of what it does not install (TLS, production
-  identities, a hosted console, AC-37's console bootstrap-review screen). ADR-BE-35.
-- **Every instance is genuinely observed, and the console can show it** (`FR-2.6`, `FR-4.6`, `AC-45`) —
-  M21 was a contract with no implementation while `observability_profile` had been created and left
-  empty, so "we observe every instance" described a table nobody wrote. `PostgresObservabilityService`
-  now derives each entry's profile (dashboards and alert rules, from `payload.observability` or a
-  documented baseline), persists it, and publishes one Prometheus `file_sd` target per instance
-  (`instance-<id>.json`, atomic and idempotent, labels `job`/`instance_id`/`instance_slug`/`entry_key`/
-  `product`) on deploy, on every stop/archive/delete transition and in a boot re-projection pass that
-  also removes targets whose instance is gone. Metrics are rendered by hand from the measured samples at
-  `GET /api/v1/metrics/instances/:id`, behind `SEAMNEX_METRICS_ENABLED` and an optional
-  `SEAMNEX_METRICS_TOKEN`, deliberately not through the prom-client registry, whose doctrine forbids an
-  `instance_id` label. `GET /instances/:id/logs` queries Loki by `{instance="<uuid>"}` with a capped
-  window and line count and returns masked lines, saying logging is not configured when
-  `SEAMNEX_LOKI_URL` is unset rather than showing an empty console. Alloy relabels `seamnex.instance` to
-  `instance`, and Prometheus/Loki retain 30 days. The instance detail page gains an Observability tab
-  with the target state, the profile, retention and a log console. ADR-BE-31.
-- **Capacity reports consumption against configurable thresholds** (`FR-4.5`, `AC-39`) — the board's
-  per-instance rows were the _declared_ deploy shape, so an idle container that reserved 2 GB and used
-  40 MiB looked exactly like one thrashing its limit, and "Thresholds at 75% and 90%" named bands no
-  code read. The status sampler now reads one-shot Docker stats per running container, sums them per
-  `seamnex.instance`, adds the measured volume usage and writes `instance_usage_sample` (pruned at
-  `SEAMNEX_USAGE_SAMPLE_RETENTION_DAYS`); a daemon failure logs and skips instead of writing a zero that
-  would read as "idle". `GET /capacity` keeps the allocated figures and adds
-  `cpuConsumedMilli`/`memoryConsumedMb`/`diskConsumedMb`/`measuredAt` from the newest sample, plus the
-  thresholds in force, which R1 edits in the settings screen (`capacity_cpu_alert_percent` 75,
-  `capacity_memory_alert_percent` 90, `capacity_disk_alert_percent` 85; 50–99). The board prints
-  allocated beside consumed, "not measured" where no fresh sample exists, and draws its bands and
-  summaries from the snapshot, while `notification.evaluate()` raises a deduplicated warning at the
-  threshold and a critical ten points past it — the same numbers the screen shows, from the same read.
-- **The domain owner is told about a break-glass grant and its expiry** (`FR-4.11`, `AC-47`) — the
-  session reported the literal "Platform" as its owner, notices were addressed to nobody, and a grant
-  whose first evaluation pass ran more than ten minutes late was never announced at all.
-  `domainOwner`/`domainOwnerEmail` are now resolved from the instance's catalogue entry (falling back to
-  `Platform` only when the session has no instance), the notice names the owner and the product, and
-  `notification.recipient_name`/`recipient_address` record who it was addressed to, so "the owner was
-  told" is answerable from the row. Delivery targets the enabled email channel matching the owner's
-  mailbox and otherwise falls back to the configured channels while still recording the named owner (a
-  warning is logged that no mailbox is configured). `grant_notified_at`/`expiry_notified_at` mark each
-  announcement, so a transition is announced once whenever it is first observed instead of depending on
-  a look-back window.
+  `NFR-4.7`, `ADR-BE-38`) — a scheduler pass reads each entry's releases and advisories, writes the
+  versions, the release link and the lead advisory per instance, derives the age of the oldest
+  unapplied security update and audits as `system`; a failed feed keeps the previous observation, so
+  an outage never reads as "nothing pending". `POST /patch-register/observe` runs it on demand, and
+  `catalog_entry` is never rewritten.
+- **Governance records name the person responsible** (`FR-4.11`, `AC-47`, `ADR-BE-25`) — the auditor
+  records licence obligations and restriction flags through `PUT /licenses/:instanceId/review`, with
+  the reviewer, date and evidence shown on every cleared row, and a break-glass notice names the
+  domain owner and the product and records who it was addressed to, so "the owner was told" is
+  answerable from the row.
 - **A mapping's conversion and missing-value policy are compiled, not just stored** (`FR-5.5`,
-  `FR-5.6`) — `transform`, `required`, `onMissing` and `defaultValue` were declared in the contract,
-  returned by the API and shown in the ledger, and read by nobody: the compiler emitted a bare
-  dereference, so a mapping the author asked to convert a date or to refuse an empty required field
-  activated, ran, and sent the unconverted value. `packages/domain` now publishes a closed catalogue
-  of seventeen conversions (text, number/whole number, yes/no, ISO date and date-time, currency
-  minor↔major, mass, length, temperature) and `mappedValueExpression` compiles one body expression
-  that handles the missing case first — `fail` throws on the node, `skip` omits the parameter,
-  `default` substitutes a value typed as the conversion's output — while a mapping that declares
-  nothing still compiles to the byte-identical `={{ $json.path }}` it always did. Activation refuses
-  `UNKNOWN_TRANSFORM` (naming the allowed conversions), `MISSING_DEFAULT_VALUE`,
-  `INVALID_DEFAULT_VALUE` and, for the first time, `MISSING_REQUIRED_FIELD` when the product publishes
-  a required field that nothing maps. The mapping drawer's body preview is now the compiler's own
-  output, and saving a mapping no longer discards the four fields. ADR-BE-29.
-- **A workflow retries a step, tells its owner when it keeps failing, and keeps a finite history**
-  (`FR-5.7`, `FR-5.8`, `AC-27`) — compiled nodes carry `retryOnFail`/`maxTries`/`waitBetweenTries`
-  and `onError: stopWorkflow` (`SEAMNEX_WORKFLOW_RETRY_MAX_TRIES`, `SEAMNEX_WORKFLOW_RETRY_WAIT_MS`),
-  and the run history reports the attempts n8n actually made instead of the constant `1`: the mirror
-  reads `resultData.runData` — one entry per try — and writes the count to
-  `workflow_run_node.attempt`. After `SEAMNEX_WORKFLOW_FAILURE_ALERT_THRESHOLD` consecutive failed
-  runs the owner is alerted through M20, once per milestone, severity escalating from the second, with
-  the workflow, the run, the failing step and n8n's capped error sentence, and the alert is recorded as
-  `workflow.run.alerted` even when no channel could be reached. Run history is retained for
-  `SEAMNEX_WORKFLOW_RUN_RETENTION_DAYS` (90, never below the required 30) and a failed run for twice
-  that, because the failed-run queue is what an operator replays; a run whose outcome was never
-  mirrored is never deleted. A rollback procedure for a write workflow — disable, confirm nothing in
-  flight, revoke the scope, export the run history, correct the records in the product, then fix and
-  replay — is written down in ADR-BE-30, which also records that n8n's retry wait is fixed and that
-  the exponential part of FR-5.7's "backoff" is not implemented.
-- **Workflow credentials are rotated before they expire, and minted from a CSPRNG** (`NFR-4.14`) — a
-  scope lives 90 days and nothing re-issued it, so a live workflow began answering 401 on day 90 and
-  stayed that way until a human re-activated it. A scheduler pass now finds the newest live scope of
-  each product that expires within `SEAMNEX_WORKFLOW_CREDENTIAL_ROTATE_BEFORE_DAYS`, mints a new
-  generation (`mint({ rotate: true })`, which bypasses the reuse path with a per-generation
-  idempotency key), creates the n8n credentials, pushes the definition, commits against a
-  compare-and-set on `workflow.current_version_id`, and only then revokes the old scopes and deletes
-  the old credentials — a race with an activation abandons the rotation and cleans up instead of
-  pointing the definition at tokens no scope recognises. An already-expired token is inside the window
-  and heals on the next pass. Broker and integration secrets are now drawn from `randomBytes(32)`
-  rather than `Math.random()`, whose output is not entropy. ADR-BE-30.
+  `FR-5.6`, `ADR-BE-29`) — seventeen conversions are compiled into the body expression, with `fail`
+  throwing, `skip` omitting the parameter and `default` substituting a value typed as the
+  conversion's output, while a mapping that declares nothing still compiles byte-identically.
+  Activation refuses an unknown conversion, a missing or invalid default, and a required field
+  nothing maps.
+- **A workflow retries, alerts, rotates its credentials and keeps a finite history** (`FR-5.7`,
+  `FR-5.8`, `NFR-4.14`, `AC-27`, `ADR-BE-30`) — compiled nodes carry their retry settings, the run
+  history reports the attempts n8n actually made, and after a threshold of consecutive failures the
+  owner is alerted once per milestone with the failing step, recorded even when no channel could be
+  reached. History is retained for 90 days and a failed run for twice that; a credential expiring
+  inside the rotation window is replaced and the old scope revoked only after the new one is
+  committed, and an already-expired token heals on the next pass. Every secret the platform mints
+  now comes from the CSPRNG.
 - **Pre-flight refuses with the blocker, before anything starts** (`FR-1.11`, `FR-1.23`, `AC-07`) —
-  `POST /instances/preview` now returns a `blockers` list — each entry a `code`, the `field` or fact it
-  refers to, a sentence and whether it blocks — and `admissible` is false while any of them does. The
-  new `PreflightService` composes the checks that already existed but were only consulted once a job
-  was running: the entry and the resolvability of its source, the image pin (`isPinnedImage`),
-  `renderer.plan` for field-level `required`/`ceiling`/rule violations, each secret reference against
-  the secret store, capacity, and the slug's route. The policy verdict stopped being hard-coded
-  `allowed`: it is read from the entry's latest recorded `source_resolution` and reported as
-  `allowed`, `blocked` or `unknown`, always with the `policyEvaluatedAt` and the `policySource` behind
-  it, so a permitted deployment can name the evidence that permitted it and an unevaluated one is no
-  longer reported as a permitted one. The wizard prints each blocker on the step that can fix it,
-  anchors it to the field, and keeps submit disabled with the reason it is disabled.
-- **Environment profiles are staff-owned, and editable where they are read** (`FR-1.26`, `AC-51`) — a
-  profile was a row someone inserted by hand. `POST /env-profiles`, `PATCH /env-profiles/:key`,
-  `PUT /env-profiles/:key/values` and `DELETE /env-profiles/:key` are now the way one is created,
-  retargeted, filled and removed, behind the new `profile.manage` capability (R1); a domain owner (R3)
-  gets `profile.request` instead, the same approval shape as every other scoped change, and the
-  console shows the action disabled with that path as the reason. Writes are validated against what
-  the catalogue declares: a variable no entry declares is refused, a secret-typed variable may only
-  point at a stored secret rather than carry a value, and a value is rejected only when **every** entry
-  that declares the variable caps it at `none`. Each write is audited (`profile.created`,
-  `profile.updated`, `profile.values_replaced`, `profile.deleted`) with the variable names and never
-  the values, reads mask secret references, and a delete a live instance depends on answers
-  `STATE_CONFLICT` naming those instances instead of letting the foreign key surface as a 500.
-  Migration `0035` adds the profile's display `name`. The console gained
-  `/admin/environment-profiles`: the profiles with their lifecycle target, every variable they set
-  with the entry that declares it and the ceiling that applies, so an operator can see why a value is
-  ignored before deploying rather than after.
+  `POST /instances/preview` returns the checks that previously ran only inside a job — entry,
+  source, image pin, field violations, secrets, capacity, route — and `admissible` is false while
+  any blocks. The policy verdict is read from the recorded resolution and reported with its evidence
+  instead of being hard-coded `allowed`, so an unevaluated deployment is no longer reported as a
+  permitted one. The wizard shows each blocker on the step that can fix it.
+- **Environment profiles are staff-owned, and the environment they declare is reconciled**
+  (`FR-1.26`, `FR-1.29`, `AC-43`, `AC-51`, `ADR-BE-28`) — profiles are edited through the API behind
+  a new capability, validated against what the catalogue declares, audited by variable name and
+  never by value, and refused when a live instance depends on the one being deleted. Drift is now
+  observed: every container's environment is compared with the declaration and one row per drifted
+  variable records the direction, so a declaration that moved after apply is repaired by a queued
+  reconfigure while a change made in the container stays open for an operator. An instance whose
+  containers cannot be inspected is reported unobserved, never clean.
 - **Identity propagation can reach the product, and is timed where it lands** (`FR-2.4`, `AC-11`,
-  `AC-48`, `S-8`) — a mapping now carries the role the product itself holds
-  (`group_mapping.product_role`, default `member`) and the entitlement records that role instead of the
-  literal `member` it used to write. "Applied" is claimed only when the platform applied something:
-  the identity client it configured, or a push the product acknowledged. The new `IDENTITY_PUSH` port
-  has an HTTP adapter that targets the instance's verified `apiBaseUrl` on the instance's own network,
-  authenticates with a secret-store credential that never reaches argv or a log, and makes one bounded
-  call per changed (subject, instance); `SEAMNEX_IDENTITY_PUSH_ENABLED` (default off) and an optional
-  `integration.rolePush` keep it inert for every entry that declares no admin API, and such a change
-  stays `pending` with its reason recorded in `sync_run.errors` rather than being reported as a
-  propagation that never happened. Migration `0035` adds `entitlement.applied_at`, the
-  `propagation_sample` table and `sync_run.p95_propagation_ms`/`propagation_samples`: the latency is
-  measured from the mirror's `idp_group_member.updated_at` to the applied entitlement, and the run
-  stores its p95 **with the number of changes it was measured across**, so a figure without a sample
-  count cannot be quoted. The mirror-write p95 stays a separate, correctly named diagnostic that is
-  not the AC-48 figure. Samples older than 30 days are pruned by the worker. The identity screens show
-  each entitlement's product role, state and applied time, and the sync screen refuses to report a
-  five-minute pass when no change was measured.
-- **Environment drift is observed, and the declarative half of it is repaired** (`FR-1.29`, `FR-1.35`,
-  `NFR-3.6`, `AC-43`) — the drift endpoint, schema and console panel were complete while nothing
-  wrote a per-variable row, so the panel could only ever answer "no drift". M22 now compares every
-  running container's `Config.Env` against the declared environment and the applied render set, and
-  records one open row per drifted variable — missing, mismatched, or present but undeclared within
-  the product's own prefix — with the direction derived from that comparison (`repo_ahead` when the
-  declaration moved after apply, `runtime_ahead` when the container did, `unknown` when there is no
-  baseline) instead of a constant. Secrets are compared by presence only and recorded as
-  `<secret>`; a variable that stops drifting has its row closed, so the panel reflects the present. A
-  scheduler pass (`SEAMNEX_DRIFT_INTERVAL_MS`, 5 min) audits new findings and queues the instance's
-  own `reconfigure` for `repo_ahead` only, under a per-instance cooldown, while `runtime_ahead` stays
-  open for an operator because silently reverting it would erase the only trace of the change. The
-  same pass re-commits `instances/<slug>/instance.yaml` from the recorded projection when the file
-  drifted, which clears the flag that otherwise blocked `start` until the control plane restarted. An
-  instance whose containers cannot be inspected is reported as unobserved, never as clean. The
-  environment table's per-variable drift badge now reflects the open rows instead of a proxy, and the
-  drift panel no longer shows definition hashes relabelled as an "environment" variable
-  (`ADR-BE-28`; no route, contract or schema change).
-- **A full data export is an archive, not a description of one** (`FR-1.13`, `AC-20`, `NFR-6.3`) —
-  the `export` action now dumps every database service in plain SQL (readable and loadable without
-  this platform's tooling), archives every registered data volume, copies the applied render set and
-  the resolved non-secret environment, writes a manifest with a SHA-256 per file plus a read-me for
-  restoring the parts by hand, and packs all of it into one `.tar.gz` beside a sidecar record under
-  `<instance data>/<id>/exports/`. Secret values are named in `instance/env.json` and never
-  included. The action refuses rather than lies: an instance that was never deployed, or a declared
-  database that cannot be dumped because the instance is not running, fails the job before the first
-  helper runs and leaves no artefact, and `includes`/`excluded` are computed from what was written.
-  Two reads make the archive reachable — `GET /instances/:id/exports` and `GET
-/instances/:id/exports/:exportId/archive`, both `instance.lifecycle` (R1, the same capability that
-  creates it) — with the archive streamed under `Content-Disposition`, the manifest's byte count,
-  `no-store`, and an `instance.export.downloaded` audit row; the console gained an Exports tab
-  listing each archive with what it holds, what it leaves out and its checksum. The engine, dump and
-  restore knowledge moved to `common/engine/database.ts` so the backup runner and the export read
-  the same rules instead of two copies of them (`docs/openapi.json` regenerated; delete-with-export
-  ordering remains ISSUE-37).
-- **The compose policy exception path works, and is scoped** (`FR-1.20`, `NFR-4.15`, `AC-33`,
-  `FR-4.11`) — an R1 can now file an exception through `POST /admin/policy-exceptions` (new
-  `exception.request` capability) instead of a hand-written `INSERT`; the request names a product, a
-  rule, a written justification and an expiry, and the deviation the approver grants is read from the
-  platform's own refused `source_resolution` rather than from the request body. The waiver is
-  resolved by the catalog entry key, so an exception for one product no longer waives the rule for
-  every product, and a lapsed one is reported as `expired` and quoted in the refusal. Migration `0034`
-  adds `source_resolution.patch_diff` and `source_resolution.policy_violations` (design §10.1 step 5
-  and §11.5 already promised the former): a blocked attempt is recorded with the violations it found
-  and the substitutions it would have applied, and the applied patch is written into the render set as
-  `policy-patch.json` next to the platform-owned copy. The Dockerfile and scaffold paths now pass the
-  same blocking check as a Compose file — a `FROM` that is neither digest- nor version-pinned is
-  refused (`unpinned_image`, waivable) — and the console gained the request dialog and matches an
-  exception by product key rather than by a text fragment.
-- **A platform restore restores** (`FR-1.35`, `FR-1.36`, `AC-30`, `AC-52`, `NFR-3.8`, `NFR-3.9`,
-  `ADR-BE-27`) — the `platform-restore` pipeline now proves the recovery set before the first write
-  (required artefacts present, every stored object matching its recorded digest), restores the identity
-  provider's database and realm first and restarts it, fails the run when the provider never answers,
-  restores the platform database, edge routes and catalogue fallback, and verifies the restored audit
-  chain against the exported anchor. The control-plane database restore needs an owner credential
-  (`SEAMNEX_PLATFORM_RESTORE_DB_URL`, restore-only) because the application role holds no DDL rights;
-  without it the phase records `pnpm restore:platform-db` as an outstanding operator step and the run
-  cannot end `complete`. The restore reinstates the running job's rows and the log/audit partitions
-  the dump replaced, and settles the jobs the dump left active. The administrative login no longer
-  completes the run: it records the login, reopens the gate and queues
-  `platform-restore-products`, which restores each instance from its newest backup — volume archives,
-  **engine dumps**, and the stored render set materialised on this host — at the run's configured
-  concurrency, then fails unless every deployment is running and the identity provider answers. An
-  ordinary instance restore now applies its engine dump too. `scripts/restore-platform-db.mjs`
-  (`pnpm restore:platform-db`) is the clean-host path for operators who will not grant the platform an
-  owner credential.
-- **The product tier's job kind, and the settlement it needed** (`FR-1.36`, `ADR-BE-27`) — migration
-  `0033` widens `deployment_job_kind_check` with `platform-restore-products` and `JOB_KINDS` gains it,
-  without which the tier insert was refused on a real database and the run sat in `products` with
-  nothing running. A tier that still cannot be queued settles the run `failed` with the queue's
-  reason instead of leaving a `running` platform run that blocks every later restore. A failed product
-  capture now settles its own `backup` row (audit `instance.backup.failed`), the Recovery register is
-  platform-only, and volume archives use one compression both ways (`tar -czf`/`tar -xzf`) because the
-  helper's busybox tar has no `--zstd`.
+  `AC-48`, `S-8`) — a mapping carries the role the product itself holds and the entitlement records
+  it. A new push adapter calls the instance's verified API on its own network with a credential that
+  never reaches a log, inert for entries that declare no admin API, where a change stays `pending`
+  with its reason rather than being reported as propagation that never happened. Latency is measured
+  to the applied entitlement and stored with the number of changes it was measured across, so a
+  figure cannot be quoted without one.
+- **A portable artefact holds what it names** (`FR-1.13`, `FR-1.35`, `FR-1.36`, `AC-20`, `AC-30`,
+  `AC-52`, `ADR-BE-26`, `ADR-BE-27`) — the `export` action dumps the databases in plain SQL,
+  archives the volumes, the render set and the non-secret environment, and writes a manifest with a
+  digest per file, all in one archive beside a record of what it holds and omits; secrets are named,
+  never included, and an instance that cannot produce a complete set fails before the first helper
+  runs. A platform backup captures the same kind of set — platform and identity databases, realm,
+  routes, anchors, catalogue fallback — with a byte count and a digest each, and records the root
+  key and edge material as references, never bundled. The restore proves the set before the first
+  write, brings the identity provider back first, needs an owner credential for the platform
+  database, and no longer completes on an administrative login: it reopens the gate and restores the
+  products at the configured concurrency, failing unless every one is running.
 - **Product data volumes are recorded, measured and captured** (`FR-1.9`, `FR-1.12`, `AC-13`) — a
-  deployment now registers the volumes Compose created, under the name the daemon gave them, with the
-  catalog's mount path and per-volume quota, and drops the rows whose volume no longer exists. The
-  status sampler measures each volume (`used_mb`, `sampled_at`), so the instance screen shows real
-  usage with a near-quota and over-quota state, and the first sample that crosses a quota writes an
-  `instance.volume.quota_exceeded` audit record. The limit is soft, as `DA-2` allows: the deploy is
-  refused before anything is created when the declared quotas add up to more disk than the instance
-  reserves, and the preview states the same shortfall. A backup of an instance whose applied
-  definition declares volumes but none is registered fails with the reconfigure remediation instead
-  of reporting a database-only set as complete.
-- **Licence review workflow** (`ADR-BE-25`) — the auditor (R2) records obligations, restriction
-  flags and the upstream LICENSE reference through `PUT /licenses/:instanceId/review`; the register
-  shows the reviewer, date and evidence on every cleared row.
-- **A platform recovery set that holds what it names** (`ADR-BE-26`) — a platform backup now captures
-  and uploads the platform database, the identity provider's **database** and realm export, the edge
-  route configuration, the audit anchors with the chain head, and a catalogue fallback copy, each with
-  its byte count and a SHA-256 digest in a typed manifest. The secret-store root key and the operator's
-  edge TLS material are recorded as references with their location (`SEAMNEX_ROOT_KEY_ESCROW_REF`,
-  `SEAMNEX_EDGE_CONFIG_REF`), never bundled. A capture refuses before writing anything when
-  `SEAMNEX_KEYCLOAK_DB_URL` or a required directory is missing, `.pgpass`/plaintext files do not
-  outlive the upload, a failed set leaves no scratch copy, and a zero-byte artefact is refused rather
-  than advertised. The escrow reference names the root key's non-secret id. Two settings make the
-  capture work where the API runs in a container: `SEAMNEX_PLATFORM_DB_URL` is the platform database
-  as the host-network dump helper reaches it, and `SEAMNEX_DOCKER_PATH_MAP` is the host spelling of a
-  bind source (`containerPath=hostPath` pairs). Both default to empty, which is correct wherever the
-  API's address and mount paths are already the host's.
+  deployment registers the volumes Compose created with the catalogue's quota, the sampler measures
+  them and flags a quota the first time it is crossed, and a deploy whose declared quotas exceed the
+  disk the instance reserves is refused before anything is created. The limit is soft, as `DA-2`
+  allows.
+- **The compose policy exception path works, and is scoped** (`FR-1.20`, `NFR-4.15`, `AC-33`) — an
+  R1 files an exception through the API naming a product, rule, justification and expiry; the
+  deviation granted is read from the platform's own refused resolution rather than the request body,
+  and the waiver is resolved by entry key, so one product's exception no longer waives the rule for
+  all of them. A lapsed exception is reported `expired` and quoted in the refusal. Dockerfile and
+  scaffold sources now pass the same blocking check as Compose, and the console gained the request
+  dialog.
 
 ### Changed
 
-- **The default catalogue's documents live beside the artefacts they pair with, and its gate is a real
-  gate** (`AC-01`, `S-1`, `S-2`) — the six entry documents moved from
-  `packages/db/src/seed/default-catalog/` to `platform/default-catalog/`, one directory from the
-  declarations (`platform/catalog/env/`) and the vendored source trees (`platform/upstream/`) they are
-  reviewed against. `@seamnex/db` keeps the seed module and materialises the same bytes; what changed
-  is the owner — a persistence package no longer carries product content, and the control-plane image
-  no longer carries a fixture set nothing in a container reads. `pnpm check:catalog` was rewritten from
-  a `.mjs` that could not import what it checked (it read `DEFAULT_PRODUCT_KEYS` by regex over the
-  seed's source and restated the served schema, the guarantee-class enum and the native floor as its own
-  copies) into `packages/db/scripts/check-catalog-coverage.ts`, which imports the key list, the two
-  directories, `CatalogEntrySchema`, `EnvSchemaFileSchema` and `computeCatalogCoverage` — the same
-  arithmetic the reload receipt and `GET /posture` serve. It now runs in CI's `quality` job and is
-  listed among the conditional gates in `AGENTS.md`, `docs/operations/catalog-repo-format.md` documents
-  the on-disk format both source comments had been citing as a file that did not exist, and
-  `docs/operations/bootstrap.md` no longer says the default set ships three. ADR-BE-21 amendment 3.
-- **Verification records the facts the screens now quote** (`FR-2.10`, `FR-2.14`, `FR-2.15`, `AC-41`,
-  `AC-50`) — the verification request carried a subset of the facts FR-2.14 names, and an empty one
-  still restarted the review clock, which is how a catalogue assumption came to read as a verified
-  one. `PATCH /catalog/:key/integration-metadata` now accepts the authentication path and guarantee
-  class actually measured, the API base URL, the operation inventory, the event modes, SLO support,
-  credential granularity and the session maximum, and refuses a request that changes nothing. The fact
-  is written into `integration_metadata` — every fact column it has, not the two the old statement
-  carried — and `verified_facts` accumulates what was checked until the next review, so an omitted
-  field means "unchanged" and never "cleared". The audit row records the before/after value per field,
-  and `verifiedAt`/`nextReviewAt`/`stale` move only because a fact arrived. The entry screen groups the
-  facts it verifies (authentication, API surface, events, credentials) with the current value and its
-  provenance, the registry prefers the verified `apiBaseUrl`, `authMethod`, `guaranteeClass`,
-  `operationInventory`, `eventModes` and `sloSupported` while labelling the document's value a
-  catalogue assumption, and an entry whose API cannot issue scoped credentials is reported as
-  write-workflow-ineligible with the granularity that made it so.
-- **"Verified" now means the objects are there** — verification listed the manifest and called that
-  a check; it now requires every named dump and volume archive to exist in the target and every
-  captured volume to carry a digest, and refuses with `BACKUP_UNUSABLE` naming what is missing. A
-  restore re-creates a missing volume under the instance label before unpacking into it, and an
-  instance backup's `includes` is computed from what was captured rather than asserted up front.
-- **Recovery contents are read from the set, not asserted** — the "What the backup contains" panel is
-  generated from the newest finished platform backup's manifest; an artefact shows `in` only when its
-  object was stored, `ref` with the recorded location otherwise, and the panel states that no set has
-  been captured when none has. A legacy manifest produces no claims, and the register's item count
-  reflects stored artefacts.
-- **Hosted-service gate** — an unreviewed licence now refuses
-  `PUT /licenses/:instanceId/hosted-service` (409, audited) instead of being treated as permissive
-  when the licence table already knows the term. The refusal sentence is shared by the API and the
-  mock platform. Migration `0031` resets partial sign-offs and makes reviewer, date and reference
-  all-or-nothing.
-- **Volume facts where the decision is made** — the catalog entry lists each declared volume with its
-  quota and the total against the disk reservation, the deploy wizard repeats the total beside the
-  confirmation, and the instance panel's empty state says a backup is refused until the volumes are
-  registered instead of describing a database-only one.
+- **"Prefetch images" prepares the artefact instead of assuming it must be downloaded** (`FR-1.7`,
+  `ADR-BE-40`) — an entry whose tree declares `build:` is built, not pulled, because pulling would
+  fetch the registry's idea of the tag and guarantee that the next deployment refuses it. Everything
+  else is pulled and verified as before, a missing mirror falls back to the pull, and a job with no
+  entry fails with `VALIDATION_FAILED` instead of resolving the empty key.
+- **The default catalogue's documents live beside the artefacts they pair with, and its gate is a
+  real gate** (`AC-01`, `S-1`, `ADR-BE-21`) — the six documents moved to
+  `platform/default-catalog/`, beside the declarations and vendored sources they are reviewed
+  against, so a persistence package no longer carries product content. `pnpm check:catalog` imports
+  the same keys, schemas and coverage arithmetic the API serves instead of restating them, so it
+  cannot drift, and it now runs in CI.
+- **Verification and backup claims are read from the record** (`FR-2.10`, `FR-2.14`, `FR-2.15`,
+  `AC-41`, `AC-50`) — `PATCH /catalog/:key/integration-metadata` accepts every measured fact,
+  refuses a request that changes nothing, and treats an omitted field as unchanged, so the review
+  clock moves only because a fact arrived. A backup is "verified" only when every named dump and
+  archive exists, refusing with `BACKUP_UNUSABLE` naming what is missing, and the recovery panel is
+  generated from the newest manifest rather than asserted.
+- **Refusals happen where the decision is made** — an unreviewed licence refuses
+  `PUT /licenses/:instanceId/hosted-service` (409, audited) instead of being treated as permissive,
+  and the catalog entry, the deploy wizard and the instance panel all state the volume quotas
+  against the disk reservation.
 
 ### Fixed
 
-- **The sign-in relay presents the product with the scheme the browser used** (`NFR-4.1`, `FR-2.16`,
-  ISSUE-07) — moving every route to TLS left the relay and the provisioning client speaking plain HTTP
-  to the container while sending `Origin: https://<host>:<port>`. Rails compares that header against
-  the request it thinks it received, so every product POST was rejected as cross-site forgery before
-  the credential was read: OpenProject's `relay.admin_credential.bootstrap_failed` recorded
-  `form_changed` ("the login form rejected its CSRF token"), the account stayed `failed`, and
-  the six-hour bootstrap quiet period made the retry look dead. `makeCall` in
-  `product-login.driver.ts` — shared by the password driver, the OrangeHRM driver and the
-  administrator-token bootstrap — now sends `X-Forwarded-Proto` from the configured public origin, so
-  the product computes the same base URL the edge published. Measured on 17.9.6 through the TLS-only
-  edge: the identical POST answers `422` with the CSRF message without the header and reaches the
-  credential check with it.
-- **Product URLs are trusted, resolved and covered by one certificate** (`NFR-4.1`, ISSUE-07) — every
-  `internal` route carries `tls: {}`, and with no ACME resolver in play Traefik answered the product URL
-  with its own `CN=TRAEFIK DEFAULT CERT`: a self-signed issuer with a SAN of `*.traefik.default`, i.e. an
-  untrusted issuer _and_ a hostname mismatch on the URL the portal launches a product with. The
-  development CA trusted for `https://localhost:5173` was never presented, so the interstitial could not
-  be avoided and Playwright, Node and `curl` refused the handshake outright.
-  `docker/traefik/dynamic/tls.yml` now points the default TLS store at the leaf
-  `packages/config/vite/dev-cert.ts` mints and `docker/compose.dev.yml` mounts `temp/certs` read-only for
-  it. That leaf carries `DNS:*.<SEAMNEX_INGRESS_DOMAIN>` — one wildcard for every slug, no re-mint per
-  deployment — which is why the development zone moved one label down to `seamnex.localhost`: no verifier
-  matches a wildcard whose base has no dot (`openssl verify -verify_hostname espocrm.localhost` →
-  `error 62 hostname mismatch`; Chromium → `ERR_CERT_COMMON_NAME_INVALID`), so `<slug>.localhost` could
-  only ever be certified one host at a time. The operating system does not implement RFC 6761 for
-  subdomains at all, so `docker/dns` (CoreDNS, `127.0.0.1:53`) answers the zone for Node, `curl` and
-  Playwright, and `pnpm dev:dns` reports what is missing: a Windows NRPT rule scoped to the zone
-  (`--apply`, reversible with `--revert`), never a rewrite of the adapter's resolvers — that would loop
-  through the container's own `forward` line. Browsers need none of it. Existing installs are told about
-  the zone change by `pnpm dev`, and the hosts stored on `instance_route` have to move with it.
-- **The dev servers reuse the certificate they minted, and two of them starting at once no longer
-  corrupt it** (`NFR-4.1`, ISSUE-07) — `isUsable()` asked the chain checks in the wrong direction:
-  `ca.checkIssued(leaf)` and `ca.verify(leaf.publicKey)` read "was the CA issued by the leaf", which is
-  false for every real pair, so the cache in `temp/certs` was rejected on every start and both SPAs
-  re-minted a leaf. Turbo starts the portal and the console as two processes over that one directory, so
-  the second `openssl x509 -req` read a request the first had already deleted (the console fell back to
-  http) while one server ended up holding a certificate for the other's key
-  (`ERR_OSSL_X509_KEY_VALUES_MISMATCH`, fatal in `server.https`) — the first `pnpm dev` on a checkout
-  could not start the portal. The chain checks now run on the leaf, the cache also verifies that
-  `dev.key` is the certificate's own key and that `dev-ca.key` is the CA's, generation is serialised by
-  `temp/certs/.generation.lock` (created `wx`, reclaimed after 60 s, and the waiter re-checks the cache
-  under it rather than minting a second pair), and a pair that does not verify is reported as a reason
-  instead of being handed to Vite, where it failed before any message could be read.
-- **The dev stack accepts the HTTPS origins the TLS switch introduced, and a generated router cannot
-  outlive its route** (`NFR-4.1`, ISSUE-07) — `APP_ORIGINS` in `docker/compose.dev.yml` still listed
-  only the plain origins, so the console's sign-in and every cookie-authenticated write were answered
-  `ORIGIN_REJECTED` while the shipped realm already registered the `https` redirect URIs; the compose
-  default now matches `.env.example` and the schema default. The route projection also only ever wrote
-  documents: one whose row was deleted stayed in the dynamic directory, and after every router moved to
-  `websecure` those leftovers named an entrypoint no deployment publishes (19 stale plain-HTTP routers
-  in the checked-out stack). `TraefikRouteWriter.prune()` deletes each `instance-<slug>.yml` the
-  boot-time `projectAll()` did not just write; hand-written documents in the same directory are left
-  alone.
-- **A transient job failure retries itself, and a dead worker no longer blocks its instance** (`NFR-6.5`,
-  ISSUE-31) — every queued job carried `attempts: 1` and nothing above the queue retried it, so a
-  registry restart became an operator task, and a worker that died mid-stage left its row `running` for
-  ever with the one-active-per-instance index refusing every later action. Retry is now a platform
-  object rather than a queue option: the scheduler queues a **successor** job (`payload.retryOf`,
-  `attempt`) for failures classified transient (`UNAVAILABLE`, `ADAPTER_UNAVAILABLE`,
-  `REPOSITORY_UNAVAILABLE`, `AUTH_PROVIDER_UNAVAILABLE`, `SECRET_UNAVAILABLE`, `RATE_LIMITED`, or a
-  socket errno recorded as `JOB_TRANSIENT` through the cause chain), bounded by
-  `SEAMNEX_JOB_RETRY_MAX_ATTEMPTS` and spaced by exponential backoff up to
-  `SEAMNEX_JOB_RETRY_MAX_DELAY_MS`. A deploy/reconfigure/upgrade/rollback is only retried while its
-  `apply` stage has not started — the boundary is resolved from `PipelineRegistry`, because
-  `job_step.name` holds the display label — and restores and `dsar` are never retried automatically. A
-  `running` job with no log line, step or transition for `SEAMNEX_JOB_STALE_AFTER_MS` is settled
-  `failed` with `JOB_ABANDONED` after the owning module's failure handler runs, so a `restore_run` no
-  longer hangs on a lost worker. The attempt bound is a candidate predicate as well as a per-row
-  check, because the pass reads oldest-first: without it a handful of exhausted jobs would occupy
-  every batch for ever and no newer failure would be examined. Both ends of a chain carry a `system`
-  log line (`Retried automatically after job …`, `Retry queued automatically: job …`), so the console
-  shows the retry as the platform's action rather than a second operator's. Audited as
-  `job.retry.scheduled`, counted as `seamnex_job_retries_total{outcome}`. BullMQ's `attempts` stays
-  `1`, stated in code and ADR-BE-34.
-- **A restore fans out at the operator's setting, not an environment default** (`NFR-3.9`, `AC-52`,
-  `DD-15`, ISSUE-33) — `settings.restore_concurrency` was validated, stored, bounded by a trigger and
-  drawn in the settings screen, and both `restore_run` inserts used `SEAMNEX_RESTORE_CONCURRENCY`
-  instead, so an operator who raised the fan-out changed nothing. Both the instance restore and the
-  portfolio restore now read the stored setting (clamped 4–12, the environment value as the fallback
-  when settings cannot be read) and record the source in `restore_run.detail.concurrencySource`, which
-  is what makes "the setting was honoured" checkable afterwards. The parallel product tier itself was
-  already implemented and is unchanged.
-- **The guest can use the portal in live mode** (`FR-3.3`, `FR-3.5`, `AC-35`, ISSUE-28) — `/me/launcher`
-  and `/portal/products/:slug` were bound to `portal.view_entitlements`, whose R6 cell in §5.2 is
-  `none`, so the one surface the guest role exists for answered `403` while mock mode hid the defect.
-  Both reads now carry `portal.launch` — the row §5.2 gives R6 as "one product" — and `PdpService`
-  resolves a `self` resource from an instance-bound session to that session's instance, so the guest's
-  grant still has to name the instance it launches. `GET /me/entitlements` keeps
-  `portal.view_entitlements`, so "My access" stays closed to R6 exactly as the matrix says; no
-  capability cell changed. `docs/openapi.json` regenerated.
-- **Global sign-out performs product single logout, and reports only that** (`FR-3.8`, `AC-35`,
-  ISSUE-29) — the dialog claimed products with single logout were signed out while the platform killed
-  its own session and nothing else, and the residual list included those products anyway.
-  `POST /me/logout` now ends the **identity-provider** session (`IdentityProvider.endSessions` →
-  Keycloak admin `users/{id}/logout`), which is what makes the already-registered back-channel logout
-  fire; migration `0038` records `idp_client.backchannel_logout_url` so the platform knows which
-  products it can actually reach, and the residual list excludes a product only when the provider
-  accepted the request _and_ a verified `slo_supported` product has a registered endpoint. The response
-  gains `singleLogout: { identityProviderEnded, products }`, the dialog says "the identity provider was
-  asked to end these", and a provider failure leaves the person signed out with the failure named in
-  the statement. Sign-out now writes one `auth.signout` audit row. ADR-BE-32.
-- **The audit anchor is signed, immutable, copied off-host, and retention is applied** (`NFR-4.10`,
-  `FR-4.3`, `AC-15`, ISSUE-30) — `audit_anchor` held an unsigned hash in the database it protects, was
-  re-anchored by an upsert the `REVOKE UPDATE` grant forbade for the application role, reached the
-  object store only when an operator happened to schedule a backup, and `audit_retention_days` (420) was
-  read by nobody while `audit_event` months accumulated forever. The anchor is now one Ed25519-signed
-  row per **closed** day, written once (`ON CONFLICT DO NOTHING`) with the key sealed in the platform
-  secret store and the public half published in the export; `AnchorStore` copies it to
-  `audit-anchors/<day>.json` daily and retries a failed copy, recording `audit.anchor.offhost_failed` /
-  `audit.anchor.recorded`; the proof endpoint returns `anchorSignatureValid` and the console shows
-  verified / not verifiable instead of printing a string. The settings floor is 365 days, a legacy
-  shorter value is read as the floor, and the scheduler drops whole expired `audit_event` months,
-  refusing to run on an unreadable setting and recording `audit.retention.enforced` with the partitions.
-  The object-store client moved to `common/storage` so M17 can use it without crossing a module
-  boundary. ADR-BE-33.
+- **Only an installed product is `ready`** (`FR-1.32`, `FR-2.9`) — a product serving its own
+  installer was recorded ready while its first-boot install had been refused. It is now `degraded`
+  with the installer named and the route still published, because finishing the install is the
+  operator's next step; a product that declares no events no longer fails a webhook check it cannot
+  satisfy, and single sign-on is not probed against an unfinished install.
+- **Environment input is validated and described honestly** (`AC-28`, `AC-51`) — a `boolean` accepts
+  only its two spellings and renders a checkbox, and the callout reads `Reconfigure queued` or
+  `Stored — reconfigure required` instead of `Restart required`, which `docker restart` can never
+  satisfy. A profile value over a `none` ceiling is a field error that names the profile to fix.
+- **The product and development surfaces present the scheme they serve** (`NFR-4.1`, `ISSUE-07`) —
+  the sign-in relay sends the public scheme, so a product no longer rejects its own credential POST
+  as cross-site forgery; the default TLS store serves the development leaf instead of a self-signed
+  certificate for the wrong host, the cache verifies the pair it minted, and the origins and routers
+  the switch left behind are gone.
+- **A transient job failure retries itself, and a dead worker no longer blocks its instance**
+  (`NFR-6.5`, `ISSUE-31`, `ADR-BE-34`) — a successor job is queued for a transient failure, retrying
+  a deployment only while its `apply` stage has not started and never retrying a restore or a
+  data-subject request; a job silent for `SEAMNEX_JOB_STALE_AFTER_MS` is settled `JOB_ABANDONED`
+  after its own failure handling runs.
 - **An event can start a workflow, and a poll actually polls** (`FR-5.4`, `NFR-2.8`, `AC-26`) — the
-  delivery URL a registration printed was served by nothing, `accept()` had no route to reach it, and a
-  delivery that did arrive started no run: event-driven start was documented and unreachable. `POST
-/trigger/:token` is now a declared, anonymous operation, authenticated by the endpoint's HMAC over the
-  **exact bytes** received (the route table tees the stream for the operations that declare
-  `rawBody: true`) and throttled on its own bucket; a valid, unique delivery starts the bound workflow
-  through `WorkflowAuthoringService.dispatchTriggerRun`, which reuses the run pipeline, keys the run on
-  the delivery id so a retrying sender cannot execute twice, and attributes it to the endpoint rather
-  than to a person. The delivery row records `forwarded` or `failed` with the measured
-  event-to-execution latency, a signed delivery to an endpoint with no binding is refused with
-  `STATE_CONFLICT` instead of being acknowledged, and every authentication failure answers one
-  indistinguishable `401`. `poll` compiles to an n8n interval schedule at `minimumIntervalMinutes`
-  instead of a webhook node waiting for an event the product cannot send, validation refuses to
-  activate a polling definition without an interval or a scheduled one without a cron, and the console
-  gained a Trigger tab where all four modes and their parameters are edited (the trigger is a versioned
-  definition, so a save asks for re-validation and re-activation). Endpoint tokens are now drawn from
-  the CSPRNG rather than `Math.random()`.
-- **An upgrade applies the version the operator confirmed** (`FR-1.7`, `AC-06`) — the handler passed
-  the confirmed version into `renderSetId`, so the job was handed a rollback selector and never knew
-  what had been approved: the audit trail could not name it. The read model compounded it by deriving
-  both versions from payload keys no producer writes, so the instance showed a version from the image
-  tag and "no update" for ever, even where the catalogue pinned a newer one. The version now travels as
-  `targetVersion` from the dialog through `LifecycleInput` into the job payload; the lifecycle call
-  refuses a target that is already running or no longer matches the catalogue, the resolve step
-  re-asserts it against the pin and refuses `STATE_CONFLICT` when the pin moved, and apply writes the
-  version it applied into `payload.currentVersion`.
-  `instance.upgrade.requested`, `.succeeded` and `.failed` name the version, the instance afterwards
-  reports what is running beside any newer catalogue pin, and the delta the dialog shows comes from
-  the entry's `upstream` rather than from a key nothing writes. The mock platform refuses an upgrade
-  that carries no confirmed version, answers with both versions when the pin moved, and applies the
-  pin it accepted instead of leaving the instance on the version it was on.
-- **A profile is bound by the ceiling that caps it** (`FR-1.26`, `AC-51`) — the renderer tested the
-  override ceiling on the instance branch and not on the profile branch, so a variable the declaration
-  marks as not overridable was populated from `env_profile_value` in silence: the ceiling was enforced
-  against the operator and not against the platform. A profile value over a `none` ceiling is now a
-  `ceiling` field error that names the profile to fix, the resolved value falls back to the catalogue
-  default instead of the value nobody was allowed to set, and an instance value for a `profile only`
-  variable is still refused by the branch that always checked it.
-- **Break-glass approver eligibility is enforced by the API, not only the console** (`FR-4.11`,
-  `AC-47`, `NFR-4.4`) — an approver whose `breakglass.approve` grant is scoped (the R2 auditor) may
-  approve a **read-only** elevation only, and a domain owner may approve an elevation only when one of
-  their grants covers the domain or instance it targets. Both rules are decided on the row the
-  decision transaction already locks, so the pending `access_mode` cannot be escalated between the
-  check and the `UPDATE`. A refusal answers `403 APPROVAL_MODE_FORBIDDEN` or `403
-APPROVAL_SCOPE_FORBIDDEN`, leaves the elevation `requested`, writes no `breakglass.approve` record
-  and writes an `access.denied` row instead; a rejection is never gated, so an auditor can still
-  decline a read-write request. The rule itself moved into `@seamnex/domain`
-  (`break-glass-approval.ts`), which is what the console button and the mock platform now read: they
-  had the only copy of it, which is why a caller that skipped the screen could have a read-write
-  elevation approved and audited as legitimate.
-- **Workflow write-target authority is enforced by the API, not only the mock** (`FR-5.9`, `AC-26`,
-  `NFR-4.4`) — a definition may now be created, imported, edited, activated, disabled, duplicated,
-  run, replayed, renamed or deleted only if the caller holds, for **every** product it writes to, R1
-  (with an active read-write break-glass session on that instance), R3 over that product's domain, or
-  R4 when its instance is the **only** write target. A refusal answers `403
-WORKFLOW_WRITE_NOT_PERMITTED` naming the target and the missing authority, and writes an
-  `access.denied` row; an authorisation that leans on an elevation records the elevation on the
-  change's own audit row. `/workflows*` no longer refuses every scoped grant outright: the PDP
-  resolves a workflow (or a run) to the instances it writes to, the list is filtered by the caller's
-  scope, and a definition that writes nowhere stays visible to its author. A duplicate now leaves a
-  `workflow.duplicated` record, and an edit keeps `workflow.write_targets` in step with the version.
-  Which instance a write target means is decided once, in `@seamnex/domain`
-  (`selectEgressInstance`), so authorisation, compilation and read scoping cannot rank two
-  deployments of one product differently.
-- **A domain owner can compose again** (`FR-5.2`, `FR-5.9`, `C-11`) — the workflow pickers were built
-  from `GET /instances`, the fleet view guarded by `instance.view_logs`, which a domain owner (R3) and
-  a product administrator (R4) are refused: both roles opened "New workflow", found two empty selects
-  and could not create the workflow FR-5.9 grants them. They now read the integration registry
-  (`registry.view`, full for both), which is where the builder's eligibility verdict already came
-  from. An auditor (R2) is also no longer offered "New workflow"/"Import", which only ever answered
-  `403`.
-- **The dev seed reconciles a grant whose scope moved** (`FR-5.9`) — the domain owner is granted a
-  catalog domain (`CRM & Sales Pipeline`) rather than the cluster that groups D1-D4, which resolved to
-  no product at all. Re-seeding now removes the superseded row for the same subject and role instead
-  of leaving a grant that matches no catalog entry beside the corrected one.
-- **A failed job keeps the fix, not only the diagnosis** — the worker wrote the stage's message and
-  dropped an `AppError`'s remediation, so the console showed "the database is not reachable" without
-  the setting that makes it reachable. The remediation now travels into the failed step, the job log
-  and the job's error detail.
-- **Mock catalog quotas fit their shape** — the sample entry declared 40 GB of volumes on a 20 GB
-  disk reservation, a configuration the platform now refuses; the fixture totals 19 GB, matching the
-  seeded catalog.
-- **A deployment no longer stops in "Apply" because the image scanner had nowhere to write**
-  (`NFR-4.6`, `S-10`, ISSUE-08) — inside the API container the relative `SEAMNEX_SCAN_TMP_DIR` default
-  resolved against `/app`, which `WORKDIR` creates as root while the process runs as `node`, so the
-  first `mkdir` failed with `EACCES` and the job ended `IMAGE_SCAN_BLOCKED` before any container
-  started; had it succeeded, the path was not a host mount, so the daemon would have bound an empty
-  directory into the scanner. `docker/compose.dev.yml` now pins `/var/lib/seamnex/scans` and mounts
-  `temp/scans` there, `ensureRuntimeDirs` creates that host directory before `up` (the same rule the
-  other runtime trees follow), and the `SEAMNEX_SCAN_*` policy variables are forwarded from `.env`
-  instead of being dead configuration — the same class of gap that hid the path. The Trivy database
-  the scanner still cannot reach is recorded as ISSUE-53, not fixed here.
+  ingress is a declared, throttled operation authenticated over the exact bytes received, starting
+  the bound workflow once per delivery and recording whether it was forwarded or failed; a delivery
+  no definition is bound to is refused rather than acknowledged. A poll compiles to a schedule
+  instead of a webhook waiting for an event the product cannot send, and the console gained a
+  Trigger tab.
+- **The guest can use the portal, and sign-out ends the products' sessions too** (`FR-3.3`,
+  `FR-3.8`, `AC-35`, `ISSUE-28`, `ISSUE-29`) — the launcher and product page are open to the guest
+  role, which answered `403` while mock mode hid it, and "My access" stays closed to it.
+  `POST /me/logout` now ends the identity-provider session, which fires the registered back-channel
+  logout, and reports which products were reached instead of claiming them all.
+- **The audit anchor is signed, immutable, off-host and retained** (`NFR-4.10`, `AC-15`, `ISSUE-30`,
+  `ADR-BE-33`) — one Ed25519-signed row per closed day, written once, copied daily with the public
+  half in the export, and proof that answers whether the signature verifies instead of printing a
+  string. Expired months are dropped under a 365-day floor.
+- **Two authorities the screens enforced are now enforced by the API** (`FR-4.11`, `FR-5.9`,
+  `AC-47`, `NFR-4.4`) — a break-glass approval is limited by access mode and by scope, decided on
+  the row the decision transaction locks, and a workflow write requires authority over every product
+  it writes to; both refuse with a code and an `access.denied` row, and the rule lives in
+  `@seamnex/domain` so the console and the mock cannot hold a different one. A domain owner's
+  workflow pickers read the registry they are allowed to see, so they can compose again.
+- **An upgrade applies the version the operator confirmed** (`FR-1.7`, `AC-06`) — the version
+  travels from the dialog into the job, is re-asserted against the pin, and is named in the audit
+  events and in what the instance afterwards reports as running.
+- **Smaller corrections** (`NFR-3.9`, `AC-52`, `NFR-4.6`, `S-10`) — a restore fans out at the
+  operator's setting instead of an environment default; a failed job keeps its remediation in the
+  step, the log and the error; the mock catalogue's quotas fit its disk reservation; the scanner
+  writes to a host mount instead of a directory the process cannot create.
 
 ## [0.1.0] - 2026-11-13
 

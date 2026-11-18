@@ -662,10 +662,14 @@ export class PostgresRendererService implements RendererService {
     return {
       diff,
       requiresRecreate,
-      // Render and apply belong to Phase 4A: the values are persisted, the containers are not
-      // restarted, and the response says so rather than implying a deployment happened.
+      /*
+       * This method stores; it does not render. `PUT /instances/:id/env` queues the reconfigure and
+       * replaces this note when there is a diff, so the sentence below is the answer for a caller
+       * that reached the service directly — it says what is true of the container, which is that its
+       * environment is fixed until the definition is re-rendered, not that a restart would do.
+       */
       applied: false,
-      note: 'Stored. Render and apply run in Phase 4A; a redeploy is required for the containers to see these values.',
+      note: 'Stored. The container keeps the environment it was created with until the instance is reconfigured.',
     };
   }
 

@@ -320,6 +320,31 @@ const EnvironmentSchema = z
     SEAMNEX_DOCKER_HOST: z.string().min(1).default('unix:///var/run/docker.sock'),
     SEAMNEX_DOCKER_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(600_000).default(30_000),
     /**
+     * BuildKit endpoint builds are sent to (ADR-BE-40 §7).
+     *
+     * Empty keeps the default builder — the daemon's own BuildKit — which needs a direct connection
+     * to the Engine. Where the Engine is reached through the socket proxy this must name a BuildKit
+     * daemon instead: a build session is a hijacked connection (`Upgrade: tcp`) and the proxy's
+     * allow-list answers it `403`, so the CLI would fail before reading a single Dockerfile.
+     */
+    SEAMNEX_BUILDKIT_ADDR: z.string().default(''),
+    /**
+     * Package-manager mirrors the `build` stage forwards to every image it builds, as `--build-arg`.
+     *
+     * A Dockerfile the platform does not own fetches from whatever CDN it names, and on a filtered
+     * network that fetch is the long part of a build: `php:8.3-apache-bookworm` sat for minutes in a
+     * TLS handshake against `deb.debian.org` and then installed the same packages anyway. Compose has
+     * no global equivalent, so the only channel is an argument the Dockerfile declares — the platform
+     * forwards all three and a file that declares none simply ignores them.
+     *
+     * They are a property of the *build host*: read from `.env`, forwarded as build arguments, and
+     * never written into an image (a mirror must not follow the container into runtime). Empty keeps
+     * upstream, which is what CI does.
+     */
+    APK_MIRROR: z.string().default(''),
+    APT_MIRROR: z.string().default(''),
+    NPM_REGISTRY: z.string().default(''),
+    /**
      * How long the `verify` stage waits for containers to run and answer HTTP. A first install
      * creates its database schema inside the container (EspoCRM: tens of seconds), so a 60 s window
      * failed deployments that were still progressing — and the retry then passed, which is the worst

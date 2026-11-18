@@ -9,11 +9,11 @@ open-source software written by other people. This document records what that so
 licence each component is made available under, and what each licence obliges this project to do. It
 is an inventory, not legal advice, and it does not reproduce licence texts (§8 says where they are).
 
-| Category                | Covered                                                                      | Source of truth                     |
-| ----------------------- | ---------------------------------------------------------------------------- | ----------------------------------- |
-| Direct npm dependencies | 52 packages: 26 runtime (`dependencies`), 26 development (`devDependencies`) | `catalog:` in `pnpm-workspace.yaml` |
-| Container images        | 15, all third-party and pinned to a full version                             | `docker/compose.dev.yml`            |
-| Vendored webfonts       | 3 families, committed as `.woff2`                                            | `packages/ui/src/assets/fonts/`     |
+| Category                | Covered                                                                      | Source of truth                                |
+| ----------------------- | ---------------------------------------------------------------------------- | ---------------------------------------------- |
+| Direct npm dependencies | 52 packages: 26 runtime (`dependencies`), 26 development (`devDependencies`) | `catalog:` in `pnpm-workspace.yaml`            |
+| Container images        | 17: 15 in the dev stack, 2 deployed by a render set, all pinned to a version | `docker/compose.dev.yml`, `platform/upstream/` |
+| Vendored webfonts       | 3 families, committed as `.woff2`                                            | `packages/ui/src/assets/fonts/`                |
 
 **Not covered.** Three things are deliberately outside this document:
 
@@ -51,16 +51,18 @@ The inventory grouped by licence, so a licence question can be answered without 
 Names appear only where the licence carries an obligation beyond preserving a notice, or a review
 step; MIT is a count because its obligation is uniform and its members are the bulk of §3 and §4.
 
-| Licence                         | npm packages                                                                                                                                     | Images and fonts                             |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------- |
-| MIT                             | 42 of the 52 packages in §3 and §4                                                                                                               | `axllent/mailpit`, `traefik`                 |
-| Apache-2.0                      | `@aws-sdk/client-s3`, `class-variance-authority`, `dockerode`, `prom-client`, `reflect-metadata`, `rxjs`, `eslint-plugin-security`, `typescript` | 8 images (§5)                                |
-| ISC                             | `lucide-react`, `yaml`                                                                                                                           | —                                            |
-| AGPL-3.0                        | —                                                                                                                                                | `grafana/grafana`, `grafana/loki`            |
-| SIL OFL-1.1                     | —                                                                                                                                                | the three font families in §6                |
-| PostgreSQL Licence              | —                                                                                                                                                | `postgres`                                   |
-| BSD-3-Clause / RSALv2 or SSPLv1 | —                                                                                                                                                | `redis` — depends on the resolved patch (§5) |
-| Sustainable Use Licence         | —                                                                                                                                                | `n8nio/n8n`                                  |
+| Licence                         | npm packages                                                                                                                                     | Images and fonts                                                     |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------- |
+| MIT                             | 42 of the 52 packages in §3 and §4                                                                                                               | `axllent/mailpit`, `traefik`                                         |
+| Apache-2.0                      | `@aws-sdk/client-s3`, `class-variance-authority`, `dockerode`, `prom-client`, `reflect-metadata`, `rxjs`, `eslint-plugin-security`, `typescript` | 8 images (§5)                                                        |
+| ISC                             | `lucide-react`, `yaml`                                                                                                                           | —                                                                    |
+| AGPL-3.0                        | —                                                                                                                                                | `grafana/grafana`, `grafana/loki`                                    |
+| SIL OFL-1.1                     | —                                                                                                                                                | the three font families in §6                                        |
+| PostgreSQL Licence              | —                                                                                                                                                | `postgres`                                                           |
+| BSD-3-Clause / RSALv2 or SSPLv1 | —                                                                                                                                                | `redis` — depends on the resolved patch (§5)                         |
+| Sustainable Use Licence         | —                                                                                                                                                | `n8nio/n8n`                                                          |
+| GPL-2.0                         | —                                                                                                                                                | `mariadb` (§5.1)                                                     |
+| GPL-3.0-only                    | —                                                                                                                                                | `seamnex/orangehrm` (§5.1), plus the product's own terms, unverified |
 
 ## 3. Runtime dependencies
 
@@ -203,6 +205,36 @@ version here is verifiable rather than asserted.
 - `apps/api/Dockerfile` builds `FROM node:24-alpine` — Node.js (MIT, plus the licences of its bundled
   dependencies) on Alpine Linux (mixed, predominantly MIT and BSD-2-Clause).
 
+### 5.1 Product images (`platform/upstream/`)
+
+The images the _catalogue_ deploys are not the images the dev stack runs, and they were absent from
+this inventory until a review found an unreviewed third-party image running under a product's own tag.
+A vendored render set is two distributions at once: someone else's application, and files this project
+adds to it. Both are recorded here, because the obligations attach to the image, not to the directory.
+
+| Image               | Version | Licence                                                                           | Role in this project                                                                                                                   | Source                                                        |
+| ------------------- | ------- | --------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `seamnex/orangehrm` | 5.9     | GPL-3.0-only for the platform's additions; the product's own terms **unverified** | OrangeHRM built on the host by the deployment's `build` stage from `platform/upstream/D07-01`; never pushed, never pulled              | [orangehrm/orangehrm](https://github.com/orangehrm/orangehrm) |
+| `mariadb`           | 11.4    | GPL-2.0                                                                           | Database service for `D07-01`, added by the render set; a separate container, reached over the instance network, never linked into PHP | [MariaDB/server](https://github.com/MariaDB/server)           |
+
+**Notes for reviewers**
+
+- `mariadb` is `GPL-2.0`, which §7 lists as **not permitted in first-party code**: it is acceptable
+  here because it is a separately deployed service the platform calls over a network boundary, and
+  because the platform pulls the image rather than distributing it. An appliance export that bundles
+  the image is a distribution and carries GPLv2's source obligation.
+- `seamnex/orangehrm` is built from a tree that adds files to the product's image, so its licence is
+  _not_ simply the product's. `platform/upstream/D07-01/IMAGE-LICENCES.md` travels inside the image
+  and names what is known and what is not — including that the product's identifier has not been read
+  out of the archive, which is what §7's `GPL-2.0` / `GPL-3.0` split turns on.
+- That image is **never published**: the deployment builds it into the host's store, and
+  `pull_policy: never` keeps it there. Running it on the operator's own host is not conveying, so the
+  GPL source obligation attaches to the export path (`docker save`, an appliance image) rather than to
+  every deployment. A registry push would turn each deployment into a distribution — which is why
+  nothing in the executor pushes.
+- The base image (`php:8.3-apache-bookworm`) brings PHP-3.01, Apache-2.0 and Debian's mixed set; the
+  same reasoning as the API image above applies.
+
 ## 6. Vendored webfonts
 
 The typography is self-hosted so the interface does not contact a third-party font service and
@@ -328,18 +360,25 @@ A pull request that touches any of the following **must** touch this document in
 - the `catalog:` block of `pnpm-workspace.yaml`
 - `docker/compose.dev.yml` or a `Dockerfile`
 - `packages/ui/src/assets/fonts/`
+- `platform/upstream/` — a vendored tree decides which images a product deployment runs and which
+  files this project adds to someone else's image. It was dropped from this gate on 2026-11-13 and
+  restored on 2026-11-18, after an inventory with no row for any product image let a third-party
+  repackaging deploy under a product's own tag.
+- `platform/default-catalog/` or `platform/catalog/env/` — `imageRef` and `imageDigest` are the pin an
+  operator reviews, and a new product brings a new image with a licence of its own.
 
 A reviewer should treat "manifest changed, notices unchanged" as a blocking comment. That single rule
 is what keeps this file honest.
 
 ## 10. Review record
 
-| Date       | Change                                                                                                                                                                                                                                                                                      | Reviewer             |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
-| 2026-11-06 | Initial inventory: 52 direct npm packages (26 runtime, 26 development), 15 container images, 3 vendored font families, 7 deployed product definitions.                                                                                                                                      | Platform maintainers |
-| 2026-11-13 | Major bumps: `dockerode` 4.0.7 → 5.0.1 (Apache-2.0; drops its `uuid` dependent, so the advisory override is gone), `@types/dockerode` 3.3.31 → 4.0.2, `jsdom` 30.1.3 → 31.0.0. Licences unchanged.                                                                                          | Platform maintainers |
-| 2026-11-13 | Consolidated the inventory: one licence summary (§2), one policy-and-obligations table (§7), transitive and text-location policy folded into §1 and §8. Versions reconciled with the `catalog:` block, `jsdom` 31.0.0 → 31.0.1, product rows keyed by their `platform/upstream/` directory. | Platform maintainers |
-| 2026-11-13 | Removed the deployed product definitions section: the inventory now covers npm packages, container images and vendored fonts only. Sections after it renumbered, and `platform/upstream/` dropped from the review gate.                                                                     | Platform maintainers |
+| Date       | Change                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Reviewer             |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
+| 2026-11-06 | Initial inventory: 52 direct npm packages (26 runtime, 26 development), 15 container images, 3 vendored font families, 7 deployed product definitions.                                                                                                                                                                                                                                                                                                                             | Platform maintainers |
+| 2026-11-13 | Major bumps: `dockerode` 4.0.7 → 5.0.1 (Apache-2.0; drops its `uuid` dependent, so the advisory override is gone), `@types/dockerode` 3.3.31 → 4.0.2, `jsdom` 30.1.3 → 31.0.0. Licences unchanged.                                                                                                                                                                                                                                                                                 | Platform maintainers |
+| 2026-11-13 | Consolidated the inventory: one licence summary (§2), one policy-and-obligations table (§7), transitive and text-location policy folded into §1 and §8. Versions reconciled with the `catalog:` block, `jsdom` 31.0.0 → 31.0.1, product rows keyed by their `platform/upstream/` directory.                                                                                                                                                                                        | Platform maintainers |
+| 2026-11-13 | Removed the deployed product definitions section: the inventory now covers npm packages, container images and vendored fonts only. Sections after it renumbered, and `platform/upstream/` dropped from the review gate.                                                                                                                                                                                                                                                            | Platform maintainers |
+| 2026-11-18 | Added §5.1: the images the catalogue deploys, starting with `seamnex/orangehrm` (built locally from `platform/upstream/D07-01`, never published) and the `mariadb` 11.4 dependency it adds. `platform/upstream/` restored to the §9.3 gate, together with the catalogue documents that carry `imageRef`/`imageDigest`. The OrangeHRM row records the product's licence as unverified — the archive is fetched at build time and nobody has read its `LICENSE` into the repository. | Platform maintainers |
 
 Add a row whenever the inventory changes materially. One line is enough; the tables carry the detail.
 

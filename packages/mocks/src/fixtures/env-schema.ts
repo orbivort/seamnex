@@ -122,6 +122,23 @@ const PRODUCT_VARS: Record<string, EnvSchemaVar[]> = {
       overrideCeiling: 'profile_and_instance',
       options: ['en_US', 'de_DE'],
     },
+    {
+      /*
+       * The real D01-01 ships six `ESPOCRM_CONFIG_OIDC_*` booleans at `profile_and_instance`; this is
+       * the demo's stand-in for that block. It matters that one boolean is overridable: without it the
+       * fixtures offer no boolean the Environment drawer can edit, and the checkbox that replaced a
+       * free-text field would have no coverage in the demo at all.
+       */
+      name: 'ESPOCRM_CONFIG_OIDC_SYNC_TEAMS',
+      purpose: 'Mirror identity-provider teams onto EspoCRM teams at each sign-in.',
+      type: 'boolean',
+      required: false,
+      defaultValue: 'false',
+      constraint: null,
+      conditional: null,
+      secret: false,
+      overrideCeiling: 'profile_and_instance',
+    },
   ],
   'D03-01': [
     {

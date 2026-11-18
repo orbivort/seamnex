@@ -73,6 +73,24 @@ export type ComposeProject = {
 };
 
 /**
+ * The buildx builder every build is routed through when `SEAMNEX_BUILDKIT_ADDR` is set.
+ *
+ * Fixed rather than generated: the builder is a property of the host, so every worker must agree on
+ * one name. A generated name would register a fresh entry on every container recreate and leave the
+ * cache behind with the old one.
+ */
+const BUILDKIT_BUILDER = 'seamnex-buildkit';
+
+/**
+ * The package-manager mirrors a build forwards, in the order a Dockerfile expects to declare them.
+ *
+ * One list, because the `--build-arg` pairs and the names the job log prints have to be the same set:
+ * the defect this closes was a setting that reached no build at all, and a log that names a mirror it
+ * did not forward would be the same lie in a friendlier font.
+ */
+const BUILD_MIRROR_ARGS = ['APK_MIRROR', 'APT_MIRROR', 'NPM_REGISTRY'] as const;
+
+/**
  * ADR-BE-12 D2 — Docker access.
  *
  * Two mechanisms, each where it is the only option:
@@ -439,6 +457,37 @@ export class DockerEngineClient {
     };
   }
 
+  /**
+   * The repository digest the daemon holds for a reference, or `null` when it holds none.
+   *
+   * Deliberately not `imageIdentity().digest`: that one falls back to the image config id, so a
+   * locally built image answered with a `sha256:` value and made "the pin matches" unfalsifiable.
+   * A pin can only be checked against a digest the registry recorded.
+   */
+  async repoDigest(ref: string): Promise<string | null> {
+    this.guard();
+    const inspect = await this.docker.getImage(ref).inspect();
+    const entry = inspect.RepoDigests?.find((value) => value.includes('@'));
+    return entry === undefined ? null : (entry.split('@')[1] ?? null);
+  }
+
+  /**
+   * The config id the tag resolves to, or `null` when the daemon holds no such image.
+   *
+   * This is the identity a *local* build has: `docker build` produces an id and no repository digest,
+   * so an entry that builds can only be pinned by id. Swallowing the inspect failure is deliberate —
+   * "the tag is gone" is a verdict the caller reports, not an exception to unwrap.
+   */
+  async imageId(ref: string): Promise<string | null> {
+    try {
+      await this.guard();
+      const inspect = await this.docker.getImage(ref).inspect();
+      return typeof inspect.Id === 'string' && inspect.Id.length > 0 ? inspect.Id : null;
+    } catch {
+      return null;
+    }
+  }
+
   async imageExists(ref: string): Promise<boolean> {
     try {
       await this.guard();
@@ -486,11 +535,99 @@ export class DockerEngineClient {
     project: ComposeProject,
     onLine?: (line: string) => Promise<void>,
   ): Promise<void> {
-    const result = await runOrThrow('docker', composeArgs(project, ['build']), {
+    /*
+     * `--progress=plain` because BuildKit's default progress is cursor-animated frames on stderr:
+     * piped, it collapses to one line, which is why a failed build reported
+     * "docker exited with 1: Image seamnex/orangehrm:5.9 Building" — the first frame, with the
+     * failing step and its error nowhere in the captured output. Plain progress emits one line per
+     * step, so the job log names the instruction that failed and keeps the rest for the next reader.
+     */
+    await this.ensureBuilder();
+    const args = composeArgs(project, ['build', '--progress=plain', ...this.buildArgs()]);
+    const result = await runOrThrow('docker', args, {
       env: this.dockerEnv(),
       timeoutMs: 900_000,
     });
     await this.emit(onLine, result.stdout);
+  }
+
+  /**
+   * The mirrors `build` forwards as `--build-arg` (`APK_MIRROR`, `APT_MIRROR`, `NPM_REGISTRY`).
+   *
+   * A definition the platform does not own fetches from whatever archive its Dockerfile names, and on
+   * a filtered network that fetch is the whole cost of the stage: the first D07-01 build spent its
+   * minutes in `apt-get` against `deb.debian.org` and in a SourceForge download. Compose offers no
+   * daemon-level equivalent (`registry-mirrors` covers image pulls only, and BuildKit reads its own
+   * config for those), so the one channel left is a build argument the Dockerfile declares. All three
+   * names are forwarded unconditionally — a Dockerfile that declares none ignores them — and empty
+   * forwards nothing, so CI and a clean host keep upstream.
+   *
+   * They are read from the API role's environment rather than from the definition: a mirror is a fact
+   * about the build host, and a value written into the render set would travel to every other host.
+   */
+  private buildArgs(): string[] {
+    const args: string[] = [];
+    for (const name of BUILD_MIRROR_ARGS) {
+      const value = this.config[name] ?? '';
+      if (value.length > 0) args.push('--build-arg', `${name}=${value}`);
+    }
+    return args;
+  }
+
+  /**
+   * The mirrors this process forwards to a build, named for the job log.
+   *
+   * A setting nothing reads is indistinguishable from one that was ignored — which is exactly how the
+   * mirrors went unnoticed while a build spent its minutes on a CDN the host could not reach. The
+   * `build` stage logs this list before the CLI runs, so "was the mirror applied" is answerable from
+   * the log rather than from the host's environment.
+   */
+  buildMirrors(): string[] {
+    return BUILD_MIRROR_ARGS.filter((name) => (this.config[name] ?? '').length > 0);
+  }
+
+  /**
+   * Registers the buildx builder that fronts `SEAMNEX_BUILDKIT_ADDR` (ADR-BE-40 §7).
+   *
+   * A BuildKit build is a hijacked connection (`Upgrade: tcp`), and the socket proxy that guards the
+   * Engine API answers it `403` — reported, before this existed, as
+   * `unable to upgrade to tcp, received 403` on the first line of a `build` stage that had read no
+   * Dockerfile yet. A *remote* builder is the one shape that needs no Engine session: the CLI speaks
+   * gRPC to BuildKit directly, and `--load` returns the image through the proxy's ordinary image
+   * endpoints. The builder is *not* created when no address is configured, so a host with direct
+   * Engine access keeps the default builder and its shell-free argv.
+   *
+   * The registration lives in the CLI's own state (`$HOME/.docker/buildx`), so it is per container
+   * and disappears with it; hence "register if absent" rather than "use what was bootstrapped".
+   */
+  private async ensureBuilder(): Promise<void> {
+    const addr = this.buildkitAddr();
+    if (addr.length === 0) return;
+    const name = BUILDKIT_BUILDER;
+    const inspect = async (): Promise<number> => {
+      const result = await run('docker', ['buildx', 'inspect', name], {
+        env: this.dockerEnv(),
+        timeoutMs: 60_000,
+      });
+      return result.code;
+    };
+    if ((await inspect()) === 0) return;
+    const created = await run(
+      'docker',
+      ['buildx', 'create', '--name', name, '--driver', 'remote', addr],
+      { env: this.dockerEnv(), timeoutMs: 60_000 },
+    );
+    // Two workers share a queue: the second one loses the race between `inspect` and `create`, and
+    // the builder it did not create is still the builder it needs. Only a builder that is *still*
+    // absent is a failure.
+    if (created.code !== 0 && (await inspect()) !== 0) {
+      throw new AppError({
+        code: 'ADAPTER_UNAVAILABLE',
+        detail: `the BuildKit builder "${name}" could not be registered for ${addr}: ${created.stderr.trim()}`,
+        remediation:
+          'Check SEAMNEX_BUILDKIT_ADDR and that the buildkit service is running; the job stopped before building anything.',
+      });
+    }
   }
 
   async composeDown(project: ComposeProject, removeVolumes: boolean): Promise<void> {
@@ -537,7 +674,12 @@ export class DockerEngineClient {
       });
   }
 
-  /** Rootless BuildKit through the socket proxy; `--load` keeps the image local for `save`. */
+  /**
+   * BuildKit through the configured builder; `--load` keeps the image local for `save`.
+   *
+   * `--load` is what makes the result usable at all here: a remote builder keeps the image in its own
+   * store, and `apply` starts containers from the *host* daemon's.
+   */
   async build(input: {
     context: string;
     dockerfile: string;
@@ -547,9 +689,11 @@ export class DockerEngineClient {
     // The tag is what enters the local store and later lands in a compose file, so it is the
     // reference the allow-list can actually judge; the base image is the Dockerfile policy's job.
     await this.assertTrustedImage(input.tag, 'build');
+    await this.ensureBuilder();
     const args = ['buildx', 'build', '--load', '-t', input.tag, '-f', input.dockerfile];
     for (const [key, value] of Object.entries(input.labels ?? {}))
       args.push('--label', `${key}=${value}`);
+    args.push(...this.buildArgs());
     args.push(input.context);
     await runOrThrow('docker', args, { env: this.dockerEnv(), timeoutMs: 900_000 });
   }
@@ -626,8 +770,26 @@ export class DockerEngineClient {
     }
   }
 
+  /**
+   * The CLI environment: the Engine endpoint, nothing inherited, and the builder when one is
+   * configured.
+   *
+   * `BUILDX_BUILDER` is the switch both `docker buildx build` and `docker compose build` honour —
+   * Compose has no `--builder` flag, so a variable is the only way to route both shapes to one
+   * daemon (ADR-BE-40 §7). It is set here, once, rather than threaded through each caller.
+   */
   private dockerEnv(): NodeJS.ProcessEnv {
-    return { DOCKER_HOST: this.config.SEAMNEX_DOCKER_HOST, DOCKER_CLI_HINTS: 'false' };
+    const env: NodeJS.ProcessEnv = {
+      DOCKER_HOST: this.config.SEAMNEX_DOCKER_HOST,
+      DOCKER_CLI_HINTS: 'false',
+    };
+    if (this.buildkitAddr().length > 0) env.BUILDX_BUILDER = BUILDKIT_BUILDER;
+    return env;
+  }
+
+  /** The configured build endpoint, or empty when the daemon's own builder is the one to use. */
+  private buildkitAddr(): string {
+    return this.config.SEAMNEX_BUILDKIT_ADDR ?? '';
   }
 
   private guard(): void {

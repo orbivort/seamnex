@@ -124,6 +124,13 @@ const CATALOG_COLUMNS = defineColumns<CatalogEntry>([
 
 const catalogRowKey = (row: CatalogEntry) => row.key;
 
+/**
+ * A narrowed filter legitimately leaves one entry, and "1 domain entries, 1 deployments" is how the
+ * count reads as a rendering bug rather than as an answer. Five counts on this screen need it.
+ */
+const counted = (count: number, singular: string, plural = `${singular}s`) =>
+  `${count} ${count === 1 ? singular : plural}`;
+
 const catalogRowLink = (row: CatalogEntry, className: string, children: ReactNode) => (
   <Link to={`/catalog/${row.key}`} className={className}>
     {children}
@@ -209,7 +216,7 @@ export function CatalogPage() {
         meta={
           <>
             <Badge tone="accent" size="sm">
-              {entries.length} entries
+              {counted(entries.length, 'entry', 'entries')}
             </Badge>
             <Badge tone="neutral" size="sm">
               {entries.filter((entry) => entry.packaging === 'compose').length} compose
@@ -352,7 +359,7 @@ export function CatalogPage() {
       <Panel>
         <PanelHeader
           eyebrow="Entries"
-          title={`${entries.length} domain entries, ${deploymentCount} deployments`}
+          title={`${counted(entries.length, 'domain entry', 'domain entries')}, ${counted(deploymentCount, 'deployment', 'deployments')}`}
           description="Entries can share a deployment (D05-01 and D06-01 share one ERPNext instance). Guarantee class is mandatory: no entry may be unclassified."
         />
         <FilterBar

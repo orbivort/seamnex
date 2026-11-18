@@ -8,8 +8,11 @@
 #
 # Deviations from the upstream distribution, each recorded rather than hidden (README.md has the
 # longer version):
-#   1. the application image is built from this tree's `Dockerfile` — upstream publishes no image —
-#      and pinned by tag, because a floating tag is refused by the platform's compose policy anyway;
+#   1. the application service declares its own `build:` — upstream publishes no image — so the
+#      platform builds it from this tree during the deployment, in the platform's own namespace and
+#      with `pull_policy: never`: the tag can only ever name an image this host built. A tag under the
+#      product's name used to resolve to a third party's repackaging the moment the local build was
+#      missing, which is exactly what deployed an uninstalled application;
 #   2. the database service is added here: `mariadb:11.4` with a named volume and a healthcheck. The
 #      installer creates the schema itself and *refuses* a pre-existing database, so this file
 #      deliberately does **not** set `MARIADB_DATABASE`;
@@ -34,7 +37,19 @@ services:
       start_period: 30s
 
   orangehrm:
-    image: orangehrm/orangehrm:5.9
+    # A declared local build, in the platform's own namespace. The tag is a name this host gives its
+    # own artefact, not an address: `build:` makes the executor produce the image during the `build`
+    # stage, and `pull_policy: never` makes an absent image an error instead of a download, so the
+    # deployment can never start something a registry served under the same name. `docker.io/seamnex`
+    # is on the trusted-registry allow-list, which the build and start checks both consult.
+    image: seamnex/orangehrm:5.9
+    build:
+      # Rewritten by the renderer to the absolute resolved source tree, which is where this file,
+      # the Dockerfile and the installer scripts are copied for the instance. Relative here so the
+      # definition stays portable and the renderer owns the base path.
+      context: '.'
+      dockerfile: Dockerfile
+    pull_policy: never
     depends_on:
       orangehrm-db:
         condition: service_healthy

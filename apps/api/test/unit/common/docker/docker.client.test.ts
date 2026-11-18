@@ -142,6 +142,9 @@ const PROJECT: ComposeProject = {
 
 beforeEach(() => {
   h.options.length = 0;
+  // The build-endpoint cases assert on the *absence* of a `buildx` call, so history cannot leak in
+  // from the case before it.
+  runMock.mockReset();
   h.getNetwork.mockReturnValue(h.network);
   h.getContainer.mockReturnValue(h.container);
   h.getImage.mockReturnValue(h.image);
@@ -691,6 +694,25 @@ describe('images', () => {
     });
   });
 
+  it('reports no repository digest instead of the image id, so a pin cannot pass on a local build', async () => {
+    h.image.inspect.mockResolvedValue({ Id: 'sha256:9', RepoDigests: ['shop@sha256:other'] });
+    await expect(makeClient().repoDigest('shop:1')).resolves.toBe('sha256:other');
+
+    h.image.inspect.mockResolvedValue({ Id: 'sha256:9', RepoDigests: [] });
+    await expect(makeClient().repoDigest('shop:1')).resolves.toBeNull();
+
+    h.image.inspect.mockResolvedValue({ Id: 'sha256:9' });
+    await expect(makeClient().repoDigest('shop:1')).resolves.toBeNull();
+  });
+
+  it('reports the config id a local build has, and null when the tag is gone', async () => {
+    h.image.inspect.mockResolvedValue({ Id: 'sha256:9', RepoDigests: [] });
+    await expect(makeClient().imageId('shop:1')).resolves.toBe('sha256:9');
+
+    h.image.inspect.mockRejectedValue(new Error('no such image'));
+    await expect(makeClient().imageId('shop:1')).resolves.toBeNull();
+  });
+
   it('reports whether an image is present, swallowing the same failure that disables it', async () => {
     h.image.inspect.mockResolvedValue({ Id: 'x' });
     await expect(makeClient().imageExists('shop:1')).resolves.toBe(true);
@@ -760,6 +782,164 @@ describe('compose CLI', () => {
       expect.objectContaining({ timeoutMs: 900_000 }),
     );
     expect(onLine).toHaveBeenCalledWith('built');
+  });
+
+  /**
+   * `.env` → `--build-arg` for both build shapes.
+   *
+   * A product Dockerfile the platform does not own fetches from whatever archive it names, and on a
+   * filtered host that fetch *is* the stage: the first D07-01 build spent its budget in `apt-get`
+   * against `deb.debian.org`. The mirrors travel as arguments the Dockerfile declares, so both shapes
+   * must carry them; nothing configured must add nothing, because a stray argument in CI is noise.
+   */
+  describe('package mirrors', () => {
+    const MIRRORS = {
+      APK_MIRROR: 'https://mirror.example.com/alpine',
+      APT_MIRROR: 'https://mirror.example.com/debian',
+      NPM_REGISTRY: 'https://registry.example.com',
+    };
+    const EXPECTED = [
+      '--build-arg',
+      'APK_MIRROR=https://mirror.example.com/alpine',
+      '--build-arg',
+      'APT_MIRROR=https://mirror.example.com/debian',
+      '--build-arg',
+      'NPM_REGISTRY=https://registry.example.com',
+    ];
+
+    /** The argv of the last CLI call, which is the one the mirror arguments have to be on. */
+    function lastArgs(): string[] {
+      return runOrThrowMock.mock.calls.at(-1)?.[1] as string[];
+    }
+
+    it('forwards every configured mirror to a compose build', async () => {
+      runOrThrowMock.mockResolvedValue({ code: 0, stdout: '', stderr: '', truncated: false });
+
+      await makeClient(MIRRORS).composeBuild(PROJECT);
+
+      const args = lastArgs();
+      expect(args).toEqual(expect.arrayContaining(EXPECTED));
+      // After the subcommand: Compose reads an argument before `build` as a global flag and exits 1.
+      expect(args.indexOf('--build-arg')).toBeGreaterThan(args.indexOf('build'));
+    });
+
+    it('forwards them to a buildx build', async () => {
+      await makeClient(MIRRORS).build({
+        context: '/srv/ctx',
+        dockerfile: '/srv/ctx/Dockerfile',
+        tag: 'seamnex/shop:1',
+      });
+
+      // Before the context, which has to stay the last argument.
+      expect(lastArgs()).toEqual([
+        'buildx',
+        'build',
+        '--load',
+        '-t',
+        'seamnex/shop:1',
+        '-f',
+        '/srv/ctx/Dockerfile',
+        ...EXPECTED,
+        '/srv/ctx',
+      ]);
+    });
+
+    it('adds nothing when no mirror is configured', async () => {
+      runOrThrowMock.mockResolvedValue({ code: 0, stdout: '', stderr: '', truncated: false });
+
+      await makeClient().composeBuild(PROJECT);
+
+      expect(lastArgs()).not.toContain('--build-arg');
+    });
+  });
+
+  /**
+   * ADR-BE-40 §7 — the build endpoint.
+   *
+   * The socket proxy cannot carry a build session, so a configured `SEAMNEX_BUILDKIT_ADDR` has to
+   * reach both build shapes: `docker compose build` (through the environment, because Compose has no
+   * `--builder` flag) and `docker buildx build` (same variable). The builder is registered once, and
+   * a lost registration race is not a failure.
+   */
+  describe('build endpoint', () => {
+    const absent = { code: 1, stdout: '', stderr: 'no builder', truncated: false };
+    const ok = { code: 0, stdout: '', stderr: '', truncated: false };
+
+    it('leaves the daemon builder alone when no endpoint is configured', async () => {
+      runOrThrowMock.mockResolvedValue({ code: 0, stdout: '', stderr: '', truncated: false });
+
+      await makeClient().composeBuild(PROJECT);
+
+      expect(runMock).not.toHaveBeenCalled();
+      const options = runOrThrowMock.mock.calls.at(-1)?.[2] as { env: Record<string, string> };
+      expect(options.env.BUILDX_BUILDER).toBeUndefined();
+    });
+
+    it('registers the remote builder, then builds through it', async () => {
+      runMock.mockResolvedValueOnce(absent).mockResolvedValueOnce(ok);
+      runOrThrowMock.mockResolvedValue({
+        code: 0,
+        stdout: 'built\n',
+        stderr: '',
+        truncated: false,
+      });
+
+      await makeClient({ SEAMNEX_BUILDKIT_ADDR: 'tcp://buildkit:1234' }).composeBuild(PROJECT);
+
+      expect(runMock).toHaveBeenCalledWith(
+        'docker',
+        ['buildx', 'inspect', 'seamnex-buildkit'],
+        expect.objectContaining({ timeoutMs: 60_000 }),
+      );
+      expect(runMock).toHaveBeenCalledWith(
+        'docker',
+        [
+          'buildx',
+          'create',
+          '--name',
+          'seamnex-buildkit',
+          '--driver',
+          'remote',
+          'tcp://buildkit:1234',
+        ],
+        expect.objectContaining({
+          env: expect.objectContaining({ DOCKER_HOST: 'unix:///var/run/docker.sock' }),
+        }),
+      );
+      const options = runOrThrowMock.mock.calls.at(-1)?.[2] as { env: Record<string, string> };
+      expect(options.env.BUILDX_BUILDER).toBe('seamnex-buildkit');
+    });
+
+    it('does not register a builder that is already there', async () => {
+      runMock.mockResolvedValue(ok);
+      runOrThrowMock.mockResolvedValue({ code: 0, stdout: '', stderr: '', truncated: false });
+
+      await makeClient({ SEAMNEX_BUILDKIT_ADDR: 'tcp://buildkit:1234' }).composeBuild(PROJECT);
+
+      expect(runMock.mock.calls.map((call) => call[1])).toEqual([
+        ['buildx', 'inspect', 'seamnex-buildkit'],
+      ]);
+    });
+
+    it('accepts a builder another worker registered first', async () => {
+      runMock.mockResolvedValueOnce(absent).mockResolvedValueOnce(absent).mockResolvedValueOnce(ok);
+      runOrThrowMock.mockResolvedValue({ code: 0, stdout: '', stderr: '', truncated: false });
+
+      await expect(
+        makeClient({ SEAMNEX_BUILDKIT_ADDR: 'tcp://buildkit:1234' }).composeBuild(PROJECT),
+      ).resolves.toBeUndefined();
+    });
+
+    it('refuses to build when the endpoint cannot be registered', async () => {
+      runMock.mockResolvedValue(absent);
+
+      const client = makeClient({ SEAMNEX_BUILDKIT_ADDR: 'tcp://buildkit:1234' });
+      await expect(client.composeBuild(PROJECT)).rejects.toMatchObject({
+        code: 'ADAPTER_UNAVAILABLE',
+        detail: expect.stringContaining('tcp://buildkit:1234'),
+      });
+      expect(runOrThrowMock).not.toHaveBeenCalled();
+    });
   });
 
   it('removes volumes only when asked', async () => {

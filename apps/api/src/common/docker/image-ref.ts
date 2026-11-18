@@ -20,3 +20,36 @@ export function imageTagOf(reference: string | null | undefined): string | null 
   const tag = withoutDigest.slice(separator + 1);
   return tag.length === 0 ? null : tag;
 }
+
+/** The repository a reference names, with any tag and digest removed. */
+export function imageRepositoryOf(reference: string): string {
+  const withoutDigest = reference.split('@')[0] ?? '';
+  const separator = withoutDigest.lastIndexOf(':');
+  return separator <= withoutDigest.lastIndexOf('/')
+    ? withoutDigest
+    : withoutDigest.slice(0, separator);
+}
+
+/**
+ * The version of the *product's* image, not of whichever image the render set lists first.
+ *
+ * A render set is a list ordered by the compose file, which says nothing about which image is the
+ * product: D07-01 renders `["mariadb:11.4", "seamnex/orangehrm:5.9"]`, so recording `imageRefs[0]`
+ * wrote the sidecar's tag and the instance screen read "current version 11.4 — available 5.9", i.e. a
+ * downgrade on offer. The product is the reference that shares a repository with the entry's declared
+ * image; a declared image that matches nothing yields `null` (keep the known version) rather than a
+ * guess, because the guess is exactly what went wrong.
+ */
+export function productVersionOf(
+  references: readonly string[],
+  productImage: string | null | undefined,
+): string | null {
+  if (references.length === 0) return null;
+  if (typeof productImage === 'string' && productImage.length > 0) {
+    const repository = imageRepositoryOf(productImage);
+    const match = references.find((reference) => imageRepositoryOf(reference) === repository);
+    return match === undefined ? null : imageTagOf(match);
+  }
+  // No declaration to match against: only a single-image entry has an unambiguous answer.
+  return references.length === 1 ? imageTagOf(references[0]) : null;
+}

@@ -104,15 +104,20 @@ export function spawnProcess(
   };
   options.signal?.addEventListener('abort', onAbort, { once: true });
 
+  /*
+   * The cap keeps the *tail*, not the head. A command's reason for failing is its last lines —
+   * `ERROR: failed to solve: …`, `fatal: …` — and a head-keeping window threw exactly that away:
+   * a 4 MB `docker compose build` reported `docker exited with 1: Image seamnex/orangehrm:5.9
+   * Building`, its first progress frame, with the cause already discarded. `truncated` still tells
+   * a caller that the document it received is incomplete, which is what a parser needs to know.
+   */
   const collect = (chunk: Buffer, target: 'stdout' | 'stderr'): void => {
-    const current = target === 'stdout' ? stdout : stderr;
-    if (Buffer.byteLength(current) >= maxOutputBytes) {
-      truncated = true;
-      return;
-    }
     const text = chunk.toString('utf8');
-    if (target === 'stdout') stdout = current + text;
-    else stderr = current + text;
+    const combined = (target === 'stdout' ? stdout : stderr) + text;
+    if (Buffer.byteLength(combined) > maxOutputBytes) truncated = true;
+    const kept = tailWithin(combined, maxOutputBytes);
+    if (target === 'stdout') stdout = kept;
+    else stderr = kept;
   };
 
   child.stdout.on('data', (chunk: Buffer) => collect(chunk, 'stdout'));
@@ -198,17 +203,29 @@ export function childEnvironment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessE
  * access '…'` — while compose and buildx report the cause on **stdout** (`ERROR: failed to solve:
  * …`) and the progress chatter on stderr. Reading stderr alone produced `docker exited with 1:
  * Image seamnex/woocommerce:11.2.1 Building`: the line before the failure, with the reason nowhere.
- * Both streams are searched for a line that declares itself an error, then stderr's first line,
- * then stdout's last, which is where a tool that prints forward puts its conclusion.
+ * Both streams are searched for a line that declares itself an error, then for the conclusion each
+ * stream ends with — stdout first, because a tool that prints forward puts its verdict last.
+ *
+ * Stderr's *first* line was the previous fallback, and it is the worst candidate: BuildKit opens
+ * with `Image … Building`, a progress frame, so that is what an operator was told a failed build
+ * said. The tail of the same stream carries `[killed after 900000 ms]` instead.
  */
 function failureReason(stdout: string, stderr: string): string {
   const err = linesOf(stderr);
   const out = linesOf(stdout);
-  const declared = [...err, ...out].filter((line) =>
-    /^(fatal|error|Error|ERROR|panic):/.test(line),
-  );
-  return declared[declared.length - 1] ?? err[0] ?? out[out.length - 1] ?? '(no output)';
+  const declared = [...err, ...out].filter((line) => DECLARED_FAILURE.test(line));
+  const meaningful = [...out, ...err].filter((line) => !SEPARATOR_ONLY.test(line));
+  return declared[declared.length - 1] ?? meaningful[meaningful.length - 1] ?? '(no output)';
 }
+
+/**
+ * A line that says what went wrong. The word may sit anywhere — BuildKit prefixes it with the step
+ * (`#12 ERROR: process …`) — and `failed to solve` carries no `error:` at all.
+ */
+const DECLARED_FAILURE = /(?:^|[\s#\d])(?:fatal|error|panic|failed)\b/i;
+
+/** BuildKit's plain progress draws `------` around every transfer; the last one is not a reason. */
+const SEPARATOR_ONLY = /^[-=_*\s]+$/;
 
 function linesOf(value: string): string[] {
   return value
@@ -216,4 +233,22 @@ function linesOf(value: string): string[] {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
+}
+
+/**
+ * The last `maxBytes` of `text`, cut at a line boundary.
+ *
+ * The boundary matters twice: a window that starts mid-line would hand `failureReason` a fragment
+ * that is neither the first line nor an error, and cutting raw bytes can split a UTF-8 sequence.
+ */
+function tailWithin(text: string, maxBytes: number): string {
+  const buffer = Buffer.from(text, 'utf8');
+  if (buffer.length <= maxBytes) return text;
+  const from = buffer.length - maxBytes;
+  const newline = buffer.indexOf(0x0a, from);
+  let start = newline === -1 ? from : newline + 1;
+  // No line boundary (one long line): skip UTF-8 continuation bytes so the window starts on a
+  // character rather than in the middle of one.
+  while (start < buffer.length && ((buffer[start] ?? 0) & 0xc0) === 0x80) start += 1;
+  return buffer.subarray(start).toString('utf8');
 }

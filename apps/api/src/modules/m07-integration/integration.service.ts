@@ -467,9 +467,13 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
     return route;
   }
 
-  async runChecks(
-    instanceId: string,
-  ): Promise<{ checks: IntegrationCheck[]; ready: boolean; blocking: string[] }> {
+  async runChecks(instanceId: string): Promise<{
+    checks: IntegrationCheck[];
+    ready: boolean;
+    blocking: string[];
+    /** Set when the product answers with its own installer: reachable, and not installed. */
+    installPending: string | null;
+  }> {
     const instance = await this.instanceOf(instanceId);
     const port = Number(instance.payload.httpPort ?? 80);
     const checks: { check: IntegrationCheck['check']; ok: boolean; detail: string }[] = [];
@@ -481,12 +485,16 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
       port,
       timeoutMs: 10_000,
     });
+    const installPending = probe.ok ? probe.installer : null;
     checks.push({
       check: 'http',
-      ok: probe.ok,
-      detail: probe.ok
-        ? `HTTP answered on :${port} (${describeProbe(probe)})`
-        : `no HTTP answer on :${port}`,
+      ok: probe.ok && installPending === null,
+      detail:
+        installPending !== null
+          ? `HTTP answered on :${port} (${describeProbe(probe)}) with the product's installer at ${installPending}`
+          : probe.ok
+            ? `HTTP answered on :${port} (${describeProbe(probe)})`
+            : `no HTTP answer on :${port}`,
     });
 
     const route = await this.route(instanceId);
@@ -498,7 +506,19 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
      * browser has already been redirected back.
      */
     const attachment = await this.ensureIdentityAttachment(instanceId);
-    const sso = await this.ssoLogin(instanceId, native, attachment);
+    /*
+     * Probing the sign-in page of a product that has not been installed measures nothing: the page
+     * that answers is the installer's, and the verdict (`account_failed`) accused the identity wiring
+     * of a failure that was really an unfinished installation. Recorded as not-checked, with the
+     * reason, and kept out of `blocking` for the same reason as `http` below.
+     */
+    const sso =
+      installPending === null
+        ? await this.ssoLogin(instanceId, native, attachment)
+        : {
+            ok: false,
+            detail: `not checked: the product is serving its installer at ${installPending}, so it has no sign-in page yet`,
+          };
     checks.push({ check: 'sso_login', ok: sso.ok, detail: sso.detail });
 
     const dnsOk = route !== null;
@@ -523,13 +543,27 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
       instanceId,
     ]);
     const hookCount = hooks.rowCount ?? 0;
+    /*
+     * `event_modes` is the declaration; `trigger_endpoint` is the registration. A product that
+     * declares no events has nothing to register, and reporting that as a failed check printed a red
+     * row on every deployment of such a product, with a detail that already explained why it was not
+     * a fault.
+     */
+    const declared = await this.pool.query<{ event_modes: unknown }>(
+      `SELECT event_modes FROM integration_metadata WHERE instance_id = $1`,
+      [instanceId],
+    );
+    const modes = declared.rows[0]?.event_modes;
+    const declaresEvents = Array.isArray(modes) && modes.length > 0;
     checks.push({
       check: 'webhook_registered',
-      ok: hookCount > 0,
+      ok: hookCount > 0 || !declaresEvents,
       detail:
         hookCount > 0
           ? `${hookCount} trigger endpoint(s) registered`
-          : 'the product declares no triggers',
+          : declaresEvents
+            ? 'the product declares events but no trigger endpoint is registered'
+            : 'the product declares no triggers, so there is nothing to register',
     });
 
     const previousSso = await this.latestSsoVerdict(instanceId);
@@ -540,7 +574,9 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
       );
     }
     const ssoCheck = checks.find((check) => check.check === 'sso_login');
-    if (ssoCheck !== undefined)
+    // A "not checked" verdict is not a transition: recording one would put a failure in the audit
+    // trail for a product that was never asked.
+    if (ssoCheck !== undefined && installPending === null)
       await this.auditSsoTransition(instanceId, previousSso, ssoCheck.ok, ssoCheck.detail);
 
     // FR-2.9: the verdict, not the state. `instance` belongs to M05, so M07 reports and the
@@ -555,16 +591,26 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
     // authority is the product itself: an IdP that is not wired up yet says nothing about whether the
     // instance works, and blocking on it made every deployment of a native product fail after the
     // containers were already running.
+    //
+    // An installer page is not a failed deployment either. The render set starts the product on
+    // purpose when its first-boot install refuses, so the operator can finish in a browser; failing
+    // the job here would leave them with a screen they cannot reach. The verdict still carries the
+    // reason (`installPending`), and the executor records `degraded` rather than `ready`.
     const blocking = checks
-      .filter(
-        (check) =>
-          !check.ok &&
-          (check.check === 'http' ||
-            check.check === 'dns' ||
-            (check.check === 'sso_login' && !native)),
-      )
+      .filter((check) => {
+        if (check.ok) return false;
+        if (check.check === 'dns') return true;
+        if (check.check === 'http') return installPending === null;
+        if (check.check === 'sso_login') return !native && installPending === null;
+        return false;
+      })
       .map((check) => `${check.check}: ${check.detail}`);
-    return { checks: await this.checks(instanceId), ready: blocking.length === 0, blocking };
+    return {
+      checks: await this.checks(instanceId),
+      ready: blocking.length === 0,
+      blocking,
+      installPending,
+    };
   }
 
   /**

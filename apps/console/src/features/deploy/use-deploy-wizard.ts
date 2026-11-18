@@ -637,13 +637,26 @@ export function useDeployWizard(entryKey: string): DeployWizard {
    * "Deploy instance" was greyed out and the only explanation lived in a check list two panels up.
    */
   const blockingBlockers = blockers.filter((blocker) => blocker.blocking);
+  /*
+   * A blocker is named by the field it belongs to. Three unanswered required variables produced
+   * three identical "A value is required." sentences, and the disabled button printed two of them:
+   * an operator could neither tell which inputs to fill nor that a third existed. The cap stays —
+   * a plan with twenty blockers must not push the action off screen — but it now says how many it
+   * left out instead of ending mid-sentence.
+   */
+  const NAMED_BLOCKERS = 3;
+  const named = blockingBlockers
+    .slice(0, NAMED_BLOCKERS)
+    .map((blocker) =>
+      blocker.field === null ? blocker.message : `${blocker.field}: ${blocker.message}`,
+    );
+  const unmentioned = blockingBlockers.length - named.length;
   const blockedReason =
     blockingBlockers.length === 0
       ? undefined
-      : `${blockingBlockers.length} pre-flight blocker${blockingBlockers.length === 1 ? '' : 's'}: ${blockingBlockers
-          .slice(0, 2)
-          .map((blocker) => blocker.message)
-          .join(' ')}`;
+      : `${blockingBlockers.length} pre-flight blocker${blockingBlockers.length === 1 ? '' : 's'}: ${named.join(' ')}${
+          unmentioned > 0 ? ` And ${unmentioned} more.` : ''
+        }`;
 
   return {
     entry,

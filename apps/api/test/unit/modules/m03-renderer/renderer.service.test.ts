@@ -805,7 +805,9 @@ describe('updateInstanceEnv', () => {
       { name: 'LEGACY', from: null, to: 'now-set', requiresRecreate: false },
     ]);
     expect(result).toMatchObject({ requiresRecreate: true, applied: false });
-    expect(result.note).toContain('Render and apply run in Phase 4A');
+    // Storing is all this method does; the sentence says what is true of the container rather than
+    // promising a restart that would keep the environment it was created with.
+    expect(result.note).toContain('keeps the environment it was created with');
 
     expect(secrets.put).toHaveBeenCalledWith(
       'instance',

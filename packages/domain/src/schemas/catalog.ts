@@ -249,6 +249,22 @@ export const EnvSchemaFileSchema = z
         });
       }
 
+      // A boolean's default is checked where an enum's already is: the value the file ships has to
+      // be one the runtime would accept, or the first deployment fails on a declaration nobody
+      // edited. `True` is the spelling that reaches a `!== 'true'` comparison and loses.
+      if (
+        variable.type === 'boolean' &&
+        variable.defaultValue !== null &&
+        variable.defaultValue !== 'true' &&
+        variable.defaultValue !== 'false'
+      ) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [...at, 'defaultValue'],
+          message: 'A boolean default is exactly "true" or "false".',
+        });
+      }
+
       if (variable.type === 'enum') {
         if (variable.options === undefined || variable.options.length === 0) {
           ctx.addIssue({

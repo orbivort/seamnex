@@ -397,6 +397,9 @@ describe('pre-flight rows that refuse the plan', () => {
 
     expect(await screen.findByText('Pre-flight blockers')).toBeDefined();
     expect(screen.getAllByText(/floating reference/).length).toBeGreaterThan(0);
+    // The field the blocker belongs to, because the message alone is generic and three unanswered
+    // variables all read "A value is required."
+    expect(screen.getByText(/^entryKey:/)).toBeDefined();
     expect(screen.getByText(/Nothing is vendored for D01-01/)).toBeDefined();
     // The advisory entry is not a refusal, and says so.
     expect(screen.getByText('(advisory)')).toBeDefined();
@@ -407,6 +410,43 @@ describe('pre-flight rows that refuse the plan', () => {
     expect(await screen.findByText('step 2 / 5')).toBeDefined();
     // The step that owns the blocker repeats it beside the fields it concerns.
     expect(await screen.findByText('The source pre-flight refuses this entry')).toBeDefined();
+  });
+
+  it('names the field on every blocker the disabled deploy action reports', async () => {
+    // The real D07-01 plan: four unanswered variables, each arriving as the same generic sentence.
+    // The reason under the action printed the first two, named nothing, and read as one blocker.
+    const blocker = (field: string) => ({
+      code: 'env_invalid',
+      field,
+      message: 'A value is required.',
+      blocking: true,
+    });
+    server.use(
+      http.post('/api/v1/instances/preview', () =>
+        HttpResponse.json({
+          ...preview(),
+          admissible: false,
+          headline: '4 blockers must be fixed first',
+          detail: 'ORANGEHRM_ADMIN_PASSWORD: A value is required.',
+          blockers: [
+            blocker('ORANGEHRM_ADMIN_PASSWORD'),
+            blocker('ORANGEHRM_DATABASE_PASSWORD'),
+            blocker('ORANGEHRM_DATABASE_ROOT_PASSWORD'),
+            blocker('ORANGEHRM_ADMIN_EMAIL'),
+          ],
+        }),
+      ),
+    );
+
+    openAs('R1', '/deploy/D01-01');
+    render(<App />);
+
+    const reason = await screen.findByText(/pre-flight blockers?: ORANGEHRM_ADMIN_PASSWORD/);
+    expect(reason.textContent).toContain('ORANGEHRM_DATABASE_PASSWORD');
+    expect(reason.textContent).toContain('ORANGEHRM_DATABASE_ROOT_PASSWORD');
+    // The cap hides a long list, so it has to say how many it hid.
+    expect(reason.textContent).toContain('And 1 more.');
+    expect(reason.textContent).not.toContain('ORANGEHRM_ADMIN_EMAIL');
   });
 
   it('retries the capacity read from both the panel and the pre-flight row', async () => {

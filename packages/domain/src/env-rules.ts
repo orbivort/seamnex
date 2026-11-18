@@ -43,7 +43,7 @@ export type EnvVarRule = z.infer<typeof EnvVarRuleSchema>;
 
 /** The codes a field error carries, so a screen can group them instead of matching on prose. */
 export type EnvRuleCode =
-  'min_length' | 'max_length' | 'pattern' | 'disallowed_value' | 'numeric_value';
+  'min_length' | 'max_length' | 'pattern' | 'disallowed_value' | 'numeric_value' | 'invalid_type';
 
 export type EnvRuleViolation = { code: EnvRuleCode; message: string };
 
@@ -53,6 +53,8 @@ export type EnvRuleTarget = {
   readonly type: string;
   readonly rule?: EnvVarRule | undefined;
   readonly constraint?: string | null;
+  /** The `enum` options, which bound the value the way `rule` bounds a string. */
+  readonly options?: readonly string[] | undefined;
 };
 
 // A malformed pattern is an authoring error the loader reports (`EnvSchemaFileSchema`); the checker
@@ -84,7 +86,15 @@ function patternFor(source: string): RegExp | null {
   return compiled;
 }
 
-/** True when `value` would be refused by the declaration; `null` when it satisfies it. */
+/**
+ * True when `value` would be refused by the declaration; `null` when it satisfies it.
+ *
+ * Two halves, not one: the bound the *type* carries, then the `rule` an author attached. The type
+ * half was asserted and never enforced — `ruleIssues` refuses a `rule` on a boolean because "its
+ * type already bounds it", while nothing here looked at the type at all. `True`, `TRUE` and `1` were
+ * therefore accepted and stored, and a consumer that compares the text (`getenv('FLAG') !== 'true'`)
+ * read every one of them as false. The Environment drawer's free-text field is where that happened.
+ */
 export function checkEnvValue(
   target: EnvRuleTarget,
   value: string | null | undefined,
@@ -92,6 +102,27 @@ export function checkEnvValue(
   // An absent value is `required`'s business, not the rule's: reporting "too short" for a variable
   // the operator never filled would put two errors on one field and hide the actionable one.
   if (value === null || value === undefined || value === '') return null;
+
+  if (target.type === 'boolean' && value !== 'true' && value !== 'false') {
+    return {
+      code: 'invalid_type',
+      message: 'A boolean is exactly "true" or "false"; this value is neither.',
+    };
+  }
+  if (
+    target.type === 'enum' &&
+    target.options !== undefined &&
+    // An enum the loader let through without options constrains nothing; an empty list would
+    // otherwise refuse every value it is handed.
+    target.options.length > 0 &&
+    !target.options.includes(value)
+  ) {
+    return {
+      code: 'invalid_type',
+      message: `Not one of the declared options: ${target.options.join(', ')}.`,
+    };
+  }
+
   const rule = target.rule;
   if (rule === undefined) return null;
 

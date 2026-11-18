@@ -917,6 +917,7 @@ describe('the five deployment checks', () => {
       payload?: Record<string, unknown>;
       schedule?: unknown;
       hooks?: unknown;
+      eventModes?: string[];
       verdict?: { ok: boolean }[];
       client?: Record<string, unknown>[];
       config?: Record<string, unknown>;
@@ -936,6 +937,9 @@ describe('the five deployment checks', () => {
       ...ssoRoutes({ client: options.client, verdict: options.verdict }),
       ['FROM backup_schedule', options.schedule ?? [{ '?column?': 1 }]],
       ['FROM trigger_endpoint', options.hooks ?? [{ '?column?': 1 }]],
+      // What the product declares, as opposed to what it registered: a product with no declared
+      // events has nothing to register, and the check has to be able to say so.
+      ['FROM integration_metadata', [{ event_modes: options.eventModes ?? [] }]],
       ['INSERT INTO integration_check', []],
       [
         'DISTINCT ON (check_type)',
@@ -1045,7 +1049,55 @@ describe('the five deployment checks', () => {
     await expect(service.runChecks(CRM)).resolves.toMatchObject({ ready: true, blocking: [] });
     const details = statements(db, 'INSERT INTO integration_check').map((entry) => entry.params[3]);
     expect(details).toContain('no backup schedule registered');
-    expect(details).toContain('the product declares no triggers');
+    // Not a failure: the declaration is empty, so there is nothing to register. Reporting it red put
+    // a permanent failed row on every deployment of such a product, with a detail that already said
+    // it was not a fault.
+    expect(details).toContain('the product declares no triggers, so there is nothing to register');
+  });
+
+  it('still reports a missing trigger endpoint for a product that declares events', async () => {
+    const { db, service } = build(
+      runChecksOptions({
+        hooks: { rows: [], rowCount: null },
+        eventModes: ['ticket.created'],
+      }),
+    );
+
+    await service.runChecks(CRM);
+
+    const details = statements(db, 'INSERT INTO integration_check').map((entry) => entry.params[3]);
+    expect(details).toContain('the product declares events but no trigger endpoint is registered');
+  });
+
+  it('reports an installer page as reachable-but-uninstalled, not as a blocked deployment', async () => {
+    // The observed incident: D07-01 answered `302 -> /installer/index.php/welcome`, the check called
+    // that a pass, and the instance, the portal tile and the job all reported success. Failing the
+    // job instead would be no better — the route is the only way to finish the install in a browser.
+    const { db, service } = build(
+      runChecksOptions({
+        route: [{ auth_mode: 'fa_gate' }],
+        docker: {
+          runCli: vi.fn(async () => ({
+            code: 0,
+            stdout: 'HTTP 302\nLOCATION /installer/index.php/welcome\n',
+            stderr: '',
+            truncated: false,
+          })),
+        },
+        sso: { verify: vi.fn(async () => ({ ok: false, detail: 'account_failed' })) },
+      }),
+    );
+
+    const result = await service.runChecks(CRM);
+
+    expect(result.installPending).toBe('/installer/index.php/welcome');
+    expect(result.ready).toBe(true);
+    expect(result.blocking).toEqual([]);
+    const details = statements(db, 'INSERT INTO integration_check').map((entry) => entry.params[3]);
+    expect(details[0]).toBe(
+      "HTTP answered on :8080 (HTTP 302) with the product's installer at /installer/index.php/welcome",
+    );
+    expect(details[1]).toContain('not checked');
   });
 
   it('records a change of SSO verdict as the event worth auditing', async () => {

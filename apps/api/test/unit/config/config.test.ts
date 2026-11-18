@@ -170,7 +170,7 @@ describe('configuration', () => {
       SEAMNEX_EDGE_TLS_MODE: 'internal',
     });
     expect(describeConfig(config)).toMatchObject({
-      productUrl: 'https://<slug>.localhost:8443',
+      productUrl: 'https://<slug>.seamnex.localhost:8443',
       edgeTlsMode: 'internal',
       acmeContactConfigured: false,
     });

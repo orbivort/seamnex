@@ -47,9 +47,17 @@ export interface IntegrationService {
    * never writes `instance`: that table belongs to M05, and a module that owns a table is the only
    * thing allowed to move its state.
    */
-  runChecks(
-    instanceId: string,
-  ): Promise<{ checks: IntegrationCheck[]; ready: boolean; blocking: string[] }>;
+  runChecks(instanceId: string): Promise<{
+    checks: IntegrationCheck[];
+    ready: boolean;
+    blocking: string[];
+    /**
+     * Set when the product answers with its own installer. `ready` stays true — the deployment did
+     * what it was asked to — and the caller records `degraded` with this as the reason, because
+     * "reachable" is not "installed".
+     */
+    installPending: string | null;
+  }>;
   /**
    * ADR-BE-22 — records one check verdict through the module that owns `integration_check`.
    *

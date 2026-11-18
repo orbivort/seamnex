@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { imageTagOf } from '../../../../src/common/docker/image-ref';
+import {
+  imageRepositoryOf,
+  imageTagOf,
+  productVersionOf,
+} from '../../../../src/common/docker/image-ref';
 
 /**
  * FR-1.7 / AC-06 — "which version is deployed" is read from the image reference, once.
@@ -40,5 +44,43 @@ describe('imageTagOf', () => {
     expect(imageTagOf(null)).toBeNull();
     expect(imageTagOf(undefined)).toBeNull();
     expect(imageTagOf('')).toBeNull();
+  });
+});
+
+/**
+ * A render set is a list ordered by the compose file, and index 0 is the first service, not the
+ * product. D07-01 renders `["mariadb:11.4", "seamnex/orangehrm:5.9"]`: recording index 0 wrote the
+ * database's tag and the instance screen read "current version 11.4 — available 5.9".
+ */
+describe('productVersionOf', () => {
+  it('reads the product image, not the sidecar listed first', () => {
+    expect(
+      productVersionOf(['mariadb:11.4', 'seamnex/orangehrm:5.9'], 'seamnex/orangehrm:5.9'),
+    ).toBe('5.9');
+  });
+
+  it('matches by repository, so a locally built tag still attributes to the product', () => {
+    expect(
+      productVersionOf(['mariadb:11.4', 'seamnex/orangehrm:built-1'], 'seamnex/orangehrm'),
+    ).toBe('built-1');
+  });
+
+  it('refuses to guess when the declared image is not in the set', () => {
+    // Guessing is what picked the sidecar; keeping the previously known version is the safe answer.
+    expect(productVersionOf(['mariadb:11.4', 'other/app:2'], 'seamnex/orangehrm:5.9')).toBeNull();
+  });
+
+  it('answers only when there is nothing to disambiguate against', () => {
+    expect(productVersionOf(['seamnex/orangehrm:5.9'], null)).toBe('5.9');
+    expect(productVersionOf(['a:1', 'b:2'], null)).toBeNull();
+    expect(productVersionOf([], 'seamnex/orangehrm:5.9')).toBeNull();
+  });
+});
+
+describe('imageRepositoryOf', () => {
+  it('drops the tag and the digest, and keeps a registry port', () => {
+    expect(imageRepositoryOf('ghcr.io/seamnex/crm:1.2@sha256:0f1e2d')).toBe('ghcr.io/seamnex/crm');
+    expect(imageRepositoryOf('localhost:5000/app:2.0.0')).toBe('localhost:5000/app');
+    expect(imageRepositoryOf('erpnext/erpnext')).toBe('erpnext/erpnext');
   });
 });

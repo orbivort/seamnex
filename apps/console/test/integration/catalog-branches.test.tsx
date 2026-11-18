@@ -350,17 +350,18 @@ describe('catalog entry actions', () => {
 
     await screen.findByRole('heading', { name: /EspoCRM/ });
 
-    // The pull consumes host bandwidth and disk, so a scoped reader is told who may run it.
+    // Preparing the images consumes host bandwidth, CPU and disk, so a scoped reader is told who
+    // may run it.
     const prefetch = await screen.findByRole('button', { name: /Prefetch images/ });
     expect(prefetch.hasAttribute('disabled')).toBe(true);
-    expect(prefetch.getAttribute('title')).toMatch(/R1 pre-pulls images/);
+    expect(prefetch.getAttribute('title')).toMatch(/R1 prepares images/);
 
     // No deploy link either: the badge states the rule instead of an action that would be refused.
     expect(screen.queryByRole('link', { name: /Deploy/ })).toBeNull();
     expect(screen.getByText('deploy: platform administrator')).toBeDefined();
   });
 
-  it('says the images are being pulled before the API answers', async () => {
+  it('says the images are being prepared before the API answers', async () => {
     let release: () => void = () => {};
     const gate = new Promise<void>((resolve) => {
       release = resolve;
@@ -388,7 +389,7 @@ describe('catalog entry actions', () => {
     expect(pending.hasAttribute('disabled')).toBe(true);
 
     release();
-    expect(await screen.findByText(/Pre-pulling the images for D01-01/)).toBeDefined();
+    expect(await screen.findByText(/Preparing the images for D01-01/)).toBeDefined();
   });
 
   it('reports a prefetch that the API refused', async () => {
@@ -412,7 +413,7 @@ describe('catalog entry actions', () => {
     expect(
       await screen.findByText('Pulling images needs the platform administrator'),
     ).toBeDefined();
-    expect(screen.queryByText(/Pre-pulling the images for D01-01/)).toBeNull();
+    expect(screen.queryByText(/Preparing the images for D01-01/)).toBeNull();
   });
 
   it('will not record a verification that changes nothing', async () => {
@@ -567,7 +568,7 @@ describe('catalog entry actions', () => {
     expect(screen.getByText('None')).toBeDefined();
     // A digest that is not a sha256 of 64 hex characters can never match a registry manifest.
     expect(screen.getByText(/Not a sha256:<64 hex> digest/)).toBeDefined();
-    expect(screen.queryByText(/This digest is what a deployment pins/)).toBeNull();
+    expect(screen.queryByText(/The tag is for humans/)).toBeNull();
   });
 
   it('confirms a digest that a deployment can actually pin', async () => {
@@ -584,7 +585,7 @@ describe('catalog entry actions', () => {
     render(<App />);
     await screen.findByRole('heading', { name: /EspoCRM/ });
 
-    expect(await screen.findByText(/This digest is what a deployment pins/)).toBeDefined();
+    expect(await screen.findByText(/The tag is for humans/)).toBeDefined();
     expect(screen.getByText(pinned)).toBeDefined();
   });
 

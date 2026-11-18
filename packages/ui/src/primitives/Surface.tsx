@@ -143,13 +143,21 @@ export function DefinitionList({
           <dt className="label-caps-sans">{item.label}</dt>
           <dd
             className={cn(
-              'mt-0.5 text-body text-text',
+              // A URL is one word with no break opportunity: a 395px release-notes link in this list
+              // pushed the document 34px past a 390px viewport, so the whole page scrolled sideways.
+              'mt-0.5 break-words text-body text-text',
               item.mono && 'font-mono text-meta break-all',
             )}
           >
             {item.value}
             {item.hint ? (
-              <span className="mt-0.5 block text-meta text-faint">{item.hint}</span>
+              /*
+               * `break-normal` is load-bearing: the hint inherits the value's wrapping, and a `mono`
+               * value carries `break-all` so identifiers survive a narrow cell. Without the reset a
+               * sentence under a mono value broke mid-word — the deploy review printed "the sch" /
+               * "eme and port the portal opens."
+               */
+              <span className="mt-0.5 block break-normal text-meta text-faint">{item.hint}</span>
             ) : null}
           </dd>
         </div>

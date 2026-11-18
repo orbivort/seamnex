@@ -292,6 +292,18 @@ export const PROBLEM_CATALOG = {
       'Upgrade the pinned image to a release that fixes the blocking findings, or (for a scanner failure) make the scanner image reachable and re-run the deployment.',
     slug: 'image-scan-blocked',
   },
+  /**
+   * FR-1.5 — the digest the catalogue records did not match the image the daemon would start, or
+   * there is no repository digest to compare with. Distinct from `IMAGE_SCAN_BLOCKED`: the image may
+   * be perfectly sound, it is simply not the artefact the operator reviewed.
+   */
+  IMAGE_DIGEST_MISMATCH: {
+    status: 422,
+    title: 'The image does not match the digest the catalogue pins',
+    remediation:
+      'Publish the pinned build under the reference the entry names, or record the new digest in the entry in the same commit as the version bump. Nothing was started.',
+    slug: 'image-digest-mismatch',
+  },
   /** AC-07: refused before any container starts, with the shortfall stated. */
   CAPACITY_EXCEEDED: {
     status: 422,

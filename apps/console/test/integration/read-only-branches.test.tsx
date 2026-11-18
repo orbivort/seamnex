@@ -29,7 +29,7 @@ describe('entry detail as a read-only role', () => {
     const prefetch = await screen.findByRole('button', { name: 'Prefetch images' });
     expect(prefetch).toHaveProperty('disabled', true);
     // The tooltip says why: a disabled control with no reason reads as a defect.
-    expect(prefetch.getAttribute('title')).toContain('R1 pre-pulls images');
+    expect(prefetch.getAttribute('title')).toContain('R1 prepares images');
 
     expect(screen.queryByRole('link', { name: /Deploy/ })).toBeNull();
     // The control is replaced by who may use it: an absent action with no owner reads as a defect.

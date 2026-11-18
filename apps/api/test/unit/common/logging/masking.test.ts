@@ -83,6 +83,20 @@ describe('mask by default', () => {
     expect(maskText('nothing to redact')).toBe('nothing to redact');
   });
 
+  it('keeps a diagnostic readable when a credential label appears mid-sentence', () => {
+    // Compose's own wording, verbatim. The colon rule used to read `PASSWORD:` in a sentence as an
+    // assignment and replace the next word with the mask, so the job log said
+    // "MARIADB_ROOT_PASSWORD: ******** variable …" — hiding the word the operator needed and
+    // implying a credential had been printed.
+    const line =
+      'error while interpolating services.orangehrm-db.environment.MARIADB_ROOT_PASSWORD: required variable ORANGEHRM_DATABASE_ROOT_PASSWORD is missing a value: ORANGEHRM_DATABASE_ROOT_PASSWORD must be supplied';
+    expect(maskText(line)).toBe(line);
+
+    // The same key opening a line is an assignment, and those are still masked.
+    expect(maskText('MARIADB_ROOT_PASSWORD: hunter2')).toBe(`MARIADB_ROOT_PASSWORD: ${MASK}`);
+    expect(maskText('  password: hunter2')).toBe(`  password: ${MASK}`);
+  });
+
   it('masks a JWT even under an innocent key', () => {
     const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature-part';
     expect(maskValue(jwt)).toBe(MASK);

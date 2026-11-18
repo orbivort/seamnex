@@ -302,7 +302,14 @@ export class PreflightService {
         : `${blocking.length} blocker${blocking.length === 1 ? '' : 's'} must be fixed first`,
       detail: admissible
         ? `Capacity, route, variables, secrets and policy were checked. The policy verdict is ${policyVerdict}.`
-        : (first?.message ?? 'A pre-flight check failed.'),
+        : first === undefined
+          ? 'A pre-flight check failed.'
+          : // The field, because the message alone is generic: three unanswered variables all
+            // produce "A value is required.", and the caller prints this as the reason the plan was
+            // refused.
+            first.field === null
+            ? first.message
+            : `${first.field}: ${first.message}`,
       shortfall: decision.shortfall,
       capacitySource: decision.source,
       routeHost,

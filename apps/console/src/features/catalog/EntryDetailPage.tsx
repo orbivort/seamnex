@@ -110,8 +110,8 @@ export function EntryDetailPage() {
               disabled={!canMutate(session.role, 'metadata.manage') || prefetch.isPending}
               title={
                 canMutate(session.role, 'metadata.manage')
-                  ? 'Pre-pull the pinned images so the deployment window is not spent downloading'
-                  : 'R1 pre-pulls images; the pull consumes host bandwidth and disk'
+                  ? 'Prepare the pinned images so the deployment window is not spent downloading or building'
+                  : 'R1 prepares images; it consumes host bandwidth, CPU and disk'
               }
               onClick={() => prefetch.mutate()}
             >
@@ -182,13 +182,15 @@ export function EntryDetailPage() {
       ) : null}
       {prefetch.data ? (
         <div className="mb-3">
-          <Alert tone="info" title={`Pre-pulling the images for ${data.key}`}>
+          <Alert tone="info" title={`Preparing the images for ${data.key}`}>
             Job{' '}
             <Link to={`/jobs/${prefetch.data.jobId}`} className="font-mono underline">
               {prefetch.data.jobId}
             </Link>{' '}
-            pulls {data.imageRef} into the local cache. It does not create containers or touch the
-            published route, so it is safe to run against a live instance.
+            prepares {data.imageRef} on this host: a pulled entry is fetched into the local cache,
+            an entry whose definition declares a build is built from its vendored tree. It does not
+            create containers or touch the published route, so it is safe to run against a live
+            instance.
           </Alert>
         </div>
       ) : null}
@@ -253,9 +255,15 @@ export function EntryDetailPage() {
                       // never match a registry manifest.
                       // FR-1.5: the hint used to open with the id — "FR-1.5: this digest is what a
                       // deployment pins; the tag is for humans." Requirement ids stay in source.
+                      //
+                      // ADR-BE-40: identity has two shapes, and this screen cannot tell which one
+                      // applies — the entry document does not record whether the definition declares
+                      // `build:` — so the hint states both instead of claiming the registry one. A
+                      // locally built image has no repository digest at all; its pin is the id the
+                      // host built, recorded per instance.
                       hint: /^sha256:[0-9a-f]{64}$/.test(data.imageDigest)
-                        ? 'This digest is what a deployment pins; the tag is for humans.'
-                        : 'Not a sha256:<64 hex> digest: a deployment cannot pull this image by digest until the entry is reconciled with the registry.',
+                        ? 'The tag is for humans: a deployment checks this digest for a pulled image, or the image id this host built when the definition declares a build.'
+                        : 'Not a sha256:<64 hex> digest: a deployment that pulls this image cannot check it by digest until the entry is reconciled with the registry.',
                     },
                     { label: 'Dependencies', value: data.dependencies.join(', ') || 'None' },
                     { label: 'Owner', value: `${data.owner.name} · ${data.owner.team}` },

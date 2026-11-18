@@ -33,18 +33,61 @@ import type { ExecResult } from './exec';
 const PROBE_IMAGE = 'busybox:1.36';
 
 const PROBE_SCRIPT = [
-  'line=$(wget -S -T 5 -O /dev/null "http://$1:$2/" 2>&1 | grep -m1 "HTTP/1")',
-  'code=$(echo "$line" | tr -s " " | cut -d" " -f3)',
-  'case "$code" in 2*|3*|4*) echo "HTTP $code"; exit 0;; esac',
-  'echo "${line:-no HTTP answer}"',
-  'exit 1',
+  'out=$(wget -S -T 5 -O /dev/null "http://$1:$2/" 2>&1)',
+  'line=$(printf "%s\\n" "$out" | grep -m1 "HTTP/1")',
+  'code=$(printf "%s\\n" "$line" | tr -s " " | cut -d" " -f3)',
+  'case "$code" in 2*|3*|4*) ;; *) printf "%s\\n" "${line:-no HTTP answer}"; exit 1;; esac',
+  'echo "HTTP $code"',
+  // The redirect target is the difference between reachable and installed. The status code alone
+  // cannot tell them apart: a product that answers `302` and a product that answers `302 -> its own
+  // installer` both prove the port is open, and only one of them is usable. The header is emitted on
+  // its own line so the verdict stays one grep away and the parsing stays in TypeScript.
+  'loc=$(printf "%s\\n" "$out" | sed -n "s/^[[:space:]]*[Ll][Oo][Cc][Aa][Tt][Ii][Oo][Nn]:[[:space:]]*//p" | head -n 1)',
+  '[ -n "$loc" ] && echo "LOCATION $loc"',
+  'exit 0',
 ].join('\n');
 
 export type HttpProbeResult = {
   readonly ok: boolean;
   /** The status line the product answered with, or an empty string when nothing answered. */
   readonly statusLine: string;
+  /**
+   * The `Location` a redirect points at, when that target is a product's own installer.
+   *
+   * `ok` still means "listens and speaks HTTP": the D07-01 render set starts Apache on purpose when
+   * its first-boot install refuses, so the route has to answer. This field is what the callers use to
+   * avoid calling that answer `ready` (see `installerReason`).
+   */
+  readonly installer: string | null;
 };
+
+/**
+ * Whether a redirect target names a first-boot installer.
+ *
+ * Deliberately narrow: `install`, `installer` and `installation` segments, which is what OrangeHRM
+ * (`/installer/index.php/welcome`), EspoCRM (`install/`) and WordPress (`/wp-admin/install.php`)
+ * answer with before they are set up. A generic `setup` or `wizard` segment is left out — products
+ * that ship one legitimately redirect to it after install.
+ */
+const INSTALLER_PATH = /(^|\/)(install|installer|installation)(\/|\.php|$)/i;
+
+/** The installer target this `Location` names, or `null` for an ordinary redirect. */
+export function installerTarget(location: string): string | null {
+  if (location === '') return null;
+  const path = location.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]*/i, '').split(/[?#]/)[0] ?? '';
+  return INSTALLER_PATH.test(path) ? location : null;
+}
+
+/**
+ * The reason an instance carries while its product serves its own installer.
+ *
+ * One wording for the deployment job, the instance state and the status sampler: three screens
+ * reported `ready` for a product whose `/` was its Setup Wizard, and the sentence they lacked is the
+ * one that says so.
+ */
+export function installerReason(installer: string): string {
+  return `the product is serving its own installer at ${installer}; the installation has not been completed`;
+}
 
 export type HttpProbeInput = {
   /** `docker` CLI runner of the calling module (each module owns its client). */
@@ -80,12 +123,19 @@ export async function probeProductHttp(input: HttpProbeInput): Promise<HttpProbe
       ],
       input.timeoutMs ?? 30_000,
     );
-    const statusLine = result.stdout.trim().split(/\r?\n/)[0] ?? '';
-    return { ok: result.code === 0, statusLine };
+    const lines = result.stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    // The script prints the status line first and the redirect target second; the failure path prints
+    // only the line wget managed to produce, which may itself be `no HTTP answer`.
+    const statusLine = lines.find((line) => !line.startsWith('LOCATION ')) ?? '';
+    const location = lines.find((line) => line.startsWith('LOCATION '))?.slice(9) ?? '';
+    return { ok: result.code === 0, statusLine, installer: installerTarget(location) };
   } catch {
     // A probe that cannot run (no docker, image missing) is a failure to answer, not a crash of the
     // caller: the deploy stage reports it, the sampler records it.
-    return { ok: false, statusLine: '' };
+    return { ok: false, statusLine: '', installer: null };
   }
 }
 

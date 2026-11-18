@@ -9,7 +9,7 @@ import { isUuid } from '../../common/http/uuid';
 import { maskText } from '../../common/logging/masking';
 import { DockerEngineClient } from '../../common/docker/docker.client';
 import { instanceNetwork } from '../../common/docker/naming';
-import { describeProbe, probeProductHttp } from '../../common/exec/http-probe';
+import { describeProbe, installerReason, probeProductHttp } from '../../common/exec/http-probe';
 import type { SampleSummary, StatusHealthService } from './status-health.contract';
 
 /** Transitional states render as "provisioning" rather than as an outage (FR-3.7). */
@@ -246,8 +246,9 @@ export class PostgresStatusHealthService implements StatusHealthService {
       this.config.SEAMNEX_SAMPLE_CONCURRENCY,
       async (instance) => {
         const observed = byInstance.get(instance.id) ?? [];
-        const httpReady = await this.probe(instance, observed);
-        const derived = derive(instance.state, observed, httpReady);
+        const outcome = await this.probe(instance, observed);
+        const httpReady = outcome === null ? null : outcome.ok;
+        const derived = derive(instance.state, observed, httpReady, outcome?.installer ?? null);
         await this.persist(instance, observed, derived, httpReady);
         if (derived.ready) ready += 1;
         else if (derived.state === 'degraded') degraded += 1;
@@ -262,11 +263,15 @@ export class PostgresStatusHealthService implements StatusHealthService {
   /**
    * HTTP readiness. Returns `null` when it could not be attempted (no containers, or the probe image
    * is unavailable) — the caller must not read `null` as success.
+   *
+   * `ok` alone is not enough: an uninstalled product answers too. The installer target rides along so
+   * the sampler stops promoting a Setup Wizard to `ready`, which is what made the portal offer an
+   * instance whose page was a licence screen.
    */
   private async probe(
     instance: InstanceRow,
     containers: readonly { id: string; state: string }[],
-  ): Promise<boolean | null> {
+  ): Promise<{ ok: boolean; installer: string | null } | null> {
     if (containers.length === 0) return null;
     if (containers.some((container) => container.state !== 'running')) return null;
 
@@ -285,12 +290,15 @@ export class PostgresStatusHealthService implements StatusHealthService {
         new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs)),
       ]);
       const ok = result?.ok === true;
+      const installer = result?.installer ?? null;
       await this.pool.query(
         `INSERT INTO probe_result (instance_id, kind, ok, latency_ms, detail)
          VALUES ($1, 'http', $2, $3, $4::jsonb)`,
         [
           instance.id,
-          ok,
+          // The row records what was observed about the product, not only about the socket: an
+          // installer page is a failure of readiness, and the evidence says why.
+          ok && installer === null,
           timeoutMs,
           JSON.stringify({
             target,
@@ -298,13 +306,14 @@ export class PostgresStatusHealthService implements StatusHealthService {
             // The status line is evidence: "302 Found" and "no HTTP answer" are different facts, and
             // the sampler used to record neither.
             answer: result === null ? 'timed out' : describeProbe(result),
+            ...(installer === null ? {} : { installer }),
           }),
         ],
       );
-      return ok;
+      return { ok, installer };
     } catch (error) {
       this.logger.debug(`probe failed for ${instance.slug}: ${String(error)}`);
-      return false;
+      return { ok: false, installer: null };
     }
   }
 
@@ -400,11 +409,18 @@ export class PostgresStatusHealthService implements StatusHealthService {
 
 type Derived = { state: InstanceStatus['state']; ready: boolean; reason: string | null };
 
-/** FR-1.32: `ready` requires running **and** an HTTP answer. */
+/**
+ * FR-1.32: `ready` requires running **and** an HTTP answer.
+ *
+ * `httpReady` is not sufficient on its own. A product that has not been installed answers with its
+ * installer — a 302 that the probe, quite correctly, counts as an answer. The four-argument form
+ * carries that target so the answer cannot be mistaken for the product.
+ */
 export function derive(
   previous: string,
   containers: readonly { state: string }[],
   httpReady: boolean | null,
+  installer: string | null = null,
 ): Derived {
   if (TRANSITIONAL.has(previous)) {
     return {
@@ -436,6 +452,9 @@ export function derive(
       ready: false,
       reason: `${notRunning} of ${containers.length} container(s) not running`,
     };
+  }
+  if (installer !== null) {
+    return { state: 'degraded', ready: false, reason: installerReason(installer) };
   }
   if (httpReady === true) return { state: 'ready', ready: true, reason: null };
   if (httpReady === false) {

@@ -139,7 +139,7 @@ describe('catalog entry', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: /Prefetch images/ }));
 
-    expect(await screen.findByText(/Pre-pulling the images for D01-01/)).toBeDefined();
+    expect(await screen.findByText(/Preparing the images for D01-01/)).toBeDefined();
     expect(
       screen.getByText(/It does not create containers or touch the published route/),
     ).toBeDefined();

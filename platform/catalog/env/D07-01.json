@@ -2,7 +2,7 @@
   "format": "env-schema/v1",
   "entryKey": "D07-01",
   "appliesTo": {
-    "imageRef": "orangehrm/orangehrm:5.9"
+    "imageRef": "seamnex/orangehrm:5.9"
   },
   "variables": [
     {
@@ -162,6 +162,17 @@
     {
       "name": "ORANGEHRM_REGISTRATION_CONSENT",
       "purpose": "Let the install register the instance with OrangeHRM and send it usage data (the installer's `registrationConsent` prompt). Upstream defaults to yes; the platform default is no, so an installation only reports itself when an operator asks for it.",
+      "type": "boolean",
+      "required": false,
+      "defaultValue": "false",
+      "constraint": "true or false",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ORANGEHRM_INSTALLER_LICENSE_AGREED",
+      "purpose": "Confirm that an operator has read the release archive's licence and accepts it (the installer's `license.agree` step). It defaults to false and the install refuses while it is false, because a licence acceptance is the person installing it — a deployment script that ticks the box records consent nobody gave. Apache still starts, so the product's own installer stays reachable with the reason in the log; set this to true on the instance once the review is done.",
       "type": "boolean",
       "required": false,
       "defaultValue": "false",

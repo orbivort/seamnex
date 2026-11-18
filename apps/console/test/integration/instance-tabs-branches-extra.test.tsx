@@ -414,9 +414,11 @@ describe('the resolved environment', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 
-  it('reports a change that needs a recreate rather than merely a restart', async () => {
-    // FR-1.28: a stored change is only real once it is applied, and a change to a variable that is
-    // read at container creation needs a recreate. Rendering it as a restart would be wrong advice.
+  it('reports a stored change as a queued reconfigure, not as a restart', async () => {
+    // FR-1.28: a stored change is only real once it is applied, and the only apply that reaches a
+    // container is a re-render. The callout used to say "Restart required", which cannot work — a
+    // restart keeps the environment the container was created with — so it now follows `applied`
+    // and the API's own note.
     const envValues = getState().envValues['inst-crm'];
     expect(envValues).toBeDefined();
     const target = envValues?.find((row) => row.name === 'ADMIN_EMAIL');
@@ -439,7 +441,33 @@ describe('the resolved environment', () => {
     });
     fireEvent.click(within(drawer).getByRole('button', { name: 'Save and render diff' }));
 
-    expect(await screen.findByText('Recreate required')).toBeDefined();
-    expect(screen.getByText(/Changes apply only after the instance is recreated/)).toBeDefined();
+    expect(await screen.findByText('Reconfigure queued')).toBeDefined();
+    expect(screen.getByText(/Stored and queued as a reconfigure job/)).toBeDefined();
+    // The row names the action that reaches the container. It used to say `recreate` for this column,
+    // and `restart` for the others — a restart re-runs the entrypoint with the old environment.
+    expect(within(row).getByText('reconfigure')).toBeDefined();
+  });
+
+  it('edits a boolean with a checkbox, so the stored text is one a script compares', async () => {
+    // The drawer offered free text for every type, and `True` was a value the API accepted and the
+    // product read as false. The control removes the spelling at the point of entry; `checkEnvValue`
+    // refuses it server-side for anything that does not come through this screen.
+    openAs('R1', '/instances/inst-crm');
+    render(<App />);
+    await screen.findByRole('heading', { name: 'EspoCRM' });
+
+    const panel = await openTab('Environment');
+    await within(panel).findByText('ESPOCRM_CONFIG_OIDC_SYNC_TEAMS');
+    const row = rowOf(within(panel).getByText('ESPOCRM_CONFIG_OIDC_SYNC_TEAMS'));
+    fireEvent.click(within(row).getByRole('button', { name: 'Change' }));
+
+    const drawer = await screen.findByRole('dialog');
+    const toggle = within(drawer).getByRole('checkbox', { name: 'Enabled' });
+    expect(within(drawer).queryByLabelText('New value')).toBeNull();
+
+    fireEvent.click(toggle);
+    fireEvent.click(within(drawer).getByRole('button', { name: 'Save and render diff' }));
+
+    expect(await screen.findByText('Reconfigure queued')).toBeDefined();
   });
 });

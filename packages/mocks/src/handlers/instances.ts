@@ -178,17 +178,24 @@ export const instanceHandlers = [
       outcome: 'success',
       detail:
         diff.length > 0
-          ? `${diff.map((item) => item.name).join(', ')} changed; ${requiresRecreate ? 'recreate' : 'restart'} required to apply.`
+          ? `${diff.map((item) => item.name).join(', ')} changed; reconfigure required to apply.`
           : 'Environment submitted with no effective change.',
       actor: actorFor(role),
     });
+    /*
+     * Mirror of the real handler: a save with a diff is queued as a reconfigure job, and a save with
+     * no diff changed nothing. The demo used to answer "Changes apply on the next restart", which no
+     * deployment can deliver — a restart keeps the environment the container was created with — and
+     * a console that prints the API's note showed that advice verbatim.
+     */
     return HttpResponse.json({
       diff,
       requiresRecreate,
-      applied: false,
-      note: requiresRecreate
-        ? 'Changes apply only after the instance is recreated. A restart is not sufficient.'
-        : 'Changes apply on the next restart.',
+      applied: diff.length > 0,
+      note:
+        diff.length > 0
+          ? 'Stored and queued as a reconfigure job: the containers are recreated with these values.'
+          : 'Stored; no value changed, so nothing was re-rendered.',
     });
   }),
 

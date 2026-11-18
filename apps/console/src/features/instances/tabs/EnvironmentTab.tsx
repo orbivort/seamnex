@@ -6,6 +6,7 @@ import {
   Badge,
   Button,
   Callout,
+  Checkbox,
   DataTable,
   Drawer,
   EmptyState,
@@ -22,7 +23,11 @@ import { AsyncPanel, QueryError } from '@seamnex/shell';
 import { AdminCredentialPanel } from './AdminCredentialPanel';
 import { rawValue } from '../rawValue';
 
-type EnvDraft = { name: string; original: string; value: string };
+/**
+ * `type` rides along with the draft because the drawer outlives the table that opened it: a boolean
+ * is edited with a checkbox, and a panel that unmounted cannot ask a row what it was.
+ */
+type EnvDraft = { name: string; type: string; original: string; value: string };
 
 /**
  * A Radix tab panel unmounts when another tab is selected (PERF-08), and this panel owns the only
@@ -81,9 +86,16 @@ const envColumns = defineColumns<EnvValue>([
     id: 'apply',
     header: 'Apply',
     hideBelow: 'lg',
-    cell: (row) => (
-      <span className="text-micro text-faint">{row.requiresRecreate ? 'recreate' : 'restart'}</span>
-    ),
+    /*
+     * `reconfigure`, on every row. This column used to say `recreate` or `restart`, and half of that
+     * was advice that cannot work: a container's environment is fixed when it is created, so the
+     * Restart button re-runs the entrypoint with the old values and the new ones never arrive. The
+     * product's own installer flag is the case that exposed it — the row said `restart`, and a restart
+     * left `ORANGEHRM_INSTALLER_LICENSE_AGREED` false at every boot. `requiresRecreate` still decides
+     * whether the container must be replaced at all; a reconfigure replaces it when it must, so the
+     * action an operator has to take is the same on every row.
+     */
+    cell: () => <span className="text-micro text-faint">reconfigure</span>,
   },
 ]);
 
@@ -146,6 +158,7 @@ export function EnvironmentTab({
               onClick={() =>
                 setDraft({
                   name: row.name,
+                  type: row.type,
                   original: rawValue(row.value, row.masked),
                   value: rawValue(row.value, row.masked),
                 })
@@ -207,10 +220,17 @@ export function EnvironmentTab({
       <AdminCredentialPanel instance={instance} canEdit={canEdit} />
 
       {update.isError ? <QueryError error={update.error} compact /> : null}
-      {update.data ? (
+      {/*
+        The title follows `applied`, not `requiresRecreate`. A stored value reaches the container only
+        when the definition is re-rendered, so "Restart required" was advice that could not work: a
+        restart re-runs the entrypoint with the environment the container was created with. A save
+        that changed nothing gets no callout at all — "0 variable(s) changed" under "Stored" read as
+        a silent failure.
+      */}
+      {update.data && update.data.diff.length > 0 ? (
         <Callout
-          tone={update.data.requiresRecreate ? 'caution' : 'info'}
-          title={update.data.requiresRecreate ? 'Recreate required' : 'Restart required'}
+          tone={update.data.applied ? 'info' : 'caution'}
+          title={update.data.applied ? 'Reconfigure queued' : 'Stored — reconfigure required'}
         >
           {update.data.note} {update.data.diff.length} variable(s) changed.
         </Callout>
@@ -262,22 +282,43 @@ export function EnvironmentTab({
         }
       >
         <div className="space-y-3">
-          <label htmlFor="env-value" className="block text-meta font-medium text-muted">
-            New value
-          </label>
-          <Input
-            id="env-value"
-            value={draft?.value ?? ''}
-            onChange={(event) => {
-              // Guarded rather than derived: the drawer only mounts while a draft exists, and a
-              // conditional keeps the write from resurrecting one that was just discarded.
-              if (draft) setDraft({ ...draft, value: event.target.value });
-            }}
-            autoComplete="off"
-          />
+          {/*
+            A boolean is a checkbox because there is no other correct spelling. The free-text field
+            this replaces stored whatever was typed, and `ORANGEHRM_INSTALLER_LICENSE_AGREED=True`
+            reached an entrypoint that compares the text to `"true"`, so the install it was meant to
+            permit never ran. `checkEnvValue` now refuses the same values server-side; this is the
+            affordance that keeps an operator from meeting that refusal.
+          */}
+          {draft?.type === 'boolean' ? (
+            <Checkbox
+              id="env-value"
+              label="Enabled"
+              checked={draft.value === 'true'}
+              onChange={(event) => {
+                if (draft) setDraft({ ...draft, value: event.target.checked ? 'true' : 'false' });
+              }}
+            />
+          ) : (
+            <>
+              <label htmlFor="env-value" className="block text-meta font-medium text-muted">
+                New value
+              </label>
+              <Input
+                id="env-value"
+                value={draft?.value ?? ''}
+                onChange={(event) => {
+                  // Guarded rather than derived: the drawer only mounts while a draft exists, and a
+                  // conditional keeps the write from resurrecting one that was just discarded.
+                  if (draft) setDraft({ ...draft, value: event.target.value });
+                }}
+                autoComplete="off"
+              />
+            </>
+          )}
           <InlineNote>
-            The render diff is shown before apply. Secrets are masked and recorded only as a secret
-            reference.
+            {draft?.type === 'boolean'
+              ? 'Stored as the literal "true" or "false"; the product compares that text, so no other spelling is accepted.'
+              : 'The render diff is shown before apply. Secrets are masked and recorded only as a secret reference.'}
           </InlineNote>
         </div>
       </Drawer>
