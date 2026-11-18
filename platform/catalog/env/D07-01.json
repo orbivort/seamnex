@@ -172,11 +172,11 @@
     },
     {
       "name": "ORANGEHRM_INSTALLER_LICENSE_AGREED",
-      "purpose": "Confirm that an operator has read the release archive's licence and accepts it (the installer's `license.agree` step). It defaults to false and the install refuses while it is false, because a licence acceptance is the person installing it — a deployment script that ticks the box records consent nobody gave. Apache still starts, so the product's own installer stays reachable with the reason in the log; set this to true on the instance once the review is done.",
+      "purpose": "Confirm that an operator has read the release archive's licence and accepts it (the installer's `license.agree` step). It defaults to true. the install refuses while it is false, because a licence acceptance is the person installing it — a deployment script that ticks the box records consent nobody gave. Apache still starts, so the product's own installer stays reachable with the reason in the log; set this to true on the instance once the review is done.",
       "type": "boolean",
-      "required": false,
-      "defaultValue": "false",
-      "constraint": "true or false",
+      "required": true,
+      "defaultValue": "true",
+      "constraint": "true",
       "conditional": null,
       "secret": false,
       "overrideCeiling": "profile_and_instance"

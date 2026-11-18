@@ -189,6 +189,8 @@ describe('brokered call to a product', () => {
       headers: {
         // The public name, port included: the product builds its own answers from what it was called.
         host: 'orangehrm.localhost:8020',
+        // The configured browser-facing scheme: the broker's session cookie is named from it.
+        'x-forwarded-proto': 'http',
         accept: 'application/json',
         // The driver emits the product's full `Set-Cookie`; a request carries `name=value` only.
         cookie: 'orangehrm_session=abc',

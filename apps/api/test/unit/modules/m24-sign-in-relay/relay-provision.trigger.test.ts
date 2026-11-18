@@ -27,6 +27,7 @@ function build() {
   const accounts = {
     sweep: vi.fn(async () => undefined),
     provisionInstance: vi.fn(async () => undefined),
+    deferredUntil: vi.fn(async (): Promise<string | null> => null),
     deprovision: vi.fn(async () => undefined),
   };
   const trigger = new RelayProvisionTrigger(outbox as never, accounts as never);
@@ -90,5 +91,88 @@ describe('RelayProvisionTrigger', () => {
       expect.stringContaining('the product refused the bootstrap'),
     );
     error.mockRestore();
+  });
+
+  /*
+   * The deployment asks the moment it records its route. OpenProject is still booting then, so the
+   * pass is deferred — and before this the event was simply dropped, leaving a fresh install on the
+   * product's own login form until the next five-minute sweep.
+   */
+  it('re-runs the pass when the bootstrap window opens instead of waiting for the sweep', async () => {
+    vi.useFakeTimers();
+    try {
+      const { accounts, handlers } = build();
+      accounts.deferredUntil
+        .mockResolvedValueOnce(new Date(Date.now() + 60_000).toISOString())
+        .mockResolvedValue(null);
+
+      await handlers.get('relay.provision')?.(row(INSTANCE));
+      expect(accounts.provisionInstance).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(61_000);
+
+      expect(accounts.provisionInstance).toHaveBeenCalledTimes(2);
+      expect(accounts.deferredUntil).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('leaves a refused credential to the sweep instead of holding a timer for hours', async () => {
+    vi.useFakeTimers();
+    try {
+      const { accounts, handlers } = build();
+      accounts.deferredUntil.mockResolvedValue(
+        new Date(Date.now() + 6 * 60 * 60 * 1_000).toISOString(),
+      );
+
+      await handlers.get('relay.provision')?.(row(INSTANCE));
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1_000);
+
+      expect(accounts.provisionInstance).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('gives up after a bounded number of windows rather than becoming a retry loop', async () => {
+    vi.useFakeTimers();
+    try {
+      const { accounts, handlers } = build();
+      accounts.deferredUntil.mockImplementation(async () =>
+        new Date(Date.now() + 60_000).toISOString(),
+      );
+
+      await handlers.get('relay.provision')?.(row(INSTANCE));
+      for (let tick = 0; tick < 6; tick += 1) await vi.advanceTimersByTimeAsync(61_000);
+
+      // The first pass plus three re-runs; the sweep owns everything after that.
+      expect(accounts.provisionInstance).toHaveBeenCalledTimes(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('queues one re-run per instance when events arrive together', async () => {
+    vi.useFakeTimers();
+    try {
+      const { accounts, handlers } = build();
+      const handler = handlers.get('relay.provision');
+      accounts.deferredUntil
+        .mockResolvedValueOnce(new Date(Date.now() + 60_000).toISOString())
+        .mockResolvedValueOnce(new Date(Date.now() + 60_000).toISOString())
+        .mockResolvedValue(null);
+
+      await handler?.(row(INSTANCE));
+      await handler?.(row(INSTANCE));
+      expect(accounts.provisionInstance).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(61_000);
+
+      // One queued re-run, not one per event: a stacked timer would make this four.
+      expect(accounts.provisionInstance).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

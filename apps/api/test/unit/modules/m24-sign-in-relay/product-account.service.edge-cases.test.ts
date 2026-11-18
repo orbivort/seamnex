@@ -116,6 +116,10 @@ function build(options: Options = {}) {
       () => (Date.now() < retryAfter ? [{ '?column?': 1 }] : []),
     ],
     [
+      'SELECT retry_after FROM relay_retry_window',
+      () => (Date.now() < retryAfter ? [{ retry_after: new Date(retryAfter) }] : []),
+    ],
+    [
       'DELETE FROM relay_retry_window',
       () => {
         retryAfter = 0;
@@ -803,6 +807,39 @@ describe('the failure quiet period', () => {
     // what it reads back is the table's state rather than this process's.
     expect(claim?.sql).toContain('WHERE relay_retry_window.retry_after <= now()');
     expect(claim?.sql).toContain('ON CONFLICT (instance_id, subject_idp_id, reason) DO UPDATE');
+  });
+});
+
+describe('deferredUntil', () => {
+  it('answers the instant the bootstrap window reopens', async () => {
+    vi.useFakeTimers();
+    try {
+      const id = '11111111-1111-4111-8111-111111111111';
+      const { service, db } = build();
+      expect(await service.deferredUntil(id)).toBeNull();
+
+      await db.pool.query(
+        `INSERT INTO relay_retry_window (instance_id, subject_idp_id, reason, retry_after)
+         VALUES ($1, '', $2, now() + ($3::text || ' milliseconds')::interval)`,
+        [id, 'admin_bootstrap', 60_000],
+      );
+
+      // The trigger schedules its re-run from this value; an instant, not a duration, so the two
+      // clocks (PostgreSQL's and this process's) never have to agree.
+      expect(await service.deferredUntil(id)).toBe(new Date(Date.now() + 60_000).toISOString());
+
+      vi.advanceTimersByTime(60_001);
+      expect(await service.deferredUntil(id)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('refuses an id that is not an instance id without asking the database', async () => {
+    const { service, db } = build();
+
+    expect(await service.deferredUntil('all')).toBeNull();
+    expect(db.calls.some((call) => call.sql.includes('SELECT retry_after'))).toBe(false);
   });
 });
 

@@ -109,6 +109,32 @@ describe('orangeHrmLogin.signIn', () => {
     expect(JSON.stringify(result)).not.toContain(input.credential);
   });
 
+  it('tells the product the browser reached it over TLS on every leg of the exchange', async () => {
+    const options = driver([
+      () => respond({ status: 200, body: LOGIN_PAGE }),
+      () => respond({ status: 302, location: '/web/index.php/dashboard/index' }),
+      () => respond({ status: 200, body: APP_PAGE }),
+    ]);
+
+    await orangeHrmLogin.signIn(
+      { ...input, publicOrigin: 'https://orangehrm.seamnex.localhost:8443' },
+      options,
+    );
+
+    /*
+     * Without the header OrangeHRM names its session cookie `_orangehrm`, while a request that
+     * arrives through the TLS edge is read as `orangehrm` — the launch hop then plants a cookie the
+     * browser never presents, and a correct sign-in ends on the login form.
+     */
+    const calls = options.fetch.mock.calls as [string, RequestInit][];
+    expect(calls).toHaveLength(3);
+    for (const [, init] of calls) {
+      const headers = new Headers(init.headers);
+      expect(headers.get('x-forwarded-proto')).toBe('https');
+      expect(headers.get('host')).toBe('orangehrm.seamnex.localhost:8443');
+    }
+  });
+
   it('treats a redirect back to the login route as a refused credential, without a second attempt', async () => {
     const options = driver([
       () => respond({ status: 200, body: LOGIN_PAGE }),

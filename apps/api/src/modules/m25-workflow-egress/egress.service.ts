@@ -41,6 +41,15 @@ type Target = {
   readonly slug: string;
   readonly origin: string;
   readonly publicHost: string;
+  /**
+   * The scheme a browser uses (`SEAMNEX_PRODUCT_URL_SCHEME`).
+   *
+   * The edge terminates TLS, so this never appears on the wire by itself; it travels as
+   * `X-Forwarded-Proto` on every call. A product can derive its session cookie *name* from it
+   * (OrangeHRM: `orangehrm` over HTTPS, `_orangehrm` otherwise), and the session this broker holds
+   * was minted through the same view — a request that omits the header is answered as anonymous.
+   */
+  readonly forwardedProto: string;
   readonly operations: readonly OperationSpec[];
 };
 
@@ -205,6 +214,9 @@ export class BrokerEgressService implements WorkflowEgressService {
         redirect: 'manual',
         headers: {
           host: target.publicHost,
+          // The edge terminates TLS; the scheme only survives in this header, and a session
+          // credential minted under it is ignored when a later call omits it.
+          'x-forwarded-proto': target.forwardedProto,
           accept: input.accept ?? 'application/json',
           ...(input.contentType === null ? {} : { 'content-type': input.contentType }),
           ...auth,
@@ -292,6 +304,7 @@ export class BrokerEgressService implements WorkflowEgressService {
         redirect: 'manual',
         headers: {
           host: target.publicHost,
+          'x-forwarded-proto': target.forwardedProto,
           accept: 'application/json',
           ...(adapter.method === 'POST' ? { 'content-type': 'application/json' } : {}),
           ...auth,
@@ -371,6 +384,7 @@ export class BrokerEgressService implements WorkflowEgressService {
       origin,
       publicHost:
         row.host === null ? row.slug : new URL(publicOriginFor(this.config, row.host)).host,
+      forwardedProto: this.config.SEAMNEX_PRODUCT_URL_SCHEME,
       operations: Array.isArray(row.operations) ? (row.operations as OperationSpec[]) : [],
     };
   }
