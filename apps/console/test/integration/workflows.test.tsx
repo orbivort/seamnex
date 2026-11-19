@@ -190,8 +190,10 @@ describe('workflow workspace', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Run now' }));
 
+    // The banner names where the outcome is, never the outcome: it outlives the run, so a state
+    // frozen into it ("Run running") was still on screen after the run had failed.
     expect(
-      await screen.findByText(/Run .*\. Per-node outcomes appear in the Runs tab\./),
+      await screen.findByText('Run requested. The Runs tab follows it to its outcome.'),
     ).toBeDefined();
     const panel = await screen.findByRole('tabpanel');
     expect(await within(panel).findByText(/Idempotency keys are preserved/)).toBeDefined();

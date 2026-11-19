@@ -207,6 +207,18 @@ export function WorkflowsPage() {
 
   const rows = workflows.data ?? [];
   const failed = rows.filter((workflow) => workflow.state === 'failed');
+  /**
+   * Every state gets a count, and a count is withheld until the list has actually answered.
+   *
+   * The header used to summarise `active`, `draft` and `failed` only, so a validated or disabled
+   * definition made the badges claim "0 active, 0 draft" beside a table that plainly listed one —
+   * and the same three zeros rendered while the query was still in flight, which reads as an empty
+   * portfolio rather than an unanswered one. The two workhorse states always show; the exceptional
+   * ones (validated, disabled, failed) appear when they exist, so a quiet portfolio is not decorated
+   * with a permanent red `0 failed`.
+   */
+  const countOf = (state: Workflow['state']) =>
+    workflows.isSuccess ? String(rows.filter((row) => row.state === state).length) : '—';
   const createProblem = create.error ? toProblem(create.error) : null;
   const fieldError = (field: string) =>
     createProblem?.fieldErrors?.find((item) => item.field === field)?.message;
@@ -259,14 +271,26 @@ export function WorkflowsPage() {
         meta={
           <>
             <Badge tone="positive" size="sm">
-              {rows.filter((workflow) => workflow.state === 'active').length} active
+              {countOf('active')} active
             </Badge>
             <Badge tone="neutral" size="sm">
-              {rows.filter((workflow) => workflow.state === 'draft').length} draft
+              {countOf('draft')} draft
             </Badge>
-            <Badge tone="danger" size="sm">
-              {failed.length} failed
-            </Badge>
+            {workflows.isSuccess && rows.some((row) => row.state === 'validated') ? (
+              <Badge tone="info" size="sm">
+                {countOf('validated')} validated
+              </Badge>
+            ) : null}
+            {workflows.isSuccess && rows.some((row) => row.state === 'disabled') ? (
+              <Badge tone="neutral" size="sm">
+                {countOf('disabled')} disabled
+              </Badge>
+            ) : null}
+            {workflows.isSuccess && failed.length > 0 ? (
+              <Badge tone="danger" size="sm">
+                {countOf('failed')} failed
+              </Badge>
+            ) : null}
           </>
         }
       />

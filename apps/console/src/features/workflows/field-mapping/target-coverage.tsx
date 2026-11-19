@@ -42,6 +42,15 @@ export function TargetCoverage({
     fields?.detail ??
     fieldsError ??
     (loading ? null : 'Bind an operation to this node before its fields can be read.');
+  /**
+   * The operation's own field list, not just the count of required ones.
+   *
+   * The panel was titled "Target fields" and showed a coverage sentence and a badge, so the only
+   * way to learn a name the product accepts was to open the combobox and read the dropdown. The
+   * schema was already in hand — it is the same list the combobox offers — and it is listed here
+   * so a required field can be found without guessing.
+   */
+  const schemaFields = fields?.status === 'available' ? fields.fields : [];
 
   return (
     <div className="flex flex-col gap-2">
@@ -68,11 +77,35 @@ export function TargetCoverage({
       </div>
 
       {status === 'available' ? (
-        <p className="text-micro text-muted">
-          {required === 0
-            ? `${mapped} field${mapped === 1 ? '' : 's'} mapped. This operation marks no field as required.`
-            : `${covered} of ${required} required fields mapped${missing.length === 0 ? '' : ` — still missing: ${missing.join(', ')}`}.`}
-        </p>
+        <>
+          <p className="text-micro text-muted">
+            {required === 0
+              ? `${mapped} field${mapped === 1 ? '' : 's'} mapped. This operation marks no field as required.`
+              : `${covered} of ${required} required fields mapped${missing.length === 0 ? '' : ` — still missing: ${missing.join(', ')}`}.`}
+          </p>
+          {schemaFields.length === 0 ? null : (
+            <details className="rounded-xs border border-line bg-panel-soft">
+              <summary className="cursor-pointer px-2 py-1.5 font-mono text-micro text-muted label-caps">
+                {schemaFields.length} accepted field{schemaFields.length === 1 ? '' : 's'}
+              </summary>
+              <ul className="scroll-slim max-h-40 overflow-auto px-2 pb-2">
+                {schemaFields.map((field) => (
+                  <li key={field.name} className="flex items-center gap-2 py-0.5 text-micro">
+                    <code className="min-w-0 flex-1 truncate font-mono text-text">
+                      {field.name}
+                    </code>
+                    <span className="shrink-0 font-mono text-faint">{field.type}</span>
+                    {field.required ? (
+                      <Badge tone="caution" size="sm">
+                        required
+                      </Badge>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </>
       ) : status === null ? null : (
         <InlineNote>
           {detail ??

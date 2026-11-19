@@ -471,9 +471,9 @@ describe('compile', () => {
       staticData: { irHash: `sha256:${HASH}` },
     });
     const nodes = document.nodes as Record<string, unknown>[];
-    expect(nodes).toHaveLength(3);
+    expect(nodes).toHaveLength(4);
     expect(nodes[0]).toMatchObject({
-      name: 'Trigger',
+      name: 'Schedule',
       type: 'n8n-nodes-base.scheduleTrigger',
       typeVersion: 1.2,
       parameters: { rule: { interval: [{ field: 'cronExpression', expression: '0 2 * * *' }] } },
@@ -521,10 +521,47 @@ describe('compile', () => {
     });
     // The trigger is not an IR node, so its edge to the entry node has to be added here. Without
     // it n8n runs an empty graph and calls that a success.
+    /*
+     * A scheduled definition also carries the manual-run webhook, so `Run now` has somewhere to
+     * arrive — n8n has no run endpoint and `N8nClient.trigger` POSTs `/webhook/<path>`. Both start
+     * nodes feed the same graph, and the webhook keeps the name whose slug is the route it calls.
+     */
+    expect(nodes[3]).toMatchObject({
+      name: 'Trigger',
+      type: 'n8n-nodes-base.webhook',
+      typeVersion: 2,
+      parameters: { path: WORKFLOW_ID, httpMethod: 'POST' },
+    });
     expect(document.connections).toEqual({
+      Schedule: { main: [[{ node: 'Read contacts', type: 'main', index: 0 }]] },
       Trigger: { main: [[{ node: 'Read contacts', type: 'main', index: 0 }]] },
       'Read contacts': { main: [[{ node: 'Create contact', type: 'main', index: 0 }]] },
     });
+  });
+
+  it('gives a scheduled definition a webhook so Run now can start it', async () => {
+    const { service } = harness();
+    const workflow = await service.load(WORKFLOW_ID);
+
+    const document = compile(workflow, healthyIr(), ADDRESSES, CREDENTIALS);
+    const nodes = document.nodes as Record<string, unknown>[];
+
+    /*
+     * n8n's public API has no run endpoint, so `POST /workflows/:id/run` arrives as a delivery to
+     * the webhook the compiler emits. A scheduled definition used to compile to a `scheduleTrigger`
+     * only, so Run now — offered for exactly that definition — answered `503 ADAPTER_UNAVAILABLE,
+     * n8n has no webhook registered`.
+     */
+    expect(nodes.filter((node) => node.type === 'n8n-nodes-base.webhook')).toEqual([
+      expect.objectContaining({
+        name: 'Trigger',
+        typeVersion: 2,
+        parameters: { path: WORKFLOW_ID, httpMethod: 'POST' },
+      }),
+    ]);
+    expect(Object.keys(document.connections as Record<string, unknown>)).toEqual(
+      expect.arrayContaining(['Schedule', 'Trigger']),
+    );
   });
 
   /**
@@ -684,6 +721,8 @@ describe('compile', () => {
       type: 'n8n-nodes-base.webhook',
       parameters: { path: WORKFLOW_ID, httpMethod: 'POST' },
     });
+    // One webhook, not two: the manual entry point exists only where the trigger is not one.
+    expect(document.nodes).toHaveLength(1);
   });
 
   it('refuses a node the plan has no address for, instead of emitting a relative URL', async () => {
@@ -720,7 +759,8 @@ describe('compile', () => {
     );
 
     expect(document.connections).toEqual({
-      // The ghost edge cannot feed anything, so the read node is still a root the trigger starts.
+      // The ghost edge cannot feed anything, so the read node is still a root the triggers start.
+      Schedule: { main: [[{ node: 'Read contacts', type: 'main', index: 0 }]] },
       Trigger: { main: [[{ node: 'Read contacts', type: 'main', index: 0 }]] },
       'Read contacts': {
         main: [
@@ -1684,7 +1724,8 @@ describe('setMappings', () => {
 
 describe('setTrigger', () => {
   it.each([
-    ['schedule', 'Every day at 02:00 UTC'],
+    // A schedule with no expression has nothing to promise, so it is not labelled as a daily run.
+    ['schedule', 'On a cron schedule'],
     ['webhook', 'On webhook delivery'],
     ['poll', 'On a poll interval'],
     ['manual', 'Manual'],
@@ -1697,6 +1738,8 @@ describe('setTrigger', () => {
   });
 
   it('describes a cron schedule from the expression it was given', async () => {
+    // The label was the constant "Every day at 02:00 UTC" whatever the cron and timezone were, so
+    // the inventory announced a daily UTC run for a weekday schedule evaluated in Berlin.
     const { db, service } = harness();
 
     await service.setTrigger(
@@ -1707,10 +1750,25 @@ describe('setTrigger', () => {
 
     expect(persistedIr(db).trigger).toEqual({
       type: 'schedule',
-      label: 'Every day at 02:00 UTC',
+      label: 'Cron 0 3 * * 1-5 (Europe/Berlin)',
       config: 'cron 0 3 * * 1-5',
       timezone: 'Europe/Berlin',
       cron: '0 3 * * 1-5',
+    });
+  });
+
+  it('spells out a daily cron in the timezone it is evaluated in', async () => {
+    const { db, service } = harness();
+
+    await service.setTrigger(
+      WORKFLOW_ID,
+      { type: 'schedule', cron: '15 6 * * *', timezone: 'Europe/Berlin' },
+      ACTOR,
+    );
+
+    expect(persistedIr(db).trigger).toMatchObject({
+      label: 'Every day at 06:15 Europe/Berlin',
+      timezone: 'Europe/Berlin',
     });
   });
 
@@ -1886,10 +1944,16 @@ describe('action: validate', () => {
     // Only the node with no entry key is credential-blocked: D02-01 is a scoped product, so its
     // scope is activation's job rather than a precondition.
     expect(countOf(codes, 'CREDENTIAL_MISSING')).toBe(1);
-    // A node with an empty mapping list is advice, never a blocker.
-    const empty = value.issues.find((issue) => issue.code === 'EMPTY_MAPPINGS');
-    expect(empty?.severity).toBe('warning');
-    expect(empty?.nodeId).toBe(NODE_READ);
+    /*
+     * A node with an empty mapping list is advice, never a blocker — and the trigger is exempt:
+     * nothing reads a mapping filed against the entry point, and the console tells the author to
+     * map on the nodes it feeds. Warning there made every definition carry a warning forever.
+     */
+    const empty = value.issues.filter((issue) => issue.code === 'EMPTY_MAPPINGS');
+    expect(empty.every((issue) => issue.severity === 'warning')).toBe(true);
+    // NODE_READ is the trigger in this fixture and holds an empty list: it is the node under test.
+    expect(empty.map((issue) => issue.nodeId)).not.toContain(NODE_READ);
+    expect(empty.length).toBeGreaterThan(0);
   });
 
   it('sees the mappings setMappings filed on the inbound edge', async () => {

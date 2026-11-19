@@ -182,6 +182,19 @@ Action required when upgrading an existing install; everything else is additive.
 
 ### Fixed
 
+- **The workflow screen stops contradicting itself** (`FR-5.4`, `FR-5.5`, `FR-5.6`) — the inventory
+  badges summarise every definition state instead of three of them and stay blank until the list
+  answers, a save retires the "Validation passed" banner it made stale, a stale link keeps its way
+  back to the list, the target panel lists the fields the operation accepts, and the trigger panel
+  names the stored mode beside the edited one and labels a schedule from its cron and timezone.
+- **The entry node no longer warns about mappings nobody reads** (`FR-5.6`) — validation raised
+  `EMPTY_MAPPINGS` on the trigger, which takes no mapping, so every definition carried a warning
+  from its first edit and "passed with 1 warning" was the best a workflow could report.
+- **Run now starts a scheduled workflow, and the run banner stops claiming a state** (`FR-5.4`) — a
+  `schedule`/`poll` definition compiled to a schedule node only, so a manual run — the one thing an
+  author wants before trusting a cron — answered `503 n8n has no webhook registered`; it now carries
+  a second entry point the run can arrive at, and re-activation is what applies it. The banner after
+  a run names where the outcome is instead of freezing `Run running` on screen after it failed.
 - **Only an installed product is `ready`** (`FR-1.32`, `FR-2.9`) — a product serving its own
   installer was recorded ready while its first-boot install had been refused. It is now `degraded`
   with the installer named and the route still published, because finishing the install is the

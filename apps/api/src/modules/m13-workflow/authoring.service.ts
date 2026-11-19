@@ -540,7 +540,7 @@ export class WorkflowAuthoringService {
     return this.mutate(workflowId, actorId, 'workflow.trigger.updated', (ir) => {
       ir.trigger = {
         type: update.type,
-        label: triggerLabel(update.type),
+        label: triggerLabel(update),
         config: triggerConfig(update),
         timezone: update.timezone ?? null,
         ...(update.cron === undefined ? {} : { cron: update.cron }),
@@ -1032,7 +1032,15 @@ export class WorkflowAuthoringService {
           ),
         );
       }
-      if (mappingsFor(ir, entry).length === 0) {
+      /*
+       * The entry point never takes a mapping. It receives the payload and passes it on, its
+       * mappings are read by nobody (`setMappings` files a source node's rows on the node, and
+       * compile ignores them), and the canvas tells the author to "map fields on the nodes it
+       * feeds". Warning here was permanent noise: every definition carried at least one warning
+       * from the moment it was drafted, so "passed with 1 warning" was the best a workflow could
+       * ever report and the warning stopped meaning anything.
+       */
+      if (entry.kind !== 'trigger' && mappingsFor(ir, entry).length === 0) {
         /*
          * A write node with no mappings compiles to `sendBody: false`, so the request reaches the
          * product with no body and is refused there — after activation succeeded. The warning has to
@@ -2341,6 +2349,21 @@ export function compile(
   });
 
   const triggerNode = triggerNodeFor(workflow.id, ir.trigger);
+  /*
+   * A second entry point for `Run now`, on every definition whose own trigger is not a webhook.
+   *
+   * `N8nClient.trigger` starts a run by POSTing the webhook the compiler emits, because n8n's public
+   * API has no run endpoint. A schedule or poll trigger compiled to a `scheduleTrigger` only, so the
+   * button was offered for exactly those definitions and answered `503 ADAPTER_UNAVAILABLE — n8n has
+   * no webhook registered` — the one thing an author wants before trusting a cron was the one thing
+   * that could not work. The declared trigger stays the definition's trigger; this node only gives a
+   * manual run somewhere to arrive.
+   */
+  const manualNode =
+    ir.trigger.type === 'schedule' || ir.trigger.type === 'poll'
+      ? manualTriggerNode(workflow.id)
+      : null;
+  const startNames = manualNode === null ? [triggerNode.name] : [triggerNode.name, manualNode.name];
 
   return {
     /*
@@ -2350,8 +2373,10 @@ export function compile(
      * to stop.
      */
     name: `${workflow.name} v${workflow.version} [${workflow.id}]`,
-    nodes: [triggerNode, ...nodes],
-    connections: connectionMap(ir),
+    // Appended, not prepended: `nodes[0]` is the definition's own trigger, and the manual entry
+    // point is a convenience beside it rather than the thing the definition says starts it.
+    nodes: manualNode === null ? [triggerNode, ...nodes] : [triggerNode, ...nodes, manualNode],
+    connections: connectionMap(ir, startNames),
     settings: { executionOrder: 'v1', timezone: ir.trigger.timezone ?? 'UTC' },
     staticData: { irHash: workflow.irHash },
   };
@@ -2385,11 +2410,15 @@ type TriggerNode = {
  *   nobody.
  * - `webhook` and `manual` → the webhook node. `manual` must keep it: `N8nClient.trigger` starts a
  *   run by POSTing to `/webhook/<path>`, and n8n has no other run endpoint.
+ *
+ * A `schedule` or `poll` definition is named `Schedule` here rather than `Trigger` so that the second
+ * webhook node — see `manualTriggerNode` — can keep the name n8n slugifies to `trigger`, which is the
+ * route `N8nClient.trigger` asks for first.
  */
 function triggerNodeFor(workflowId: string, trigger: WorkflowTrigger): TriggerNode {
   if (trigger.type === 'schedule') {
     return {
-      name: 'Trigger',
+      name: 'Schedule',
       type: 'n8n-nodes-base.scheduleTrigger',
       typeVersion: 1.2,
       position: [-260, 0],
@@ -2405,7 +2434,7 @@ function triggerNodeFor(workflowId: string, trigger: WorkflowTrigger): TriggerNo
 
   if (trigger.type === 'poll') {
     return {
-      name: 'Trigger',
+      name: 'Schedule',
       type: 'n8n-nodes-base.scheduleTrigger',
       typeVersion: 1.2,
       position: [-260, 0],
@@ -2431,7 +2460,24 @@ function triggerNodeFor(workflowId: string, trigger: WorkflowTrigger): TriggerNo
   };
 }
 
-function connectionMap(ir: Ir): Record<string, unknown> {
+/**
+ * The webhook a scheduled definition needs so `Run now` has somewhere to arrive.
+ *
+ * Named `Trigger` on purpose: n8n slugs the node name into the webhook route, and
+ * `N8nClient.trigger` asks for `<n8nWorkflowId>/trigger/<path>` before the single-process
+ * `<path>`. Positioned below the declared trigger so the editor reads it as a second entry point.
+ */
+function manualTriggerNode(workflowId: string): TriggerNode {
+  return {
+    name: 'Trigger',
+    type: 'n8n-nodes-base.webhook',
+    typeVersion: 2,
+    position: [-260, 140],
+    parameters: { path: workflowId, httpMethod: 'POST' },
+  };
+}
+
+function connectionMap(ir: Ir, startNames: string[]): Record<string, unknown> {
   const connections: Record<string, { main: { node: string; type: string; index: number }[][] }> =
     {};
   for (const edge of ir.edges) {
@@ -2447,14 +2493,18 @@ function connectionMap(ir: Ir): Record<string, unknown> {
    * only the edges left it with no outgoing connection. n8n then starts at a node with nowhere to
    * go and reports the execution as *successful* having run nothing: the platform mirrored nothing,
    * the run stayed `running`, and no product was called while every surface said the workflow had
-   * executed. Each root (a node no edge feeds) starts from the trigger.
+   * executed. Each root (a node no edge feeds) starts from **every** start node: a scheduled
+   * definition has two (its schedule and the manual-run webhook), and an execution started from
+   * either must run the same graph.
    */
   const fed = new Set(ir.edges.map((edge) => edge.target));
   const roots = ir.nodes.filter((entry) => !fed.has(entry.id));
   if (roots.length > 0) {
-    const trigger = (connections.Trigger ??= { main: [[]] });
-    for (const root of roots) {
-      trigger.main[0]?.push({ node: root.label, type: 'main', index: 0 });
+    for (const startName of startNames) {
+      const start = (connections[startName] ??= { main: [[]] });
+      for (const root of roots) {
+        start.main[0]?.push({ node: root.label, type: 'main', index: 0 });
+      }
     }
   }
   return connections;
@@ -2509,23 +2559,37 @@ function authorityDetail(evidence: WorkflowAuthorityEvidence): Record<string, un
  */
 function triggerFor(type: WorkflowTrigger['type']): WorkflowTrigger {
   const cron = type === 'schedule' ? '0 2 * * *' : null;
+  const timezone = 'UTC';
   return {
     type,
-    label: triggerLabel(type),
+    label: triggerLabel({ type, cron, timezone }),
     config: triggerConfig({ type, ...(cron === null ? {} : { cron }) }),
-    timezone: 'UTC',
+    timezone,
     ...(cron === null ? {} : { cron }),
   };
 }
 
-function triggerLabel(type: WorkflowTrigger['type']): string {
-  return type === 'schedule'
-    ? 'Every day at 02:00 UTC'
-    : type === 'webhook'
-      ? 'On webhook delivery'
-      : type === 'poll'
-        ? 'On a poll interval'
-        : 'Manual';
+/**
+ * The trigger in words the rest of the object agrees with.
+ *
+ * It used to be the constant `Every day at 02:00 UTC` for **any** schedule, so a definition holding
+ * `cron 0 3 * * 1-5` evaluated in `Europe/Berlin` was listed as running daily at 02:00 UTC — the
+ * inventory, the canvas header and the workspace header all repeated it, beside a `config` field
+ * that said `cron 0 3 * * 1-5`. The label now reads the cron and the timezone it is evaluated in.
+ */
+function triggerLabel(update: Pick<WorkflowTriggerUpdate, 'type' | 'cron' | 'timezone'>): string {
+  if (update.type === 'webhook') return 'On webhook delivery';
+  if (update.type === 'poll') return 'On a poll interval';
+  if (update.type === 'manual') return 'Manual';
+  const cron = (update.cron ?? '').trim();
+  const zone = update.timezone ?? 'UTC';
+  if (cron.length === 0) return 'On a cron schedule';
+  // `minute hour * * *` is the one shape worth spelling out; anything else is named by expression.
+  const daily = /^(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+\*$/.exec(cron);
+  const minute = Number(daily?.[1] ?? Number.NaN);
+  const hour = Number(daily?.[2] ?? Number.NaN);
+  if (!Number.isInteger(minute) || !Number.isInteger(hour)) return `Cron ${cron} (${zone})`;
+  return `Every day at ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} ${zone}`;
 }
 
 function triggerConfig(update: WorkflowTriggerUpdate): string {
@@ -2533,7 +2597,7 @@ function triggerConfig(update: WorkflowTriggerUpdate): string {
   if (update.minimumIntervalMinutes !== null && update.minimumIntervalMinutes !== undefined) {
     return `every ${update.minimumIntervalMinutes} minute(s)`;
   }
-  return triggerLabel(update.type);
+  return triggerLabel(update);
 }
 
 /**

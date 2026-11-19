@@ -85,7 +85,8 @@ export function WorkflowTriggerPanel({
 
   return (
     <Panel>
-      <PanelHeader eyebrow="FR-5.4" title="Trigger" />
+      {/* The requirement id was the eyebrow, which is a note to us and noise to an operator. */}
+      <PanelHeader eyebrow="Starting mode" title="Trigger" />
       <Grid cols={2} className="p-4">
         <div className="space-y-3">
           <Field
@@ -197,6 +198,20 @@ export function WorkflowTriggerPanel({
             {TRIGGER_LABELS[workflow.trigger.type] ?? workflow.trigger.type} ·{' '}
             <span className="font-mono text-micro text-muted">{workflow.trigger.config}</span>
           </p>
+          {/*
+            The explanation describes the *selected* mode while the line above describes the stored
+            one. Without this note, picking Schedule left "Manual · Manual" beside a paragraph about
+            crons, which reads as a contradiction rather than as a preview.
+          */}
+          {unchanged ? null : (
+            <p className="text-micro font-medium text-warning-strong">
+              {type === workflow.trigger.type
+                ? 'Unsaved change: the parameters above apply once you save.'
+                : `Unsaved change: saving switches this workflow from ${
+                    TRIGGER_LABELS[workflow.trigger.type] ?? workflow.trigger.type
+                  } to ${TRIGGER_LABELS[type] ?? type}.`}
+            </p>
+          )}
           <p className="text-meta leading-relaxed text-muted">{EXPLANATION[type]}</p>
           <InlineNote>
             The trigger travels with the definition: a change creates a new version, and the running
