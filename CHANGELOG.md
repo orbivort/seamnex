@@ -182,6 +182,10 @@ Action required when upgrading an existing install; everything else is additive.
 
 ### Fixed
 
+- **A cron expression the engine cannot compile is refused where it is typed** (`FR-5.4`) — only an
+  empty one was checked, so `61 * * * *` saved, validated clean, then failed at activation with n8n's
+  bare `400`, reported as a missing platform adapter. The trigger panel and `validate()` now share
+  one five-field grammar check (`TRIGGER_CRON_INVALID`) that names the field and its accepted values.
 - **The workflow screen stops contradicting itself** (`FR-5.4`, `FR-5.5`, `FR-5.6`) — the inventory
   badges summarise every definition state instead of three of them and stay blank until the list
   answers, a save retires the "Validation passed" banner it made stale, a stale link keeps its way

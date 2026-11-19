@@ -158,6 +158,28 @@ describe('WorkflowTriggerPanel modes', () => {
     });
   });
 
+  it('refuses an expression the engine cannot compile, and names the field', () => {
+    /*
+     * The live failure FR-5.4 started from: only an empty cron was refused, so `61 * * * *` saved,
+     * validated clean, and activation answered with n8n's bare 400 — reported to the operator as a
+     * missing platform adapter, which sent them to inspect a working credential.
+     */
+    renderPanel();
+    setTriggerType('schedule');
+
+    const cron = screen.getByRole('textbox', { name: /Cron expression/ });
+    fireEvent.change(cron, { target: { value: '61 * * * *' } });
+
+    expect(screen.getByText(/Minute "61" is not a number from 0 to 59/)).toBeDefined();
+    expect(screen.queryByText('A scheduled workflow needs a cron expression.')).toBeNull();
+    expect(saveButton().hasAttribute('disabled')).toBe(true);
+    expect(save.mutate).not.toHaveBeenCalled();
+
+    fireEvent.change(cron, { target: { value: '0 2 * * *' } });
+    expect(screen.queryByText(/Minute "61"/)).toBeNull();
+    expect(saveButton().hasAttribute('disabled')).toBe(false);
+  });
+
   it('keeps the timezone the operator typed, without surrounding whitespace', () => {
     renderPanel({ definition: workflow({ type: 'schedule', cron: '0 2 * * *' }) });
 

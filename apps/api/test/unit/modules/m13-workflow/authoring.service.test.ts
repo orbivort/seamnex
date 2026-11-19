@@ -3125,7 +3125,8 @@ describe('decideApproval', () => {
 
 /**
  * FR-5.4: the two modes that need a stated parameter are refused at validation, where the author
- * can fix them, instead of at compile time where a default would have to be invented.
+ * can fix them, instead of at compile time where a default would have to be invented. The schedule's
+ * expression is checked for grammar too: a stated but impossible one only failed at activation.
  */
 describe('action: validate trigger configuration', () => {
   const withTrigger = (trigger: WorkflowTrigger): Route =>
@@ -3170,6 +3171,34 @@ describe('action: validate trigger configuration', () => {
     expect(value.issues).toEqual([
       expect.objectContaining({ code: 'TRIGGER_CRON_MISSING', severity: 'error', nodeId: null }),
     ]);
+  });
+
+  it('blocks a scheduled workflow whose cron expression cannot be compiled', async () => {
+    /*
+     * The check this rule adds: `61 * * * *` used to pass validation, then fail at activation with
+     * n8n's bare 400, which the adapter layer reported as a missing configuration. The issue has to
+     * name the field, so the operator is not left counting characters across five tokens.
+     */
+    const { value } = await validate([withTrigger({ ...scheduleTrigger(), cron: '61 * * * *' })]);
+
+    expect(value.valid).toBe(false);
+    expect(value.issues).toEqual([
+      expect.objectContaining({
+        code: 'TRIGGER_CRON_INVALID',
+        severity: 'error',
+        nodeId: null,
+        message: expect.stringContaining('Minute "61" is not a number from 0 to 59'),
+      }),
+    ]);
+  });
+
+  it('accepts a scheduled workflow whose cron expression the engine can compile', async () => {
+    const { value } = await validate([
+      withTrigger({ ...scheduleTrigger(), cron: '*/15 9-17 * * MON-FRI' }),
+    ]);
+
+    expect(value.issues).toEqual([]);
+    expect(value.valid).toBe(true);
   });
 });
 

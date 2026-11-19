@@ -19,6 +19,7 @@ export * from './routes';
 export * from './contract';
 
 export * from './compose-rules';
+export * from './cron';
 export * from './env-rules';
 export * from './mapping-expression';
 export * from './mapping-transform';

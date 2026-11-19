@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { toProblem, usePutWorkflowTrigger } from '@seamnex/api-client';
 import type { Tone, Workflow, WorkflowTriggerUpdate } from '@seamnex/domain';
-import { TRIGGER_LABELS } from '@seamnex/domain';
+import { cronExpressionProblem, TRIGGER_LABELS } from '@seamnex/domain';
 import {
   Alert,
   Button,
@@ -53,7 +53,18 @@ export function WorkflowTriggerPanel({
    * and the "In effect" column below reads the definition the server returned.
    */
   const minutes = Number.parseInt(interval, 10);
-  const cronProblem = type === 'schedule' && cron.trim().length === 0;
+  /*
+   * FR-5.4: the grammar is checked here, not left to activation. Only an *empty* expression used to be
+   * refused, so `61 * * * *` saved and came back from activation as "a platform adapter is not
+   * configured". The message names the field and the token, because "invalid cron" leaves the
+   * operator counting characters across five tokens.
+   */
+  const cronIssue =
+    type !== 'schedule'
+      ? null
+      : cron.trim().length === 0
+        ? 'A scheduled workflow needs a cron expression.'
+        : cronExpressionProblem(cron);
   const intervalProblem = type === 'poll' && !(Number.isInteger(minutes) && minutes > 0);
   const unchanged =
     type === workflow.trigger.type &&
@@ -61,7 +72,7 @@ export function WorkflowTriggerPanel({
       (cron.trim() === (workflow.trigger.cron ?? '') &&
         timezone.trim() === (workflow.trigger.timezone ?? 'UTC'))) &&
     (type !== 'poll' || String(workflow.trigger.minimumIntervalMinutes ?? '') === interval);
-  const blocked = save.isPending || !canWrite || cronProblem || intervalProblem || unchanged;
+  const blocked = save.isPending || !canWrite || cronIssue !== null || intervalProblem || unchanged;
 
   const submit = () => {
     setNotice(null);
@@ -115,7 +126,7 @@ export function WorkflowTriggerPanel({
                 label="Cron expression"
                 htmlFor="workflow-trigger-cron"
                 required
-                error={cronProblem ? 'A scheduled workflow needs a cron expression.' : undefined}
+                error={cronIssue ?? undefined}
                 hint="Five fields, evaluated in the timezone below. For example 0 2 * * * is 02:00 daily."
               >
                 <Input
@@ -123,7 +134,7 @@ export function WorkflowTriggerPanel({
                   value={cron}
                   spellCheck={false}
                   className="font-mono"
-                  invalid={cronProblem}
+                  invalid={cronIssue !== null}
                   disabled={!canWrite || save.isPending}
                   onChange={(event) => setCron(event.target.value)}
                 />

@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import { admissionVerdict } from '@seamnex/domain';
+import { admissionVerdict, cronExpressionProblem } from '@seamnex/domain';
 import type {
   BreakGlassReveal,
   CredentialScopeMintResult,
@@ -433,8 +433,9 @@ export const phase4Handlers = [
    * and files a version, exactly as `mutate` does on the API side, which is what makes the "validate,
    * then re-activate" notice the panel prints true.
    *
-   * The two refusals mirror `validate()`: a polling workflow without an interval and a scheduled one
-   * without a cron cannot be compiled, and inventing a default here would teach the opposite.
+   * The refusals mirror `validate()`: a polling workflow without an interval, a scheduled one without
+   * a cron, and a scheduled one whose cron the engine cannot compile all fail there, and inventing a
+   * default or accepting the third here would teach the opposite of what the platform does.
    */
   http.put('/api/v1/workflows/:id/trigger', async ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'workflow.author');
@@ -470,6 +471,19 @@ export const phase4Handlers = [
         'Enter a cron expression, for example "0 2 * * *".',
         [{ field: 'cron', code: 'required', message: 'A cron expression is required.' }],
       );
+    }
+    if (type === 'schedule' && cron !== null) {
+      const cronProblem = cronExpressionProblem(cron);
+      if (cronProblem !== null) {
+        return problem(
+          422,
+          'TRIGGER_CRON_INVALID',
+          'A scheduled workflow needs an expression the engine can compile',
+          cronProblem,
+          'Correct the expression, for example "0 2 * * *" for 02:00 daily.',
+          [{ field: 'cron', code: 'invalid', message: cronProblem }],
+        );
+      }
     }
     const interval = type === 'poll' ? (body.minimumIntervalMinutes ?? null) : null;
     if (type === 'poll' && (interval ?? 0) < 1) {

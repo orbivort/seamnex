@@ -5,6 +5,7 @@ import * as capabilities from '../../src/capabilities';
 import * as capacity from '../../src/capacity';
 import * as composeRules from '../../src/compose-rules';
 import * as contract from '../../src/contract';
+import * as cron from '../../src/cron';
 import * as credentialGranularity from '../../src/credential-granularity';
 import * as enums from '../../src/enums';
 import * as envRules from '../../src/env-rules';
@@ -58,6 +59,8 @@ const MODULES = [
   ['capacity', capacity],
   ['compose-rules', composeRules],
   ['contract', contract],
+  // FR-5.4: the cron grammar the schedule trigger is checked against by the panel and by validation.
+  ['cron', cron],
   ['catalog-coverage', catalogCoverage],
   ['credential-granularity', credentialGranularity],
   ['enums', enums],

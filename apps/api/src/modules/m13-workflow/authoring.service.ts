@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import {
+  cronExpressionProblem,
   defaultValueProblem,
   isCredentialGranularity,
   isMappingTransform,
@@ -1156,16 +1157,40 @@ export class WorkflowAuthoringService {
         ),
       );
     }
-    if (ir.trigger.type === 'schedule' && (ir.trigger.cron ?? '').trim().length === 0) {
-      issues.push(
-        issue(
-          null,
-          'error',
-          'TRIGGER_CRON_MISSING',
-          'This workflow is scheduled but states no cron expression.',
-          'Set the cron expression (and its timezone) on the Trigger tab.',
-        ),
-      );
+    if (ir.trigger.type === 'schedule') {
+      const cron = (ir.trigger.cron ?? '').trim();
+      if (cron.length === 0) {
+        issues.push(
+          issue(
+            null,
+            'error',
+            'TRIGGER_CRON_MISSING',
+            'This workflow is scheduled but states no cron expression.',
+            'Set the cron expression (and its timezone) on the Trigger tab.',
+          ),
+        );
+      } else {
+        /*
+         * FR-5.4: a schedule the engine cannot compile is refused here, before activation.
+         *
+         * Reported only at activation, `61 * * * *` passed validate clean and then came back as n8n's
+         * bare `400`, which surfaces as "a platform adapter is not configured" — a message that sends
+         * the operator to inspect a working credential. The grammar is a property of the definition,
+         * so it is checked with the rest of the definition, and the rule names the offending field.
+         */
+        const problem = cronExpressionProblem(cron);
+        if (problem !== null) {
+          issues.push(
+            issue(
+              null,
+              'error',
+              'TRIGGER_CRON_INVALID',
+              `The cron expression "${cron}" cannot be compiled. ${problem}`,
+              'Correct the expression on the Trigger tab; five fields, for example "0 2 * * *" for 02:00 daily.',
+            ),
+          );
+        }
+      }
     }
 
     const checkedAt = new Date();
