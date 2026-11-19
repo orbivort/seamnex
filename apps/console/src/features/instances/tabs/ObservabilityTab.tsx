@@ -103,7 +103,13 @@ function ProfileBody({ report }: { report: ObservabilityReport }) {
           {Object.entries(report.target.labels)
             .filter(([name]) => name !== 'job')
             .map(([name, value]) => (
-              <Badge key={name} tone="neutral" size="sm">
+              /*
+               * `mono` selects the verbatim caps recipe. Without it the badge's default
+               * `text-transform: uppercase` shouted real identifier values into
+               * `INSTANCE_ID=FB71A735-…`, and copying the label out of the page produced a value the
+               * platform would not accept.
+               */
+              <Badge key={name} tone="neutral" size="sm" mono>
                 <span className="font-mono">
                   {name}={value}
                 </span>

@@ -101,6 +101,7 @@
         "image_scan_result"
       ],
       "mayImport": ["M02", "M03", "M04", "M07", "M15", "M19"],
+      "$comment": "M05 builds the instance read model, so it reads the evidence the other modules own rather than a copy of it: `backup`/`backup_schedule` (M16) are read because the fleet list and the detail header state the backup posture, and the document in `instance.payload` is only a fallback for rows no schedule or backup set has been recorded against yet. M16 still owns the writes.",
       "reads": [
         "deployment_plan",
         "render_set",
@@ -112,7 +113,9 @@
         "source_resolution",
         "instance_route",
         "scaffold_artefact",
-        "instance_env_value"
+        "instance_env_value",
+        "backup",
+        "backup_schedule"
       ]
     },
     {

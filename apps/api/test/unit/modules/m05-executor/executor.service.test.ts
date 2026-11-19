@@ -192,6 +192,18 @@ describe('instances', () => {
     // `($1 = '' OR …)` is the shape that keeps one prepared statement for every filter combination.
     expect(db.calls[0]?.params).toEqual(['', '', '']);
   });
+
+  // The search box offered "product, domain, slug or key" while the query matched only the first
+  // three, so typing the key shown in the first column emptied the table.
+  it('matches the entry key and every key a composite entry serves', async () => {
+    const { db, service } = setup([['FROM instance i', []]]);
+
+    await service.instances({ q: 'd07-01' });
+
+    const sql = db.calls[0]?.sql ?? '';
+    expect(sql).toContain('lower(i.entry_key)');
+    expect(sql).toContain("i.payload->>'entryKeys'");
+  });
 });
 
 describe('the projection', () => {
@@ -438,6 +450,46 @@ describe('the projection', () => {
 
     expect(instance.maintenance).toEqual(maintenance);
     expect(instance.backup).toEqual(backup);
+  });
+
+  /*
+   * The regression these two guard: `PUT /instances/:id/backup-schedule` wrote `backup_schedule`,
+   * answered 200, and the console went on showing "not scheduled · disabled" because the projection
+   * only ever read the document. The write was verified in the audit trail while the fleet list and
+   * the detail header disagreed with it.
+   */
+  it('reports the schedule a row actually has, not the document that predates it', async () => {
+    const instance = await project({
+      payload: { backup: { schedule: 'not scheduled', scheduleEnabled: false } },
+      backup_cadence: 'daily',
+      backup_timezone: 'Europe/Berlin',
+    });
+
+    expect(instance.backup).toEqual({
+      lastSuccessAt: null,
+      lastVerifiedRestoreAt: null,
+      schedule: 'daily',
+      scheduleTimezone: 'Europe/Berlin',
+      scheduleEnabled: true,
+      verified: false,
+    });
+  });
+
+  it('reports the newest succeeded backup set as the posture', async () => {
+    const instance = await project({
+      backup_cadence: 'off',
+      backup_finished_at: new Date('2026-01-06T03:00:00Z'),
+      backup_verified_at: new Date('2026-01-07T09:00:00Z'),
+    });
+
+    expect(instance.backup).toEqual({
+      lastSuccessAt: '2026-01-06T03:00:00.000Z',
+      lastVerifiedRestoreAt: '2026-01-07T09:00:00.000Z',
+      schedule: 'off',
+      scheduleTimezone: 'UTC',
+      scheduleEnabled: false,
+      verified: true,
+    });
   });
 
   it('projects the event modes the catalog declares, dropping the ones it cannot read', async () => {

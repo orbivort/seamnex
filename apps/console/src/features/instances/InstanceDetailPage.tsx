@@ -151,12 +151,39 @@ export function InstanceDetailPage() {
    * the data and shows the banner below instead.
    */
   if (!instance.data) {
-    return instance.isPending ? (
-      <Panel inset>
-        <SkeletonLines lines={10} />
-      </Panel>
-    ) : (
-      <QueryError error={instance.error} onRetry={() => void instance.refetch()} />
+    return (
+      <Page>
+        {/*
+          The failure branch is a screen, not a floating panel. As a bare `QueryError` it had no
+          heading and no link, so an operator who followed a stale link from an incident channel had
+          one control — "Retry", which re-ran the request that had just 404'd — and no way back to
+          the fleet short of the sidebar.
+        */}
+        <Link
+          to="/instances"
+          className="mb-3 inline-flex items-center gap-1.5 text-meta font-medium text-muted hover:text-link"
+        >
+          <ArrowLeft className="size-3.5" aria-hidden /> Instances
+        </Link>
+        <PageHeader
+          eyebrow="Deployments"
+          // Deliberately not the problem's own title: `QueryError` prints that below, and a heading
+          // that repeats it word for word reads as two failures rather than one.
+          title={instance.isPending ? 'Loading instance…' : 'This instance could not be loaded'}
+          description={
+            instance.isPending
+              ? 'Reading the deployment, its status and its evidence.'
+              : 'The deployment this address names could not be read.'
+          }
+        />
+        {instance.isPending ? (
+          <Panel inset>
+            <SkeletonLines lines={10} />
+          </Panel>
+        ) : (
+          <QueryError error={instance.error} onRetry={() => void instance.refetch()} />
+        )}
+      </Page>
     );
   }
 

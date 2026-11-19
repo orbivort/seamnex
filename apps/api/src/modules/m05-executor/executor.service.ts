@@ -65,6 +65,12 @@ type InstanceRow = {
   source_image_ref: string | null;
   source_policy_verdict: string | null;
   source_resolved_at: Date | null;
+  /** The scheduled cadence (`off`/`daily`/`weekly`/`monthly`); null when no schedule row exists. */
+  backup_cadence: string | null;
+  backup_timezone: string | null;
+  /** The latest succeeded backup set: the only evidence the posture may claim. */
+  backup_finished_at: Date | null;
+  backup_verified_at: Date | null;
 };
 
 /**
@@ -86,11 +92,19 @@ const INSTANCE_SELECT = `
          s.source AS status_source, s.reason AS status_reason,
          src.path AS source_path, src.source_url AS source_url,
          src.source_revision AS source_revision, src.resolved_image_ref AS source_image_ref,
-         src.policy_verdict AS source_policy_verdict, src.created_at AS source_resolved_at
-    FROM instance i
-    LEFT JOIN catalog_entry e ON e.key = i.entry_key
-    LEFT JOIN instance_route r ON r.instance_id = i.id
-    LEFT JOIN instance_status s ON s.instance_id = i.id
+         src.policy_verdict AS source_policy_verdict, src.created_at AS source_resolved_at,
+         bs.cadence AS backup_cadence, bs.timezone AS backup_timezone,
+         bk.finished_at AS backup_finished_at, bk.verified_at AS backup_verified_at
+         FROM instance i
+         LEFT JOIN catalog_entry e ON e.key = i.entry_key
+         LEFT JOIN instance_route r ON r.instance_id = i.id
+         LEFT JOIN instance_status s ON s.instance_id = i.id
+         LEFT JOIN backup_schedule bs ON bs.instance_id = i.id
+         LEFT JOIN LATERAL (
+         SELECT finished_at, verified_at
+         FROM backup WHERE instance_id = i.id AND state = 'succeeded'
+         ORDER BY finished_at DESC LIMIT 1
+         ) bk ON true
     LEFT JOIN LATERAL (
       SELECT path, source_url, source_revision, resolved_image_ref, policy_verdict, created_at
         FROM source_resolution WHERE instance_id = i.id ORDER BY created_at DESC LIMIT 1
@@ -295,6 +309,8 @@ export class PostgresExecutorService implements ExecutorService {
       `${INSTANCE_SELECT}
         WHERE i.deleted_at IS NULL
           AND ($1 = '' OR lower(i.slug) LIKE '%' || $1 || '%'
+               OR lower(i.entry_key) LIKE '%' || $1 || '%'
+               OR lower(coalesce(i.payload->>'entryKeys', '')) LIKE '%' || $1 || '%'
                OR lower(coalesce(i.payload->>'product', e.product, '')) LIKE '%' || $1 || '%'
                OR lower(coalesce(i.payload->>'domain', e.domain, '')) LIKE '%' || $1 || '%')
           AND ($2 = '' OR i.state = $2)
@@ -591,14 +607,7 @@ export class PostgresExecutorService implements ExecutorService {
         diskMb: number(usage, 'diskMb') ?? 0,
       },
       maintenance: asRecord(payload.maintenance) as Instance['maintenance'],
-      backup: (asRecord(payload.backup) as Instance['backup'] | null) ?? {
-        lastSuccessAt: null,
-        lastVerifiedRestoreAt: null,
-        schedule: 'not scheduled',
-        scheduleTimezone: 'UTC',
-        scheduleEnabled: false,
-        verified: false,
-      },
+      backup: backupPostureOf(row, payload),
       eventModes: asEventModes(integration.eventModes),
       licenseId: text(payload, 'licenseId') ?? text(entry, 'licenseId') ?? 'unreviewed',
       licenseRestricted: payload.licenseRestricted === true,
@@ -607,6 +616,42 @@ export class PostgresExecutorService implements ExecutorService {
       metadataStale: payload.metadataStale === true || integration.stale === true,
     };
   }
+}
+
+/**
+ * Backup posture: the recorded evidence first, the document only where there is none.
+ *
+ * The document used to be the only source, so `PUT /instances/:id/backup-schedule` wrote
+ * `backup_schedule`, answered 200, and the console went on showing "not scheduled" because nothing
+ * updated the payload. A schedule row and a succeeded `backup` row are facts M16 owns and this
+ * module reads; an instance with neither keeps the document it already has, untouched, because
+ * overriding a recorded posture with a default would be a second way to lie about the same field.
+ */
+function backupPostureOf(row: InstanceRow, payload: Record<string, unknown>): Instance['backup'] {
+  const stored = asRecord(payload.backup);
+  const cadence = typeof row.backup_cadence === 'string' ? row.backup_cadence : null;
+  const finished = row.backup_finished_at ?? null;
+  const verifiedAt = row.backup_verified_at ?? null;
+  if (cadence === null && finished === null && verifiedAt === null) {
+    return (
+      (stored as Instance['backup'] | null) ?? {
+        lastSuccessAt: null,
+        lastVerifiedRestoreAt: null,
+        schedule: 'not scheduled',
+        scheduleTimezone: 'UTC',
+        scheduleEnabled: false,
+        verified: false,
+      }
+    );
+  }
+  return {
+    lastSuccessAt: finished === null ? null : finished.toISOString(),
+    lastVerifiedRestoreAt: verifiedAt === null ? null : verifiedAt.toISOString(),
+    schedule: cadence ?? 'not scheduled',
+    scheduleTimezone: typeof row.backup_timezone === 'string' ? row.backup_timezone : 'UTC',
+    scheduleEnabled: cadence !== null && cadence !== 'off',
+    verified: verifiedAt !== null,
+  };
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

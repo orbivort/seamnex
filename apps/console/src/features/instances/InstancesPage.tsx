@@ -1,5 +1,5 @@
-import { useMemo, useState, type ReactNode } from 'react';
-import { Link } from 'react-router';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Link, useSearchParams } from 'react-router';
 import { Boxes, RefreshCw } from 'lucide-react';
 import type { InstanceFilters } from '@seamnex/api-client';
 import { useInstances } from '@seamnex/api-client';
@@ -25,6 +25,16 @@ import { cn, formatRelative } from '@seamnex/utils';
 import { AsyncPanel, QueryError, useDebouncedValue } from '@seamnex/shell';
 
 const STATE_FILTERS = ['all', 'ready', 'degraded', 'stopped', 'failed', 'upgrading'] as const;
+type StateFilter = (typeof STATE_FILTERS)[number];
+
+/**
+ * The address bar is the record of the view. A filter held in component state alone could not be
+ * bookmarked, shared with a colleague or restored by the back button, which is the whole point of a
+ * fleet screen an operator links into an incident channel.
+ */
+function parseState(value: string | null): StateFilter {
+  return STATE_FILTERS.includes(value as StateFilter) ? (value as StateFilter) : 'all';
+}
 
 /**
  * Module scope on purpose: `DataTable` no longer compares props, so a `Column[]` rebuilt during
@@ -157,9 +167,49 @@ const instanceRowLink = (row: Instance, className: string, children: ReactNode) 
 );
 
 export function InstancesPage() {
-  const [state, setState] = useState<(typeof STATE_FILTERS)[number]>('all');
-  const [query, setQuery] = useState('');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const state = parseState(searchParams.get('state'));
+  const urlQuery = searchParams.get('q') ?? '';
+  // Typed value stays local so a keystroke repaints immediately; the debounced copy is what reaches
+  // both the API and the address bar.
+  const [query, setQuery] = useState(urlQuery);
   const debouncedQuery = useDebouncedValue(query);
+  /**
+   * The last query string this component wrote. An address bar that differs from it came from a
+   * navigation (back, forward, a pasted link) and is adopted; one that matches is our own echo and
+   * must not be written back over what is being typed.
+   */
+  const writtenUrl = useRef<string | null>(null);
+
+  useEffect(() => {
+    const trimmed = debouncedQuery.trim();
+    if (trimmed === urlQuery) return;
+    const next = new URLSearchParams(searchParams);
+    if (trimmed.length > 0) next.set('q', trimmed);
+    else next.delete('q');
+    writtenUrl.current = next.toString();
+    setSearchParams(next, { replace: true });
+  }, [debouncedQuery, urlQuery, searchParams, setSearchParams]);
+
+  useEffect(() => {
+    if (writtenUrl.current === searchParams.toString()) return;
+    writtenUrl.current = searchParams.toString();
+    setQuery(urlQuery);
+  }, [searchParams, urlQuery]);
+
+  const selectState = (option: StateFilter) => {
+    const next = new URLSearchParams(searchParams);
+    if (option === 'all') next.delete('state');
+    else next.set('state', option);
+    writtenUrl.current = next.toString();
+    setSearchParams(next, { replace: true });
+  };
+
+  const clearFilters = () => {
+    setQuery('');
+    writtenUrl.current = '';
+    setSearchParams(new URLSearchParams(), { replace: true });
+  };
 
   const filters = useMemo<InstanceFilters>(() => {
     const next: InstanceFilters = {};
@@ -222,17 +272,22 @@ export function InstancesPage() {
           trailing={`${rows.length} shown`}
         >
           {STATE_FILTERS.map((option) => (
-            <FilterChip key={option} active={state === option} onClick={() => setState(option)}>
+            <FilterChip key={option} active={state === option} onClick={() => selectState(option)}>
               <span className="capitalize">{option}</span>
             </FilterChip>
           ))}
           {/* Ghost, not `quiet`: inside a row of bordered chips a `quiet` button draws the same
-              border and reads as a seventh state. A command is not a filter. */}
+              border and reads as a seventh state. A command is not a filter.
+
+              Disabled while a read is in flight: an enabled button with no feedback invited a
+              second click, which queued a redundant request behind the first. */}
           <Button
             size="sm"
             variant="ghost"
-            icon={<RefreshCw />}
+            icon={<RefreshCw className={cn(instances.isFetching && 'motion-safe:animate-spin')} />}
             onClick={() => void instances.refetch()}
+            disabled={instances.isFetching}
+            aria-busy={instances.isFetching}
           >
             Refresh
           </Button>
@@ -274,7 +329,13 @@ export function InstancesPage() {
                       : 'Deploy the first product from the catalog; the platform renders compose, health checks, volumes and the route.'
                   }
                   action={
-                    filtered ? null : (
+                    filtered ? (
+                      // The copy above told the operator to clear the filter but handed them no
+                      // control to do it, so the only way out was to find the chip again.
+                      <Button size="sm" variant="secondary" onClick={clearFilters}>
+                        Clear filters
+                      </Button>
+                    ) : (
                       <Link
                         to="/catalog"
                         className={buttonVariants({ variant: 'primary', size: 'sm' })}

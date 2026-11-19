@@ -219,7 +219,9 @@ export function EnvironmentTab({
           the same capability — and this is the screen an operator opens to unblock a product. */}
       <AdminCredentialPanel instance={instance} canEdit={canEdit} />
 
-      {update.isError ? <QueryError error={update.error} compact /> : null}
+      {/* ERR-05: printed once. While the drawer is open it owns the message; once dismissed, the
+          panel carries it so the refusal is not lost with the editor. */}
+      {update.isError && draft === null ? <QueryError error={update.error} compact /> : null}
       {/*
         The title follows `applied`, not `requiresRecreate`. A stored value reaches the container only
         when the definition is re-rendered, so "Restart required" was advice that could not work: a
@@ -270,9 +272,26 @@ export function EnvironmentTab({
                 disabled={update.isPending}
                 onClick={() => {
                   if (!draft) return;
-                  update.mutate({ [draft.name]: draft.value });
-                  setConfirmDiscard(false);
-                  setDraft(null);
+                  /*
+                   * Close on success only. Closing on send dropped the typed value and printed
+                   * "fix the flagged variables" in the panel behind a drawer that had already gone,
+                   * so the operator could not see what they had written, let alone fix it.
+                   */
+                  update.mutate(
+                    { [draft.name]: draft.value },
+                    {
+                      onSuccess: () => {
+                        setConfirmDiscard(false);
+                        setDraft(null);
+                      },
+                      /*
+                       * A refusal keeps the drawer and the typed value on screen, but drops the
+                       * module-scope copy: that map exists so a *valid* unapplied edit survives a
+                       * tab switch, and a rejected value is not something to reopen later.
+                       */
+                      onError: () => drafts.delete(instance.id),
+                    },
+                  );
                 }}
               >
                 Save and render diff
@@ -282,6 +301,8 @@ export function EnvironmentTab({
         }
       >
         <div className="space-y-3">
+          {/* The refusal belongs next to the field that caused it while the drawer stays open. */}
+          {update.isError ? <QueryError error={update.error} compact /> : null}
           {/*
             A boolean is a checkbox because there is no other correct spelling. The free-text field
             this replaces stored whatever was typed, and `ORANGEHRM_INSTALLER_LICENSE_AGREED=True`
