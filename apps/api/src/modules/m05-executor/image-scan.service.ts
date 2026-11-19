@@ -16,6 +16,7 @@ import {
   scanImage,
   type ScanOutcome,
 } from '../../common/docker/image-scan';
+import { vulnDatabaseStatus } from '../../common/docker/vuln-db';
 import { AppError } from '../../common/problem/app-error';
 import { AUDIT_SERVICE, type AuditService } from '../m17-audit/audit.contract';
 
@@ -94,13 +95,24 @@ export class PostgresImageScanService {
     const summaries: ImageScanSummary[] = [];
     const seen = new Set<string>();
 
+    /*
+     * Reuse is only as good as the database behind it. A cache that is missing or older than the
+     * configured limit is reported by `scanImage` as an `error`; reusing a `passed` row first would
+     * pre-empt that answer and start a container on evidence this deployment has just declared it
+     * will not accept.
+     */
+    const database = vulnDatabaseStatus(this.config);
+    if (database.ok === false) {
+      await log('system', `retained scan reports are not reused: ${database.failure}`);
+    }
+
     for (const reference of input.references) {
       if (reference.trim().length === 0 || seen.has(reference)) continue;
       seen.add(reference);
 
       const identity = await this.docker.imageIdentity(reference);
       const retained = await this.findRow(input.instanceId, identity.digest);
-      if (retained !== null && retained.verdict === 'passed') {
+      if (retained !== null && retained.verdict === 'passed' && database.ok) {
         await log(
           'stdout',
           `${reference} (${shortDigest(identity.digest)}): reusing the retained scan from ${retained.scanned_at.toISOString()}`,
@@ -118,6 +130,11 @@ export class PostgresImageScanService {
       });
       const persisted = await this.persist(input.instanceId, reference, identity.digest, outcome);
       summaries.push(summaryOf(persisted));
+
+      // Narrower coverage than "vuln" is said out loud; a silent gap is what S-10 records.
+      for (const warning of outcome.warnings ?? []) {
+        await log('system', `${reference}: ${warning}`);
+      }
 
       if (persisted.verdict === 'passed') {
         await log(
@@ -171,7 +188,9 @@ export class PostgresImageScanService {
         remediation:
           persisted.verdict === 'blocked'
             ? 'Upgrade the pinned image to a release that fixes the blocking findings, then redeploy.'
-            : 'Make the scanner image reachable from the deployment host (SEAMNEX_SCANNER_IMAGE, trusted registry), then redeploy.',
+            : outcome.failureKind === 'database'
+              ? 'Seed or refresh the scanner database on the deployment host (`pnpm scan:db:update`; a cached scan reads SEAMNEX_SCAN_CACHE_DIR), then redeploy.'
+              : 'Make the scanner image reachable from the deployment host (SEAMNEX_SCANNER_IMAGE, trusted registry), then redeploy.',
       });
     }
 

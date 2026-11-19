@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -20,11 +20,46 @@ import {
  */
 const workRoot = () => mkdtempSync(join(tmpdir(), 'seamnex-scan-'));
 
+/**
+ * A Trivy cache the age rule accepts: the database, the metadata that dates it, and the Java database
+ * unless a case is about the coverage gap left without one.
+ */
+function seededCache(
+  options: { updatedAt?: Date; metadata?: boolean; java?: boolean } = {},
+): string {
+  const dir = mkdtempSync(join(tmpdir(), 'seamnex-trivy-cache-'));
+  mkdirSync(join(dir, 'db'), { recursive: true });
+  writeFileSync(join(dir, 'db', 'trivy.db'), 'database');
+  if (options.metadata !== false) {
+    writeFileSync(
+      join(dir, 'db', 'metadata.json'),
+      JSON.stringify({
+        Version: 2,
+        DownloadedAt: (options.updatedAt ?? new Date()).toISOString(),
+        NextUpdate: new Date(Date.now() + 6 * 3_600_000).toISOString(),
+      }),
+      'utf8',
+    );
+  }
+  if (options.java !== false) {
+    mkdirSync(join(dir, 'java-db'), { recursive: true });
+    writeFileSync(join(dir, 'java-db', 'trivy-java.db'), 'java database');
+  }
+  return dir;
+}
+
 function config(overrides: Record<string, unknown> = {}): AppConfig {
   return {
     SEAMNEX_SCANNER_IMAGE: 'aquasec/trivy:0.58.0',
     SEAMNEX_SCAN_TIMEOUT_MS: 120_000,
     SEAMNEX_DOCKER_PATH_MAP: '',
+    // `cached` is the shipped posture, so it is what these cases exercise: the scanner keeps no
+    // route, the seeded cache is mounted, and Trivy is told not to reach for a database.
+    SEAMNEX_SCAN_DB_MODE: 'cached',
+    SEAMNEX_SCAN_CACHE_DIR: seededCache(),
+    SEAMNEX_SCAN_DB_MAX_AGE_HOURS: 168,
+    SEAMNEX_SCAN_DB_REPOSITORY: 'ghcr.io/aquasec/trivy-db',
+    SEAMNEX_SCAN_NETWORK: '',
     scanBlockSeverities: ['CRITICAL'],
     ...overrides,
   } as unknown as AppConfig;
@@ -38,8 +73,11 @@ function docker(report: unknown, options: { code?: number; stderr?: string } = {
     })),
     pull: vi.fn(async () => undefined),
     runCli: vi.fn(async (_command: string, args: readonly string[]) => {
-      // Emulate the scanner: the `-v` mount is the work directory, and `--output` names the report.
-      const mount = String(args[args.indexOf('-v') + 1] ?? '').replace(/:\/scan$/, '');
+      // Emulate the scanner: the mount ending in `:/scan` is the work directory, `--output` the report.
+      const mount = String(args.find((arg) => arg.endsWith(':/scan')) ?? '').replace(
+        /:\/scan$/,
+        '',
+      );
       const target = String(args[args.indexOf('--output') + 1] ?? '/scan/report.json');
       const name = target.replace('/scan/', '');
       writeFileSync(join(mount, name), JSON.stringify(report), 'utf8');
@@ -161,6 +199,102 @@ describe('scanImage', () => {
     // The guard runs over the scanner image too: it is a pull like any other.
     expect(engine.pull).toHaveBeenCalledWith('aquasec/trivy:0.58.0');
     expect(args.join(' ')).not.toContain('docker.sock');
+  });
+
+  it('runs offline against the seeded cache and tells the scanner not to fetch a database', async () => {
+    const engine = docker({ Results: [] });
+    const cache = seededCache();
+
+    await scanImage({
+      docker: engine as never,
+      config: config({ SEAMNEX_SCAN_CACHE_DIR: cache }),
+      reference: 'redis:7.2.5',
+      workRoot: workRoot(),
+    });
+
+    const args = engine.runCli.mock.calls[0]?.[1] ?? [];
+    expect(args.join(' ')).toContain('--network none');
+    expect(args).toEqual(expect.arrayContaining(['--cache-dir', '/cache']));
+    // Both skips matter: without them Trivy tries to reach a registry it has no route to and fails.
+    expect(args).toEqual(expect.arrayContaining(['--skip-db-update', '--skip-java-db-update']));
+    expect(args.some((arg) => arg.endsWith(':/cache'))).toBe(true);
+    // Nothing names a repository: `cached` reads what is on disk, not what it could download.
+    expect(args.join(' ')).not.toContain('--db-repository');
+  });
+
+  it('refuses to scan when the cache was never seeded, before it saves the image', async () => {
+    const engine = docker({ Results: [] });
+    const empty = mkdtempSync(join(tmpdir(), 'seamnex-trivy-empty-'));
+
+    const outcome = await scanImage({
+      docker: engine as never,
+      config: config({ SEAMNEX_SCAN_CACHE_DIR: empty }),
+      reference: 'redis:7.2.5',
+      workRoot: workRoot(),
+    });
+
+    // A missing database is "we could not look", and the remedy is named rather than implied.
+    expect(outcome).toMatchObject({ verdict: 'error', failureKind: 'database', findings: [] });
+    expect(outcome.failure).toContain('pnpm scan:db:update');
+    // The check runs before the tar: hundreds of megabytes is the wrong way to discover this.
+    expect(engine.saveImage).not.toHaveBeenCalled();
+    expect(engine.runCli).not.toHaveBeenCalled();
+  });
+
+  it('refuses a database older than the configured limit', async () => {
+    const engine = docker({ Results: [] });
+    const stale = seededCache({ updatedAt: new Date(Date.now() - 200 * 3_600_000) });
+
+    const outcome = await scanImage({
+      docker: engine as never,
+      config: config({ SEAMNEX_SCAN_CACHE_DIR: stale }),
+      reference: 'redis:7.2.5',
+      workRoot: workRoot(),
+    });
+
+    // A months-old database answers "no findings" for an image nobody really looked at.
+    expect(outcome.verdict).toBe('error');
+    expect(outcome.failureKind).toBe('database');
+    expect(outcome.failure).toContain('over the 168 h limit');
+    expect(engine.runCli).not.toHaveBeenCalled();
+  });
+
+  it('reports the coverage gap when the Java database was not seeded', async () => {
+    const cache = seededCache({ java: false });
+
+    const outcome = await scanImage({
+      docker: docker({ Results: [] }) as never,
+      config: config({ SEAMNEX_SCAN_CACHE_DIR: cache }),
+      reference: 'redis:7.2.5',
+      workRoot: workRoot(),
+    });
+
+    // The scan counts, but "passed" must not imply an ecosystem that was skipped.
+    expect(outcome.verdict).toBe('passed');
+    expect(outcome.warnings?.join(' ')).toContain('JAR-packaged');
+  });
+
+  it('uses the configured network and repository in a mode that fetches the database', async () => {
+    const engine = docker({ Results: [] });
+
+    await scanImage({
+      docker: engine as never,
+      config: config({
+        SEAMNEX_SCAN_DB_MODE: 'mirror',
+        SEAMNEX_SCAN_CACHE_DIR: '',
+        SEAMNEX_SCAN_DB_REPOSITORY: 'registry.internal.test/aquasec/trivy-db',
+      }),
+      reference: 'redis:7.2.5',
+      workRoot: workRoot(),
+    });
+
+    const args = engine.runCli.mock.calls[0]?.[1] ?? [];
+    // `mirror` needs a route to the mirror, and it names it instead of the public default.
+    expect(args.join(' ')).toContain('--network bridge');
+    expect(args).toEqual(
+      expect.arrayContaining(['--db-repository', 'registry.internal.test/aquasec/trivy-db']),
+    );
+    expect(args).not.toContain('--skip-db-update');
   });
 
   it('names every severity the contract knows, and treats a missing one as unknown', async () => {

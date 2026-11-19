@@ -34,6 +34,10 @@ export function ensureRuntimeDirs(root, log = () => {}) {
     // NFR-4.6: the scan scratch tree. Docker would create the mount root as root, and the API's
     // `node` user then cannot `mkdir` the per-scan directory inside it.
     join('temp', 'scans'),
+    // NFR-4.6: the advisory cache the scanner reads offline. Created here for the same reason, and
+    // because `pnpm scan:db:update` writes into it as the host user: a mount root Docker created for
+    // a missing source belongs to root, so the seeding command could not write to it on Linux.
+    join('temp', 'trivy-cache'),
     join('temp', 'traefik', 'dynamic'),
     join('temp', 'catalog-repo', 'instances'),
     // FR-2.6: the `file_sd` directory M21 writes and Prometheus watches. Created on the host for the

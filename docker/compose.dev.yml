@@ -214,12 +214,20 @@ x-api-environment: &api-environment
   # stopped at "Apply" with IMAGE_SCAN_BLOCKED. The scan tree is also what the daemon binds into the
   # scanner container, so the `.env` path map needs the matching pair (see `.env.example`).
   SEAMNEX_SCAN_TMP_DIR: /var/lib/seamnex/scans
+  # The advisory cache, literal for the same reason as the scratch tree above: the root `.env` names
+  # the *host* tree (`./temp/trivy-cache`) and the daemon binds it into the scanner, so the container
+  # path and the `.env` path map have to agree with this mount.
+  SEAMNEX_SCAN_CACHE_DIR: /var/lib/seamnex/trivy-cache
   # The scan policy, forwarded rather than restated so `.env` is authoritative: a scan setting named
-  # there that never reached the process was indistinguishable from its default. The root `.env`
-  # sets `SEAMNEX_SCAN_FAIL_OPEN=true` as a stopgap while the scanner cannot fetch its vulnerability
-  # database (ISSUE-53); the default here stays fail-closed, which is the shipped posture.
+  # there that never reached the process was indistinguishable from its default. `cached` is the
+  # shipped posture — the scanner keeps no route and reads the database `pnpm scan:db:update` seeds —
+  # so the dev stopgap of `SEAMNEX_SCAN_FAIL_OPEN=true` is no longer the way past a failed scan.
   SEAMNEX_SCAN_ENABLED: ${SEAMNEX_SCAN_ENABLED:-true}
   SEAMNEX_SCANNER_IMAGE: ${SEAMNEX_SCANNER_IMAGE:-aquasec/trivy:0.57.1}
+  SEAMNEX_SCAN_DB_MODE: ${SEAMNEX_SCAN_DB_MODE:-cached}
+  SEAMNEX_SCAN_DB_REPOSITORY: ${SEAMNEX_SCAN_DB_REPOSITORY:-ghcr.io/aquasec/trivy-db}
+  SEAMNEX_SCAN_DB_MAX_AGE_HOURS: ${SEAMNEX_SCAN_DB_MAX_AGE_HOURS:-168}
+  SEAMNEX_SCAN_NETWORK: ${SEAMNEX_SCAN_NETWORK:-}
   SEAMNEX_SCAN_BLOCK_SEVERITIES: ${SEAMNEX_SCAN_BLOCK_SEVERITIES:-CRITICAL}
   SEAMNEX_SCAN_FAIL_OPEN: ${SEAMNEX_SCAN_FAIL_OPEN:-false}
   SEAMNEX_SCAN_RETENTION_DAYS: ${SEAMNEX_SCAN_RETENTION_DAYS:-90}
@@ -241,6 +249,10 @@ x-api-volumes: &api-volumes
   # filesystem: the scanner container is a sibling `docker run` and the daemon resolves the bind
   # source on the *host*, so an unmounted path gave the scanner an empty directory.
   - ../temp/scans:/var/lib/seamnex/scans
+  # NFR-4.6: the advisory database the scanner reads offline. It has to be the host tree too — the
+  # scanner is a sibling `docker run` and the daemon resolves the bind source on the host — and it is
+  # written by `pnpm scan:db:update`, not by the API.
+  - ../temp/trivy-cache:/var/lib/seamnex/trivy-cache
   # Read-write: 4A.8 commits `instances/<slug>/instance.yaml` here before a job may apply. The
   # container runs as `node` (uid 1000) while the mount root is owned by the host, so the
   # `instances/` subdirectory is created by `scripts/dev.mjs` and `scripts/compose.mjs`

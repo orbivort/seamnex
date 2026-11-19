@@ -169,6 +169,18 @@ function container(overrides: Record<string, unknown> = {}) {
   };
 }
 
+/** The summary the scan service returns; the pipeline only reads `verdict`. */
+function scanSummary(scanner: string, verdict: 'passed' | 'blocked' | 'error'): unknown {
+  return {
+    verdict,
+    scanner,
+    scannerVersion: '0.57.1',
+    scannedAt: '2026-11-19T15:43:39.000Z',
+    severityCounts: { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 },
+    blockingSeverities: ['critical'],
+  };
+}
+
 function setup(routes: readonly Route[] = [], configOverrides: Record<string, unknown> = {}) {
   const db = fakeDb([...routes, ...DEFAULTS], { allowUnmatched: true });
   const registry = new PipelineRegistry();
@@ -2832,7 +2844,7 @@ describe('apply image evidence', () => {
     );
     h.images.scanForDeploy.mockImplementation(async (input) => {
       await input.log?.('stdout', 'scanning the images this deployment will start');
-      return ['repo/crm:7.4'];
+      return [scanSummary('repo/crm:7.4', 'passed')] as never;
     });
     const context = ctx();
     await reachApply(h, context);
@@ -2849,6 +2861,67 @@ describe('apply image evidence', () => {
     expect(context.log).toHaveBeenCalledWith(
       'stdout',
       'scanning the images this deployment will start',
+    );
+    expect(h.docker.composeUp).toHaveBeenCalled();
+  });
+
+  it('does not summarise an unscannable image as "no blocking findings"', async () => {
+    const h = setup();
+    h.renderer.render.mockResolvedValue(
+      renderSetOf({
+        files: [
+          {
+            path: COMPOSE,
+            sha256: 'c'.repeat(64),
+            content: 'services:\n  app:\n    image: repo/crm:7.4\n    expose:\n      - "80"\n',
+          },
+        ],
+      }),
+    );
+    // Fail-open: the deployment continued, but calling that a clean scan would be the S-10 defect.
+    h.images.scanForDeploy.mockResolvedValue([scanSummary('repo/crm:7.4', 'error')] as never);
+    const context = ctx();
+    await reachApply(h, context);
+
+    await h.run('deploy', 'apply', context);
+
+    expect(context.log).toHaveBeenCalledWith(
+      'system',
+      '1 image(s) examined: 0 passed, 0 blocked, 1 not scanned',
+    );
+    expect(context.log).not.toHaveBeenCalledWith(
+      'system',
+      '1 image(s) scanned; no blocking findings',
+    );
+    expect(h.docker.composeUp).toHaveBeenCalled();
+  });
+
+  it('says how many images passed when only some could be scanned', async () => {
+    const h = setup();
+    h.renderer.render.mockResolvedValue(
+      renderSetOf({
+        files: [
+          {
+            path: COMPOSE,
+            sha256: 'c'.repeat(64),
+            content:
+              'services:\n  app:\n    image: repo/crm:7.4\n    expose:\n      - "80"\n  db:\n    image: mariadb:11.4\n',
+          },
+        ],
+      }),
+    );
+    h.images.scanForDeploy.mockResolvedValue([
+      scanSummary('repo/crm:7.4', 'passed'),
+      scanSummary('mariadb:11.4', 'error'),
+    ] as never);
+    const context = ctx();
+    await reachApply(h, context);
+
+    await h.run('deploy', 'apply', context);
+
+    expect(context.log).toHaveBeenCalledWith(
+      'system',
+      '2 image(s) examined: 1 passed, 0 blocked, 1 not scanned',
     );
     expect(h.docker.composeUp).toHaveBeenCalled();
   });

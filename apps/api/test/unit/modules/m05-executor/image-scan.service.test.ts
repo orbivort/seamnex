@@ -1,3 +1,6 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeDb, type Route } from '../../../support/fakes';
 import type { AppConfig } from '../../../../src/config/config';
@@ -69,6 +72,13 @@ function config(overrides: Record<string, unknown> = {}): AppConfig {
     SEAMNEX_SCAN_FAIL_OPEN: false,
     SEAMNEX_SCAN_TMP_DIR: 'temp/agent/scan',
     SEAMNEX_SCANNER_IMAGE: 'aquasec/trivy:0.58.0',
+    // `online` keeps these cases about the service: the scanner is a double, so there is no cache to
+    // inspect and nothing to refuse. The cached-database rules have their own cases below.
+    SEAMNEX_SCAN_DB_MODE: 'online',
+    SEAMNEX_SCAN_CACHE_DIR: '',
+    SEAMNEX_SCAN_DB_MAX_AGE_HOURS: 168,
+    SEAMNEX_SCAN_DB_REPOSITORY: 'ghcr.io/aquasec/trivy-db',
+    SEAMNEX_SCAN_NETWORK: '',
     scanBlockSeverities: ['CRITICAL'],
     ...overrides,
   } as unknown as AppConfig;
@@ -124,6 +134,64 @@ describe('scanForDeploy', () => {
 
     expect(scanImageMock).not.toHaveBeenCalled();
     expect(summary?.verdict).toBe('passed');
+  });
+
+  it('does not reuse a passing report once the database behind it is unusable', async () => {
+    // A cache that was never seeded: the retained pass is evidence from a database this deployment
+    // will not scan with, so it must not pre-empt the "we could not look" answer.
+    const emptyCache = mkdtempSync(join(tmpdir(), 'seamnex-service-cache-'));
+    const { service } = setup(
+      [
+        [FIND_QUERY, [row()]],
+        [INSERT_QUERY, [row()]],
+      ],
+      {
+        SEAMNEX_SCAN_DB_MODE: 'cached',
+        SEAMNEX_SCAN_CACHE_DIR: emptyCache,
+      },
+    );
+    const log = vi.fn(async () => undefined);
+
+    await service.scanForDeploy({ instanceId: 'inst-crm', references: ['redis:7'], log });
+
+    expect(scanImageMock).toHaveBeenCalledOnce();
+    expect(log).toHaveBeenCalledWith('system', expect.stringContaining('not reused'));
+  });
+
+  it('points a database failure at the seeding command rather than at the scanner image', async () => {
+    const { service } = setup([
+      [FIND_QUERY, []],
+      [INSERT_QUERY, [row({ verdict: 'error' })]],
+    ]);
+    scanImageMock.mockResolvedValue(
+      outcome({
+        verdict: 'error',
+        failure: 'no vulnerability database is present',
+        failureKind: 'database',
+      }),
+    );
+
+    // The scanner image was reachable: sending the operator back to SEAMNEX_SCANNER_IMAGE would be
+    // a remedy for a fault that is not there.
+    await expect(
+      service.scanForDeploy({ instanceId: 'inst-crm', references: ['redis:7'] }),
+    ).rejects.toMatchObject({ remediation: expect.stringContaining('scan:db:update') });
+  });
+
+  it('writes a coverage gap the scanner reported into the job log', async () => {
+    const { service } = setup([
+      [FIND_QUERY, []],
+      [INSERT_QUERY, [row()]],
+    ]);
+    scanImageMock.mockResolvedValue(outcome({ warnings: ['the Java database is not seeded'] }));
+    const log = vi.fn(async () => undefined);
+
+    await service.scanForDeploy({ instanceId: 'inst-crm', references: ['redis:7'], log });
+
+    expect(log).toHaveBeenCalledWith(
+      'system',
+      expect.stringContaining('Java database is not seeded'),
+    );
   });
 
   it('rescans when the retained report is blocked, because the answer may have changed', async () => {

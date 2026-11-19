@@ -9,6 +9,14 @@ import type {
 import type { AppConfig } from '../../config/config';
 import type { DockerEngineClient } from './docker.client';
 import { dockerMountSource } from './mount';
+import {
+  javaDatabaseSeeded,
+  scanCacheDir,
+  scanDbMode,
+  scannerNetwork,
+  vulnDatabaseRepository,
+  vulnDatabaseStatus,
+} from './vuln-db';
 
 /**
  * NFR-4.6 / S-10 — scan the image the deployment is about to run.
@@ -26,6 +34,10 @@ import { dockerMountSource } from './mount';
  *      `error` is "we could not look", and treating it as a pass is the defect S-10 names.
  *   3. **The work directory is removed in a `finally`.** An image tar is hundreds of megabytes; a
  *      leak per deployment fills a host disk within a week.
+ *   4. **No network means a pre-seeded database.** A scanner with no route cannot fetch advisories,
+ *      so the cache under `SEAMNEX_SCAN_CACHE_DIR` is mounted into it and its age decides whether the
+ *      scan may run at all (`vuln-db.ts`). The alternative — opening the route — would make every
+ *      deployment depend on a third-party registry staying reachable.
  */
 
 export type ScanOutcome = {
@@ -36,6 +48,14 @@ export type ScanOutcome = {
   readonly findings: readonly ImageScanFinding[];
   /** Set when the scan could not run at all; `null` on a completed scan. */
   readonly failure: string | null;
+  /**
+   * Which remedy the failure calls for: a database that was never seeded is repaired by
+   * `pnpm scan:db:update`, a scanner that could not start by fixing `SEAMNEX_SCANNER_IMAGE`. Without
+   * the distinction the operator is sent to the scanner image for a problem it cannot cause.
+   */
+  readonly failureKind?: 'database' | 'scanner';
+  /** Coverage the scanner ran without (e.g. no Java database), reported rather than hidden. */
+  readonly warnings?: readonly string[];
 };
 
 type TrivyVulnerability = {
@@ -90,6 +110,35 @@ export async function scanImage(input: {
   const scannerVersion = scannerVersionOf(scanner);
   const empty = emptyCounts();
 
+  // Asked before the image is saved: an unseeded cache cannot answer, and a tar of hundreds of
+  // megabytes is the wrong way to find that out.
+  const database = vulnDatabaseStatus(input.config);
+  if (database.ok === false) {
+    return {
+      verdict: 'error',
+      scanner,
+      scannerVersion,
+      severityCounts: empty,
+      findings: [],
+      failure: database.failure,
+      failureKind: 'database',
+      warnings: [],
+    };
+  }
+
+  const mode = scanDbMode(input.config);
+  const cacheDir = scanCacheDir(input.config);
+  const repository = vulnDatabaseRepository(input.config);
+  const warnings: string[] = [];
+  if (mode === 'cached' && !javaDatabaseSeeded(input.config)) {
+    // Trivy skips JAR scanning without a java database. The scan still counts as a scan, but the
+    // coverage is narrower than "vuln", and a clean pass that silently omitted a whole ecosystem is
+    // the kind of claim S-10 exists to stop.
+    warnings.push(
+      'the Java database is not seeded, so JAR-packaged dependencies were not scanned; run `pnpm scan:db:update` to cover them',
+    );
+  }
+
   const directory = join(input.workRoot, `scan-${Date.now()}-${process.pid}`);
   try {
     mkdirSync(directory, { recursive: true });
@@ -98,8 +147,10 @@ export async function scanImage(input: {
 
     await input.docker.saveImage(input.reference, tarPath);
     // The scanner container is a second `docker run`; its mounts are resolved by the daemon, so the
-    // host spelling of this directory is what has to be passed.
+    // host spelling of these directories is what has to be passed.
     const mount = dockerMountSource(directory, input.config.SEAMNEX_DOCKER_PATH_MAP);
+    const cacheMount =
+      cacheDir.length > 0 ? dockerMountSource(cacheDir, input.config.SEAMNEX_DOCKER_PATH_MAP) : '';
 
     // The scanner image is pulled through the same trusted-registry guard as any product image.
     await input.docker.pull(scanner);
@@ -108,10 +159,11 @@ export async function scanImage(input: {
       [
         'run',
         '--rm',
-        '--network',
-        'none',
         '-v',
         `${mount}:/scan`,
+        ...(cacheMount.length > 0 ? ['-v', `${cacheMount}:/cache`] : []),
+        '--network',
+        scannerNetwork(input.config),
         scanner,
         'image',
         '--input',
@@ -123,6 +175,11 @@ export async function scanImage(input: {
         '--scanners',
         'vuln',
         '--quiet',
+        ...(cacheMount.length > 0 ? ['--cache-dir', '/cache'] : []),
+        // Cached mode has no route to anything, so asking Trivy to refresh would be a guaranteed
+        // failure after the database was found; the same goes for the java database.
+        ...(mode === 'cached' ? ['--skip-db-update', '--skip-java-db-update'] : []),
+        ...(mode !== 'cached' && repository.length > 0 ? ['--db-repository', repository] : []),
       ],
       input.config.SEAMNEX_SCAN_TIMEOUT_MS,
     );
@@ -134,6 +191,8 @@ export async function scanImage(input: {
         severityCounts: empty,
         findings: [],
         failure: `scanner exited ${result.code}: ${(result.stderr || result.stdout).trim().slice(0, 400)}`,
+        failureKind: 'scanner',
+        warnings,
       };
     }
 
@@ -148,6 +207,7 @@ export async function scanImage(input: {
       severityCounts: countOf(findings),
       findings,
       failure: null,
+      warnings,
     };
   } catch (error) {
     return {
@@ -157,6 +217,8 @@ export async function scanImage(input: {
       severityCounts: empty,
       findings: [],
       failure: (error as Error).message.slice(0, 400),
+      failureKind: 'scanner',
+      warnings,
     };
   } finally {
     // Best-effort: a failed delete must not mask the verdict.

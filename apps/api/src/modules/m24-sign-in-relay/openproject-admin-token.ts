@@ -21,7 +21,7 @@ import type { RelayFailure } from './relay.contract';
  *
  * The one account the platform may use for this is the seed administrator: the deploy generated its
  * password and stored it as an instance secret. The entry's env schema sets
- * `OPENPROJECT_SEED_ADMIN_USER_PASSWORD_RESET=false`, so a fresh deployment signs in normally. An
+ * `OPENPROJECT_SEED__ADMIN__USER__PASSWORD__RESET=false`, so a fresh deployment signs in normally. An
  * instance seeded *before* that variable existed still owes the change its seeder demanded, and the
  * flag lives on the account, so editing the entry cannot clear it. The driver therefore completes the
  * pending change **with the password it already holds** — measured on 17.9.6: `new_password` equal to

@@ -36,8 +36,8 @@ export class ProductApiClient implements ProductProvisioningAdapter {
   /** OpenProject's API authenticates with a personal access token, not a login pair. */
   readonly credentialKind = 'bearer' as const;
   /**
-   * The deploy seeds this administrator and `OPENPROJECT_SEED_ADMIN_USER_PASSWORD_RESET=false` in the
-   * entry's env schema keeps the first sign-in from forcing a password change, so the account can be
+   * The deploy seeds this administrator and `OPENPROJECT_SEED__ADMIN__USER__PASSWORD__RESET=false` in
+   * the entry's env schema keeps the first sign-in from forcing a password change, so the account can be
    * used once to mint the token (ADR-BE-22 §Credentials, amendment). The password is never rotated.
    */
   readonly adminBootstrap = {

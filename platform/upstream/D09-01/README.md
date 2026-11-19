@@ -8,6 +8,12 @@
 | Catalogue `httpPort` | `80` — the port the container listens on |
 | Repository | <https://github.com/opf/openproject> |
 
+> **Route note.** The measurements dated 2026-10-31 to 2026-11-04 below were taken on the pre-TLS
+> development edge (`http://<host>:8020`). That edge no longer exists: every route is served over
+> TLS (`https://<host>:8443` in development, `443` in production, ADR-BE-39), and the definition
+> now sets `OPENPROJECT_HTTPS=true`. The older URLs are kept as a historical record; do not copy
+> them into a new deployment. See “2026-11-19 — TLS edge alignment” at the end of this file.
+
 ## Why this tree exists
 
 The D09-01 entry used to declare `packaging: dockerfile` with a repository clone as its source. That
@@ -29,7 +35,8 @@ A single container under supervisord with:
 - PostgreSQL 17, cluster in `$PGDATA` = `/var/openproject/pgdata`
 - memcached (the Rails cache store the image selects by default)
 - the Rails/Puma application and its background worker
-- Apache as the HTTP front end on **port 80**, `ServerName` from `SERVER_NAME`
+- Apache as the HTTP front end on **port 80**, `ServerName` from `SERVER_NAME`; TLS is terminated
+  at the edge, so the container serves plain HTTP only and publishes no host port
 
 Because PostgreSQL, the cache and the worker live inside the container, the entry's `database`,
 `cache` and `worker` dependency roles are satisfied internally. Do not add services for them.
@@ -53,8 +60,25 @@ The application tree (`/app`) is deliberately **not** mounted: the image owns it
   executor.
 - **The seeded `admin` account is mandatory too.** Without
   `OPENPROJECT_SEED__ADMIN__USER__PASSWORD` the seeder applies its documented default and the log
-  prints `default admin credentials are login: admin, password: admin`. The seeder runs once, while
-  no administrator exists.
+  prints `default admin credentials are login: admin, password: admin`. The definition now makes
+  the variable a required interpolation, as it already did for `SECRET_KEY_BASE`, so a missing
+  secret fails the apply instead of seeding a known password. The seeder runs once, while no
+  administrator exists.
+- **The reset flag uses doubled underscores.**
+  `OPENPROJECT_SEED__ADMIN__USER__PASSWORD__RESET` (not
+  `OPENPROJECT_SEED_ADMIN_USER_PASSWORD_RESET`) is the name OpenProject maps to
+  `seed.admin.user.password_reset`; the single-underscore spelling was silently ignored. It is a
+  first-boot setting, so an instance seeded while the name was wrong keeps `force_password_change`
+  and the relay cannot mint its token through the account.
+- **TLS ends at the edge; the product is told so.** `OPENPROJECT_HTTPS=true` makes Rails build
+  `https` links when no request is available (mail, exports) and mark cookies `Secure`.
+  `OPENPROJECT_HSTS=false` is deliberate: the edge emits HSTS and performs the http→https
+  redirect, and Rails must not redirect the relay's admin API calls on the instance network (that
+  client does not send `X-Forwarded-Proto`; the login driver does, and Rails exempts
+  `/health_checks` from the redirect either way).
+- **Sizing is the all-in-one minimum.** The catalogue reserves 4 vCPU / 4 GiB because PostgreSQL,
+  Puma, Apache and the worker share one cgroup. A 1 vCPU / 2 GiB reservation is below OpenProject's
+  documented floor and risks an OOM during the first-boot migrations.
 - **`OPENPROJECT_HOST__NAME` must equal the route host.** OpenProject builds absolute URLs from it;
   a mismatch produces links to a host the browser cannot resolve (it is also what the login
   redirect uses).
@@ -69,19 +93,25 @@ Four defects were found by running the entry end to end, not by reading the file
 
 1. **The catalogue said `httpPort: 8080`.** That is the *host* side of the canonical example
    mapping (`8080:80`). The policy rewrites `ports:` to `expose: ['80']`, so nothing exposed 8080
-   and `render` would have refused with `HTTP_PORT_NOT_EXPOSED`. It is `80`.
+   and `render` would have refused with `HTTP_PORT_NOT_EXPOSED`. It is `80`. The definition now
+   declares `expose: ['80']` directly; the policy rewrite remains for entries that still publish a
+   port.
 2. **`packaging: dockerfile` had no vendored tree.** Resolving the repository clone would have
    reached `apply` and died in `docker compose build`. This tree replaced it.
 3. **The first healthcheck was wrong.** `curl http://127.0.0.1:80/health_checks/default` without a
    `Host` header matches Apache's `_default_` vhost — the static placeholder — and gets a 404. The
    container would have been declared unhealthy 15 minutes into a boot that worked. The probe now
-   sends `Host: ${SERVER_NAME}`, so it exercises the same vhost the edge proxies to.
+   sends the container's `SERVER_NAME` as `Host`, so it exercises the same vhost the edge proxies
+   to.
 4. **Apache answers the placeholder before Rails does**, and it answers **200**. That is what a
    host-side `GET http://<slug>:80/` sees, which is why the platform's `verify` stage can report
    `ready` while OpenProject is still migrating. The container health status is the trustworthy
    signal; `V6`/a browser check is what closes the gap.
 
 ## Verified behaviour (17.9.6, route `projects.localhost:8020`)
+
+These probes were taken on the pre-TLS edge; the `http://…:8020` values are historical. The
+current route is `https://…:8443` in development and `443` in production.
 
 | Probe | Result |
 | --- | --- |
@@ -106,6 +136,9 @@ stands: no instance override, no environment profile value, slug `projects`.
 | Route | `projects.localhost` published (`fa_header`) |
 | Identity client | `seamnex-projects`, redirect `http://projects.localhost:8020/oauth2/callback` |
 | Env defaults used | `OPENPROJECT_HOST__NAME=projects.localhost`, `SERVER_NAME=projects.localhost`, `OPENPROJECT_HTTPS=false` |
+
+The `OPENPROJECT_HTTPS=false` entry is part of the 2026-11-01 record. The current default is
+`true`; see “2026-11-19 — TLS edge alignment”.
 
 What this run added to the file above:
 
@@ -224,3 +257,40 @@ Consequences for the platform:
 Enabling native OIDC needs an Enterprise token first, and its environment keys carry a non-obvious
 escaping rule. The provider is seeded from the environment on every container start, so the flip
 itself is a catalogue change.
+
+## 2026-11-19 — TLS edge alignment
+
+The edge moved to TLS-only after the runs above: `http://…:8020` was removed, development serves
+`https://…:8443` and production `443` (ADR-BE-39, NFR-4.1). The definition and its declaration were
+corrected together; changing either alone does not alter a running instance, because the renderer
+injects the catalogue value over the file literal.
+
+| Change | Why |
+| --- | --- |
+| `OPENPROJECT_HTTPS=true` (definition and catalogue default) | The public URL is `https`. `false` disables secure cookies and makes Rails build `http` links when no request is available (mail, exports) — the drift the old `:8020` comment described. |
+| `OPENPROJECT_HSTS=false` (definition and catalogue default) | The edge owns the HSTS header and the redirect. Rails would otherwise redirect the relay's admin API calls on the instance network, which do not send `X-Forwarded-Proto`; the login driver does, and Rails exempts `/health_checks` either way. |
+| `OPENPROJECT_SEED__ADMIN__USER__PASSWORD__RESET` | The previous single-underscore name is not a recognised setting, so the seeder kept `force_password_change=true` and the relay's token mint could not use the account. |
+| required `OPENPROJECT_SEED__ADMIN__USER__PASSWORD` | A missing secret now fails interpolation instead of seeding `admin`/`admin` once and permanently. |
+| `expose: ['80']` instead of `ports: 8080:80` | The platform never publishes a host port; a manual `docker compose up` no longer binds a plain-HTTP listener outside the edge. |
+| digest pin on `openproject/openproject:17.9.6` | The tag can be repointed; the digest recorded in the catalogue is the reviewed artefact. |
+| 4 vCPU / 4 GiB default | OpenProject's documented minimum for the all-in-one image; 1 vCPU / 2 GiB risks an OOM during the first-boot migrations. |
+| healthcheck asserts `200` | `curl -f` accepts a 3xx as success, and a redirect is not readiness. The probe now expands `SERVER_NAME` inside the container and sends `X-Forwarded-Proto: https`. |
+
+To apply this to an existing instance: update the catalogue default (done here) **and** replace any
+stored `OPENPROJECT_HTTPS=false` override through `PUT /instances/<id>/env`; a catalog reload does
+not rewrite an instance value. Remove any stored value under the old
+`OPENPROJECT_SEED_ADMIN_USER_PASSWORD_RESET` spelling: it is no longer declared, so the renderer
+would keep injecting it and the drift scan would report an undeclared variable. The reset flag is
+read only at first boot, so an instance already seeded with `force_password_change` keeps the flag —
+the relay driver completes the pending change with the password it holds, which is why the flag is
+not a runtime switch.
+
+Not changed, and still gaps: the entry supplies no SMTP configuration (invitations and password
+resets are not delivered), and the repository still has no production edge Compose file. The static
+Traefik configuration declares the http→https redirect, but only `docker/compose.dev.yml` publishes
+the development edge, which deliberately leaves port 80 unpublished.
+
+Verification after this change (not yet run on a host): through the edge, `GET /` must answer
+`302 → https://<host>:8443/login` with the port intact; `/login` must set a `Secure` session
+cookie; the container must stay `healthy`; and a relayed launch must still reach `/login` (the
+internal hop must not be redirected, which is what `OPENPROJECT_HSTS=false` guarantees).

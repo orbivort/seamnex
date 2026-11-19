@@ -507,6 +507,27 @@ const EnvironmentSchema = z
      * why `docker.io/aquasec` is in the default allow-list above.
      */
     SEAMNEX_SCANNER_IMAGE: z.string().min(1).default('aquasec/trivy:0.57.1'),
+    /**
+     * Where the advisory database comes from.
+     *
+     * `cached` is the shipped posture: the scanner keeps no network at all and reads a database
+     * seeded on the host by `pnpm scan:db:update`. `online` lets Trivy fetch and refresh it through
+     * the scanner container's network, and `mirror` does the same against
+     * `SEAMNEX_SCAN_DB_REPOSITORY`. The networked modes widen the scanner's reach, so they are opt-in
+     * and are the only ones that need a route out.
+     */
+    SEAMNEX_SCAN_DB_MODE: z.enum(['cached', 'online', 'mirror']).default('cached'),
+    /** The Trivy cache the scanner reads in `cached` mode; mounted into it, so it must be host-visible. */
+    SEAMNEX_SCAN_CACHE_DIR: z.string().default('./temp/trivy-cache'),
+    /** OCI repository the database is taken from, and the one an internal mirror overrides. */
+    SEAMNEX_SCAN_DB_REPOSITORY: z.string().min(1).default('ghcr.io/aquasec/trivy-db'),
+    /**
+     * How old the cached database may be before a scan refuses to run. A week by default: advisories
+     * move daily, but blocking every deployment the morning a refresh was missed is not a control.
+     */
+    SEAMNEX_SCAN_DB_MAX_AGE_HOURS: z.coerce.number().int().min(1).max(8_760).default(168),
+    /** The scanner's network. Empty derives it: `none` for `cached`, `bridge` for the networked modes. */
+    SEAMNEX_SCAN_NETWORK: z.string().default(''),
     /** Severities whose presence blocks the deployment; `CRITICAL` is NFR-4.6's block condition. */
     SEAMNEX_SCAN_BLOCK_SEVERITIES: z.string().min(1).default('CRITICAL'),
     SEAMNEX_SCAN_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(1_800_000).default(300_000),
@@ -1008,6 +1029,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
         : resolveFromRepoRoot(parsed.data.SEAMNEX_PROMETHEUS_TARGETS_DIR),
     SEAMNEX_BACKUP_TMP_DIR: resolveFromRepoRoot(parsed.data.SEAMNEX_BACKUP_TMP_DIR),
     SEAMNEX_SCAN_TMP_DIR: resolveFromRepoRoot(parsed.data.SEAMNEX_SCAN_TMP_DIR),
+    SEAMNEX_SCAN_CACHE_DIR: resolveFromRepoRoot(parsed.data.SEAMNEX_SCAN_CACHE_DIR),
     SEAMNEX_AGE_IDENTITY_FILE: resolveFromRepoRoot(parsed.data.SEAMNEX_AGE_IDENTITY_FILE),
     isProduction: parsed.data.NODE_ENV === 'production',
     isDevelopment: parsed.data.NODE_ENV !== 'production',

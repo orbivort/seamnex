@@ -485,7 +485,19 @@ export class DeploymentPipeline implements OnModuleInit {
       log: (level, line) => context.log(level, line),
     });
     if (scanned.length > 0) {
-      await context.log('system', `${scanned.length} image(s) scanned; no blocking findings`);
+      /*
+       * `error` is a first-class verdict, so this line may not summarise every outcome as a pass: a
+       * deployment that continued past an unscannable image (fail-open) would otherwise read as
+       * "no blocking findings" one line after saying nothing was looked at.
+       */
+      const blocked = scanned.filter((summary) => summary.verdict === 'blocked').length;
+      const unscanned = scanned.filter((summary) => summary.verdict === 'error').length;
+      await context.log(
+        'system',
+        blocked === 0 && unscanned === 0
+          ? `${scanned.length} image(s) scanned; no blocking findings`
+          : `${scanned.length} image(s) examined: ${scanned.length - blocked - unscanned} passed, ${blocked} blocked, ${unscanned} not scanned`,
+      );
     }
 
     await this.docker.composeUp(project, (line) => context.log('stdout', line));
