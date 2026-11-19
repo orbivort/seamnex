@@ -22,10 +22,13 @@ import {
   defineColumns,
 } from '@seamnex/ui';
 import { cn, formatRelative } from '@seamnex/utils';
-import { AsyncPanel, QueryError, useDebouncedValue } from '@seamnex/shell';
+import { AsyncPanel, QueryError } from '@seamnex/shell';
 
 const STATE_FILTERS = ['all', 'ready', 'degraded', 'stopped', 'failed', 'upgrading'] as const;
 type StateFilter = (typeof STATE_FILTERS)[number];
+
+/** Typing settles before it reaches the request and the address bar; clearing does not wait. */
+const SEARCH_DEBOUNCE_MS = 250;
 
 /**
  * The address bar is the record of the view. A filter held in component state alone could not be
@@ -170,31 +173,58 @@ export function InstancesPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const state = parseState(searchParams.get('state'));
   const urlQuery = searchParams.get('q') ?? '';
-  // Typed value stays local so a keystroke repaints immediately; the debounced copy is what reaches
+  // Typed value stays local so a keystroke repaints immediately; the settled copy is what reaches
   // both the API and the address bar.
   const [query, setQuery] = useState(urlQuery);
-  const debouncedQuery = useDebouncedValue(query);
+  /** What the request and the address bar carry: the typed text, once it has settled. */
+  const [appliedQuery, setAppliedQuery] = useState(urlQuery);
   /**
    * The last query string this component wrote. An address bar that differs from it came from a
    * navigation (back, forward, a pasted link) and is adopted; one that matches is our own echo and
    * must not be written back over what is being typed.
    */
   const writtenUrl = useRef<string | null>(null);
+  /**
+   * The query string this component last rendered against. `setSearchParams` does not land in the
+   * same render as the call, so one render still sees the address the user is leaving; comparing
+   * against this ref is what stops that stale render from being mistaken for a navigation and
+   * adopted back.
+   */
+  const renderedUrl = useRef(searchParams.toString());
 
   useEffect(() => {
-    const trimmed = debouncedQuery.trim();
-    if (trimmed === urlQuery) return;
+    const trimmed = query.trim();
+    if (trimmed.length === 0 || trimmed === appliedQuery) return;
+    const timer = setTimeout(() => setAppliedQuery(trimmed), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [query, appliedQuery]);
+
+  /**
+   * A clear is not a keystroke: an emptied box must empty the list and the address bar at once.
+   * Waiting for the debounce let the pending value be written back over the clear a moment later,
+   * which made "Clear filters" look inert on a filtered fleet.
+   */
+  const search = (value: string) => {
+    setQuery(value);
+    if (value.trim().length === 0) setAppliedQuery('');
+  };
+
+  useEffect(() => {
+    if (appliedQuery === urlQuery) return;
     const next = new URLSearchParams(searchParams);
-    if (trimmed.length > 0) next.set('q', trimmed);
+    if (appliedQuery.length > 0) next.set('q', appliedQuery);
     else next.delete('q');
     writtenUrl.current = next.toString();
     setSearchParams(next, { replace: true });
-  }, [debouncedQuery, urlQuery, searchParams, setSearchParams]);
+  }, [appliedQuery, urlQuery, searchParams, setSearchParams]);
 
   useEffect(() => {
-    if (writtenUrl.current === searchParams.toString()) return;
-    writtenUrl.current = searchParams.toString();
+    const current = searchParams.toString();
+    if (current === renderedUrl.current) return;
+    renderedUrl.current = current;
+    if (current === writtenUrl.current) return;
     setQuery(urlQuery);
+    setAppliedQuery(urlQuery);
   }, [searchParams, urlQuery]);
 
   const selectState = (option: StateFilter) => {
@@ -207,6 +237,7 @@ export function InstancesPage() {
 
   const clearFilters = () => {
     setQuery('');
+    setAppliedQuery('');
     writtenUrl.current = '';
     setSearchParams(new URLSearchParams(), { replace: true });
   };
@@ -214,9 +245,9 @@ export function InstancesPage() {
   const filters = useMemo<InstanceFilters>(() => {
     const next: InstanceFilters = {};
     if (state !== 'all') next.state = state;
-    if (debouncedQuery.trim().length > 0) next.q = debouncedQuery.trim();
+    if (appliedQuery.length > 0) next.q = appliedQuery;
     return next;
-  }, [state, debouncedQuery]);
+  }, [state, appliedQuery]);
 
   const instances = useInstances(filters);
   const rows = useMemo(() => instances.data ?? [], [instances.data]);
@@ -266,7 +297,7 @@ export function InstancesPage() {
         />
         <FilterBar
           search={query}
-          onSearch={setQuery}
+          onSearch={search}
           searchLabel="Search instances"
           placeholder="Search product, domain, slug or key"
           trailing={`${rows.length} shown`}

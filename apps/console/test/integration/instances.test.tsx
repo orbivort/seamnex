@@ -33,6 +33,44 @@ describe('deployment inventory', () => {
     expect(await screen.findByText('Zammad')).toBeDefined();
   });
 
+  it('keeps the applied search in the address bar so the view can be shared', async () => {
+    openAs('R1', '/instances');
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Instances' });
+    await screen.findByText('EspoCRM');
+
+    fireEvent.change(screen.getByLabelText('Search instances'), { target: { value: 'Zammad' } });
+    await screen.findByText('Zammad');
+
+    await waitFor(() => {
+      const params = new URLSearchParams(window.location.search);
+      expect(params.get('q')).toBe('Zammad');
+      // The session parameters point the request pipeline at the mock platform; dropping them
+      // while rewriting the filter would send the next request somewhere else.
+      expect(params.get('role')).toBe('R1');
+    });
+  });
+
+  it('clears a search filter from the empty state instead of restoring it', async () => {
+    openAs('R1', '/instances');
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Instances' });
+    await screen.findByText('EspoCRM');
+
+    fireEvent.change(screen.getByLabelText('Search instances'), {
+      target: { value: 'no-such-product' },
+    });
+    await screen.findByText('No instance matches this filter');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+
+    // The regression: a value still inside the debounce window was written back over the clear, so
+    // the button looked inert and the empty state stayed on screen.
+    expect(await screen.findByText('EspoCRM')).toBeDefined();
+    expect((screen.getByLabelText('Search instances') as HTMLInputElement).value).toBe('');
+    await waitFor(() => expect(new URLSearchParams(window.location.search).get('q')).toBeNull());
+  });
+
   it('explains a filter that matches nothing without claiming the fleet is empty', async () => {
     openAs('R1', '/instances');
     render(<App />);
