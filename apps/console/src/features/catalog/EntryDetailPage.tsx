@@ -35,10 +35,26 @@ import { useSession } from '../../session';
 import { QueryError } from '@seamnex/shell';
 import { EnvTab, IntegrationTab, ScaffoldTab } from './EntryTabs';
 import { FACT_LABELS, VerificationForm } from './VerificationForm';
+import { useVerifierLabel } from './verifier';
 
 /** What the deploy path compares with the disk reservation (FR-1.9). */
 function volumeQuotaMb(volumes: readonly { quotaMb: number }[]): number {
   return volumes.reduce((total, volume) => total + volume.quotaMb, 0);
+}
+
+/**
+ * The only way back from an entry that could not be read. Rendered inside the error branch too:
+ * a 404 replaced the whole screen, and Retry on a key that does not exist is a dead end.
+ */
+function BackToCatalog() {
+  return (
+    <Link
+      to="/catalog"
+      className="mb-3 inline-flex items-center gap-1.5 text-meta font-medium text-muted hover:text-link"
+    >
+      <ArrowLeft className="size-3.5" aria-hidden /> Back to catalog
+    </Link>
+  );
 }
 
 export function EntryDetailPage() {
@@ -48,6 +64,8 @@ export function EntryDetailPage() {
   const envSchema = useEnvSchema(key);
   const [tab, setTab] = useState('overview');
   const verify = useVerifyIntegrationMetadata(key);
+  // Called before the screen gate below, because hooks cannot sit behind an early return.
+  const verifier = useVerifierLabel(verify.data?.integration.verifiedBy ?? '');
   // CL-18: NFR-2.4 measures apply, not download, so warming the image cache is an operator action
   // taken before a deployment window rather than part of the deploy itself.
   const prefetch = usePrefetchEntry(key);
@@ -68,21 +86,23 @@ export function EntryDetailPage() {
         <SkeletonLines lines={10} />
       </Panel>
     ) : (
-      <QueryError error={entry.error} onRetry={() => void entry.refetch()} />
+      <Page>
+        <BackToCatalog />
+        <QueryError error={entry.error} onRetry={() => void entry.refetch()} />
+      </Page>
     );
   }
 
   const data = entry.data;
   const guarantee = GUARANTEE_CLASS_LABELS[data.guaranteeClass];
+  const declaredVolumeMb = volumeQuotaMb(data.volumes);
+  // FR-1.9: a deployment is refused when the declared quotas exceed the disk reservation, so the
+  // entry says it before the wizard spends the operator's time on a refusal.
+  const overReserved = declaredVolumeMb > data.resources.diskMb;
 
   return (
     <Page>
-      <Link
-        to="/catalog"
-        className="mb-3 inline-flex items-center gap-1.5 text-meta font-medium text-muted hover:text-link"
-      >
-        <ArrowLeft className="size-3.5" aria-hidden /> Catalog
-      </Link>
+      <BackToCatalog />
 
       <PageHeader
         eyebrow={
@@ -169,7 +189,7 @@ export function EntryDetailPage() {
             {Object.keys(verify.variables ?? {})
               .map((fact) => FACT_LABELS[fact as keyof typeof FACT_LABELS] ?? fact)
               .join(', ') || 'no fact'}
-            . Review recorded by {verify.data.integration.verifiedBy}; the next review is due{' '}
+            . Review recorded by {verifier}; the next review is due{' '}
             {formatDate(verify.data.integration.nextReviewAt)} and the change is in the audit trail.
           </Alert>
         </div>
@@ -324,9 +344,7 @@ export function EntryDetailPage() {
                         <span className="text-faint">Declared total</span>
                         <span
                           className={
-                            volumeQuotaMb(data.volumes) > data.resources.diskMb
-                              ? 'font-mono text-danger'
-                              : 'font-mono text-muted'
+                            overReserved ? 'font-mono text-danger' : 'font-mono text-muted'
                           }
                         >
                           {formatBytes(volumeQuotaMb(data.volumes) * 1024 ** 2)} of{' '}
@@ -337,6 +355,14 @@ export function EntryDetailPage() {
                   </ul>
                 </div>
               </Panel>
+
+              {overReserved ? (
+                <Callout tone="danger" title="Volumes exceed the disk reservation">
+                  The declared volumes total {formatBytes(declaredVolumeMb * 1024 ** 2)} against a{' '}
+                  {formatBytes(data.resources.diskMb * 1024 ** 2)} disk reservation. A deployment is
+                  refused until a quota is reduced or the reservation is raised.
+                </Callout>
+              ) : null}
 
               {data.deviation ? (
                 <Callout tone="caution" title="Recorded deviation">

@@ -91,6 +91,73 @@ describe('catalog list filters', () => {
     );
   });
 
+  /**
+   * The filter set used to be component state only: a shared link carried the whole catalog, and a
+   * Back step from an entry returned to it. The URL is now the input on mount and the record of what
+   * was applied, so both directions are asserted.
+   */
+  it('opens a catalog that is already filtered by the query string', async () => {
+    openAs('R1', '/catalog');
+    const url = new URL(window.location.href);
+    url.searchParams.set('q', 'Mautic');
+    window.history.replaceState({}, '', url);
+
+    render(<App />);
+
+    expect(await screen.findByText('1 shown')).toBeDefined();
+    expect((screen.getByLabelText('Search catalog') as HTMLInputElement).value).toBe('Mautic');
+  });
+
+  it('writes the applied filters to the URL without dropping the session parameters', async () => {
+    openAs('R1', '/catalog');
+    render(<App />);
+    await screen.findByText('Domain catalog');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Compose' }));
+    fireEvent.change(screen.getByLabelText('Filter by domain cluster'), {
+      target: { value: 'Enabling Platform' },
+    });
+    fireEvent.change(screen.getByLabelText('Search catalog'), { target: { value: 'Metabase' } });
+
+    // The search half lands after the debounce, so the address is read once it settles.
+    await waitFor(() => expect(window.location.search).toContain('q=Metabase'));
+    const params = new URLSearchParams(window.location.search);
+    expect(params.get('packaging')).toBe('compose');
+    expect(params.get('cluster')).toBe('Enabling Platform');
+    // `SessionProvider` reads the same query string; the catalog must not strip `role`.
+    expect(params.get('role')).toBe('R1');
+  });
+
+  it('clears every filter from the empty state', async () => {
+    openAs('R1', '/catalog');
+    render(<App />);
+    await screen.findByText('Domain catalog');
+
+    fireEvent.change(screen.getByLabelText('Search catalog'), {
+      target: { value: 'nothing-matches' },
+    });
+    expect(
+      await screen.findByText(
+        'No entry matches this filter. Clear the filters to see the full catalog.',
+      ),
+    ).toBeDefined();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+
+    expect(await screen.findByText('13 shown')).toBeDefined();
+    expect((screen.getByLabelText('Search catalog') as HTMLInputElement).value).toBe('');
+  });
+
+  it('names each row action after the product it opens', async () => {
+    openAs('R1', '/catalog');
+    render(<App />);
+    await screen.findByText('Domain catalog');
+
+    // Six links announced as "Open" do not say where any of them goes.
+    const open = await screen.findByRole('link', { name: 'Open EspoCRM (D01-01)' });
+    expect(open.getAttribute('href')).toBe('/catalog/D01-01');
+  });
+
   it('reports a catalog that cannot be read and lists it when the operator retries', async () => {
     let attempts = 0;
     server.use(
@@ -439,6 +506,29 @@ describe('catalog entry actions', () => {
 
     // The receipt names what was verified, so a review is auditable from the screen.
     expect(await screen.findByText(/Verified: Session maximum/)).toBeDefined();
+  });
+
+  it('names the reviewer instead of showing their subject id in the receipt', async () => {
+    server.use(
+      http.patch('/api/v1/catalog/D01-01/integration-metadata', () => {
+        const entry = entryFor('D01-01');
+        // An older API stored the actor's subject id; the screen must not print a UUID as a person.
+        return HttpResponse.json({
+          ...entry,
+          integration: { ...entry.integration, verifiedBy: 'usr-sofia' },
+        });
+      }),
+    );
+
+    openAs('R1', '/catalog/D01-01');
+    render(<App />);
+    await screen.findByRole('heading', { name: /EspoCRM/ });
+
+    fireEvent.change(screen.getByLabelText(/Session maximum/), { target: { value: '481' } });
+    fireEvent.click(await screen.findByRole('button', { name: /Record verified review/ }));
+
+    expect(await screen.findByText(/Review recorded by Sofia Almeida/)).toBeDefined();
+    expect(screen.queryByText(/Review recorded by usr-sofia/)).toBeNull();
   });
 
   it('reports a review that the API refused', async () => {
@@ -1002,5 +1092,29 @@ describe('entry detail and its volume declaration', () => {
     // refusal colour rather than the muted grey of every other figure on the panel.
     expect(total?.textContent).toBe('40.0 GB of 20.0 GB reserved');
     expect(total?.className).toContain('text-danger');
+    // The colour is not the whole message: the panel states the refusal and what clears it, so the
+    // operator does not learn it from the deploy wizard.
+    expect(screen.getByText('Volumes exceed the disk reservation')).toBeDefined();
+    expect(screen.getByText(/A deployment is refused until a quota is reduced/)).toBeDefined();
+  });
+
+  it('offers a way back to the catalog from an entry that does not exist', async () => {
+    server.use(
+      http.get('/api/v1/catalog/D99-99', () =>
+        problemResponse(
+          404,
+          'The resource does not exist',
+          'No catalog entry D99-99.',
+          'NOT_FOUND',
+        ),
+      ),
+    );
+
+    openAs('R1', '/catalog/D99-99');
+    render(<App />);
+
+    // Retry on a key that does not exist is a dead end; the error branch keeps the way back.
+    const back = await screen.findByRole('link', { name: 'Back to catalog' });
+    expect(back.getAttribute('href')).toBe('/catalog');
   });
 });

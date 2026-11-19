@@ -24,6 +24,8 @@ const METADATA = 'INSERT INTO integration_metadata';
 /** The per-instance record the patch reads before it writes, and the instances it fans out to. */
 const METADATA_READ = 'FROM integration_metadata WHERE entry_key = $1';
 const INSTANCES = 'SELECT id FROM instance WHERE entry_key = $1';
+/** FR-2.14: the reviewer is stored by name, resolved from the identity mirror. */
+const VERIFIER = 'FROM idp_user WHERE idp_id = $1';
 
 function document(overrides: Partial<CatalogEntry> = {}): CatalogEntry {
   return {
@@ -120,6 +122,8 @@ const WRITES: readonly Route[] = [
   [METADATA, []],
   [METADATA_READ, []],
   [INSTANCES, []],
+  // No mirror row by default: a job or service actor keeps its id as the fallback.
+  [VERIFIER, []],
 ];
 
 function setup(routes: readonly Route[] = []) {
@@ -611,6 +615,33 @@ describe('patchIntegrationMetadata', () => {
       eventType: 'registry.rebuild',
       payload: { reason: 'integration_metadata.updated', entryKey: 'D01-01' },
     });
+  });
+
+  it('names the reviewer instead of storing their subject id', async () => {
+    const subjectId = '8412fc5d-536e-4256-a3ef-ca78e3567330';
+    const { db, service } = setup([
+      [FIND, [entryRow(document())]],
+      [INSTANCES, [{ id: 'inst-1' }]],
+      [VERIFIER, [{ name: 'Platform Administrator' }]],
+    ]);
+
+    const entry = await service.patchIntegrationMetadata(
+      'D01-01',
+      { credentialGranularity: 'none' },
+      subjectId,
+    );
+
+    // The receipt and the entry screen read `verifiedBy`; a UUID there is unreadable to the
+    // operator while a catalogue document written by hand would show a person's name.
+    expect(entry.integration.verifiedBy).toBe('Platform Administrator');
+    const update = db.calls.find((call) => call.sql.includes(PATCH_UPDATE));
+    expect(JSON.parse(String(update?.params[1]))).toMatchObject({
+      integration: { verifiedBy: 'Platform Administrator' },
+    });
+    // The per-instance record the registry reads is named the same way.
+    expect(db.calls.find((call) => call.sql.includes(METADATA))?.params[11]).toBe(
+      'Platform Administrator',
+    );
   });
 
   it('records a granularity change that restores write eligibility as non-revoking', async () => {

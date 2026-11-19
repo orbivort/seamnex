@@ -23,6 +23,7 @@ import {
 } from '@seamnex/ui';
 import { formatDateTime } from '@seamnex/utils';
 import { AsyncPanel, QueryError, type AsyncQuery } from '@seamnex/shell';
+import { useVerifierLabel } from './verifier';
 
 /** The inventory row type, named once so the column array can live at module scope. */
 type OperationRow = CatalogEntry['integration']['operationInventory'][number];
@@ -140,6 +141,8 @@ const envVarRowKey = (row: EnvSchemaVar) => row.name;
 export function IntegrationTab({ entry }: { entry: CatalogEntry }) {
   const integration = entry.integration;
   const granularity = CREDENTIAL_GRANULARITY_LABELS[integration.credentialGranularity];
+  // A record written before the API stored a name still carries the reviewer's subject id.
+  const verifier = useVerifierLabel(integration.verifiedBy);
 
   return (
     <div className="space-y-3">
@@ -155,7 +158,7 @@ export function IntegrationTab({ entry }: { entry: CatalogEntry }) {
             eyebrow. */}
         <PanelHeader
           title="Verified integration facts"
-          description={`Recorded by ${integration.verifiedBy} on ${formatDateTime(
+          description={`Recorded by ${verifier} on ${formatDateTime(
             integration.verifiedAt,
           )}. These values supersede the catalogue assumption; the next review is due ${formatDateTime(
             integration.nextReviewAt,

@@ -361,6 +361,9 @@ export class PostgresCatalogService implements CatalogService {
     // contract, the button label and the audit detail all claim the clock restarts, so it does.
     const verifiedAt = new Date();
     const nextReviewAt = new Date(verifiedAt.getTime() + REVIEW_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+    // FR-2.14: the record names a person, not a subject identifier. Resolved once, before the
+    // transaction, and reused for both the entry document and the per-instance record.
+    const verifierName = await this.verifierName(actorId);
     const integration = {
       ...entry.integration,
       credentialGranularity: nextGranularity,
@@ -377,7 +380,7 @@ export class PostgresCatalogService implements CatalogService {
         : { operationInventory: patch.operationInventory }),
       ...(patch.eventModes === undefined ? {} : { eventModes: patch.eventModes }),
       ...(patch.sloSupported === undefined ? {} : { sloSupported: patch.sloSupported }),
-      verifiedBy: actorId,
+      verifiedBy: verifierName,
       verifiedAt: verifiedAt.toISOString(),
       nextReviewAt: nextReviewAt.toISOString(),
       stale: false,
@@ -462,7 +465,7 @@ export class PostgresCatalogService implements CatalogService {
             patch.sessionMaxMinutes ?? before?.session_max_minutes ?? null,
             patch.sloSupported ?? before?.slo_supported ?? null,
             verifiedFacts,
-            actorId,
+            verifierName,
             verifiedAt,
             nextReviewAt,
           ],
@@ -502,6 +505,21 @@ export class PostgresCatalogService implements CatalogService {
     });
 
     return next;
+  }
+
+  /**
+   * FR-2.14 — `verified_by` is the person who recorded the review, in the same spelling the rest of
+   * the platform shows (`M10`, `M18` resolve names from the identity mirror). Feeding the column the
+   * subject id made the receipt read "recorded by 8412fc5d-…" while a seeded document read
+   * "Platform Administrator". The audit trail keeps the id; this record keeps the name. A subject
+   * with no mirror row (a job, a service account) keeps its id rather than inventing a person.
+   */
+  private async verifierName(actorId: string): Promise<string> {
+    const result = await this.pool.query<{ name: string | null }>(
+      `SELECT coalesce(display_name, username) AS name FROM idp_user WHERE idp_id = $1`,
+      [actorId],
+    );
+    return result.rows[0]?.name ?? actorId;
   }
 
   private async find(key: string): Promise<EntryRow | undefined> {

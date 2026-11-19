@@ -1,5 +1,5 @@
-import { useMemo, useState, type ReactNode } from 'react';
-import { Link } from 'react-router';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { Link, useSearchParams } from 'react-router';
 import { ArrowRight } from 'lucide-react';
 import type { CatalogFilters } from '@seamnex/api-client';
 import { useCatalog, useReloadCatalog } from '@seamnex/api-client';
@@ -36,6 +36,15 @@ const PACKAGING_FILTERS = [
   { value: 'dockerfile', label: 'Dockerfile' },
   { value: 'none', label: 'Scaffolded' },
 ] as const;
+
+type PackagingFilter = (typeof PACKAGING_FILTERS)[number]['value'];
+
+/** The filter set lives in the URL (`?q=&packaging=&cluster=`), so it is validated on the way in. */
+const isPackagingFilter = (value: string | null): value is PackagingFilter =>
+  PACKAGING_FILTERS.some((option) => option.value === value);
+
+const clusterFrom = (value: string | null): string =>
+  value !== null && (DOMAIN_CLUSTERS as readonly string[]).includes(value) ? value : 'all';
 
 /**
  * Module scope: every cell reads only its row, so the array and its closures can be built once.
@@ -114,6 +123,9 @@ const CATALOG_COLUMNS = defineColumns<CatalogEntry>([
     cell: (row) => (
       <Link
         to={`/catalog/${row.key}`}
+        // The visible word is the same in every row, so the accessible name has to carry the
+        // product: six links announced as "Open" do not say where any of them goes.
+        aria-label={`Open ${row.product} (${row.key})`}
         className="inline-flex items-center gap-1 text-meta font-semibold text-link hover:underline"
       >
         Open <ArrowRight className="size-3" aria-hidden />
@@ -141,10 +153,45 @@ export function CatalogPage() {
   const { session } = useSession();
   const reload = useReloadCatalog();
   const canReload = canMutate(session.role, 'metadata.manage');
-  const [query, setQuery] = useState('');
-  const [packaging, setPackaging] = useState<(typeof PACKAGING_FILTERS)[number]['value']>('all');
-  const [cluster, setCluster] = useState<string>('all');
+  const [params, setParams] = useSearchParams();
+  // The URL is the initial value on every mount, so a shared or bookmarked filter arrives applied
+  // and a back step from an entry restores the narrowed list instead of the whole catalog.
+  const [query, setQuery] = useState(() => params.get('q') ?? '');
+  const [packaging, setPackaging] = useState<PackagingFilter>(() => {
+    const fromUrl = params.get('packaging');
+    return isPackagingFilter(fromUrl) ? fromUrl : 'all';
+  });
+  const [cluster, setCluster] = useState<string>(() => clusterFrom(params.get('cluster')));
   const debouncedQuery = useDebouncedValue(query);
+
+  /**
+   * Mirror the applied filter set into the URL. `replace` because typing is not navigation: a
+   * history entry per keystroke would make the browser's Back button useless on this screen. The
+   * debounced query is the one the API key carries, so the address never claims a filter that is
+   * still in flight.
+   */
+  useEffect(() => {
+    setParams(
+      (previous) => {
+        const next = new URLSearchParams(previous);
+        const q = debouncedQuery.trim();
+        if (q.length > 0) next.set('q', q);
+        else next.delete('q');
+        if (packaging === 'all') next.delete('packaging');
+        else next.set('packaging', packaging);
+        if (cluster === 'all') next.delete('cluster');
+        else next.set('cluster', cluster);
+        return next.toString() === previous.toString() ? previous : next;
+      },
+      { replace: true },
+    );
+  }, [debouncedQuery, packaging, cluster, setParams]);
+
+  const clearFilters = () => {
+    setQuery('');
+    setPackaging('all');
+    setCluster('all');
+  };
 
   // Filtering is the server's job: the query key carries the filter set, so paging and
   // counts stay correct once the catalog outgrows one page. The input stays debounced because each
@@ -414,8 +461,15 @@ export function CatalogPage() {
               rowKey={catalogRowKey}
               renderRowLink={catalogRowLink}
               empty={
-                <div className="p-8 text-center text-body text-muted">
-                  No entry matches this filter. Clear the filters to see the full catalog.
+                <div className="p-8 text-center">
+                  <p className="text-body text-muted">
+                    No entry matches this filter. Clear the filters to see the full catalog.
+                  </p>
+                  {/* The empty state used to instruct the operator to clear three controls by
+                      hand; the action is the instruction. */}
+                  <Button size="sm" variant="secondary" className="mt-3" onClick={clearFilters}>
+                    Clear filters
+                  </Button>
                 </div>
               }
             />
