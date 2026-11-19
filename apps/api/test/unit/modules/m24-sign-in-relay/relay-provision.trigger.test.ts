@@ -32,7 +32,7 @@ function build() {
   };
   const trigger = new RelayProvisionTrigger(outbox as never, accounts as never);
   trigger.onModuleInit();
-  return { outbox, accounts, handlers };
+  return { trigger, outbox, accounts, handlers };
 }
 
 function row(aggregateId: string): OutboxRow {
@@ -171,6 +171,37 @@ describe('RelayProvisionTrigger', () => {
 
       // One queued re-run, not one per event: a stacked timer would make this four.
       expect(accounts.provisionInstance).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /*
+   * A window that cannot be read is not a reason to fail the event: the sweep is the fallback the
+   * caller had before, so the read costs nothing beyond the delay it already had.
+   */
+  it('leaves the retry to the sweep when the window cannot be read', async () => {
+    const { accounts, handlers } = build();
+    accounts.deferredUntil.mockRejectedValueOnce(new Error('database unavailable'));
+
+    await expect(handlers.get('relay.provision')?.(row(INSTANCE))).resolves.toBeUndefined();
+    expect(accounts.provisionInstance).toHaveBeenCalledOnce();
+  });
+
+  it('clears a queued re-run on shutdown instead of firing into a stopping container', async () => {
+    vi.useFakeTimers();
+    try {
+      const { trigger, accounts, handlers } = build();
+      accounts.deferredUntil.mockResolvedValueOnce(new Date(Date.now() + 60_000).toISOString());
+
+      await handlers.get('relay.provision')?.(row(INSTANCE));
+      expect(accounts.provisionInstance).toHaveBeenCalledTimes(1);
+
+      trigger.onModuleDestroy();
+      await vi.advanceTimersByTimeAsync(61_000);
+
+      // The timer was the only thing left holding the pass; shutting down drops it.
+      expect(accounts.provisionInstance).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }

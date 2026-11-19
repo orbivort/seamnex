@@ -45,7 +45,8 @@
         "integration_metadata"
       ],
       "mayImport": ["M22"],
-      "reads": ["instance"]
+      "$comment": "FR-2.14: `verified_by` records the reviewer's name, so the catalog resolves a subject id against the identity mirror the way M10 and M18 do. M08 still owns `idp_user` and every write to it.",
+      "reads": ["instance", "idp_user"]
     },
     {
       "id": "M02",

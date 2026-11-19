@@ -48,11 +48,13 @@ describe('env-schema file', () => {
     expect(parsed.success).toBe(true);
     if (!parsed.success) return;
     expect(parsed.data.entryKey).toBe('D01-01');
-    // 30 since the OIDC block (`…_OIDC_*`) landed in the shipped baseline: the console renders
+    // 31 since the OIDC block (`…_OIDC_*`) landed in the shipped baseline: the console renders
     // those fields, and a schema that omits them shows an empty identity section. The count is
     // exact on purpose — a variable added without a fixture update is the drift this guards.
-    expect(parsed.data.variables.length).toBe(30);
-    expect(new Set(parsed.data.variables.map((entry) => entry.name)).size).toBe(30);
+    // The 31st is `ESPOCRM_CONFIG_SITE_URL`, the restart-applied mirror of `ESPOCRM_SITE_URL`
+    // (FR-2.5): without it a route change never reaches a running instance.
+    expect(parsed.data.variables.length).toBe(31);
+    expect(new Set(parsed.data.variables.map((entry) => entry.name)).size).toBe(31);
     // The variable the served schema used to lose: an enum without options renders an empty select.
     // Values are the method names EspoCRM 10.0.11 registers (`Espo`, `ApiKey`, `Hmac`, `Oidc`).
     const method = parsed.data.variables.find(

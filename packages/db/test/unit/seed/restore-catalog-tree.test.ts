@@ -128,6 +128,30 @@ describe('decideTreeRestore', () => {
     expect(decision.lines.join('\n')).toContain('cannot reproduce');
   });
 
+  it('marks the empty half of a one-sided mismatch rather than printing nothing', () => {
+    // A projection that is the default set plus a stranger, and one that is a strict subset: only one
+    // side of the report has keys, so the other has to say `(none)` instead of leaving a blank after
+    // the label that reads like a truncation.
+    const extra = decideTreeRestore({
+      root: ROOT,
+      catalogPresent: false,
+      projectedKeys: [...DEFAULT_PRODUCT_KEYS, 'D99-99'],
+    });
+    const short = decideTreeRestore({
+      root: ROOT,
+      catalogPresent: false,
+      projectedKeys: DEFAULT_PRODUCT_KEYS.slice(0, 1),
+    });
+
+    expect([extra.restore, extra.code]).toEqual([false, 1]);
+    expect(extra.lines.join('\n')).toContain('default keys the projection lacks: (none)');
+    expect(extra.lines.join('\n')).toContain('no vendored document declares: D99-99');
+
+    expect([short.restore, short.code]).toEqual([false, 1]);
+    expect(short.lines.join('\n')).toContain('default keys the projection lacks: D02-01');
+    expect(short.lines.join('\n')).toContain('no vendored document declares: (none)');
+  });
+
   it('leaves a present tree alone, and an empty projection to the seed', () => {
     const present = decideTreeRestore({ root: ROOT, catalogPresent: true, projectedKeys: [] });
     const empty = decideTreeRestore({ root: ROOT, catalogPresent: false, projectedKeys: [] });
@@ -216,6 +240,18 @@ describe('catalog:restore', () => {
     expect(code).toBe(1);
     expect(errorSpy.mock.calls[0]?.[0]).toBe('[catalog] connect ECONNREFUSED 127.0.0.1:5432');
     // The pool is closed on the failure path too, or the process hangs for its idle timeout.
+    expect(doubles.end).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a rejection that is not an Error the same way', async () => {
+    // A driver or a callback can reject with a string; the line still has to be the message rather
+    // than `[object Object]` or an empty log.
+    doubles.query.mockRejectedValue('connection terminated unexpectedly');
+
+    const code = await runRestore({ DATABASE_URL: CONNECTION });
+
+    expect(code).toBe(1);
+    expect(errorSpy.mock.calls[0]?.[0]).toBe('[catalog] connection terminated unexpectedly');
     expect(doubles.end).toHaveBeenCalledTimes(1);
   });
 });
