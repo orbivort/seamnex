@@ -7,6 +7,7 @@ import {
   mappedValueExpression,
   normaliseTransform,
   transformNames,
+  resolvesPath,
   WORKFLOW_EXPORT_API_VERSION,
   workflowIneligibilityReason,
   writeIneligibilityReason,
@@ -1134,6 +1135,7 @@ export class WorkflowAuthoringService {
      */
     issues.push(...mappingSemanticsIssues(ir));
     await this.checkMappingFields(ir, issues);
+    await this.checkSourcePaths(workflow, ir, issues);
 
     /**
      * FR-5.4: the two trigger modes that need a stated parameter now refuse to activate without one.
@@ -1278,6 +1280,84 @@ export class WorkflowAuthoringService {
       targets.map((target) => ({ instanceId: target.instanceId, operation: target.operation })),
     );
     issues.push(...mappingFieldIssues(ir, targets, snapshots));
+  }
+
+  /**
+   * FR-5.5 — the source half of every mapping, checked against the last item the step received.
+   *
+   * Validation compared mappings with the *target* schema and never with the source shape, so a
+   * definition whose four source paths did not exist in the record it read passed with zero issues
+   * and then posted an empty body the target product refused — a failure that reads as the target's
+   * fault. The mirror already stores one redacted item per node per run; this reads the newest one
+   * instead of asking the product anything, so validation stays local and deterministic.
+   *
+   * Severity follows what one item can prove:
+   *
+   *  - every mapped path missing from an untruncated sample is an **error** — the mapping describes a
+   *    record that does not exist, and activating only buys a failed run;
+   *  - a partial miss is a **warning** — that field may simply be absent on this one record;
+   *  - a truncated sample is a warning either way, because the path may sit past the cut;
+   *  - no sample at all is nothing to report — a definition that has never run has nothing to
+   *    compare, and a warning on every new draft is the noise that stops being read.
+   */
+  private async checkSourcePaths(
+    workflow: Workflow,
+    ir: Ir,
+    issues: ValidationIssue[],
+  ): Promise<void> {
+    if (this.samples === undefined) return;
+
+    for (const node of ir.nodes) {
+      if (node.kind === 'trigger') continue;
+      const mappings = mappingsFor(ir, node).filter((mapping) => mapping.from.trim().length > 0);
+      if (mappings.length === 0) continue;
+      const inbound = ir.edges.find((edge) => edge.target === node.id);
+      if (inbound === undefined) continue;
+      const source = ir.nodes.find((entry) => entry.id === inbound.source);
+      if (source === undefined) continue;
+
+      const sample = await this.samples.latestForCheck(workflow.id, source.id);
+      /*
+       * A sample that is not a record proves nothing about paths.
+       *
+       * `{ data: "<json string>" }` is n8n's wrapper for a body it did not parse — the shape every
+       * read produced before the compiler asked for `responseFormat: 'json'`. Every path is missing
+       * from a string by definition, so reporting it would blame the author for a sample that is
+       * about to be replaced by a structured one on the next run.
+       */
+      if (sample === null || !isRecord(sample.item) || isTextEnvelope(sample.item)) continue;
+
+      const missing = mappings
+        .map((mapping) => mapping.from)
+        .filter((from) => resolvesPath(sample.item, from) === false);
+      if (missing.length === 0) continue;
+
+      const listed = missing.slice(0, 6).join(', ');
+      const more = missing.length > 6 ? `, and ${missing.length - 6} more` : '';
+      const all = missing.length === mappings.length;
+      const severity = all && !sample.truncated ? 'error' : 'warning';
+      const cut = sample.truncated
+        ? ' The stored sample is truncated, so a deeper path may sit past the cut.'
+        : '';
+      // Named so the author knows which run the evidence came from; `run-` is a prefix here, not a
+      // word, so it is dropped before the id is shortened.
+      const run =
+        sample.runId === null ? '' : ` (run ${sample.runId.replace(/^run-/, '').slice(0, 8)})`;
+
+      issues.push(
+        issue(
+          node.id,
+          severity,
+          all ? 'SOURCE_PATHS_UNRESOLVED' : 'SOURCE_PATHS_PARTIAL',
+          all
+            ? `Node "${node.label}" maps ${missing.length} source path${missing.length === 1 ? '' : 's'} the last item from "${source.label}" does not carry: ${listed}${more}.`
+            : `Node "${node.label}" maps ${missing.length} of ${mappings.length} source paths the last item from "${source.label}" did not carry: ${listed}${more}.`,
+          all
+            ? `Map the fields from that item — Mappings → "Last run"${run} — or fix the read operation: as it stands the write sends no value for these fields and the product refuses it.${cut}`
+            : `Those fields were absent on that record${run}. Map a path that always exists, or give the row a default, where a target requires one.${cut}`,
+        ),
+      );
+    }
   }
 
   /**
@@ -2325,7 +2405,19 @@ export function compile(
          */
         authentication: 'genericCredentialType',
         genericAuthType: 'httpHeaderAuth',
-        options: { timeout: 30_000 },
+        /*
+         * FR-5.5 — a read must be parsed, because its item is what every downstream mapping reads.
+         *
+         * n8n parses `application/json` and turns anything else into `{ data: "<string>" }`, which
+         * no `$json.<path>` can reach; OpenProject answers `application/hal+json`, so the second step
+         * of a read→write workflow received a string blob and the target product refused the empty
+         * body. Writes keep autodetect: a `204` answer must not turn a successful write into a node
+         * error, and the broker already relabels every JSON body it relays.
+         */
+        options: {
+          timeout: 30_000,
+          ...(entry.mode === 'read' ? { response: { response: { responseFormat: 'json' } } } : {}),
+        },
         sendBody: entry.mode === 'write' && bodyParameters.length > 0,
         ...(entry.mode === 'write' && bodyParameters.length > 0
           ? { specifyBody: 'keypair', bodyParameters: { parameters: bodyParameters } }
@@ -2590,6 +2682,16 @@ function triggerLabel(update: Pick<WorkflowTriggerUpdate, 'type' | 'cron' | 'tim
   const hour = Number(daily?.[2] ?? Number.NaN);
   if (!Number.isInteger(minute) || !Number.isInteger(hour)) return `Cron ${cron} (${zone})`;
   return `Every day at ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} ${zone}`;
+}
+
+/** A plain object — what a record of a product's answer looks like. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** n8n's wrapper for a response body it did not parse: `{ data: "<text>" }` and nothing else. */
+function isTextEnvelope(item: Record<string, unknown>): boolean {
+  return Object.keys(item).length === 1 && typeof item['data'] === 'string';
 }
 
 function triggerConfig(update: WorkflowTriggerUpdate): string {

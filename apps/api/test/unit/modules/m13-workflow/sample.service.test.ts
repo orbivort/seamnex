@@ -111,6 +111,47 @@ describe('WorkflowSampleService', () => {
     });
   });
 
+  it('reads the newest item for a validation pass without auditing it', async () => {
+    const { service, query, audit } = harness({
+      sample: [
+        {
+          run_id: 'run-7',
+          sample_item: { contact: { email: 'someone@example.com' } },
+          sample_truncated: false,
+        },
+      ],
+    });
+
+    const result = await service.latestForCheck(WORKFLOW, TRIGGER);
+
+    expect(result).toEqual({
+      item: { contact: { email: 'someone@example.com' } },
+      truncated: false,
+      runId: 'run-7',
+    });
+    expect(query.mock.calls[0]?.[1]).toEqual([WORKFLOW, TRIGGER]);
+    // Validation runs on every click of every screen; an audit row per pass would bury the reads
+    // an author makes on purpose on the Mapping rail.
+    expect(audit.append).not.toHaveBeenCalled();
+  });
+
+  it('answers null when nothing was ever captured, instead of failing the pass', async () => {
+    const { service } = harness({ sample: [] });
+
+    await expect(service.latestForCheck(WORKFLOW, TRIGGER)).resolves.toBeNull();
+  });
+
+  it('reports a truncated item as truncated, so the rule can soften to advice', async () => {
+    const { service } = harness({
+      sample: [{ run_id: 'run-8', sample_item: { a: 1 }, sample_truncated: true }],
+    });
+
+    await expect(service.latestForCheck(WORKFLOW, TRIGGER)).resolves.toMatchObject({
+      truncated: true,
+      runId: 'run-8',
+    });
+  });
+
   it('audits the read without the item', async () => {
     const { service, audit } = harness({ sample: [] });
 

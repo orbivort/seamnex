@@ -19,6 +19,7 @@ import * as policy from '../../src/policy';
 import * as posture from '../../src/posture';
 import * as propagation from '../../src/propagation';
 import * as routes from '../../src/routes';
+import * as samplePath from '../../src/sample-path';
 import * as signInCopy from '../../src/sign-in-copy';
 import * as stateMachines from '../../src/state-machines';
 import * as version from '../../src/version';
@@ -73,6 +74,8 @@ const MODULES = [
   ['posture', posture],
   ['propagation', propagation],
   ['routes', routes],
+  // FR-5.5: the resolver validation uses to ask whether a mapped path exists in a stored item.
+  ['sample-path', samplePath],
   ['sign-in-copy', signInCopy],
   ['state-machines', stateMachines],
   ['version', version],

@@ -22,6 +22,7 @@ export * from './compose-rules';
 export * from './env-rules';
 export * from './mapping-expression';
 export * from './mapping-transform';
+export * from './sample-path';
 export * from './schemas/auth';
 export * from './schemas/common';
 export * from './schemas/catalog';

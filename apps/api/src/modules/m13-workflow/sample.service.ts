@@ -92,4 +92,34 @@ export class WorkflowSampleService {
       truncated: row?.sample_truncated === true,
     };
   }
+
+  /**
+   * The latest item a step received, for a validation pass: no audit entry, and absence is ordinary.
+   *
+   * `latest` is a deliberate read an author makes on the Mapping rail and auditing it is the point.
+   * Validation runs on every click of every screen, so writing an audit row for each pass would bury
+   * those deliberate reads in noise; and a definition that has never run simply has no sample, which
+   * is an answer here rather than a 404.
+   */
+  async latestForCheck(
+    workflowId: string,
+    sourceNodeId: string,
+  ): Promise<{ item: unknown; truncated: boolean; runId: string | null } | null> {
+    const found = await this.pool.query<{
+      run_id: string;
+      sample_item: unknown;
+      sample_truncated: boolean;
+    }>(
+      `SELECT rn.run_id, rn.sample_item, rn.sample_truncated
+         FROM workflow_run_node rn
+         JOIN workflow_run r ON r.id = rn.run_id
+        WHERE r.workflow_id = $1 AND rn.node_id = $2 AND rn.sample_item IS NOT NULL
+        ORDER BY r.started_at DESC
+        LIMIT 1`,
+      [workflowId, sourceNodeId],
+    );
+    const row = found.rows[0];
+    if (row === undefined) return null;
+    return { item: row.sample_item, truncated: row.sample_truncated === true, runId: row.run_id };
+  }
 }

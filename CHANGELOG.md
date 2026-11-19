@@ -190,6 +190,16 @@ Action required when upgrading an existing install; everything else is additive.
 - **The entry node no longer warns about mappings nobody reads** (`FR-5.6`) — validation raised
   `EMPTY_MAPPINGS` on the trigger, which takes no mapping, so every definition carried a warning
   from its first edit and "passed with 1 warning" was the best a workflow could report.
+- **A read's answer is parsed, and a mapping that cannot resolve is refused before activation**
+  (`FR-5.5`) — OpenProject answers `application/hal+json`, which n8n does not parse, so a read
+  reached the next step as `{ data: "<json string>" }` and every `$json.<path>` mapping resolved to
+  nothing; the write posted an empty body and the _target_ product refused it. The broker now
+  relabels a JSON-parsable body as JSON (bytes untouched) and compiled reads ask n8n to parse.
+  Validation also compares mapped source paths with the newest stored item: none resolving is an
+  error that blocks activation, some missing is advice, and a truncated sample is advice.
+- **The sample caption counts sample fields, not mapping rows** (`FR-5.5`) — four mappings against a
+  one-field sample read "4 of 1 mapped", a ratio that cannot exist on the screen where "mapped" was
+  the thing that turned out to be wrong.
 - **Run now starts a scheduled workflow, and the run banner stops claiming a state** (`FR-5.4`) — a
   `schedule`/`poll` definition compiled to a schedule node only, so a manual run — the one thing an
   author wants before trusting a cron — answered `503 n8n has no webhook registered`; it now carries

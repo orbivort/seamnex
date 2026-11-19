@@ -238,6 +238,19 @@ export class BrokerEgressService implements WorkflowEgressService {
     response.headers.forEach((value, name) => {
       if (!HOP_HEADERS.has(name.toLowerCase())) headers[name] = value;
     });
+    /*
+     * The payload decides the label, not the product's header (FR-5.5).
+     *
+     * OpenProject answers `application/hal+json`, and n8n's HTTP node only auto-parses
+     * `application/json`: the compiled workflow received `{ data: "<json string>" }` instead of the
+     * collection, so every `$json.<path>` mapping resolved to nothing and the *target* product
+     * refused the empty body — a failure that reads as the target's fault. The bytes are untouched;
+     * only a label that a JSON-parsable body already deserves is corrected. Anything that does not
+     * parse keeps the product's own content type, so text and binary answers stay as they were.
+     */
+    if (body.length > 0 && isJsonBody(body) && !isJsonLabel(headers['content-type'])) {
+      headers['content-type'] = 'application/json; charset=utf-8';
+    }
 
     await this.record(
       input,
@@ -558,4 +571,19 @@ function problem(
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Whether the product already called this body what n8n parses; a charset parameter is kept as sent. */
+function isJsonLabel(contentType: string | undefined): boolean {
+  return contentType?.split(';')[0]?.trim().toLowerCase() === 'application/json';
+}
+
+/** Whether these bytes are a JSON document — the only question the relay has to ask before relabelling. */
+function isJsonBody(body: Buffer): boolean {
+  try {
+    JSON.parse(body.toString('utf8'));
+    return true;
+  } catch {
+    return false;
+  }
 }

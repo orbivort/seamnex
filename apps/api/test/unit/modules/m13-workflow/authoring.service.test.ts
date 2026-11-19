@@ -564,6 +564,31 @@ describe('compile', () => {
     );
   });
 
+  it('asks n8n to parse a read and leaves a write on autodetect', async () => {
+    const { service } = harness();
+    const workflow = await service.load(WORKFLOW_ID);
+
+    const document = compile(workflow, healthyIr(), ADDRESSES, CREDENTIALS);
+    const nodes = document.nodes as Record<string, unknown>[];
+    const optionsOf = (index: number) =>
+      (nodes[index]?.parameters as { options?: Record<string, unknown> }).options;
+
+    /*
+     * The read decides the item every downstream mapping reads. n8n parses `application/json` and
+     * turns anything else into `{ data: "<string>" }`; OpenProject answers `application/hal+json`,
+     * so the write received a string blob and the target product refused the empty body.
+     */
+    expect(optionsOf(1)).toEqual({
+      timeout: 30_000,
+      response: { response: { responseFormat: 'json' } },
+    });
+    /*
+     * A write keeps autodetect: a `204 No Content` answer must not turn a successful write into a
+     * node error, and the broker already relabels every JSON body it relays.
+     */
+    expect(optionsOf(2)).toEqual({ timeout: 30_000 });
+  });
+
   /**
    * The sample parser emits bracket notation for keys that are not identifiers — a product may well
    * call a field `first name`. Prefixing that with `$json.` produced `$json.["first name"]`, which
@@ -3337,6 +3362,114 @@ describe('rotateDueCredentials', () => {
         detail: expect.objectContaining({ message: 'broker unavailable' }),
       }),
     );
+  });
+});
+
+// ---- FR-5.5: the source half of a mapping -------------------------------------------------------
+
+/** A definition whose single edge carries exactly these source paths. */
+function irWithMappings(froms: readonly string[]) {
+  return {
+    trigger: scheduleTrigger(),
+    nodes: [readNode({ mappings: [] }), writeNode({ mappings: [] })],
+    edges: [
+      edge(
+        NODE_READ,
+        NODE_WRITE,
+        froms.map((from, index) => ({ from, to: `field${index}`, transform: null })),
+      ),
+    ],
+  };
+}
+
+/** A validate pass with a stored item, so the rule that reads one can be exercised. */
+async function validateWithSample(
+  sample: unknown,
+  options: { truncated?: boolean; runId?: string | null; ir?: unknown } = {},
+): Promise<ValidationValue> {
+  const { service } = harness(
+    options.ir === undefined
+      ? []
+      : [
+          route('JOIN workflow_version v ON v.id = w.current_version_id', [
+            versionRow({ ir: options.ir as never }),
+          ]),
+        ],
+    undefined,
+    {
+      latestForCheck: vi.fn(async () => ({
+        item: sample,
+        truncated: options.truncated === true,
+        runId: options.runId === undefined ? 'run-916a8d86' : options.runId,
+      })),
+    },
+  );
+  const result = await service.action(WORKFLOW_ID, 'validate', ACTOR);
+  return result.value as unknown as ValidationValue;
+}
+
+describe('action: validate — source paths', () => {
+  it('passes when every mapped path exists in the item the step received', async () => {
+    const value = await validateWithSample({ contact: { email: 'someone@example.com' } });
+
+    expect(value.valid).toBe(true);
+    expect(value.issues).toEqual([]);
+  });
+
+  it('blocks activation when none of the mapped paths exist in that item', async () => {
+    // The live failure: four paths describing a work package were mapped against a collection
+    // envelope, so the write posted an empty body and the *target* product refused it — after a
+    // validation pass that reported nothing at all.
+    const value = await validateWithSample({ _type: 'WorkPackageCollection', total: 33 });
+
+    expect(value.valid).toBe(false);
+    const issue = value.issues.find((entry) => entry.code === 'SOURCE_PATHS_UNRESOLVED');
+    expect(issue).toMatchObject({ severity: 'error', nodeId: NODE_WRITE });
+    expect(issue?.message).toContain('"Create contact"');
+    expect(issue?.message).toContain('"Read contacts"');
+    expect(issue?.message).toContain('contact.email');
+    expect(issue?.remediation).toContain('Last run');
+    // The evidence is named, so the author knows which run to look at.
+    expect(issue?.remediation).toContain('run 916a8d86');
+  });
+
+  it('advises when only some paths are missing, because a field can be absent on one record', async () => {
+    const value = await validateWithSample(
+      { contact: { email: 'someone@example.com' } },
+      { ir: irWithMappings(['contact.email', 'contact.phone']) },
+    );
+
+    expect(value.valid).toBe(true);
+    const issue = value.issues.find((entry) => entry.code === 'SOURCE_PATHS_PARTIAL');
+    expect(issue).toMatchObject({ severity: 'warning', nodeId: NODE_WRITE });
+    expect(issue?.message).toContain('1 of 2 source paths');
+    expect(issue?.message).toContain('contact.phone');
+    expect(issue?.message).not.toContain('contact.email');
+  });
+
+  it('never blocks on a truncated sample, because the path may sit past the cut', async () => {
+    const value = await validateWithSample(
+      { contact: {} },
+      { truncated: true, runId: null, ir: irWithMappings(['contact.email', 'contact.phone']) },
+    );
+
+    expect(value.valid).toBe(true);
+    const issue = value.issues.find(
+      (entry) => entry.code === 'SOURCE_PATHS_UNRESOLVED' || entry.code === 'SOURCE_PATHS_PARTIAL',
+    );
+    expect(issue?.severity).toBe('warning');
+    expect(issue?.remediation).toContain('truncated');
+    // No run id worth naming, so the remediation does not invent one.
+    expect(issue?.remediation).not.toContain('run ');
+  });
+
+  it('says nothing when the stored item is text, because it proves nothing about paths', async () => {
+    // n8n produced `{ data: "<json string>" }` before read nodes were told to parse; blaming the
+    // author for paths inside a string would be wrong, so the rule stays quiet.
+    const value = await validateWithSample({ data: '{"contact":{"email":"a@b.c"}}' });
+
+    expect(value.valid).toBe(true);
+    expect(value.issues).toEqual([]);
   });
 });
 
