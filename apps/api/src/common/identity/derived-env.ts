@@ -2,7 +2,8 @@
  * Environment values that are a property of *this instance*, not of the product.
  *
  * A catalog default describes the deployment an entry was verified against — for D1 that is
- * `espocrm.localhost:8020` and the client `seamnex-espocrm`. Both are correct for exactly one instance.
+ * `https://espocrm.seamnex.localhost:8443` and the client `seamnex-espocrm`. Both are correct for
+ * exactly one instance.
  * A second instance of the same entry inherits them and then fails at the identity provider: the
  * product derives its redirect URI from its `siteUrl`, the platform registers the client against the
  * instance's own route, and Keycloak refuses the authorization request with `invalid_redirect_uri`
@@ -82,6 +83,40 @@ const DERIVATIONS: Readonly<Record<string, Derivation>> = {
 
 export function derivedEnvValues(context: DerivedEnvContext): Record<string, string> {
   return DERIVATIONS[resolveKey(context.entryKey)]?.(context) ?? {};
+}
+
+/**
+ * Values that have to be stored *beside* another one, because the entry applies them on a different
+ * schedule than the variable that is actually derived.
+ *
+ * D1 is the case in the field. `ESPOCRM_SITE_URL` is read by the image's install action only, so a
+ * product keeps the `siteUrl` written on the day it was installed; after the instance moved to
+ * another scheme, host or port it goes on sending the previous `redirect_uri`, and Keycloak answers
+ * the popup with `invalid_redirect_uri` — signing in cannot complete, however correct the client
+ * registration and the route are. The same image applies every `ESPOCRM_CONFIG_*` variable through
+ * `bin/command config:set` on *every* start (`applyConfigEnv`), which is the channel that carries a
+ * route change into a running instance.
+ *
+ * The mirror is taken from the effective value — after the operator's override was merged — so an
+ * address someone set on purpose is not silently replaced by the derived one. It is applied wherever
+ * the environment is written, so the two cannot drift through a partial update either.
+ */
+const MIRRORS: Readonly<Record<string, readonly { from: string; to: string }[]>> = {
+  'D01-01': [{ from: 'ESPOCRM_SITE_URL', to: 'ESPOCRM_CONFIG_SITE_URL' }],
+};
+
+export function mirroredEnvValues(
+  entryKey: string,
+  values: Readonly<Record<string, string>>,
+): Record<string, string> {
+  const mirrors = MIRRORS[resolveKey(entryKey)] ?? [];
+  const mirrored: Record<string, string> = { ...values };
+  for (const mirror of mirrors) {
+    const source = values[mirror.from];
+    if (source === undefined || source === '') continue;
+    mirrored[mirror.to] = source;
+  }
+  return mirrored;
 }
 
 /** `scheme://host[:port]`, with no trailing slash — the shape the product compares against. */

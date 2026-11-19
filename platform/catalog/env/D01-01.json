@@ -5,7 +5,7 @@
   "variables": [
     {
       "name": "ESPOCRM_SITE_URL",
-      "purpose": "Public URL the product is reached at. It is also the base of the OIDC redirect URI (`<siteUrl>/oauth-callback.php`), so it must match both the registered client and the published route. The platform derives it from the instance's own route at deploy time — the value below is only what the entry screen shows before an instance exists — so an instance under another slug or domain gets its own URL without an override. Override it only when the product is deliberately reached at a different address than its route; a value that disagrees with the route makes Keycloak refuse the authorization request with `invalid_redirect_uri`. Applied at first install only — the image writes `siteUrl` once, so changing the route of a running instance needs the value set inside the product as well.",
+      "purpose": "Public URL the product is reached at. It is also the base of the OIDC redirect URI (`<siteUrl>/oauth-callback.php`), so it must match both the registered client and the published route. The platform derives it from the instance's own route at deploy time — the value below is only what the entry screen shows before an instance exists — so an instance under another slug or domain gets its own URL without an override. Override it only when the product is deliberately reached at a different address than its route; a value that disagrees with the route makes Keycloak refuse the authorization request with `invalid_redirect_uri`. Read by the image's install action only; the platform mirrors the effective value into `ESPOCRM_CONFIG_SITE_URL`, which the image applies on every start, so a route change reaches a running instance on its next restart.",
       "type": "url",
       "required": true,
       "defaultValue": "https://espocrm.seamnex.localhost:8443",
@@ -117,6 +117,21 @@
       "required": false,
       "defaultValue": "en_US",
       "constraint": "Locale code, e.g. en_US or de_DE",
+      "conditional": null,
+      "secret": false,
+      "overrideCeiling": "profile_and_instance"
+    },
+    {
+      "name": "ESPOCRM_CONFIG_SITE_URL",
+      "purpose": "The product's `siteUrl`, applied on every start, unlike the installation-only `ESPOCRM_SITE_URL` above. The image applies each `ESPOCRM_CONFIG_*` variable through `bin/command config:set` on every start, so this is the channel that carries a route change into a running instance: without it the product keeps the address it was installed at, sends the previous `redirect_uri`, and Keycloak answers the sign-in popup with `invalid_redirect_uri`. Do not set it independently — the platform mirrors the effective `ESPOCRM_SITE_URL` into it whenever the environment is written or rendered, so the two cannot disagree.",
+      "type": "url",
+      "required": false,
+      "defaultValue": "https://espocrm.seamnex.localhost:8443",
+      "constraint": "Absolute URL, no trailing slash; written by the platform from ESPOCRM_SITE_URL",
+      "rule": {
+        "pattern": "^https?://[^/]+$",
+        "patternDescription": "an absolute URL with no trailing slash and no path"
+      },
       "conditional": null,
       "secret": false,
       "overrideCeiling": "profile_and_instance"

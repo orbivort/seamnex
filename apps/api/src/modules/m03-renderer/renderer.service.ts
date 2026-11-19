@@ -27,6 +27,7 @@ import type {
   UnresolvedSecret,
 } from './renderer.contract';
 import { RenderSetService } from './render.service';
+import { mirroredEnvValues } from '../../common/identity/derived-env';
 
 type VarRow = {
   name: string;
@@ -554,6 +555,14 @@ export class PostgresRendererService implements RendererService {
       (await this.vars(row.entry_key)).map((variable) => [variable.name, variable]),
     );
 
+    /**
+     * An entry may need a second variable written alongside the one the operator changed, because
+     * the product applies the two on different schedules (`mirroredEnvValues`). Doing it here, on the
+     * single write path, is what keeps the pair equal whether the change came from a deploy, an
+     * override in the wizard, or a later environment update.
+     */
+    const applied = mirroredEnvValues(row.entry_key, values);
+
     const diff: EnvUpdateResponse['diff'] = [];
     let requiresRecreate = false;
 
@@ -567,7 +576,7 @@ export class PostgresRendererService implements RendererService {
      * a value the wizard refused cannot be stored through this route either.
      */
     const fieldErrors: NonNullable<EnvPlan['fieldErrors']> = [];
-    for (const [name, value] of Object.entries(values)) {
+    for (const [name, value] of Object.entries(applied)) {
       const variable = vars.get(name);
       if (variable === undefined) {
         fieldErrors.push({
@@ -602,7 +611,7 @@ export class PostgresRendererService implements RendererService {
 
     await withTransaction(this.pool, async (tx) => {
       await this.audit.lockChain(tx);
-      for (const [name, value] of Object.entries(values)) {
+      for (const [name, value] of Object.entries(applied)) {
         const variable = vars.get(name);
         // The pre-pass above proved these; a missing one here would be a defect, not a user error.
         if (variable === undefined)

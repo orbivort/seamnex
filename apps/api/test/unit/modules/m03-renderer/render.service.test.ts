@@ -149,6 +149,39 @@ describe('render', () => {
     });
   });
 
+  it('renders the restart-safe mirror of the site URL, even when no row was ever written for it', async () => {
+    const { service } = setup([
+      [
+        'FROM env_schema_var',
+        [{ name: 'ESPOCRM_SITE_URL', default_value: 'https://old.example.test' }],
+      ],
+      [
+        'FROM instance_env_value',
+        [
+          {
+            var_name: 'ESPOCRM_SITE_URL',
+            value_enc: Buffer.from('https://crm.seamnex.localhost:8443', 'utf8'),
+          },
+        ],
+      ],
+      ['INSERT INTO render_set', [RENDER_ROW]],
+      ['INSERT INTO render_file', []],
+    ]);
+
+    const set = await service.render(input());
+
+    /*
+     * The installer writes `siteUrl` once and never reads the variable again, so an instance whose
+     * address moved (`http://espocrm.localhost:8020` → `https://espocrm.seamnex.localhost:8443`)
+     * keeps answering sign-ins with the old redirect URI until somebody opens the product by hand.
+     * The mirror is what the image's `applyConfigEnv` re-applies on every start.
+     */
+    const env = readFileSync(join(set.directory, 'platform.env'), 'utf8');
+    expect(env).toContain('ESPOCRM_CONFIG_SITE_URL=https://crm.seamnex.localhost:8443');
+    const override = readFileSync(join(set.directory, 'docker-compose.override.yml'), 'utf8');
+    expect(override).toContain('ESPOCRM_CONFIG_SITE_URL: https://crm.seamnex.localhost:8443');
+  });
+
   it('normalises the platform copy: no published ports, absolute build context, slug alias', async () => {
     const { service } = setup([
       ...ENV_ROUTES,

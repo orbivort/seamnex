@@ -848,6 +848,46 @@ describe('updateInstanceEnv', () => {
     );
   });
 
+  it('mirrors the site URL into the variable the image re-applies on every start', async () => {
+    const { db, service } = setup([
+      ['SELECT entry_key FROM instance WHERE id = $1', [{ entry_key: ENTRY }]],
+      [
+        'ORDER BY name',
+        [
+          varRow({ name: 'ESPOCRM_SITE_URL', type: 'url' }),
+          varRow({ name: 'ESPOCRM_CONFIG_SITE_URL', type: 'url' }),
+        ],
+      ],
+      ['SELECT value_enc FROM instance_env_value', () => []],
+      ['INSERT INTO instance_env_value', []],
+    ]);
+
+    const result = await service.updateInstanceEnv(
+      'inst-1',
+      { ESPOCRM_SITE_URL: 'https://crm.seamnex.localhost:8443' },
+      ACTOR,
+    );
+
+    /*
+     * `ESPOCRM_SITE_URL` is install-only, so a product keeps the address it was installed at and its
+     * sign-in goes on sending the previous redirect URI (`invalid_redirect_uri` in the popup). The
+     * `ESPOCRM_CONFIG_*` family is what the image applies on every start, so the write path has to
+     * carry the change into it — whichever route the change arrived by.
+     */
+    const upserts = db.calls.filter((call) => call.sql.includes('INSERT INTO instance_env_value'));
+    expect(upserts.map((call) => call.params[1])).toEqual([
+      'ESPOCRM_SITE_URL',
+      'ESPOCRM_CONFIG_SITE_URL',
+    ]);
+    expect(upserts[1]?.params[3]).toEqual(
+      Buffer.from('https://crm.seamnex.localhost:8443', 'utf8'),
+    );
+    expect(result.diff.map((entry) => entry.name)).toEqual([
+      'ESPOCRM_SITE_URL',
+      'ESPOCRM_CONFIG_SITE_URL',
+    ]);
+  });
+
   it('writes nothing but the audit record when the request carries no values', async () => {
     const { audit, db, service } = setup([
       ['SELECT entry_key FROM instance WHERE id = $1', [{ entry_key: ENTRY }]],

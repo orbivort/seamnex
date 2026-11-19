@@ -10,6 +10,7 @@ import { stringifyCompose } from '../../common/compose/compose-policy';
 import { renderSetDirectory } from '../../common/compose/render-directory';
 import { parse as parseYaml } from 'yaml';
 import { instanceNetwork, projectName } from '../../common/docker/naming';
+import { mirroredEnvValues } from '../../common/identity/derived-env';
 import type { RenderInput, RenderedFile, RenderSet, RendererService } from './renderer.contract';
 
 type RenderRow = {
@@ -234,7 +235,15 @@ export class RenderSetService {
     for (const row of stored.rows) {
       env.set(row.var_name, row.value_enc === null ? '' : row.value_enc.toString('utf8'));
     }
-    return env;
+
+    /*
+     * Resolved here as well as on write (`updateInstanceEnv`), because the stored pair can be older
+     * than the declaration: an instance created before the entry declared the second variable has no
+     * row for it, and the next deployment is exactly when the product has to pick the address up. A
+     * product whose address is applied only by its installer keeps the one it was installed with and
+     * refuses every sign-in at the identity provider with `invalid_redirect_uri`.
+     */
+    return new Map(Object.entries(mirroredEnvValues(entryKey, Object.fromEntries(env))));
   }
 }
 
