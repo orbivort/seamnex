@@ -13,11 +13,11 @@
 # Four deliberate deviations, each recorded rather than hidden (README.md has the longer version):
 #   1. the application image is a thin layer over the pinned upstream image (`Dockerfile`), because
 #      the upstream image starts Apache with an *uninstalled* product and only a CLI install can
-#      make a deployment usable without a browser. That layer is built **on the deployment host**
-#      (`docker build -t seamnex/mautic:7.2.2 platform/upstream/D02-01`) and referenced by tag here: a
-#      `build:` section cannot work from the executor, because the BuildKit session needs an
-#      endpoint the scoped socket proxy refuses (`unable to upgrade to tcp, received 403`), and the
-#      apply failed with exactly that line the first time this file carried one;
+#      make a deployment usable without a browser. The service declares that layer as its own
+#      `build:` in the platform's namespace (`seamnex/mautic:7.2.2`), so the executor builds it in
+#      the `build` stage from this tree and never resolves the tag from a registry (ADR-BE-40). The
+#      build reaches BuildKit through `SEAMNEX_BUILDKIT_ADDR`, not through the socket proxy — a
+#      build sent through the proxy is refused before a single instruction is read;
 #   2. the database service is added here — the catalog entry has always declared `database` as a
 #      dependency, and without it the product reached its own error page and nothing else;
 #   3. the cron container is kept: Mautic sends campaigns and segments from scheduled commands, so a
@@ -51,10 +51,19 @@ services:
     restart: unless-stopped
 
   mautic-web:
-    # Built on the host from this tree's `Dockerfile` before release; see the note at the top of the
-    # file. Referencing the tag (instead of a `build:` block) is what makes the apply work through
-    # the socket proxy, and it keeps the deployed bytes identical to the reviewed ones.
+    # A declared local build, in the platform's own namespace. `build:` makes the executor produce
+    # the image from this tree during the `build` stage, and `pull_policy: never` makes an absent
+    # image an error instead of a download, so the tag can only ever name an artefact this host
+    # built. `docker.io/seamnex` is on the trusted-registry allow-list, which the build and the
+    # start check both consult.
     image: seamnex/mautic:7.2.2
+    build:
+      # Rewritten by the renderer to the absolute resolved source tree, which is where this file,
+      # the Dockerfile and the bootstrap script are copied for the instance. Relative here so the
+      # definition stays portable and the renderer owns the base path.
+      context: '.'
+      dockerfile: Dockerfile
+    pull_policy: never
     environment:
       # The image dispatches on this variable and refuses to start without it.
       DOCKER_MAUTIC_ROLE: mautic_web
@@ -74,6 +83,23 @@ services:
       MAUTIC_ADMIN_PASSWORD: ${MAUTIC_ADMIN_PASSWORD:?MAUTIC_ADMIN_PASSWORD must be supplied}
       MAUTIC_ADMIN_FIRSTNAME: ${MAUTIC_ADMIN_FIRSTNAME:-Mautic}
       MAUTIC_ADMIN_LASTNAME: ${MAUTIC_ADMIN_LASTNAME:-Admin}
+      # Read by `seamnex-bootstrap.sh`, which writes it into `local.php`: the peers whose
+      # `X-Forwarded-Proto` the product may believe. The edge terminates TLS and forwards plain HTTP,
+      # and Mautic trusts the header only from a listed peer. Its address is assigned per deployment,
+      # so the private ranges are what can be pinned.
+      #
+      # `SEAMNEX_`-prefixed and not `MAUTIC_`: every `MAUTIC_*` name is mapped to a configuration
+      # parameter, and this one collides with an existing array parameter that is read with Symfony's
+      # `resolve:` processor — a comma list there made the product answer every request with
+      # `Invalid JSON in env var "resolve:MAUTIC_TRUSTED_PROXIES"`, and a JSON list parsed but reached
+      # nothing, because `TrustMiddleware` reads `local.php` rather than the container parameter.
+      SEAMNEX_MAUTIC_TRUSTED_PROXIES: ${SEAMNEX_MAUTIC_TRUSTED_PROXIES:-172.16.0.0/12,192.168.0.0/16,10.0.0.0/8}
+      # Read by `seamnex-bootstrap.sh`, which writes `api_enabled` and `api_enable_basic_auth` into
+      # `local.php`. The relay creates a per-user account for every entitled person through the
+      # product's REST API, and Mautic ships that API off — with server-to-server login off as well.
+      # On by default because a deployment without it cannot sign anyone in; `0` turns both switches
+      # off again, for an operator who wants the relay to stay out of the product entirely.
+      SEAMNEX_MAUTIC_API_ENABLED: ${SEAMNEX_MAUTIC_API_ENABLED:-1}
     depends_on:
       mautic-db:
         condition: service_healthy
@@ -104,7 +130,12 @@ services:
     restart: unless-stopped
 
   mautic-cron:
+    # The same artefact as `mautic-web`, started in the cron role. It declares no `build:` of its own
+    # — `compose build` would produce the identical tag twice — but it repeats `pull_policy: never`
+    # so a missing image is an error here too rather than a download of whatever a registry serves
+    # under this name.
     image: seamnex/mautic:7.2.2
+    pull_policy: never
     environment:
       DOCKER_MAUTIC_ROLE: mautic_cron
       MAUTIC_DB_HOST: ${MAUTIC_DB_HOST:-mautic-db}

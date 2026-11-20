@@ -8,6 +8,7 @@ import {
   type SessionCheck,
 } from './product-login.driver';
 import { orangeHrmLogin } from './adapters/orangehrm-login';
+import { mauticLogin } from './adapters/mautic-login';
 
 /**
  * ADR-BE-22 §"One role, one hop" — the seam between the orchestration and a product's login form.
@@ -59,6 +60,7 @@ const openProjectLogin: ProductLoginAdapter = {
 const ADAPTERS: Readonly<Record<string, ProductLoginAdapter>> = {
   'D09-01': openProjectLogin,
   'D07-01': orangeHrmLogin,
+  'D02-01': mauticLogin,
 };
 
 /**

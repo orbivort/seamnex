@@ -7,8 +7,8 @@
   "repoUrl": "https://github.com/mautic/mautic",
   "licenseId": "GPL-3.0",
   "stack": "PHP / MySQL",
-  "imageRef": "mautic/mautic:7.2.2-apache",
-  "imageDigest": "sha256:83461b9ec7c109413281490180e1f96c379aa935bd92f80c68294f98487a9015",
+  "imageRef": "seamnex/mautic:7.2.2",
+  "imageDigest": "sha256:0cc3f586d03ee5fa3bd1d0e3b2547d26e4dd573a1fd15aae87075bf604529a7e",
   "upstream": {
     "currentVersion": "7.2.2",
     "latestVersion": "7.2.2",
@@ -19,7 +19,7 @@
   "guaranteeClass": "fa_gate",
   "authMethod": "Proxy gate only - Mautic keeps its own login (no OIDC/SAML in the free core)",
   "packaging": "compose",
-  "packagingSource": "vendored render set (platform/upstream/D02-01) over the pinned mautic/mautic:7.2.2-apache image; the application layer is built on the host as seamnex/mautic:7.2.2 and carries the first-boot installer",
+  "packagingSource": "vendored render set (platform/upstream/D02-01) over the pinned mautic/mautic:7.2.2-apache image; the service declares its own build, so the platform produces seamnex/mautic:7.2.2 from that tree in the build stage and the layer carries the first-boot installer",
   "primaryInstanceId": null,
   "sharedWith": [],
   "httpPort": 80,
@@ -52,7 +52,7 @@
     }
   ],
   "integration": {
-    "apiBaseUrl": "https://marketing.seamnex.local/api",
+    "apiBaseUrl": "https://mautic.seamnex.local/api",
     "authMethod": "HTTP basic / OAuth2 against a Mautic API user",
     "guaranteeClassVerified": "fa_gate",
     "operationInventory": [
@@ -105,6 +105,7 @@
     "team": "Marketing Operations",
     "email": "marketing-ops@seamnex.local"
   },
-  "notes": "Campaign and segment mail is sent from a second container running the cron role; a web container alone renders the product but sends nothing. Deliverability (SPF, DKIM, DMARC) is an operator responsibility, not a platform one. The catalogue pins the upstream base image; the deployed tag is the vendored wrapper built from it.",
+  "notes": "Campaign and segment mail is sent from a second container running the cron role; a web container alone renders the product but sends nothing. Deliverability (SPF, DKIM, DMARC) is an operator responsibility, not a platform one. `imageRef` is the tag the definition runs — the vendored wrapper `seamnex/mautic:7.2.2`, which the service declares as its own `build:` so the platform produces it in the build stage from platform/upstream/D02-01 rather than pulling it (ADR-BE-40); the pinned `mautic/mautic:7.2.2-apache` image is the base it wraps. Because the artefact is local, `imageDigest` is reference data: the enforced pin is the image id the host built, recorded per instance on the first deployment.",
+  "deviation": "Upstream `mautic/mautic` ships neither a Compose file nor a Dockerfile, and its Docker distribution starts Apache with the product *uninstalled*. Four deliberate changes, recorded row by row in platform/upstream/D02-01/README.md: (1) the application is a thin layer over the pinned upstream image, declared as the service's own `build:` with `pull_policy: never`, so the executor builds `seamnex/mautic:7.2.2` in the build stage and the tag can never resolve to a registry's idea of it; (2) a MariaDB service is added, because the catalog has always declared `database` as a dependency and without it the product reached its own error page; (3) the cron container is kept, because campaigns and segments are sent by scheduled commands, so a web container alone renders a product that never sends a mail; (4) `ports:` is written as `expose:` — the platform publishes no host port and the edge reaches the container on the instance network. The first-boot install runs in `seamnex-bootstrap.sh` (`bin/console mautic:install`) before the image's own entrypoint, because only a CLI install makes a deployment usable without a browser, and `config/local.php` is the marker that keeps a restart from reinstalling.",
   "verifiedAt": "2026-11-01T01:00:00Z"
 }

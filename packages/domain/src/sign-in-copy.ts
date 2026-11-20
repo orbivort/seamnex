@@ -74,6 +74,20 @@ const PER_ENTRY: Readonly<Record<string, Partial<Record<SignInShape, SignInPath>
    * is opt-in per deployment. The second *password prompt* is what disappears, not the navigation,
    * and the label above the tile remains "Sign-in required".
    */
+  /*
+   * Mautic — the third relayed product, and the only one whose rotation replaces the account rather
+   * than re-passwording it (its API ignores a password on edit, measured 2026-11-20). The sentence a
+   * person reads before clicking has to be true of that mechanism: the account is the platform's, it
+   * carries a non-administrator role the platform created, and it is replaced on rotation — not that
+   * "the password is rotated", which would imply the same user row. It grants nothing outside Mautic
+   * and is never the single sign-on password.
+   */
+  D2: {
+    local: {
+      note: 'The platform signs you in and gates the route, then signs you in to Mautic with an account it created for you, so Mautic does not ask for a second password. The account is non-administrative and one per person; the platform replaces it when it rotates the credential and deletes it when your access ends. It is not your single sign-on password and it grants nothing outside this product.',
+      clicks: 2,
+    },
+  },
   D9: {
     local: {
       note: 'The platform signs you in and gates the route, then signs you in to OpenProject with an account it created for you, so OpenProject does not ask for a second password. That credential belongs to the platform — one per person, rotated monthly and deleted when your access ends. It is not your single sign-on password and it grants nothing outside this product.',

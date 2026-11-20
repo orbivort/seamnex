@@ -82,6 +82,101 @@ install_once() {
   fi
 }
 
+# The edge terminates TLS and forwards plain HTTP, so every absolute URL the product builds from the
+# request — the post-login redirect is the one that bites — comes out as `http://<route>:<edge port>`.
+# Nothing serves that scheme on that port: a correct password lands on the edge's 404 *after* a
+# successful sign-in, which reads as a broken product rather than as a proxy that was never trusted.
+#
+# Two things had to be discovered rather than guessed, and both cost a deployment:
+#   - `TrustMiddleware` reads `trusted_proxies` from `local.php`, not from the container parameter
+#     the (`MAUTIC_`-prefixed) environment variable would populate, so setting the variable changes
+#     nothing about the redirect;
+#   - naming that variable `MAUTIC_TRUSTED_PROXIES` *breaks the product*: every `MAUTIC_*` name maps
+#     to a configuration parameter, and this one is an array read with Symfony's `resolve:` processor,
+#     so a comma list answered every request with `Invalid JSON in env var "resolve:…"` — a 500.
+# The variable therefore carries our own prefix and the value is written beside the marker instead.
+#
+# Idempotent by construction: the file is compared before it is rewritten, so a restart that changes
+# nothing writes nothing, and the atomic rename keeps a half-written `local.php` from being read by a
+# request that arrives mid-update.
+apply_trusted_proxies() {
+  local list="${SEAMNEX_MAUTIC_TRUSTED_PROXIES:-}"
+  [ -n "$list" ] || return 0
+  [ -f "$CONF_FILE" ] || return 0
+  if php -r '
+      include $argv[1];
+      $want = array_values(array_filter(array_map("trim", explode(",", $argv[2]))));
+      $have = isset($parameters["trusted_proxies"]) ? (array) $parameters["trusted_proxies"] : [];
+      exit($have === $want ? 0 : 1);
+    ' "$CONF_FILE" "$list"; then
+    return 0
+  fi
+  php -r '
+      $file = $argv[1];
+      include $file;
+      $parameters["trusted_proxies"] = array_values(
+        array_filter(array_map("trim", explode(",", $argv[2])))
+      );
+      $body = "<?php\n\$parameters = " . var_export($parameters, true) . ";\n";
+      $tmp = $file . ".tmp";
+      if (file_put_contents($tmp, $body, LOCK_EX) === false) { exit(1); }
+      @chmod($tmp, 0644);
+      @chown($tmp, "www-data");
+      @chgrp($tmp, "www-data");
+      if (!rename($tmp, $file)) { @unlink($tmp); exit(1); }
+    ' "$CONF_FILE" "$list" || {
+    log 'could not write trusted_proxies; product URLs keep the scheme the proxy forwards'
+    return 0
+  }
+  log "trusted_proxies set to ${list}"
+}
+
+# The relay provisions a per-user account for every entitled person and signs in as it, so it needs
+# the product's REST API. Mautic ships it **off**, and its server-to-server login is a second switch
+# that is off independently: with only `api_enabled` set, every call answers `403 api_disabled`; with
+# basic auth left off it answers `403` again with "Basic Auth disabled". Both were measured on this
+# render set on 2026-11-20.
+#
+# The switches are written into `local.php` because that is where the product reads them — the same
+# lesson as `trusted_proxies` above, where the `MAUTIC_*` environment variable populated a parameter
+# nothing consulted. Our own prefix keeps `MAUTIC_*` from being mapped onto a parameter of the same
+# name. Idempotent by comparison, like the trusted-proxy write.
+apply_api_settings() {
+  local want="${SEAMNEX_MAUTIC_API_ENABLED:-1}"
+  [ -f "$CONF_FILE" ] || return 0
+  case "$want" in
+    0 | 1) ;;
+    *)
+      log "SEAMNEX_MAUTIC_API_ENABLED must be 0 or 1, not '${want}'; leaving the API as it is"
+      return 0
+      ;;
+  esac
+  if php -r '
+      include $argv[1];
+      exit(((int) ($parameters["api_enabled"] ?? 0) === (int) $argv[2]
+        && (int) ($parameters["api_enable_basic_auth"] ?? 0) === (int) $argv[2]) ? 0 : 1);
+    ' "$CONF_FILE" "$want"; then
+    return 0
+  fi
+  php -r '
+      $file = $argv[1];
+      include $file;
+      $parameters["api_enabled"] = (int) $argv[2];
+      $parameters["api_enable_basic_auth"] = (int) $argv[2];
+      $body = "<?php\n\$parameters = " . var_export($parameters, true) . ";\n";
+      $tmp = $file . ".tmp";
+      if (file_put_contents($tmp, $body, LOCK_EX) === false) { exit(1); }
+      @chmod($tmp, 0644);
+      @chown($tmp, "www-data");
+      @chgrp($tmp, "www-data");
+      if (!rename($tmp, $file)) { @unlink($tmp); exit(1); }
+    ' "$CONF_FILE" "$want" || {
+    log 'could not write the API switches; the relay cannot provision accounts'
+    return 0
+  }
+  log "api_enabled and api_enable_basic_auth set to ${want}"
+}
+
 case "$ROLE" in
   mautic_web)
     # The same three checks the image runs, executed *before* the install because the install needs a
@@ -94,6 +189,8 @@ case "$ROLE" in
     else
       install_once
     fi
+    apply_trusted_proxies
+    apply_api_settings
     ;;
   mautic_cron | mautic_worker)
     # The image's `wait_for_mautic_install.sh` waits forever. Unbounded is the wrong default: a failed

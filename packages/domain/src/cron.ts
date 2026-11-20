@@ -70,7 +70,9 @@ export function cronExpressionProblem(expression: string): string | null {
     return `A cron expression has five fields (minute hour day month weekday), and this has ${fields.length}.`;
   }
   for (const [index, spec] of FIELDS.entries()) {
-    const problem = fieldProblem(fields[index] ?? '', spec);
+    // The count check above makes the two lists the same length, so the field is always there: a
+    // `?? ''` guard would be a branch no input reaches.
+    const problem = fieldProblem(fields[index] as string, spec);
     if (problem !== null) return problem;
   }
   return null;
@@ -88,9 +90,13 @@ function itemProblem(item: string, spec: FieldSpec): string | null {
   if (item.length === 0) return `${spec.name} has an empty list item.`;
   if (item === '*') return null;
 
-  const [base, step, ...rest] = item.split('/');
-  if (rest.length > 0) return `${spec.name} "${item}" has more than one "/".`;
-  if (step !== undefined) {
+  // `indexOf` rather than `split`: read this way the base is always a string, so neither the step
+  // nor the range check needs a fallback for a part that is not there.
+  const slash = item.indexOf('/');
+  const base = slash === -1 ? item : item.slice(0, slash);
+  const step = slash === -1 ? null : item.slice(slash + 1);
+  if (step !== null) {
+    if (step.includes('/')) return `${spec.name} "${item}" has more than one "/".`;
     if (!isWholeNumber(step) || Number(step) < 1) {
       return `${spec.name} "${item}" needs a whole step of at least 1.`;
     }
@@ -99,16 +105,19 @@ function itemProblem(item: string, spec: FieldSpec): string | null {
   // A bare `*` returned above, so a `*` base here is the stepped form the engine also reads.
   if (base === '*') return null;
 
-  const range = (base ?? '').split('-');
-  if (range.length > 2) return `${spec.name} "${item}" has more than one "-".`;
+  const dash = base.indexOf('-');
+  const startToken = dash === -1 ? base : base.slice(0, dash);
+  const endToken = dash === -1 ? null : base.slice(dash + 1);
+  if (endToken !== null && endToken.includes('-')) {
+    return `${spec.name} "${item}" has more than one "-".`;
+  }
 
-  const start = value(range[0] ?? '', spec);
-  if (start === null) return `${spec.name} "${range[0] ?? item}" is not ${describe(spec)}.`;
+  const start = value(startToken, spec);
+  if (start === null) return `${spec.name} "${startToken}" is not ${describe(spec)}.`;
+  if (endToken === null) return null;
 
-  if (range.length === 1) return null;
-
-  const end = value(range[1] ?? '', spec);
-  if (end === null) return `${spec.name} "${range[1] ?? item}" is not ${describe(spec)}.`;
+  const end = value(endToken, spec);
+  if (end === null) return `${spec.name} "${endToken}" is not ${describe(spec)}.`;
   if (end < start) return `${spec.name} "${item}" is a range that runs backwards.`;
   return null;
 }

@@ -780,7 +780,9 @@ export class DeploymentPipeline implements OnModuleInit {
         `UPDATE instance
             SET payload = payload || jsonb_build_object('activeRenderSetId', $2::text)
                         || CASE WHEN $4::text IS NULL THEN '{}'::jsonb
-                                ELSE jsonb_build_object('currentVersion', $4::text) END,
+                                ELSE jsonb_build_object('currentVersion', $4::text) END
+                        || CASE WHEN $5::text IS NULL THEN '{}'::jsonb
+                                ELSE jsonb_build_object('imageDigest', $5::text) END,
                 source_path = $3,
                 updated_at = now()
           WHERE id = $1`,
@@ -789,6 +791,7 @@ export class DeploymentPipeline implements OnModuleInit {
           renderSet.id,
           state.source?.path ?? state.instance.source_path,
           appliedVersion,
+          this.builtPrimaryDigest(state, renderSet),
         ],
       );
     }
@@ -1416,6 +1419,26 @@ export class DeploymentPipeline implements OnModuleInit {
           'not build.',
       });
     }
+  }
+
+  /**
+   * The id this run built for the product's own image, or `null` when the deployment pulls it.
+   *
+   * ADR-BE-40 gave identity a second shape: a locally built image has no repository digest, and the
+   * id changes on every build because the build carries instance labels. The instance's *reported*
+   * identity therefore has to come from the build, not from the catalogue's reference value — the
+   * overview showed the catalogue digest (`0cc3f586…`, built once for a prefetch) while the
+   * containers ran `65959ba07e6d…`, so the two screens of one instance disagreed about what was
+   * running. A pulled image keeps the catalogue's answer: there the manifest digest is the pin, and
+   * it is the value a reader can check against the registry.
+   */
+  private builtPrimaryDigest(state: RunState, renderSet: RenderSet): string | null {
+    const builds = state.builds;
+    if (builds === undefined || builds.size === 0) return null;
+    const primary = primaryServiceOf(renderSet, httpPortOf(state.instance));
+    if (primary === null) return null;
+    const ref = imageOfService(renderSet, primary);
+    return ref === null ? null : (builds.get(ref) ?? null);
   }
 
   private async recordedDigests(instanceId: string): Promise<Map<string, string>> {

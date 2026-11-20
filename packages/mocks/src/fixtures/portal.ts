@@ -281,6 +281,9 @@ function tileFor(role: PlatformRole, instance: Instance, status: PlainStatus): L
     maintenanceTitle: instance.maintenance?.title ?? null,
     lastVerifiedAt: instance.observedAt,
     badge: BADGE[role],
+    // The fixture set models no relay mapping (the posture fixture says the same), so every gated
+    // tile keeps the outside-credential claim rather than inventing a platform-managed one.
+    relayState: 'unavailable',
   };
 }
 

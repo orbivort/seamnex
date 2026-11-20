@@ -106,6 +106,11 @@ type Options = {
   readonly catalog?: readonly Row[];
   /** Extra statements a test needs answered, tried before the projection routes. */
   readonly routes?: readonly Route[];
+  /**
+   * Per-instance answers for M24's relay read. Absent means the relay is not mounted, which is the
+   * deployment the BFF has to stay usable in (the field then reads `unavailable`).
+   */
+  readonly relayStates?: Readonly<Record<string, 'ready' | 'preparing' | 'unavailable'>>;
 };
 
 function setup(options: Options = {}) {
@@ -128,14 +133,27 @@ function setup(options: Options = {}) {
     }),
   };
   const audit = { append: vi.fn(async () => ({ seq: '1', hash: 'h' })) };
+  const relayStates = options.relayStates;
+  const relay =
+    relayStates === undefined
+      ? undefined
+      : {
+          attempt: vi.fn(),
+          invalidate: vi.fn(),
+          accountState: vi.fn(
+            async ({ instanceId }: { instanceId: string }) =>
+              relayStates[instanceId] ?? ('unavailable' as const),
+          ),
+        };
   const service = new PostgresPortalBffService(
     db.pool,
     options.config ?? CONFIG,
     access as never,
     redis as never,
     audit as never,
+    relay as never,
   );
-  return { db, access, redis, audit, service };
+  return { db, access, redis, audit, relay, service };
 }
 
 /** The single tile a launcher response must project for one row. */
@@ -447,6 +465,46 @@ describe('launcher', () => {
       observed_at: null,
     }),
   ];
+
+  it('says who holds a gated credential, from the relay contract', async () => {
+    // ADR-BE-22: the tile may not print "credential outside platform" over a gate the relay carries.
+    // The answer is M24's `accountState`, not a join: `product_account` is that module's table, and
+    // asking for a native route would be a round trip for a product the relay never signs into.
+    const { service, relay } = setup({
+      rows: [
+        tileRow({ instance_id: 'i-ready', guarantee_class: 'fa_gate', auth_mode: 'fa_gate' }),
+        tileRow({ instance_id: 'i-pending', guarantee_class: 'fa_gate', auth_mode: 'fa_gate' }),
+        tileRow({ instance_id: 'i-failed', guarantee_class: 'fa_gate', auth_mode: 'fa_gate' }),
+        tileRow({ instance_id: 'i-native', guarantee_class: 'native' }),
+      ],
+      relayStates: {
+        'i-ready': 'ready',
+        'i-pending': 'preparing',
+        'i-failed': 'unavailable',
+      },
+    });
+
+    const tiles = (await service.launcher(SUB)).tiles;
+
+    expect(tiles.map((tile) => tile.relayState)).toEqual([
+      'ready',
+      'preparing',
+      'unavailable',
+      'unavailable',
+    ]);
+    expect(relay?.accountState).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps the launcher usable when the relay is not mounted', async () => {
+    const { service } = setup({
+      rows: [tileRow({ instance_id: 'i-gate', guarantee_class: 'fa_gate', auth_mode: 'fa_gate' })],
+    });
+
+    const [tile] = (await service.launcher(SUB)).tiles;
+
+    // The card degrades to the pre-relay sentence rather than failing the whole grid.
+    expect(tile?.relayState).toBe('unavailable');
+  });
 
   it('counts each plain status, maintenance winning over the health state', async () => {
     const { service } = setup({ rows: STATUS_ROWS });

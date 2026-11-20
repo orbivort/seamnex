@@ -10,8 +10,11 @@
 # own `/entrypoint.sh`, so the volume checks, migrations, role dispatch and Apache startup remain
 # upstream's code rather than a copy of it.
 #
-# Pinned by tag (the compose file also carries the image name); the catalog entry records the digest
-# of the built image. Build with:  docker build -t seamnex/mautic:7.2.2 platform/upstream/D02-01
+# Pinned by tag (the compose file also carries the image name and declares this build); the catalog
+# entry records the id the reference host built. The executor builds it in the deployment's `build`
+# stage through BuildKit (ADR-BE-40), so no host-side `docker build` is required:
+#
+#   platform deployment (automatic)   or   docker build -t seamnex/mautic:7.2.2 platform/upstream/D02-01
 FROM mautic/mautic:7.2.2-apache
 
 COPY seamnex-bootstrap.sh /usr/local/bin/seamnex-bootstrap.sh

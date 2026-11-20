@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { ProductApiAdapters } from '../../../../src/modules/m24-sign-in-relay/provisioning-adapters';
 import type { ProductApiClient } from '../../../../src/modules/m24-sign-in-relay/product-api.client';
 import type { OrangeHrmApiClient } from '../../../../src/modules/m24-sign-in-relay/adapters/orangehrm-api';
+import type { MauticApiClient } from '../../../../src/modules/m24-sign-in-relay/adapters/mautic-api';
 
 /**
  * Which admin API answers for a catalogue entry.
@@ -14,9 +15,10 @@ import type { OrangeHrmApiClient } from '../../../../src/modules/m24-sign-in-rel
 
 const openproject = { name: 'openproject' } as unknown as ProductApiClient;
 const orangehrm = { name: 'orangehrm' } as unknown as OrangeHrmApiClient;
+const mautic = { name: 'mautic' } as unknown as MauticApiClient;
 
 function adapters(): ProductApiAdapters {
-  return new ProductApiAdapters(openproject, orangehrm);
+  return new ProductApiAdapters(openproject, orangehrm, mautic);
 }
 
 describe('ProductApiAdapters', () => {
@@ -25,11 +27,14 @@ describe('ProductApiAdapters', () => {
     expect(adapters().for('D09-01')).toBe(openproject);
     expect(adapters().for('D7')).toBe(orangehrm);
     expect(adapters().for('D07-01')).toBe(orangehrm);
+    expect(adapters().for('D2')).toBe(mautic);
+    expect(adapters().for('D02-01')).toBe(mautic);
   });
 
   it('normalises case and surrounding whitespace before resolving', () => {
     expect(adapters().for('  d07-01 ')).toBe(orangehrm);
     expect(adapters().for('d9')).toBe(openproject);
+    expect(adapters().for('  d02-01 ')).toBe(mautic);
   });
 
   it('answers null for a product the platform does not provision', () => {

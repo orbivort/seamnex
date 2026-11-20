@@ -175,6 +175,14 @@ export async function scanImage(input: {
         '--scanners',
         'vuln',
         '--quiet',
+        // Trivy keeps its own analysis deadline — five minutes — and it knows nothing about the
+        // ceiling this platform kills the process at. A 3.4 GB image therefore failed with
+        // `analyze error: pipeline error: context deadline exceeded` *after* the operator raised
+        // `SEAMNEX_SCAN_TIMEOUT_MS`, because the inner clock had not moved with the outer one.
+        // Derived from the outer ceiling and kept below it, so the scanner gets to say why it gave
+        // up rather than being SIGKILLed and reported as `[killed after … ms]`.
+        '--timeout',
+        `${Math.max(60, Math.floor(input.config.SEAMNEX_SCAN_TIMEOUT_MS / 1000) - 15)}s`,
         ...(cacheMount.length > 0 ? ['--cache-dir', '/cache'] : []),
         // Cached mode has no route to anything, so asking Trivy to refresh would be a guaranteed
         // failure after the database was found; the same goes for the java database.

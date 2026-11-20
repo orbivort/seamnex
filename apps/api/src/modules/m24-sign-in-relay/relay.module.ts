@@ -8,6 +8,7 @@ import { PostgresProductAccountService } from './product-account.service';
 import { PostgresAdminCredentialService } from './admin-credential.service';
 import { ProductApiClient } from './product-api.client';
 import { OrangeHrmApiClient } from './adapters/orangehrm-api';
+import { MauticApiClient } from './adapters/mautic-api';
 import { ProductApiAdapters } from './provisioning-adapters';
 import { RelaySignInService } from './relay.service';
 import { RelayProvisionTrigger } from './relay-provision.trigger';
@@ -28,6 +29,7 @@ import { RelayProvisionTrigger } from './relay-provision.trigger';
   providers: [
     ProductApiClient,
     OrangeHrmApiClient,
+    MauticApiClient,
     ProductApiAdapters,
     { provide: SIGN_IN_RELAY, useClass: RelaySignInService },
     { provide: PRODUCT_ACCOUNT_SERVICE, useClass: PostgresProductAccountService },

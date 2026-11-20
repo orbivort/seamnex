@@ -7,11 +7,15 @@
   "variables": [
     {
       "name": "MAUTIC_SITE_URL",
-      "purpose": "Public URL the product is reached at, written into `local.php` by the first-boot installer. It is the base of every absolute URL Mautic puts in an e-mail — unsubscribe links, tracked links, landing pages — so it must be the published route including the edge port (`https://marketing.seamnex.localhost:8443` on the development edge), not the container name. Installation-only: changing the route of a running instance has to be changed inside the product as well.",
+      "purpose": "Public URL the product is reached at, written into `local.php` by the first-boot installer. It is the base of every absolute URL Mautic puts in an e-mail — unsubscribe links, tracked links, landing pages — so it must be the published route including the edge port (`https://mautic.seamnex.localhost:8443` on the development edge), not the container name. The platform derives it from the instance's own route at deploy time, so an instance under another slug or domain gets its own value without an override; override it only when the product is deliberately reached at an address other than its route. Installation-only: changing the route of a running instance has to be changed inside the product as well.",
       "type": "url",
       "required": true,
       "defaultValue": "https://mautic.seamnex.localhost:8443",
       "constraint": "Absolute URL, no trailing slash; must match the published route (`<slug>.<ingress domain>:<edge port>`)",
+      "rule": {
+        "pattern": "^https?://[^/]+$",
+        "patternDescription": "an absolute URL with no trailing slash and no path"
+      },
       "conditional": null,
       "secret": false,
       "overrideCeiling": "profile_and_instance"
@@ -23,6 +27,10 @@
       "required": true,
       "defaultValue": "mautic-db",
       "constraint": "Hostname or IP address reachable from the application container",
+      "rule": {
+        "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*$",
+        "patternDescription": "a host name or IP address, without a scheme, port or path"
+      },
       "conditional": null,
       "secret": false,
       "overrideCeiling": "none"
@@ -34,6 +42,10 @@
       "required": false,
       "defaultValue": "3306",
       "constraint": "1–65535",
+      "rule": {
+        "pattern": "^[0-9]{1,5}$",
+        "patternDescription": "a whole TCP port number, 1–65535"
+      },
       "conditional": null,
       "secret": false,
       "overrideCeiling": "none"
@@ -45,6 +57,11 @@
       "required": true,
       "defaultValue": "mautic",
       "constraint": "MySQL identifier: letters, digits and underscores",
+      "rule": {
+        "pattern": "^[A-Za-z0-9_]+$",
+        "patternDescription": "letters, digits and underscores only",
+        "maxLength": 64
+      },
       "conditional": null,
       "secret": false,
       "overrideCeiling": "none"
@@ -56,6 +73,11 @@
       "required": true,
       "defaultValue": "mautic",
       "constraint": "MySQL account name; at most 32 characters",
+      "rule": {
+        "pattern": "^[A-Za-z0-9_.-]+$",
+        "patternDescription": "letters, digits, underscore, dot and hyphen",
+        "maxLength": 32
+      },
       "conditional": null,
       "secret": false,
       "overrideCeiling": "profile_only"
@@ -67,17 +89,24 @@
       "required": true,
       "defaultValue": null,
       "constraint": "At least 16 characters",
+      "rule": {
+        "minLength": 16
+      },
       "conditional": null,
       "secret": true,
       "overrideCeiling": "profile_and_instance"
     },
     {
       "name": "MAUTIC_DB_TABLE_PREFIX",
-      "purpose": "Prefix of every table the installation writes, and it must be empty. Mautic 7.2.2's installer records the prefix in `local.php` but creates the schema **unprefixed**: with `mautic_` the install reports 'Install complete' and the migration that runs immediately afterwards fails with `Table 'mautic.mautic_email_stats' doesn't exist`, leaving a product that answers but cannot save a campaign. The ceiling allows a profile and an instance value only so an instance that already stored the old `mautic_` default can be converged back to empty; do not set any other value. Installation-only either way.",
+      "purpose": "Prefix of every table the installation writes, and it must be empty. Mautic 7.2.2's installer records the prefix in `local.php` but creates the schema **unprefixed**: with `mautic_` the install reports 'Install complete' and the migration that runs immediately afterwards fails with `Table 'mautic.mautic_email_stats' doesn't exist`, leaving a product that answers but cannot save a campaign. The rule refuses any non-empty value, which is what turns that failure into a field error before the container starts; the ceiling stays at profile and instance only so an instance that already stored the old `mautic_` default can be converged back to empty. Installation-only either way.",
       "type": "string",
       "required": false,
       "defaultValue": "",
       "constraint": "Empty; a non-empty prefix is not supported by the 7.2.2 install path",
+      "rule": {
+        "pattern": "^$",
+        "patternDescription": "empty — any prefix breaks the 7.2.2 install and its first migration"
+      },
       "conditional": null,
       "secret": false,
       "overrideCeiling": "profile_and_instance"
@@ -89,6 +118,9 @@
       "required": true,
       "defaultValue": null,
       "constraint": "At least 16 characters; must differ from MAUTIC_DB_PASSWORD",
+      "rule": {
+        "minLength": 16
+      },
       "conditional": null,
       "secret": true,
       "overrideCeiling": "profile_and_instance"
@@ -100,6 +132,11 @@
       "required": true,
       "defaultValue": "admin",
       "constraint": "At least 3 characters; letters, digits and the characters Mautic accepts in a username",
+      "rule": {
+        "pattern": "^[A-Za-z0-9._@-]+$",
+        "patternDescription": "letters, digits and the characters . _ @ -",
+        "minLength": 3
+      },
       "conditional": null,
       "secret": false,
       "overrideCeiling": "profile_and_instance"
@@ -111,6 +148,9 @@
       "required": true,
       "defaultValue": null,
       "constraint": "At least 12 characters",
+      "rule": {
+        "minLength": 12
+      },
       "conditional": null,
       "secret": true,
       "overrideCeiling": "profile_and_instance"
@@ -122,6 +162,10 @@
       "required": true,
       "defaultValue": null,
       "constraint": "Valid e-mail address",
+      "rule": {
+        "pattern": "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$",
+        "patternDescription": "an e-mail address, for example marketing-ops@seamnex.local"
+      },
       "conditional": null,
       "secret": false,
       "overrideCeiling": "profile_and_instance"
@@ -133,6 +177,9 @@
       "required": false,
       "defaultValue": "Mautic",
       "constraint": "At most 64 characters",
+      "rule": {
+        "maxLength": 64
+      },
       "conditional": null,
       "secret": false,
       "overrideCeiling": "profile_and_instance"
@@ -144,6 +191,9 @@
       "required": false,
       "defaultValue": "Admin",
       "constraint": "At most 64 characters",
+      "rule": {
+        "maxLength": 64
+      },
       "conditional": null,
       "secret": false,
       "overrideCeiling": "profile_and_instance"

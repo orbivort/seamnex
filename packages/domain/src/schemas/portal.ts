@@ -102,6 +102,15 @@ export const LauncherTileSchema = z.object({
   maintenanceTitle: z.string().nullable(),
   lastVerifiedAt: TimestampSchema,
   badge: z.string().nullable(),
+  /**
+   * ADR-BE-22 — who holds this person's credential for the deployment.
+   *
+   * The tile is where the decision to trust the product is made, so the same fact the launch dialog
+   * carries has to travel with the card: a gate the relay signs into may not be labelled "credential
+   * provisioned outside the platform" (EX-3). Additive with a default, for the same reason the
+   * launch target's field is: a client that predates it reads the conservative answer.
+   */
+  relayState: z.enum(['ready', 'preparing', 'unavailable']).default('unavailable'),
 });
 
 export const LauncherResponseSchema = z.object({

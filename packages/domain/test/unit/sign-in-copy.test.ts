@@ -56,6 +56,19 @@ describe('signInPathFor', () => {
     expect(signInPathFor('D7', 'forwarded')).toEqual(signInPathFor('D3', 'forwarded'));
   });
 
+  it('describes Mautic as a relayed product whose account is replaced on rotation', () => {
+    const local = signInPathFor('D2', 'local');
+    expect(local.clicks).toBe(2);
+    expect(local.note).not.toMatch(/never stores|provisioned outside/);
+    expect(local.note).toMatch(/does not ask for a second password/);
+    // The role the platform assigns, and the one lifecycle fact that differs from the other two:
+    // Mautic's API cannot re-password an account, so rotation replaces it.
+    expect(local.note).toMatch(/non-administrative/);
+    expect(local.note).toMatch(/replaces it when it rotates the credential/);
+    expect(signInPathFor('D02-01', 'local')).toEqual(local);
+    expect(signInPathFor('D2', 'forwarded')).toEqual(signInPathFor('D3', 'forwarded'));
+  });
+
   /*
    * A live `instance.entry_key` carries the composed grammar (`D09-01`, ADR-BE-20) while this table
    * is written in the legacy one (`D9`). Keying the lookup on the raw string printed the generic

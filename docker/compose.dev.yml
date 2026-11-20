@@ -230,6 +230,11 @@ x-api-environment: &api-environment
   SEAMNEX_SCAN_NETWORK: ${SEAMNEX_SCAN_NETWORK:-}
   SEAMNEX_SCAN_BLOCK_SEVERITIES: ${SEAMNEX_SCAN_BLOCK_SEVERITIES:-CRITICAL}
   SEAMNEX_SCAN_FAIL_OPEN: ${SEAMNEX_SCAN_FAIL_OPEN:-false}
+  # The ceiling a single scan may take. Forwarded for the reason the block above gives, and this is
+  # the setting whose absence was invisible: `SEAMNEX_SCAN_TIMEOUT_MS` in `.env` changed nothing
+  # because the name never reached the process, and the default `300000` killed the scan of the
+  # 3.4 GB image this platform builds itself — recorded as "not scanned", not as a failure.
+  SEAMNEX_SCAN_TIMEOUT_MS: ${SEAMNEX_SCAN_TIMEOUT_MS:-300000}
   SEAMNEX_SCAN_RETENTION_DAYS: ${SEAMNEX_SCAN_RETENTION_DAYS:-90}
   SEAMNEX_AGE_RECIPIENT: ${SEAMNEX_AGE_RECIPIENT:-}
   SEAMNEX_AGE_IDENTITY_FILE: /var/lib/seamnex/age/identity

@@ -1706,8 +1706,9 @@ describe('record', () => {
     ]);
     const payloadUpdate = h.db.calls.find((call) => call.sql.includes('jsonb_build_object'));
     // FR-1.7: the fourth bind is the version the applied image actually carries, so the instance
-    // reports what is running rather than what was requested.
-    expect(payloadUpdate?.params).toEqual([INSTANCE_ID, 'rs-000000000001', 'compose', '7.4']);
+    // reports what is running rather than what was requested. The fifth is the id a local build
+    // produced — null here, because this deployment pulls `repo/crm:7.4`.
+    expect(payloadUpdate?.params).toEqual([INSTANCE_ID, 'rs-000000000001', 'compose', '7.4', null]);
     expect(h.db.calls.some((call) => call.sql.includes('UPDATE render_set SET applied_at'))).toBe(
       true,
     );
@@ -1768,7 +1769,48 @@ describe('record', () => {
     await h.run('rollback', 'record', context);
 
     const payloadUpdate = h.db.calls.find((call) => call.sql.includes('jsonb_build_object'));
-    expect(payloadUpdate?.params).toEqual([INSTANCE_ID, 'rs-previous-1234', 'compose', '7.4']);
+    expect(payloadUpdate?.params).toEqual([
+      INSTANCE_ID,
+      'rs-previous-1234',
+      'compose',
+      '7.4',
+      null,
+    ]);
+  });
+
+  it('records the id a local build produced as the instance image identity', async () => {
+    const h = setup();
+    h.renderer.render.mockResolvedValue(
+      renderSetOf({
+        files: [
+          {
+            path: COMPOSE,
+            sha256: 'd'.repeat(64),
+            content:
+              'services:\n  app:\n    image: seamnex/crm:1\n    build: .\n    expose:\n      - "80"\n',
+          },
+        ],
+      }),
+    );
+    h.docker.build.mockResolvedValue(undefined);
+    h.docker.imageId.mockResolvedValue(IMAGE_DIGEST);
+    const context = ctx();
+    await reachRecord(h, context);
+    await h.run('deploy', 'build', context);
+
+    await h.run('deploy', 'record', context);
+
+    const payloadUpdate = h.db.calls.find((call) => call.sql.includes('jsonb_build_object'));
+    // ADR-BE-40: a built artefact has no repository digest, and its id changes per build, so the
+    // instance has to report the id this build produced. The catalogue's reference value is what the
+    // overview used to show while the containers ran something else.
+    expect(payloadUpdate?.params).toEqual([
+      INSTANCE_ID,
+      'rs-000000000001',
+      'compose',
+      '7.4',
+      IMAGE_DIGEST,
+    ]);
   });
 
   it('names the role of every service from what the service is, never from list order', async () => {

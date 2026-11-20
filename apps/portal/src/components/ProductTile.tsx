@@ -30,6 +30,30 @@ function signInCopy(tile: LauncherTile): { sso: boolean; short: string; detail: 
         : 'Wired for single sign-on, but no end-to-end check has proven that the sign-in completes.',
     };
   }
+  /*
+   * ADR-BE-22: `fa_gate` says who answers at the door, not who holds the credential. A gate the
+   * relay carries has a per-user account the platform created, so printing "credential outside
+   * platform" over it repeats the sentence EX-3 exists to retire — and it is the sentence a person
+   * reads before deciding whether the tile can be trusted. `relayState` is the fact that decides it.
+   */
+  if (tile.guaranteeClass === 'fa_gate') {
+    if (tile.relayState === 'ready') {
+      return {
+        sso,
+        short: 'Platform-managed credential',
+        detail:
+          'The platform created an account for you and signs you in to this product with it. It is a per-person password the platform holds, rotates and deletes with your access — not single sign-on.',
+      };
+    }
+    if (tile.relayState === 'preparing') {
+      return {
+        sso,
+        short: 'Credential preparing',
+        detail:
+          'The platform is creating your account for this product; the first launch may land on the product’s own sign-in form until it exists.',
+      };
+    }
+  }
   return {
     sso,
     short: tile.guaranteeClass === 'fa_gate' ? 'Credential outside platform' : 'Sign-in required',

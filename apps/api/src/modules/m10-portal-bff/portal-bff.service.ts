@@ -79,9 +79,11 @@ type TileRow = {
 /**
  * Deliverable 2.6 — the portal BFF.
  *
- * One query, one join tree, no per-tile lookup: `GET /me/launcher` is the hottest read in the
- * platform (NFR-2.1, exit criterion 3) and must not fan out per instance. Maintenance is layered
- * last so an active window always wins over the health state.
+ * One query, one join tree: `GET /me/launcher` is the hottest read in the platform (NFR-2.1, exit
+ * criterion 3) and must not fan out per instance. The one exception is the relay state of a gated
+ * route, which lives in M24's `product_account` and is asked for through that module's contract —
+ * in parallel, once per gate, never once per tile. Maintenance is layered last so an active window
+ * always wins over the health state.
  */
 
 @Injectable()
@@ -250,7 +252,11 @@ export class PostgresPortalBffService extends Repository implements PortalBffSer
 
   async launcher(subjectIdpId: string): Promise<LauncherResponse> {
     const rows = await this.tiles(subjectIdpId);
-    const tiles = rows.map((row) => this.tile(row));
+    // The relay question is asked per gate, in parallel: a serial pass would make the grid wait
+    // three reads per product, and asking for every tile would describe products that never relay.
+    const tiles = await Promise.all(
+      rows.map(async (row) => this.tile(row, await this.tileRelayState(row, subjectIdpId))),
+    );
     return {
       environment: process.env.SEAMNEX_ENVIRONMENT_NAME ?? 'seamnex-local',
       generatedAt: new Date().toISOString(),
@@ -309,16 +315,16 @@ export class PostgresPortalBffService extends Repository implements PortalBffSer
   /**
    * Whether the relay has something to sign this person in as.
    *
-   * Asked only for a gated route: `accountState` would answer `unavailable` for the rest anyway, and
-   * the launcher is the hottest read in the platform (NFR-2.1) — a per-tile round trip on every
-   * dialog would be paid for every product to describe the ones that do not relay.
+   * Asked only when the relay applies (a gated route): `accountState` would answer `unavailable` for
+   * the rest anyway, and the launcher is the hottest read in the platform (NFR-2.1) — a round trip
+   * for every product would be paid by the ones that never relay.
    */
   private async relayStateOf(
-    bootstrapRequired: boolean,
+    relayApplies: boolean,
     instanceId: string,
     subjectIdpId: string,
   ): Promise<LaunchTarget['relayState']> {
-    if (!bootstrapRequired || this.relay === undefined) return 'unavailable';
+    if (!relayApplies || this.relay === undefined) return 'unavailable';
     /*
      * A read about sign-in must not be able to block a launch. The dialog renders this as one line
      * among several, and `AsyncPanel` would replace the whole body — and the Open button — with a
@@ -495,7 +501,7 @@ export class PostgresPortalBffService extends Repository implements PortalBffSer
         remediation: 'Refresh the launcher; unentitled products are not listed.',
       });
     }
-    return this.tile(row);
+    return this.tile(row, await this.tileRelayState(row, subjectIdpId));
   }
 
   async requestable(subjectIdpId: string): Promise<RequestableProduct[]> {
@@ -559,7 +565,7 @@ export class PostgresPortalBffService extends Repository implements PortalBffSer
     };
   }
 
-  private tile(row: TileRow): LauncherTile {
+  private tile(row: TileRow, relayState: LauncherTile['relayState']): LauncherTile {
     const ready = row.ready === true;
     const maintenance = row.maintenance_title !== null;
     const plainStatus: LauncherTile['plainStatus'] = maintenance
@@ -603,7 +609,25 @@ export class PostgresPortalBffService extends Repository implements PortalBffSer
       maintenanceTitle: row.maintenance_title,
       lastVerifiedAt: new Date(row.observed_at ?? row.synced_at).toISOString(),
       badge: row.sync_state === 'pending' ? 'Sync pending' : null,
+      relayState,
     };
+  }
+
+  /**
+   * Who holds the credential, for the tile.
+   *
+   * Only a `fa_gate` route can have a relay mapping, so only a gate asks. The answer comes from
+   * M24's contract, not from its table: `product_account` is M24's to own, and a join here would be
+   * the boundary violation the module manifest exists to prevent. `ready` is the only state that may
+   * print "platform-managed"; `preparing` says the pass is still running, and the rest read as a
+   * credential issued outside the platform — the truth at launch.
+   */
+  private tileRelayState(
+    row: Pick<TileRow, 'instance_id' | 'guarantee_class'>,
+    subjectIdpId: string,
+  ): Promise<LauncherTile['relayState']> {
+    const gated = (row.guarantee_class ?? 'native') === 'fa_gate';
+    return this.relayStateOf(gated, row.instance_id, subjectIdpId);
   }
 
   /** A catalog-first field read: the entry document outranks the instance's deploy-time snapshot. */

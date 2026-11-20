@@ -46,6 +46,8 @@ describe('cronExpressionProblem', () => {
     expect(cronExpressionProblem('0 0 * * 5-1')).toContain('runs backwards');
     expect(cronExpressionProblem('*/0 * * * *')).toContain('step of at least 1');
     expect(cronExpressionProblem('*/x * * * *')).toContain('step of at least 1');
+    // The far end of a range is checked like a value: "1-99" is one bad number, not a bad range.
+    expect(cronExpressionProblem('0 0 * * 1-99')).toContain('Day of week "99"');
   });
 
   it('names the field and offers the accepted values', () => {
