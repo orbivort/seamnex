@@ -58,9 +58,35 @@ describe('derived identity environment values', () => {
     });
   });
 
-  it('derives the ERPNext site name as the bare route host', () => {
+  /*
+   * ERPNext carries two shapes from one route: a Frappe site name (bare host — a directory and a
+   * `server_name`) and the origin `host_name` is built from. Writing the site name into `host_name`
+   * was the deployment's own default once, and it printed `http://crm.localhost` on an edge that
+   * serves `https` on `:8443`, so every link the product emitted was unreachable.
+   */
+  it('derives the ERPNext site name as the bare route host and the origin as a URL', () => {
     expect(derivedEnvValues({ ...base, entryKey: 'D06-01' })).toEqual({
       ERPNEXT_SITE_NAME: 'crm.localhost',
+      ERPNEXT_SITE_ORIGIN: 'http://crm.localhost:8020',
+      // `registerIdentity` names the Keycloak client `seamnex-<slug>`; the site's Social Login Key
+      // has to present that id, or the registration succeeds and the first login fails.
+      ERPNEXT_SSO_CLIENT_ID: 'seamnex-crm',
+    });
+  });
+
+  it('omits the port from the ERPNext origin when the edge uses the scheme default', () => {
+    expect(
+      derivedEnvValues({
+        ...base,
+        entryKey: 'D06-01',
+        host: 'erp.seamnex.localhost',
+        scheme: 'https',
+        port: '',
+      }),
+    ).toEqual({
+      ERPNEXT_SITE_NAME: 'erp.seamnex.localhost',
+      ERPNEXT_SITE_ORIGIN: 'https://erp.seamnex.localhost',
+      ERPNEXT_SSO_CLIENT_ID: 'seamnex-crm',
     });
   });
 

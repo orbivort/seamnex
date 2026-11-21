@@ -29,11 +29,37 @@ export type IdentityAttachment = {
   readonly detail: string;
 };
 
+/**
+ * What happened to the product's own copy of the identity client secret.
+ *
+ * `applied` is the only state in which the product can present the secret: the others are reported so
+ * a caller can log (or refuse) instead of assuming a value reached the container.
+ */
+export type IdentitySecretState = {
+  /** The declared instance variable, or `null` when the entry declares none. */
+  readonly variable: string | null;
+  /**
+   * `not-declared` covers both "this entry has no such variable" and "the projected schema does not
+   * carry it": in neither case is there an environment row to write or read.
+   */
+  readonly status: 'applied' | 'minted' | 'linked' | 'not-declared';
+};
+
 /** Owns idp_client, instance_route, integration_check, integration_metadata. */
 export interface IntegrationService {
   checks(instanceId: string): Promise<IntegrationCheck[]>;
   route(instanceId: string): Promise<InstanceRoute | null>;
   metadata(instanceId: string): Promise<Record<string, unknown> | null>;
+  /**
+   * 4D.1 — makes sure the product holds the client secret *before* its definition is applied.
+   *
+   * The renderer and the executor resolve `instance_env_value` and nothing else, so a secret that
+   * only ever reaches M15's own table never reaches the container. `registerIdentity` mints one and
+   * runs after `apply` (it needs the route), which is why a value minted there could only arrive at
+   * the *next* deployment: ERPNext deployed with no `ERPNEXT_SSO_CLIENT_SECRET`, skipped its
+   * `Social Login Key` entirely, and still passed the platform's login check.
+   */
+  ensureIdentitySecret(instanceId: string, actorId: string): Promise<IdentitySecretState>;
   /** 4D.1 — registers the product's identity client (secret in M15). */
   registerIdentity(
     instanceId: string,

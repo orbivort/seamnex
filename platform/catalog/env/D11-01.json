@@ -7,18 +7,22 @@
   "variables": [
     {
       "name": "MB_SITE_URL",
-      "purpose": "Absolute base URL Metabase uses for every link it generates: password-reset mails, dashboard subscriptions, alert links and the OAuth/redirect material. The image's fallback is the value of the incoming `Host` header, so behind an edge that forwards `Host: <slug>` the generated links point at a host the browser cannot reach on this deployment. Set it to the published route — `<scheme>://<slug>.<SEAMNEX_INGRESS_DOMAIN>:<SEAMNEX_PRODUCT_URL_PORT>`. A wrong value does not stop the sign-in page from loading; it surfaces later as a reset link that fails, which is why it is declared rather than left to the image default.",
+      "purpose": "Absolute base URL Metabase uses for every link it generates: password-reset mails, dashboard subscriptions, alert links and the OAuth/redirect material. The image's fallback is the value of the incoming `Host` header, so behind an edge that forwards `Host: <slug>` the generated links point at a host the browser cannot reach on this deployment. It must equal the published route — `<scheme>://<slug>.<SEAMNEX_INGRESS_DOMAIN>:<SEAMNEX_PRODUCT_URL_PORT>` — and the platform derives it from the instance's own route at deploy time, so the value below is only what the entry screen shows before an instance exists. An instance under another slug or domain therefore gets its own URL without an override; an explicit override still wins. A wrong value does not stop the sign-in page from loading; it surfaces later as a reset link that fails, which is why it is declared rather than left to the image default.",
       "type": "url",
       "required": true,
       "defaultValue": "https://metabase.seamnex.localhost:8443",
-      "constraint": "Absolute URL with scheme and host, no trailing slash; must equal the published route",
-      "conditional": "change it together with the route slug — the edge rewrites the host, the application does not",
+      "constraint": "Absolute URL with scheme and host, no trailing slash and no path; must equal the published route",
+      "rule": {
+        "pattern": "^https?://[^/]+$",
+        "patternDescription": "an absolute URL with no trailing slash and no path"
+      },
+      "conditional": "derived from the instance route on every deploy and reconfigure; override only when the product is deliberately reached at an address other than its route",
       "secret": false,
       "overrideCeiling": "profile_and_instance"
     },
     {
       "name": "MB_DB_HOST",
-      "purpose": "Host of the PostgreSQL application database. `db` is the service name in the vendored definition (platform/upstream/D11/docker-compose.yml), which resolves on the instance network created for the deployment. Capped at `none` because no operator choice is meaningful here: pointing the application at another host would not create it, and the deployment would fail during first-boot migration.",
+      "purpose": "Host of the PostgreSQL application database. `db` is the service name in the vendored definition (platform/upstream/D11-01/docker-compose.yml), which resolves on the instance network created for the deployment. Capped at `none` because no operator choice is meaningful here: pointing the application at another host would not create it, and the deployment would fail during first-boot migration.",
       "type": "string",
       "required": true,
       "defaultValue": "db",
@@ -83,9 +87,10 @@
       "type": "secret",
       "required": true,
       "defaultValue": null,
-      "constraint": "64 hexadecimal characters (`openssl rand -hex 32`); never rotate on a live instance",
+      "constraint": "Exactly 64 hexadecimal characters (`openssl rand -hex 32`); never rotate on a live instance",
       "rule": {
-        "minLength": 16,
+        "minLength": 64,
+        "maxLength": 64,
         "pattern": "^[0-9a-fA-F]{64}$",
         "patternDescription": "64 hexadecimal characters (openssl rand -hex 32)"
       },
@@ -99,9 +104,12 @@
       "type": "secret",
       "required": true,
       "defaultValue": null,
-      "constraint": "At least 32 characters (`openssl rand -hex 32`); never rotate on a live instance without accepting a global sign-out",
+      "constraint": "Exactly 64 hexadecimal characters (`openssl rand -hex 32`); never rotate on a live instance without accepting a global sign-out",
       "rule": {
-        "minLength": 32
+        "minLength": 64,
+        "maxLength": 64,
+        "pattern": "^[0-9a-fA-F]{64}$",
+        "patternDescription": "64 hexadecimal characters (openssl rand -hex 32)"
       },
       "conditional": null,
       "secret": true,

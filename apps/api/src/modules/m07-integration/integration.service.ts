@@ -16,10 +16,13 @@ import { probeIdpFromNetwork } from '../../common/exec/idp-probe';
 import type {
   AdapterSummary,
   IdentityAttachment,
+  IdentitySecretState,
   IntegrationService,
   RouteInput,
 } from './integration.contract';
 import { KeycloakAdminClient } from '../../common/keycloak/keycloak-admin.client';
+import { RENDERER_SERVICE, type RendererService } from '../m03-renderer/renderer.contract';
+import { probeSignInPage } from '../../common/exec/sign-in-probe';
 import { TraefikRouteWriter } from './traefik.writer';
 import {
   backchannelLogoutUrlFor,
@@ -27,6 +30,7 @@ import {
   oidcSecretVariableFor,
   publicBaseUrl,
   redirectUriFor,
+  signInPageFor,
 } from './oidc-redirect';
 import { SsoProbe, type SsoProbeResult } from './sso.probe';
 
@@ -114,6 +118,13 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
     @Inject(KeycloakAdminClient) private readonly keycloak: KeycloakAdminClient,
     @Inject(TraefikRouteWriter) private readonly traefik: TraefikRouteWriter,
     @Inject(SsoProbe) private readonly ssoProbe: SsoProbe,
+    /**
+     * M03 owns `instance_env_value`, and the value this module mints is only real once it is applied
+     * there: the renderer and the executor resolve that table and nothing else. The write goes
+     * through the owning module rather than this one's SQL, so the validation, the audit row and the
+     * secret linkage stay single-valued.
+     */
+    @Inject(RENDERER_SERVICE) private readonly renderer: RendererService,
   ) {}
 
   async checks(instanceId: string): Promise<IntegrationCheck[]> {
@@ -234,6 +245,42 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
     };
   }
 
+  /**
+   * 4D.1 — the product's copy of the client secret, written where the product is configured from.
+   *
+   * Runs before the render set is produced (`deploy`/`reconfigure`/`upgrade`), and that ordering is the
+   * whole point: `registerIdentity` cannot run until the route exists, so a value minted there is
+   * applied no earlier than the *next* deployment. ERPNext proved what that costs — the site booted
+   * without `ERPNEXT_SSO_CLIENT_SECRET`, the bootstrap took its documented fallback and wrote no
+   * `Social Login Key`, and the platform's login check passed anyway because it never asked the
+   * product.
+   *
+   * Idempotent on the applied row, not on the secret: a value the instance already stores is left
+   * alone, so a redeploy does not rotate the client secret the IdP was registered with. When M15 holds
+   * a value that was never linked to the environment, that value is reused and linked rather than
+   * replaced, for the same reason.
+   */
+  async ensureIdentitySecret(instanceId: string, actorId: string): Promise<IdentitySecretState> {
+    const instance = await this.instanceOf(instanceId);
+    const variable = oidcSecretVariableFor(instance.entryKey);
+    if (variable === null) return { variable: null, status: 'not-declared' };
+
+    const values = await this.renderer.instanceEnv(instanceId);
+    const applied = values.find((value) => value.name === variable);
+    if (applied?.source === 'secret') return { variable, status: 'applied' };
+    // The entry names a variable its projected schema does not carry, which is a disagreement for the
+    // catalog gate rather than something to paper over with a write this module's owner would refuse.
+    if (applied === undefined) return { variable, status: 'not-declared' };
+
+    const existing = await this.secrets.find('instance', instanceId, variable).catch(() => null);
+    const value =
+      existing === null
+        ? randomSecret()
+        : await this.secrets.open(existing.id, `apply identity secret ${instanceId}`);
+    await this.renderer.updateInstanceEnv(instanceId, { [variable]: value }, actorId);
+    return { variable, status: existing === null ? 'minted' : 'linked' };
+  }
+
   async registerIdentity(
     instanceId: string,
     actorId: string,
@@ -252,10 +299,11 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
         remediation: 'Shorten the instance slug.',
       });
     }
-    // The IdP and the product must share one client secret. When the operator has stored it as the
-    // product's OIDC secret variable, reuse that value: generating a second one here would register
-    // a client the product can never authenticate as, which is a login that fails after the redirect
-    // with no hint of why.
+    // The IdP and the product must share one client secret. When the instance already holds it as
+    // the product's OIDC secret variable, reuse that value: generating a second one here would
+    // register a client the product can never authenticate as, which is a login that fails after the
+    // redirect with no hint of why. `ensureIdentitySecret` puts it there before the definition is
+    // applied; this is the read side of the same single value.
     const secretVariable = oidcSecretVariableFor(instance.entryKey);
     const operatorSecret =
       secretVariable === null
@@ -266,15 +314,11 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
         ? randomSecret()
         : await this.secrets.open(operatorSecret.id, `register identity client ${instanceId}`);
     /**
-     * A generated secret is stored under the product's own variable name, not only as an
-     * `idp_client` secret.
-     *
-     * The renderer resolves `instance_env_value` and nothing else, so a secret parked in an
-     * `idp_client` scope never reaches the container: the client is registered at the IdP with a
-     * value the product does not have, the platform's own probe passes (it used its copy), and the
-     * product's login fails at the token exchange with `invalid_client` — which it reports as a
-     * site-URL problem. Writing it as the declared variable makes the value that was registered the
-     * value that is applied.
+     * The fallback for an entry that declares no secret variable: the value is stored under
+     * `idp_client`, where nothing applies it — there is no variable for the product to read it from,
+     * so the entry has to carry it some other way. An entry that *does* declare one is handled by
+     * `ensureIdentitySecret`, which writes the value as the declared variable and therefore as the
+     * value the executor injects.
      */
     const stored =
       operatorSecret ??
@@ -707,13 +751,65 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
       return { ok: false, detail: `stage 0 (product network): ${reach.detail}` };
     }
 
+    /**
+     * Stage 0.5 — the product's own half of the contract.
+     *
+     * Everything above is a statement about the identity provider and the network between them. A
+     * registered client, a matching redirect URI and a code exchanged from inside the instance network
+     * all passed for an ERPNext site that had no `Social Login Key`: the site never received the client
+     * secret, took its documented fallback, and its sign-in page offered a password form only. The
+     * platform called that single sign-on. So the credential the product needs is looked for where it
+     * would be applied, and the page the product actually serves is read for the provider entry point.
+     */
+    const secretVariable = oidcSecretVariableFor(instance.entryKey);
+    if (secretVariable !== null) {
+      const applied = (await this.renderer.instanceEnv(instanceId)).find(
+        (value) => value.name === secretVariable,
+      );
+      if (applied?.source !== 'secret')
+        return {
+          ok: false,
+          detail: `stage 0.5 (product configuration): ${secretVariable} is registered at the identity provider but was never applied to the instance, so the product cannot present the client secret`,
+        };
+    }
+
+    const page = signInPageFor(instance.entryKey);
+    if (page !== null) {
+      const signIn = await probeSignInPage({
+        runCli: (file, args, timeoutMs) => this.docker.runCli(file, args, timeoutMs),
+        network: instanceNetwork(instance.slug),
+        host: instance.slug,
+        port: Number(instance.payload.httpPort ?? 80),
+        path: page.path,
+        marker: page.marker,
+        timeoutMs: 30_000,
+      });
+      if (!signIn.ok) return { ok: false, detail: `stage 0.5 (sign-in page): ${signIn.detail}` };
+    }
+
     const groupClaim = oidcGroupClaimFor(instance.entryKey);
-    return this.ssoProbe.verify({
+    const probe = await this.ssoProbe.verify({
       clientId: row.client_id,
       redirectUri,
       clientSecret: secret,
       ...(groupClaim === null ? {} : { expectedClaims: [groupClaim] }),
     });
+    if (!probe.ok) return probe;
+
+    /**
+     * The probe's own sentence names its stages ("stages 1–2 passed"), and that sentence was true of
+     * a deployment whose product had never been configured. The legs above are what makes it true of
+     * *this* deployment, so the recorded detail says which of them were established: this row is what
+     * an operator reads when deciding whether the product signs people in.
+     */
+    const established: string[] = [];
+    if (secretVariable !== null) established.push(`${secretVariable} is applied`);
+    if (page !== null) established.push(`${page.path} offers the provider`);
+    return {
+      ok: true,
+      detail:
+        established.length === 0 ? probe.detail : `${established.join(', ')}; ${probe.detail}`,
+    };
   }
 
   /**

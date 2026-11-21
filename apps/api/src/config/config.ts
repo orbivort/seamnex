@@ -345,6 +345,32 @@ const EnvironmentSchema = z
     APT_MIRROR: z.string().default(''),
     NPM_REGISTRY: z.string().default(''),
     /**
+     * Registry mirrors the *Engine* pulls through, comma-separated, fastest first.
+     *
+     * `SEAMNEX_REGISTRY_MIRROR` in the stack reaches BuildKit only, because BuildKit reads its own
+     * config file; this one covers the other fetch path — `pull` through the Engine API and
+     * `compose up --quiet-pull` — which reads `daemon.json`, a host setting the platform cannot
+     * change without restarting the daemon. On a filtered network that gap is the whole cost of an
+     * `apply`: D06-01 spent hours on ~940 MB of `frappe/erpnext` at 50–100 KB/s while a mirror
+     * served the same blobs at ~470 KB/s.
+     *
+     * Each entry is a reference *prefix* (`<mirror>/<reference>`), and a successful pull is retagged
+     * onto the canonical name, so the digest pin, the compose file and the scan keep reading the
+     * registry reference. The pin remains the control: a mirror that serves different content
+     * produces a different digest and that attempt is refused. Empty keeps the registry the
+     * definition names, which is what CI does.
+     */
+    SEAMNEX_PULL_MIRROR: z.string().default(''),
+    /**
+     * The budget for one pull attempt before it is abandoned and the next mirror — or the registry
+     * itself — is tried.
+     *
+     * A budget against a *stalled* attempt, not a target: a 1 GB product image at ~450 KB/s needs
+     * ~35 min, so the default clears the slow-but-working case and still cuts a multi-hour crawl.
+     * `0` is refused: an unbounded pull is the defect this closes.
+     */
+    SEAMNEX_PULL_TIMEOUT_MS: z.coerce.number().int().min(60_000).max(7_200_000).default(3_600_000),
+    /**
      * How long the `verify` stage waits for containers to run and answer HTTP. A first install
      * creates its database schema inside the container (EspoCRM: tens of seconds), so a 60 s window
      * failed deployments that were still progressing — and the retry then passed, which is the worst
@@ -966,6 +992,12 @@ export type AppConfig = Readonly<
     readonly sourceAllowedHosts: readonly string[];
     /** Parsed `SEAMNEX_TRUSTED_REGISTRIES`: `registry` or `registry/namespace`, lower-cased. */
     readonly trustedRegistries: readonly string[];
+    /**
+     * Parsed `SEAMNEX_PULL_MIRROR`, in the operator's order, with any scheme removed: an image
+     * reference cannot carry one, so `https://mirror.example.com` and `mirror.example.com` name the
+     * same prefix and `.env` may reuse the value written for `SEAMNEX_REGISTRY_MIRROR`.
+     */
+    readonly pullMirrors: readonly string[];
     /** Parsed `SEAMNEX_SCAN_BLOCK_SEVERITIES`, upper-cased (`CRITICAL`, `HIGH`). */
     readonly scanBlockSeverities: readonly string[];
     /** Parsed `SEAMNEX_UPSTREAM_ALLOWED_HOSTS`, lower-cased. */
@@ -1062,6 +1094,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     trustedRegistries: parsed.data.SEAMNEX_TRUSTED_REGISTRIES.split(',')
       .map((entry) => entry.trim().toLowerCase().replace(/\/+$/, ''))
       .filter((entry) => entry.length > 0),
+    pullMirrors: parsed.data.SEAMNEX_PULL_MIRROR.split(',')
+      .map((entry) => normalisePullMirror(entry))
+      .filter((entry): entry is string => entry !== null),
     scanBlockSeverities: parsed.data.SEAMNEX_SCAN_BLOCK_SEVERITIES.split(',')
       .map((severity) => severity.trim().toUpperCase())
       .filter((severity) => severity.length > 0),
@@ -1095,6 +1130,31 @@ function resolveFromRepoRoot(value: string): string {
  */
 function trimTrailingSlash(value: string): string {
   return value.trim().replace(/\/+$/, '');
+}
+
+/**
+ * One pull mirror as a reference prefix, or `null` when the entry cannot be one.
+ *
+ * The scheme is dropped rather than validated: `https://mirror.example.com` is the shape an
+ * operator already wrote for `SEAMNEX_REGISTRY_MIRROR`, and copying it here must not produce a
+ * reference the daemon cannot parse (`https://mirror/repo` is not an image). A value that keeps a
+ * path is refused instead of truncated — the operator meant something the prefix rule cannot honour,
+ * and a silent rewrite would pull from a host they did not name.
+ */
+function normalisePullMirror(value: string): string | null {
+  const trimmed = value
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/\/+$/, '');
+  if (trimmed.length === 0) return null;
+  // A registry host: a name, optionally a port, and no path — anything with a `/` is a mistaken
+  // full reference, not a mirror.
+  const [host, port, ...rest] = trimmed.split(':');
+  if (host === undefined || host.length === 0 || rest.length > 0) return null;
+  if (!/^[a-z0-9.-]+$/.test(host)) return null;
+  if (port !== undefined && !/^\d{1,5}$/.test(port)) return null;
+  return trimmed;
 }
 
 /**
@@ -1186,6 +1246,9 @@ export function describeConfig(config: AppConfig): Record<string, unknown> {
     edgeTlsMode: config.SEAMNEX_EDGE_TLS_MODE,
     // Presence only: the address is the operator's, and the boot line is not a place to copy it.
     acmeContactConfigured: config.SEAMNEX_TRAEFIK_ACME_EMAIL !== '',
+    // The pull path is where a filtered network shows up, and a setting nothing reports is
+    // indistinguishable from one that was never read: a deployment then looks merely slow.
+    pullMirrors: config.pullMirrors,
   };
 }
 

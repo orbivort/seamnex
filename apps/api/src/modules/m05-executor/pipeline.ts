@@ -332,6 +332,24 @@ export class DeploymentPipeline implements OnModuleInit {
     if (state.source === undefined) throw new Error('render ran before resolve');
     await this.setState(state.instance.id, 'rendering');
 
+    /*
+     * 4D.1 — the identity client's secret is applied before the definition that carries it.
+     *
+     * `registerIdentity` runs in `integrate`, which is after `apply`, because the redirect URI it
+     * registers is derived from the route that stage materialises. A secret minted there could only
+     * reach a container on the *next* deployment, and ERPNext booted without one, took its documented
+     * fallback and never wrote a `Social Login Key` while every check stayed green. The value is put
+     * on the instance here instead, so the render in the next statement includes it and `apply`
+     * injects it; `registerIdentity` then registers that same value at the identity provider.
+     */
+    const secret = await this.integration.ensureIdentitySecret(state.instance.id, context.actorId);
+    if (secret.variable !== null && secret.status !== 'applied') {
+      await context.log(
+        'stdout',
+        `${secret.variable} ${secret.status === 'minted' ? 'generated and stored' : 'stored'} as the instance secret it is applied from`,
+      );
+    }
+
     const route = routeOf(state.instance, this.config.SEAMNEX_EDGE_TLS_MODE);
     const resources = resourcesOf(state.instance);
     const renderSet = await this.renderer.render({
@@ -1286,7 +1304,9 @@ export class DeploymentPipeline implements OnModuleInit {
     const images = await this.imagesForEntry(entryKey);
     for (const image of images) {
       await context.log('stdout', `pulling ${image.reference}`);
-      await this.docker.pull(image.reference, (line) => context.log('stdout', line));
+      await this.docker.pull(image.reference, (line) => context.log('stdout', line), {
+        expectedDigest: image.digest,
+      });
       // The pin is checked against what the pull produced, not against what the entry asked for: a
       // resolve job that reports "pulled" while the tag has moved is the failure this stage exists for.
       await this.assertPinnedDigest(image.reference, image.digest, context);
@@ -1323,7 +1343,14 @@ export class DeploymentPipeline implements OnModuleInit {
         'stdout',
         `${source.imageRef} is not present locally; pulling it to check the pin`,
       );
-      await this.docker.pull(source.imageRef, (line) => context.log('stdout', line));
+      /*
+       * The pin travels into the pull so a mirror that serves different content is refused *inside*
+       * the attempt: the next mirror, or the registry itself, is then tried instead of failing the
+       * deployment on the first mirror that answers.
+       */
+      await this.docker.pull(source.imageRef, (line) => context.log('stdout', line), {
+        expectedDigest: source.imageDigest,
+      });
     }
     await this.assertPinnedDigest(source.imageRef, source.imageDigest, context);
   }

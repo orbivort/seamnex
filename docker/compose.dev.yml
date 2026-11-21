@@ -88,6 +88,14 @@ x-api-environment: &api-environment
   APK_MIRROR: ${APK_MIRROR:-}
   APT_MIRROR: ${APT_MIRROR:-}
   NPM_REGISTRY: ${NPM_REGISTRY:-}
+  # Registry mirrors the *Engine* pulls through, fastest first. The `buildkit` service's list (see
+  # below) only covers a build's `FROM`; a deployment's own `pull` and `compose up --quiet-pull` go to
+  # the daemon, whose `daemon.json` this stack does not own. Empty pulls from the registry the
+  # definition names, which is what CI does.
+  SEAMNEX_PULL_MIRROR: ${SEAMNEX_PULL_MIRROR:-}
+  # One pull attempt's budget before the next mirror (or the registry) is tried. Supplied here as well
+  # as in the schema because an empty value would coerce to `0` and fail configuration at boot.
+  SEAMNEX_PULL_TIMEOUT_MS: ${SEAMNEX_PULL_TIMEOUT_MS:-3600000}
   # How long `verify` waits for containers *and* an HTTP answer. The 300 s default fits a product
   # that starts in seconds; a first ERPNext install migrates a few hundred doctypes and does not.
   # Global until the catalog can carry a per-entry override (docs/catalog-and-deployment-operations.md

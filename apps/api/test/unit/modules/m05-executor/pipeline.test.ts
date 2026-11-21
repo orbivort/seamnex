@@ -250,6 +250,12 @@ function setup(routes: readonly Route[] = [], configOverrides: Record<string, un
       gated: false,
       published: true,
     })),
+    // An entry that declares no identity-secret variable: the render stage asks, and the answer is
+    // that there is nothing to apply. A test that provisions one replaces this answer.
+    ensureIdentitySecret: vi.fn(async (): Promise<{ variable: string | null; status: string }> => ({
+      variable: null,
+      status: 'not-declared',
+    })),
     registerIdentity: vi.fn(async () => ({
       clientId: 'seamnex-crm',
       adapter: { adapter: 'oidc', syncState: 'applied' },
@@ -568,6 +574,56 @@ describe('render', () => {
       'stdout',
       'render set rs-000000000 (1 files, 0 published, 0 rewritten to expose)',
     );
+  });
+
+  it('applies the identity client secret before the definition that carries it', async () => {
+    /*
+     * The ordering is the defect: `registerIdentity` runs after `apply` because it needs the route,
+     * so a secret minted there reached no container on the deployment that needed it. ERPNext booted
+     * without `ERPNEXT_SSO_CLIENT_SECRET`, wrote no `Social Login Key`, and the platform still called
+     * it single sign-on.
+     */
+    const { integration, renderer, run } = setup([
+      [
+        'SELECT i.id, i.entry_key, i.slug, i.domain_route',
+        [{ ...INSTANCE_ROW, entry_key: 'D06-01' }],
+      ],
+    ]);
+    integration.ensureIdentitySecret.mockResolvedValueOnce({
+      variable: 'ERPNEXT_SSO_CLIENT_SECRET',
+      status: 'minted',
+    });
+    const context = ctx();
+
+    await run('deploy', 'resolve', context);
+    await run('deploy', 'render', context);
+
+    expect(integration.ensureIdentitySecret).toHaveBeenCalledWith(INSTANCE_ID, 'alice');
+    expect(integration.ensureIdentitySecret.mock.invocationCallOrder[0]).toBeLessThan(
+      renderer.render.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+    );
+    expect(context.log).toHaveBeenCalledWith(
+      'stdout',
+      'ERPNEXT_SSO_CLIENT_SECRET generated and stored as the instance secret it is applied from',
+    );
+  });
+
+  it('says nothing when the instance already carries the identity client secret', async () => {
+    const { integration, run } = setup();
+    integration.ensureIdentitySecret.mockResolvedValueOnce({
+      variable: 'ERPNEXT_SSO_CLIENT_SECRET',
+      status: 'applied',
+    });
+    const context = ctx();
+
+    await run('deploy', 'resolve', context);
+    await run('deploy', 'render', context);
+
+    const lines = vi
+      .mocked(context.log)
+      .mock.calls.map((call) => String(call[1]))
+      .filter((line) => line.includes('ERPNEXT_SSO_CLIENT_SECRET'));
+    expect(lines).toEqual([]);
   });
 
   it('prefers the recorded profile and falls back to the domain route and default resources', async () => {
@@ -1088,7 +1144,10 @@ describe('apply', () => {
 
     await h.run('deploy', 'apply', context);
 
-    expect(h.docker.pull).toHaveBeenCalledWith('repo/crm:7.4', expect.any(Function));
+    // The pin travels into the pull, so a mirror serving other content is refused inside the attempt.
+    expect(h.docker.pull).toHaveBeenCalledWith('repo/crm:7.4', expect.any(Function), {
+      expectedDigest: IMAGE_DIGEST,
+    });
     expect(context.log).toHaveBeenCalledWith(
       'stdout',
       `repo/crm:7.4 matches the pinned digest ${IMAGE_DIGEST}`,
@@ -2481,7 +2540,11 @@ describe('prepull', () => {
     await h.run('prepull', 'resolve', context);
 
     expect(context.log).toHaveBeenCalledWith('stdout', 'pulling repo/crm:7.4');
-    expect(h.docker.pull).toHaveBeenCalledWith('repo/crm:7.4', expect.any(Function));
+    expect(h.docker.pull).toHaveBeenCalledWith(
+      'repo/crm:7.4',
+      expect.any(Function),
+      expect.anything(),
+    );
   });
 
   it('pulls nothing for an entry that declares no image', async () => {
@@ -3253,7 +3316,11 @@ describe('prepull from a vendored tree', () => {
       );
 
       expect(h.docker.build).not.toHaveBeenCalled();
-      expect(h.docker.pull).toHaveBeenCalledWith('repo/none:1', expect.any(Function));
+      expect(h.docker.pull).toHaveBeenCalledWith(
+        'repo/none:1',
+        expect.any(Function),
+        expect.anything(),
+      );
     } finally {
       rmSync(join(mirror, 'D08-01'), { recursive: true, force: true });
     }
@@ -3273,7 +3340,11 @@ describe('prepull from a vendored tree', () => {
       );
 
       expect(h.docker.build).not.toHaveBeenCalled();
-      expect(h.docker.pull).toHaveBeenCalledWith('repo/map:1', expect.any(Function));
+      expect(h.docker.pull).toHaveBeenCalledWith(
+        'repo/map:1',
+        expect.any(Function),
+        expect.anything(),
+      );
     } finally {
       rmSync(join(mirror, 'D08-02'), { recursive: true, force: true });
     }
@@ -3293,7 +3364,11 @@ describe('prepull from a vendored tree', () => {
       );
 
       expect(h.docker.build).not.toHaveBeenCalled();
-      expect(h.docker.pull).toHaveBeenCalledWith('repo/db:11', expect.any(Function));
+      expect(h.docker.pull).toHaveBeenCalledWith(
+        'repo/db:11',
+        expect.any(Function),
+        expect.anything(),
+      );
     } finally {
       rmSync(join(mirror, 'D08-03'), { recursive: true, force: true });
     }

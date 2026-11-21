@@ -6,6 +6,7 @@
   "description": "Self-service dashboards and questions over the operator's own databases, so a report is a saved query rather than a spreadsheet mailed around.",
   "repoUrl": "https://github.com/metabase/metabase",
   "licenseId": "AGPL-3.0",
+  "licenseNote": "AGPL-3.0 covers the open-source edition this entry deploys; JWT/SAML SSO, sandboxing, audit logs and API keys are commercial Pro/Enterprise features and are not included.",
   "stack": "JVM / PostgreSQL",
   "imageRef": "metabase/metabase:v0.65.2",
   "imageDigest": "sha256:b62ac14872e9992d28218a2264d99484e0707064aae9fb594d8fbb3bc1518a9e",
@@ -17,9 +18,9 @@
     "checkedAt": "2026-11-01T01:00:00Z"
   },
   "guaranteeClass": "fa_gate",
-  "authMethod": "Proxy gate only - SSO is a paid tier; the free edition keeps its own login",
+  "authMethod": "Proxy gate only: JWT/SAML SSO is a Pro/Enterprise feature, so the open-source edition keeps its own login",
   "packaging": "compose",
-  "packagingSource": "vendored definition (platform/upstream/D11-01) pinning the published all-in-one image @ v0.65.2 with a pinned PostgreSQL sidecar",
+  "packagingSource": "vendored definition (platform/upstream/D11-01) pinning the published application image @ v0.65.2 with a pinned PostgreSQL 18 sidecar",
   "primaryInstanceId": null,
   "sharedWith": [],
   "httpPort": 3000,
@@ -37,8 +38,8 @@
     }
   ],
   "integration": {
-    "apiBaseUrl": "https://insights.seamnex.local/api",
-    "authMethod": "API key per user (session token in the free edition)",
+    "apiBaseUrl": "https://metabase.seamnex.local/api",
+    "authMethod": "Session token per user (POST /api/session); API keys are a Pro/Enterprise feature, so the open-source edition brokers a session instead",
     "guaranteeClassVerified": "fa_gate",
     "operationInventory": [
       {
@@ -58,18 +59,35 @@
         "method": "GET"
       },
       {
+        "id": "database.read",
+        "label": "Read connected databases",
+        "mode": "read",
+        "description": "List the databases the instance is connected to; a saved question is created against one of their ids.",
+        "path": "/api/database",
+        "method": "GET"
+      },
+      {
         "id": "question.write",
         "label": "Create a question",
         "mode": "write",
         "description": "Create a saved question against an existing database connection.",
         "path": "/api/card",
         "method": "POST"
+      },
+      {
+        "id": "alert.read",
+        "label": "Read alert state",
+        "mode": "read",
+        "description": "List the alerts attached to questions and dashboards, which the platform polls because the edition sends no outbound event.",
+        "path": "/api/alert",
+        "method": "GET"
       }
     ],
     "eventModes": [
       {
-        "mode": "none",
-        "label": "No event surface; dashboards and alerts are pulled"
+        "mode": "poll",
+        "label": "Poll dashboards, saved questions and alert state",
+        "minimumIntervalMinutes": 30
       }
     ],
     "credentialGranularity": "account",
@@ -85,6 +103,7 @@
     "team": "Data & Insights",
     "email": "data-ops@seamnex.local"
   },
-  "notes": "The sidecar PostgreSQL is required: Metabase's embedded H2 store corrupts under concurrent use and loses saved questions. MB_ENCRYPTION_SECRET_KEY and MB_SESSION_SECRET_KEY must be supplied, otherwise data-source credentials are stored unencrypted and session tokens are forgeable.",
+  "notes": "The sidecar PostgreSQL is required: Metabase's embedded H2 store corrupts under concurrent use and loses saved questions, so the definition runs `postgres:18-alpine` as service `db` and the entry's `database` dependency is served inside it rather than provisioned again. Three secrets have no usable image default and are declared as required: `MB_DB_PASS` (also the sidecar's `POSTGRES_PASSWORD`, so it cannot disagree with itself), `MB_ENCRYPTION_SECRET_KEY` (without it every connected data-source credential is stored in plaintext) and `MB_SESSION_SECRET_KEY` (without it the session keys in the application database are unsigned and anyone with read access can forge a session). `MB_SITE_URL` is derived from the instance's own route on every deploy, so a second instance gets its own links. `MB_LOAD_SAMPLE_CONTENT=false` keeps first boot from registering the demo `Examples` database and its sample questions; it is read once and removes nothing a previous boot installed. Back up `mb-pgdata`, mounted at `/var/lib/postgresql` (the PostgreSQL 18 image's declared VOLUME), which holds the whole application database. First run redirects to `/setup` until an administrator exists — account creation is a business step, not a deployment step.",
+  "deviation": "The class is `fa_gate`, and the gap is the edition rather than the definition: JWT/SAML SSO, sandboxing, audit logs and API keys are commercial Pro/Enterprise features, so the open-source image keeps its own login form and the edge's forward-auth gate protects the route without signing anyone in. The integration operations are therefore brokered with a session token minted per user against `/api/session`, and the session maximum of 480 minutes is the platform's policy, not the product's cookie lifetime. Itemised in platform/upstream/D11-01/README.md: the published artefact is the image `metabase/metabase`, because the repository ships a build Dockerfile and no Compose file, and the executor's BuildKit session is refused by the deploy-worker's socket proxy; the container healthcheck asks `/api/health` rather than the socket, because `/` answers `200` with the loading page while the schema is still migrating, and `ready` was measured on a deployment whose product still answered `503 initializing`.",
   "verifiedAt": "2026-11-01T01:00:00Z"
 }

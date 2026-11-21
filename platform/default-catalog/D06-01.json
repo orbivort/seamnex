@@ -17,7 +17,7 @@
     "checkedAt": "2026-11-01T01:00:00Z"
   },
   "guaranteeClass": "native",
-  "authMethod": "SAML 2.0 (Frappe social login)",
+  "authMethod": "OIDC (Frappe Social Login Key — Keycloak provider)",
   "packaging": "compose",
   "packagingSource": "vendored definition (platform/upstream/D06-01): frappe_docker compose layout with MariaDB, two Redis instances, nginx, gunicorn, socket.io, two RQ workers and the bench scheduler @ v16.53.0",
   "primaryInstanceId": null,
@@ -26,7 +26,7 @@
   "resources": {
     "cpu": 4,
     "memoryMb": 8192,
-    "diskMb": 40960
+    "diskMb": 81920
   },
   "dependencies": ["database", "cache", "worker"],
   "volumes": [
@@ -42,8 +42,8 @@
     }
   ],
   "integration": {
-    "apiBaseUrl": "https://erp.seamnex.local/api",
-    "authMethod": "API key and secret per user (Frappe token authentication)",
+    "apiBaseUrl": "https://erpnext.seamnex.local/api",
+    "authMethod": "OIDC (Frappe Social Login Key — Keycloak provider)",
     "guaranteeClassVerified": "native",
     "operationInventory": [
       {
@@ -103,6 +103,7 @@
     "team": "Finance & Operations",
     "email": "erp-ops@seamnex.local"
   },
-  "notes": "D05-01 (ERPNext Accounts) runs on this same deployment: one instance serves both domain entries, which is why S-2 counts deployments rather than entries. The first boot creates the site and installs the erpnext app, so a cold start can exceed the default verify window. Payroll is out of scope.",
+  "notes": "D05-01 (ERPNext Accounts) runs on this same deployment: one instance serves both domain entries, which is why S-2 counts deployments rather than entries. The first boot creates the site and installs the erpnext app, so a cold start can exceed the default verify window. Payroll is out of scope. The disk reservation is 80 GiB because the two volumes this deployment needs — `sites` (the bench site tree: uploaded files, and the backups `bench backup` writes beside them) and `db-data` (the ledger itself) — declare 60 GiB between them, and FR-1.9 refuses a deployment whose declared quotas exceed the reservation: the 40 GiB this entry carried could not have deployed at all. The site's `host_name` is derived from the instance's own route and re-applied on every start (`ERPNEXT_SITE_ORIGIN`), so moving an instance to another host does not leave every link it prints pointing at the previous one. Sign-in is wired by the first boot rather than left to an operator: Frappe keeps identity configuration in a `Social Login Key` row, which no environment variable can create, so the bootstrap writes that row from the `ERPNEXT_SSO_*` declaration on every start and re-applies `redirect_url` as the route moves. With `ERPNEXT_SSO_ENABLED=false`, or before a client secret exists, it writes nothing and password sign-in stays in place — the declared fallback.",
+  "deviation": "The sign-in path is wired, and four limits of it are worth stating where the entry shows them. (1) Protocol: Frappe v16 has no SAML support — the `Social Login Key` doctype has no SAML fields and `oauth2_logins.py` exposes only OAuth 2.0 entry points — so the class is backed by OpenID Connect against the realm's `Keycloak` provider, and the earlier `SAML 2.0` label was wrong. (2) PKCE: `frappe/utils/oauth.py` sends no `code_challenge` and stores no verifier; the flow is protected by a single-use, 600-second `state` instead, and the platform's client registration does not require PKCE, so the two agree — but a downgrade to a public client would not. (3) Roles: Frappe maps nothing from the token to a role. `Portal Settings.default_role` is the whole of the native mapping, applied on creation only, and it also leaves the user as a `Website User`, who cannot open `/app` (Desk) until someone sets `System User` and its roles by hand. Per-group mapping is possible only through the `on_social_login` hook, which is an app, not a configuration value — EspoCRM's `oidcGroupClaim`/`oidcSyncTeams` pair has no declarative equivalent here. (4) Single logout: Frappe implements neither back-channel logout nor RP-initiated logout, so `sloSupported` stays `false` and a sign-out at the platform leaves the ERPNext session alive until `session_expiry` expires it.",
   "verifiedAt": "2026-11-01T01:00:00Z"
 }

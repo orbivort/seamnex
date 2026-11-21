@@ -56,10 +56,26 @@ const DERIVATIONS: Readonly<Record<string, Derivation>> = {
   'D02-01': (context) => ({ MAUTIC_SITE_URL: origin(context) }),
 
   /**
-   * ERPNext. The value is a Frappe *site name* — bare host, no scheme, no port — and the product
-   * builds absolute URLs from it, so it has to be this instance's host and nothing else.
+   * ERPNext. Two values, because a Frappe site name and the base of the product's absolute URLs are
+   * different shapes:
+   *   - `ERPNEXT_SITE_NAME` is a *site name* — bare host, no scheme, no port. It is the directory
+   *     `sites/<name>`, the argument to `bench new-site` and nginx's `server_name`, so a URL there
+   *     fails the first boot instead of producing a site;
+   *   - `ERPNEXT_SITE_ORIGIN` is what `host_name` carries, and `host_name` is the base of every link
+   *     the product prints. It has to be the origin a browser can follow — the route's scheme and,
+   *     when the edge publishes a non-default one, its port. Deriving it from the site name is what
+   *     produced `http://<site>` on an edge serving `https` on `:8443`: a reset link nobody could open.
+   *
+   * The SSO client id is derived for the same reason as EspoCRM's: `registerIdentity` names the
+   * Keycloak client `seamnex-<slug>`, and the site's `Social Login Key` has to present that id. A
+   * copied default would point one instance at another instance's client — the registration would
+   * succeed and the first login would fail with `invalid_client`.
    */
-  'D06-01': (context) => ({ ERPNEXT_SITE_NAME: context.host }),
+  'D06-01': (context) => ({
+    ERPNEXT_SITE_NAME: context.host,
+    ERPNEXT_SITE_ORIGIN: origin(context),
+    ERPNEXT_SSO_CLIENT_ID: `seamnex-${context.slug}`,
+  }),
 
   /**
    * OpenProject. `OPENPROJECT_HOST__NAME` is copied into Rails' `config.hosts` and Apache's

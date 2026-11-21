@@ -615,6 +615,151 @@ describe('images', () => {
     expect(identity).toEqual({ ref: 'shop:1.2', digest: 'sha256:abc', id: 'sha256:1' });
   });
 
+  /**
+   * A filtered network is a transport problem, not a product one: `SEAMNEX_REGISTRY_MIRROR` reaches
+   * BuildKit only, so the Engine's own pull had no mirror at all and a deployment sat in the digest
+   * check for hours. These cases fix the three properties that make the prefix approach safe — the
+   * guard still judges the canonical reference, the pin still decides, and a dead mirror costs one
+   * attempt rather than the deployment.
+   */
+  it('pulls through a configured mirror and retags onto the canonical reference', async () => {
+    const guard = makeGuard();
+    h.pull.mockImplementation((_ref: string, callback: (error: null, stream: unknown) => void) => {
+      callback(null, {});
+    });
+    h.followProgress.mockImplementation((_stream, done: (error: Error | null) => void) => {
+      done(null);
+    });
+    h.image.inspect.mockResolvedValue({
+      Id: 'sha256:1',
+      RepoDigests: ['mirror.test/shop@sha256:abc'],
+    });
+    runMock.mockResolvedValue({ code: 0, stdout: '', stderr: '', truncated: false });
+    runOrThrowMock.mockClear();
+
+    const identity = await makeClient(
+      { pullMirrors: ['mirror.test'], SEAMNEX_PULL_TIMEOUT_MS: 5_000 },
+      guard,
+    ).pull('shop:1.2');
+
+    expect(h.pull).toHaveBeenCalledWith('mirror.test/shop:1.2', expect.any(Function));
+    expect(runOrThrowMock).toHaveBeenCalledWith(
+      'docker',
+      ['tag', 'mirror.test/shop:1.2', 'shop:1.2'],
+      expect.anything(),
+    );
+    // The mirror name is transport, not identity: `docker images` should show what will be started.
+    expect(runMock).toHaveBeenCalledWith(
+      'docker',
+      ['rmi', 'mirror.test/shop:1.2'],
+      expect.anything(),
+    );
+    expect(identity).toEqual({ ref: 'shop:1.2', digest: 'sha256:abc', id: 'sha256:1' });
+    // NFR-4.16 is about content, not transport: the allow-list saw the reference, never the prefix.
+    expect(guard.assertTrusted).toHaveBeenCalledWith('shop:1.2', 'pull');
+  });
+
+  it('tries the next mirror, then the registry, and says so in the job log', async () => {
+    const lines: string[] = [];
+    h.pull
+      .mockImplementationOnce((_ref: string, callback: (error: Error) => void) => {
+        callback(new Error('mirror a refused'));
+      })
+      .mockImplementationOnce((_ref: string, callback: (error: null, stream: unknown) => void) => {
+        callback(null, {});
+      });
+    h.followProgress.mockImplementation((_stream, done: (error: Error | null) => void) => {
+      done(null);
+    });
+    h.image.inspect.mockResolvedValue({ Id: 'sha256:1', RepoDigests: ['shop@sha256:abc'] });
+
+    await makeClient({ pullMirrors: ['a.test', 'b.test'], SEAMNEX_PULL_TIMEOUT_MS: 5_000 }).pull(
+      'shop:1.2',
+      async (line) => {
+        lines.push(line);
+      },
+    );
+
+    expect(h.pull.mock.calls.map((call) => String(call[0]))).toEqual([
+      'a.test/shop:1.2',
+      'b.test/shop:1.2',
+    ]);
+    expect(lines.some((line) => line.includes('a.test/shop:1.2 did not complete'))).toBe(true);
+  });
+
+  it('refuses a mirror that serves a different digest and falls through to the registry', async () => {
+    const pinned = `sha256:${'0'.repeat(64)}`;
+    const other = `sha256:${'1'.repeat(64)}`;
+    h.pull.mockImplementation((_ref: string, callback: (error: null, stream: unknown) => void) => {
+      callback(null, {});
+    });
+    h.followProgress.mockImplementation((_stream, done: (error: Error | null) => void) => {
+      done(null);
+    });
+    // identity + repoDigest per attempt: the mirror answers with other content, the registry with the pin.
+    h.image.inspect
+      .mockResolvedValueOnce({ Id: 'sha256:mirror', RepoDigests: [`mirror.test/shop@${other}`] })
+      .mockResolvedValueOnce({ Id: 'sha256:mirror', RepoDigests: [`mirror.test/shop@${other}`] })
+      .mockResolvedValue({ Id: 'sha256:1', RepoDigests: [`shop@${pinned}`] });
+    runMock.mockResolvedValue({ code: 0, stdout: '', stderr: '', truncated: false });
+
+    const identity = await makeClient({
+      pullMirrors: ['mirror.test'],
+      SEAMNEX_PULL_TIMEOUT_MS: 5_000,
+    }).pull('shop:1.2', undefined, { expectedDigest: pinned });
+
+    expect(h.pull.mock.calls.map((call) => String(call[0]))).toEqual([
+      'mirror.test/shop:1.2',
+      'shop:1.2',
+    ]);
+    expect(identity.digest).toBe(pinned);
+  });
+
+  it('fails the pin when the registry itself serves something else', async () => {
+    h.pull.mockImplementation((_ref: string, callback: (error: null, stream: unknown) => void) => {
+      callback(null, {});
+    });
+    h.followProgress.mockImplementation((_stream, done: (error: Error | null) => void) => {
+      done(null);
+    });
+    h.image.inspect.mockResolvedValue({
+      Id: 'sha256:1',
+      RepoDigests: [`shop@sha256:${'1'.repeat(64)}`],
+    });
+
+    await expect(
+      makeClient({ SEAMNEX_PULL_TIMEOUT_MS: 5_000 }).pull('shop:1.2', undefined, {
+        expectedDigest: `sha256:${'0'.repeat(64)}`,
+      }),
+    ).rejects.toMatchObject({ code: 'IMAGE_DIGEST_MISMATCH' });
+  });
+
+  it('abandons an attempt that outlives SEAMNEX_PULL_TIMEOUT_MS instead of waiting', async () => {
+    // Never answers — the shape of the D06-01 pull, where the daemon kept emitting progress lines.
+    h.pull.mockImplementation(() => undefined);
+
+    await expect(makeClient({ SEAMNEX_PULL_TIMEOUT_MS: 25 }).pull('shop:1.2')).rejects.toThrow(
+      /did not finish within/,
+    );
+  });
+
+  it('does not prefix a digest reference, which cannot be retagged', async () => {
+    const digest = `sha256:${'0'.repeat(64)}`;
+    h.pull.mockImplementation((_ref: string, callback: (error: null, stream: unknown) => void) => {
+      callback(null, {});
+    });
+    h.followProgress.mockImplementation((_stream, done: (error: Error | null) => void) => {
+      done(null);
+    });
+    h.image.inspect.mockResolvedValue({ Id: 'sha256:1', RepoDigests: [`shop@${digest}`] });
+
+    await makeClient({ pullMirrors: ['mirror.test'], SEAMNEX_PULL_TIMEOUT_MS: 5_000 }).pull(
+      `shop@${digest}`,
+    );
+
+    expect(h.pull.mock.calls.map((call) => String(call[0]))).toEqual([`shop@${digest}`]);
+  });
+
   it('forwards progress without waiting for the sink', async () => {
     const onProgress = vi.fn(async () => {
       throw new Error('sink failed');

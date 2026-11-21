@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { DockerModule } from '../../common/docker/docker.module';
 import { KeycloakModule } from '../../common/keycloak/keycloak.module';
 import { SecretsModule } from '../m15-secrets/secrets.module';
+import { RendererModule } from '../m03-renderer/renderer.module';
 import { INTEGRATION_SERVICE } from './integration.contract';
 import { PostgresIntegrationService } from './integration.service';
 import { SsoProbe } from './sso.probe';
@@ -16,7 +17,12 @@ import { TraefikRouteWriter } from './traefik.writer';
 @Module({
   // The admin client is provided by `KeycloakModule` and re-exported here, so the deployment path
   // and the identity mirror share one credential and one token cache.
-  imports: [DockerModule, KeycloakModule, SecretsModule],
+  //
+  // `RendererModule` is here for the one value this module has to *apply*, not merely store: the
+  // product's copy of the OIDC client secret is an `instance_env_value` row, and that table belongs to
+  // M03. Reaching it through its contract keeps the validation and the audit on the same write path as
+  // every other environment change.
+  imports: [DockerModule, KeycloakModule, SecretsModule, RendererModule],
   providers: [
     TraefikRouteWriter,
     SsoProbe,

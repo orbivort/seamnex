@@ -33,9 +33,12 @@
 #     used three ways by the image's nginx template (`server_name`, the
 #     `X-Frappe-Site-Name` upstream header, and `try_files /<site>/public/...`).
 #     A single-site ERPNext behind one platform route therefore pins it to
-#     `ERPNEXT_SITE_NAME`, and the operator keeps that value equal to the route
-#     host (`<slug>.<SEAMNEX_INGRESS_DOMAIN>`) so absolute URLs the product builds
-#     are the ones the browser can follow.
+#     `ERPNEXT_SITE_NAME`, kept equal to the route host
+#     (`<slug>.<SEAMNEX_INGRESS_DOMAIN>`).
+#   - the URLs the product *prints* are a different value: `host_name`, written
+#     here from `ERPNEXT_SITE_ORIGIN` on every start. A Frappe site name cannot
+#     carry a scheme or a port, so deriving the origin from it produced
+#     `http://<site>` on an edge that serves `https` on `:8443`.
 #   - every interpolation intended for the container shell is written `$$`, so
 #     Compose leaves it alone and the value is resolved from the *injected*
 #     environment at run time instead of being baked into the command line.
@@ -106,6 +109,7 @@ services:
         cd /home/frappe/frappe-bench
 
         SITE="$$ERPNEXT_SITE_NAME"
+        ORIGIN="$$ERPNEXT_SITE_ORIGIN"
         DB_HOST="$$ERPNEXT_DATABASE_HOST"
         DB_PORT="$$ERPNEXT_DATABASE_PORT"
         CACHE="$$ERPNEXT_REDIS_CACHE"
@@ -118,7 +122,11 @@ services:
         bench set-config -gp db_port "$$DB_PORT"
         bench set-config -g redis_cache "$$CACHE"
         bench set-config -g redis_queue "$$QUEUE"
-        bench set-config -g redis_socketio "$$QUEUE"
+        # socket.io pub/sub rides the cache instance, which is where Frappe's own fallback puts it
+        # (`redis_socketio` defaults to `redis_cache`). Pointing it at the queue instance instead made
+        # a queue purge drop every open realtime channel, and contradicted what the catalog declares
+        # the cache URL is used for.
+        bench set-config -g redis_socketio "$$CACHE"
         bench set-config -gp socketio_port 9000
 
         if [ ! -f "sites/$$SITE/.seamnex-ready" ]; then
@@ -137,10 +145,207 @@ services:
             bench --site "$$SITE" install-app erpnext
             echo "$$SITE" > sites/currentsite.txt
           fi
-          bench --site "$$SITE" set-config host_name "http://$$SITE"
           touch "sites/$$SITE/.seamnex-ready"
           echo "[seamnex] site $$SITE ready"
         fi
+
+        # The site's database account is converged for the address this container has *now*.
+        #
+        # `bench new-site` does not create `'user'@'%'`: `DbManager.create_user` defaults the host to
+        # `SELECT user()` of the connection that ran it, which is this container's address on the
+        # instance network. A container that is recreated — reconfigure, upgrade, a route change —
+        # gets a new address, and from then on every request answers
+        # `Access denied for user '…'@'…'`, because nothing re-runs `bench new-site` while
+        # `.seamnex-ready` exists and the account is bound to an address nothing answers from any
+        # more. It surfaced the first time this instance was reconfigured after deployment, as a
+        # backend that never became healthy.
+        #
+        # Frappe's own privilege list is `ALL PRIVILEGES` on the site's own schema whenever `rds_db`
+        # is off, so this grants exactly what the installer would have; the account keeps its
+        # generated password, read back from `site_config.json`.
+        if [ -f "sites/$$SITE/site_config.json" ]; then
+          env/bin/python - <<'PY'
+        import json
+        import os
+
+        import MySQLdb
+
+        site = os.environ["ERPNEXT_SITE_NAME"]
+        config = json.load(
+            open(os.path.join("/home/frappe/frappe-bench/sites", site, "site_config.json"))
+        )
+        user = config["db_user"]
+        database = config["db_name"]
+        connection = MySQLdb.connect(
+            host=config["db_host"],
+            port=int(config.get("db_port") or 3306),
+            user="root",
+            passwd=os.environ.get("ERPNEXT_DATABASE_ROOT_PASSWORD", ""),
+        )
+        try:
+            cursor = connection.cursor()
+            cursor.execute("SELECT SUBSTRING_INDEX(USER(), '@', -1)")
+            host = cursor.fetchone()[0]
+            cursor.execute(
+                "CREATE USER IF NOT EXISTS %s@%s IDENTIFIED BY %s", (user, host, config["db_password"])
+            )
+            cursor.execute(f"GRANT ALL PRIVILEGES ON `{database}`.* TO %s@%s", (user, host))
+            connection.commit()
+            print(f"[seamnex] database account {user}@{host} converged")
+        finally:
+            connection.close()
+        PY
+        fi
+
+        # Outside the guard on purpose. `host_name` is site-scoped, not global, and it is the base of
+        # every absolute URL the product prints; written once on first boot it kept the origin of the
+        # day the site was created, so a route change left reset links, notification bodies and export
+        # downloads pointing at a host the browser no longer reaches.
+        bench --site "$$SITE" set-config host_name "$$ORIGIN"
+
+        # Native single sign-on (FR-2.16). Frappe keeps its identity-provider settings in a
+        # `Social Login Key` row on the site, not in the environment, so unlike EspoCRM's
+        # `ESPOCRM_CONFIG_*` variables nothing the platform injects reaches the product by itself:
+        # this script is the only thing that can apply the declaration. It runs on every start, so a
+        # route change moves `redirect_url` with the site and an operator's change reaches a running
+        # instance at its next restart.
+        #
+        # Full source, not `bench execute`: the client secret arrives in the environment, and passing
+        # it through `--kwargs` would mean quoting it into a shell string. The site context Frappe
+        # needs is what `frappe.init` + `frappe.connect` set up, and the writes are ordinary
+        # document saves, so no schema or permission bypass is involved beyond `ignore_permissions`
+        # (the script runs as `Administrator` with no session).
+        env/bin/python - <<'PY'
+        import json
+        import os
+        import sys
+
+        import frappe
+
+        def env(name, default=None):
+            value = os.environ.get(name, default)
+            return value.strip() if isinstance(value, str) else value
+
+        # Fallback first, and deliberately before anything touches the database: with the switch off,
+        # or with no secret to present, the site is left exactly as the installer made it. A
+        # half-configured provider is worse than none — Frappe would render a button that fails at
+        # the provider, and the operator would lose the password form they still need.
+        if env("ERPNEXT_SSO_ENABLED", "false").lower() != "true":
+            sys.exit(0)
+        secret = env("ERPNEXT_SSO_CLIENT_SECRET", "")
+        if not secret:
+            sys.exit(0)
+
+        site = env("ERPNEXT_SITE_NAME")
+        origin = env("ERPNEXT_SITE_ORIGIN")
+
+        # Frappe resolves its *file* logging relative to the process working directory:
+        # `create_handler` opens `../logs/<module>.log`. `bench` gets away with that by moving into
+        # `sites/` first, which is why the CLI in the block above is fine. This heredoc inherits the
+        # image's working directory (`/home/frappe/frappe-bench`), where `../logs` is `/home/frappe/logs`
+        # — a directory the image does not have, so the first `frappe.connect()` raised
+        # `FileNotFoundError: '/home/frappe/logs/database.log'` and the container never became healthy.
+        # Nothing here needed the database, so the whole block was latent until the secret started
+        # arriving: the failure appeared the first time a site was actually configured.
+        sites_path = "/home/frappe/frappe-bench/sites"
+        os.chdir(sites_path)
+
+        frappe.init(site=site, sites_path=sites_path)
+        frappe.connect()
+        frappe.set_user("Administrator")
+
+        try:
+            # `Keycloak` is a first-class provider option in the doctype, so the callback Frappe will
+            # be sent back to is `login_via_keycloak` — the same path the platform registered.
+            values = {
+                "enable_social_login": 1,
+                "client_id": env("ERPNEXT_SSO_CLIENT_ID"),
+                "client_secret": secret,
+                "base_url": env("ERPNEXT_SSO_BASE_URL"),
+                "authorize_url": env("ERPNEXT_SSO_AUTHORIZE_URL"),
+                "access_token_url": env("ERPNEXT_SSO_TOKEN_URL"),
+                "api_endpoint": env("ERPNEXT_SSO_USERINFO_URL"),
+                # Absolute, and built from the same two pieces the platform used for the registered
+                # redirect URI: the route origin and this path. Relative would make Frappe join it
+                # onto `host_name` at request time, a third derivation that can disagree.
+                "redirect_url": origin
+                + "/api/method/frappe.integrations.oauth2_logins.login_via_keycloak",
+                "user_id_property": env("ERPNEXT_SSO_USER_ID_PROPERTY", "sub"),
+                # `response_type` is not optional: rauth's `get_authorize_url` adds only `client_id`,
+                # so whatever this JSON omits is simply absent from the URL the browser follows.
+                # Without `code`, Keycloak answers "Invalid parameter: response_type" and the button
+                # leads to an error page instead of a login. Frappe's own Keycloak template carries
+                # the same pair.
+                "auth_url_data": json.dumps(
+                    {
+                        "response_type": "code",
+                        "scope": env("ERPNEXT_SSO_SCOPE", "openid profile email"),
+                    }
+                ),
+                "sign_ups": env("ERPNEXT_SSO_SIGN_UPS", "Allow"),
+                "show_in_resource_metadata": 1,
+                # The three endpoint fields above are absolute, so no base is prepended.
+                "custom_base_url": 0,
+            }
+
+            # The document must be *named* `keycloak`, and that is a property of the provider, not a
+            # cosmetic choice. Frappe's `login_via_keycloak` entry point calls
+            # `login_via_oauth2("keycloak", …)`, and everything downstream resolves the provider by the
+            # document name: `get_oauth2_providers()` is keyed by it, and `get_oauth_keys`,
+            # `get_redirect_uri`, `provider_allows_signup` and `update_oauth_user` all look that key up
+            # in the database. `autoname` scrubs `provider_name`, so `provider_name = "Keycloak"` is
+            # what produces the name `keycloak`. The previous `"seamnex"` produced a document the
+            # sign-in button could reach and the callback could not: the browser came back with a code
+            # and the callback raised `KeyError: 'keycloak'`.
+            #
+            # A row left by that version is removed, not repaired: `provider_name` and
+            # `social_login_provider` are `set_only_once`, so an existing document cannot be corrected
+            # in place. Nothing is lost by deleting it — this bootstrap owns every field of the row.
+            for legacy in frappe.get_all(
+                "Social Login Key",
+                filters={"social_login_provider": "Keycloak"},
+                pluck="name",
+            ):
+                if legacy != "keycloak":
+                    frappe.delete_doc(
+                        "Social Login Key", legacy, force=True, ignore_permissions=True
+                    )
+
+            if frappe.db.exists("Social Login Key", "keycloak"):
+                doc = frappe.get_doc("Social Login Key", "keycloak")
+                doc.update(values)
+                doc.save(ignore_permissions=True)
+            else:
+                doc = frappe.new_doc("Social Login Key")
+                doc.update(values)
+                doc.provider_name = "Keycloak"
+                doc.social_login_provider = "Keycloak"
+                doc.insert(ignore_permissions=True)
+
+            # Session handling: `session_expiry` is the only session-length setting Frappe has, and
+            # the entry's `sessionMaxMinutes` claim is only true while it agrees with this value.
+            frappe.db.set_single_value(
+                "System Settings", "session_expiry", env("ERPNEXT_SESSION_EXPIRY", "08:00:00")
+            )
+            # Fallback behaviour: the password form stays unless the operator turned it off, so an
+            # IdP outage never strands the administrator who has to repair the site.
+            frappe.db.set_single_value(
+                "System Settings",
+                "disable_user_pass_login",
+                1 if env("ERPNEXT_SSO_DISABLE_LOCAL_LOGIN", "false").lower() == "true" else 0,
+            )
+            # Role mapping — the single hook Frappe offers. It is applied when the login flow creates
+            # the user, never afterwards, so a change here reaches only accounts created from now on.
+            role = env("ERPNEXT_SSO_DEFAULT_ROLE", "")
+            if role:
+                frappe.db.set_single_value("Portal Settings", "default_role", role)
+
+            frappe.db.commit()
+            frappe.clear_cache()
+            print("[seamnex] social login key applied for " + site)
+        finally:
+            frappe.destroy()
+        PY
 
         exec /usr/local/bin/start.sh
     healthcheck:

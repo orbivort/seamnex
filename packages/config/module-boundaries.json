@@ -132,7 +132,8 @@
       "name": "Integration",
       "dir": "m07-integration",
       "owns": ["idp_client", "instance_route", "integration_check"],
-      "mayImport": ["M05", "M15", "M23"],
+      "$comment": "M03 is the edge that makes a client secret real: the product reads it from `instance_env_value`, which M03 owns, so `ensureIdentitySecret` writes through M03's contract instead of this module's SQL.",
+      "mayImport": ["M05", "M15", "M23", "M03"],
       "reads": [
         "instance",
         "integration_metadata",

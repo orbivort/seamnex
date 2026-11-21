@@ -46,6 +46,19 @@ the running container, and an export, backup and restore path that proves what i
 
 ### Added
 
+- **ERPNext signs people in through the platform identity provider** (`FR-2.16`, `FR-1.11`) — the
+  product's own SSO is a `Social Login Key` row, which no environment variable can create, so the
+  last step of its bootstrap writes that row from thirteen declared values and re-applies it on every
+  start: client id derived as `seamnex-<slug>`, secret minted by the platform, applied to the instance
+  before its definition is rendered and registered at the identity provider as the same value, the
+  three realm endpoints split between the browser leg (published origin) and the server
+  leg (instance network), `sub` as the account subject, `sign_ups` for provisioning,
+  `Portal Settings.default_role` for the one role a social login can confer, and `session_expiry`
+  set to the eight hours the entry claims. With `ERPNEXT_SSO_ENABLED=false`, or before a client
+  secret exists, it writes nothing and password sign-in stays — the declared fallback. The entry's
+  `SAML 2.0` label was wrong: Frappe v16 has no SAML, no PKCE, no OIDC discovery, no claim-to-role
+  mapping and no back-channel logout, and each of those limits is now stated on the entry rather
+  than implied by the class.
 - **A host install is one idempotent command** (`NFR-6.2`, `NFR-6.3`, `S-9`, `AC-19`, `ADR-BE-35`) —
   `pnpm bootstrap` installs, brings the stack up, seeds the identity mirror and the catalogue and
   checks `/api/v1/readyz`; `pnpm bootstrap:check` repeats the checks read-only. It never rotates a
@@ -200,6 +213,28 @@ the running container, and an export, backup and restore path that proves what i
 
 ### Fixed
 
+- **ERPNext's single sign-on is the flow the portal claims** (`FR-2.16`, `NFR-4.17`) — four defects
+  made the entry a label rather than a working path, and the platform's own login check passed through
+  all of them: the minted client secret was written to the secret store but never to
+  `instance_env_value`, which is the only thing the renderer and the executor resolve, and it was
+  minted in `integrate` — after `apply` — so it could not reach a container at all. The site therefore
+  booted without `ERPNEXT_SSO_CLIENT_SECRET`, took its documented fallback, wrote no
+  `Social Login Key`, and offered a password form while the portal showed "Single sign-on".
+  `ensureIdentitySecret` now puts that value on the instance before the render set is produced, so the
+  first `apply` carries it. The `Social Login Key` was also named `seamnex`, and Frappe's
+  `login_via_keycloak` resolves the provider by _document name_, so the callback would have raised
+  `KeyError: 'keycloak'` after the browser returned with a code; the row is now created as
+  `Keycloak` (name `keycloak`) and a row left by the old name is removed. The provider's
+  `auth_url_data` omitted `response_type`, which rauth does not add, so the button pointed at an
+  authorization request Keycloak rejects. And `sso_login` now reads the product's own `/login` page
+  for the provider entry point and the credential's applied row, because a check that only asks the
+  identity provider cannot fail when the product was never configured. Two defects in the same
+  bootstrap were latent until the secret started arriving, because the block that touches the site's
+  database had never run: Frappe resolves file logging relative to the process working directory, so
+  `frappe.connect()` raised `FileNotFoundError: '/home/frappe/logs/database.log'` and the backend
+  never became healthy; and `bench new-site` binds the site's MariaDB account to the _address of the
+  container that ran it_, so the first recreate would have answered `Access denied`. The script now
+  runs from `sites/` and converges that account for the current address on every start.
 - **A cron expression the engine cannot compile is refused where it is typed** (`FR-5.4`) — only an
   empty one was checked, so `61 * * * *` saved, validated clean, then failed at activation with n8n's
   bare `400`, reported as a missing platform adapter. The trigger panel and `validate()` now share one
@@ -253,6 +288,13 @@ the running container, and an export, backup and restore path that proves what i
 - **An upgrade applies the version the operator confirmed** (`FR-1.7`, `AC-06`) — the version travels
   from the dialog into the job, is re-asserted against the pin, and is named in the audit events and
   in what the instance reports as running.
+- **An `apply` no longer waits hours on a filtered registry path** (`FR-1.5`, `NFR-4.16`) — the
+  Engine's own pulls had no mirror at all: `SEAMNEX_REGISTRY_MIRROR` reaches BuildKit only, so D06-01
+  spent hours on ~940 MB of `frappe/erpnext` at 50–100 KB/s inside its digest check. `SEAMNEX_PULL_MIRROR`
+  names mirrors for that path — the reference is prefixed, then retagged onto the canonical name — and
+  the pinned digest still decides: a mirror that serves other content is refused and the next attempt
+  runs. Every attempt is bounded by `SEAMNEX_PULL_TIMEOUT_MS`, the registry stays the last attempt, and
+  each fallback is a line in the job log.
 
 ### Internal
 

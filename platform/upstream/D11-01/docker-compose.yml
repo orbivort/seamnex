@@ -14,8 +14,11 @@
 # Deliberate choices, each recorded rather than hidden:
 #   1. the image is pinned to a full version — the platform refuses a floating tag before apply
 #      (compose policy `unpinned_image`);
-#   2. `ports: 3000:3000` documents the image's own listening port. The policy rewrites it to
-#      `expose: ['3000']` and the catalogue `httpPort` is therefore **3000**, the container port;
+#   2. `expose: ['3000']` names the image's own listening port and never a host port. The platform
+#      rewrites a `ports:` mapping into this form and asserts zero published ports immediately before
+#      apply; writing it directly keeps a manual `docker compose up` from binding a plain-HTTP
+#      listener outside the edge, and leaves the reviewed file identical to the applied document. The
+#      catalogue `httpPort` is therefore **3000**, the container port;
 #   3. the application database is the pinned PostgreSQL sidecar, not the image's embedded H2 file.
 #      Upstream restricts H2 to evaluation: it corrupts under the concurrent access a BI tool
 #      generates and there is no repair path. `db` is a real service, so the entry's `database`
@@ -29,14 +32,21 @@
 #   6. the healthcheck asks the application, not the socket. `/api/health` answers `200` only once
 #      Jetty has the application wired; a TCP probe on 3000 reports healthy while the first-boot
 #      migrations are still running. `start_period: 300s` covers a first boot on a 1 vCPU shape.
+#
+# The project name is overridden by the platform: the renderer writes `name: seamnex-<slug>` and the
+# executor passes `--project-name`, so two instances of this product cannot share a network or a
+# volume. This value only names an ad-hoc stack started by hand.
 name: metabase
 
 services:
   metabase:
     image: metabase/metabase:v0.65.2
     environment:
-      # Absolute URLs for every link the product generates; must equal the published route.
-      MB_SITE_URL: ${MB_SITE_URL:-http://insights.localhost:8020}
+      # Absolute base for every link the product generates (resets, subscriptions, alerts). The
+      # platform interpolates it from `platform.env`: the value is derived from the instance's own
+      # route on every deploy, so the fallback below only serves a stack started by hand and is kept
+      # equal to the declaration's default in catalog/env/D11-01.json rather than to one route.
+      MB_SITE_URL: ${MB_SITE_URL:-https://metabase.seamnex.localhost:8443}
       # PostgreSQL, never the embedded H2 (see note 3 above).
       MB_DB_TYPE: postgres
       MB_DB_HOST: ${MB_DB_HOST:-db}
@@ -59,9 +69,11 @@ services:
       MB_LOAD_SAMPLE_CONTENT: ${MB_LOAD_SAMPLE_CONTENT:-false}
       # The image's own listening port; `expose` below must agree with it and with `httpPort`.
       MB_JETTY_PORT: '3000'
-    ports:
-      # Rewritten to `expose: ['3000']` by the platform: an instance never publishes a host port.
-      - '3000:3000'
+    # The product's own port, inside the container. The platform never publishes a host port and
+    # rewrites `ports:` into this form anyway; writing `expose` directly keeps the reviewed file and
+    # the applied document identical.
+    expose:
+      - '3000'
     depends_on:
       db:
         condition: service_healthy
@@ -104,6 +116,12 @@ services:
       timeout: 5s
       retries: 12
       start_period: 60s
+    # `SIGTERM` is PostgreSQL's *smart* shutdown: it waits for every client to disconnect, and
+    # Metabase keeps pooled connections open, so the default 10 s grace ends in `SIGKILL` and the next
+    # start pays for crash recovery. `SIGINT` is the fast shutdown, and the longer grace leaves room
+    # for its final checkpoint.
+    stop_signal: SIGINT
+    stop_grace_period: 60s
     restart: unless-stopped
 
 volumes:

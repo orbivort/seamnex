@@ -7,6 +7,7 @@ import { parseAllDocuments } from 'yaml';
 import { requireAdapters } from '../adapters';
 import { run, runOrThrow, spawnProcess } from '../exec/exec';
 import { AppError } from '../problem/app-error';
+import { digestPinVerdict } from './digest-pin';
 import {
   IMAGE_TRUST_GUARD,
   type ImageTrustGuard,
@@ -89,6 +90,18 @@ const BUILDKIT_BUILDER = 'seamnex-buildkit';
  * did not forward would be the same lie in a friendlier font.
  */
 const BUILD_MIRROR_ARGS = ['APK_MIRROR', 'APT_MIRROR', 'NPM_REGISTRY'] as const;
+
+/**
+ * The pull budget when the config object does not carry one.
+ *
+ * The schema defaults it to the same hour, so this is a guard for a partially built config (a test,
+ * a script) rather than a second setting: `setTimeout(undefined)` would expire the attempt instantly
+ * and turn every pull into a timeout.
+ */
+const DEFAULT_PULL_TIMEOUT_MS = 3_600_000;
+
+/** One fetch attempt: the reference the daemon is asked for, and the mirror it came from or `null`. */
+type PullAttempt = { readonly reference: string; readonly mirror: string | null };
 
 /**
  * ADR-BE-12 D2 — Docker access.
@@ -418,32 +431,166 @@ export class DockerEngineClient {
       });
   }
 
-  async pull(ref: string, onProgress?: (line: string) => Promise<void>): Promise<ImageIdentity> {
-    // NFR-4.16 at the last possible moment: pre-flight can be minutes old, and a queued job reaches
-    // this call without re-reading the plan. The guard is the control; the blocker is the advice.
+  /**
+   * Fetch an image, trying the configured pull mirrors before the registry the reference names.
+   *
+   * NFR-4.16 at the last possible moment: pre-flight can be minutes old, and a queued job reaches
+   * this call without re-reading the plan. The guard is the control, and it judges the *canonical*
+   * reference — a mirror is a transport here, never a trusted registry of its own.
+   *
+   * The mirror list exists because the two fetch paths are not the same setting:
+   * `SEAMNEX_REGISTRY_MIRROR` reaches BuildKit only, and the Engine's own `registry-mirrors` lives in
+   * `daemon.json`, which this process cannot change. On a filtered network that left every pull at
+   * 50–100 KB/s while a mirror served the same blobs at ~470 KB/s, and a deployment sat in a digest
+   * check for hours.
+   *
+   * Order is the operator's ranking and the registry is always last, so a mirror that is down costs
+   * one timeout and never a deployment. A mirror that serves different content fails the digest
+   * check and the next attempt runs; failing the pin on the *final* attempt is what ends the pull.
+   */
+  async pull(
+    ref: string,
+    onProgress?: (line: string) => Promise<void>,
+    options: { readonly expectedDigest?: string | null } = {},
+  ): Promise<ImageIdentity> {
     await this.assertTrustedImage(ref, 'pull');
     this.guard();
+
+    const expected = options.expectedDigest ?? null;
+    /*
+     * A digest reference is not prefixed: `docker tag` refuses a digest as the source, and the name
+     * has no tag to retag onto anyway, so a mirror attempt could only fail. It is also already exact —
+     * the pull asks for one manifest, not a moving tag.
+     */
+    const mirrors = ref.includes('@sha256:') ? [] : (this.config.pullMirrors ?? []);
+    const attempts: readonly PullAttempt[] = [
+      ...mirrors.map((mirror) => ({ reference: `${mirror}/${ref}`, mirror })),
+      { reference: ref, mirror: null },
+    ];
+
+    let lastFailure: unknown = null;
+    for (const [index, attempt] of attempts.entries()) {
+      if (attempt.mirror !== null) {
+        await this.note(onProgress, `mirror ${attempt.mirror}: ${ref}`);
+      }
+      try {
+        await this.pullAttempt(attempt.reference, ref, onProgress);
+        if (attempt.mirror !== null) await this.retag(attempt.reference, ref);
+        const identity = await this.imageIdentity(ref);
+        if (expected !== null) {
+          const verdict = digestPinVerdict({
+            mode: 'registry',
+            reference: ref,
+            expected,
+            observed: await this.repoDigest(ref),
+          });
+          if (!verdict.ok) {
+            throw new AppError({
+              code: 'IMAGE_DIGEST_MISMATCH',
+              detail: verdict.detail,
+              remediation: verdict.remediation,
+            });
+          }
+        }
+        return identity;
+      } catch (error) {
+        lastFailure = error;
+        const next = attempts[index + 1];
+        if (next === undefined) break;
+        await this.note(
+          onProgress,
+          `${attempt.reference} did not complete (${messageOf(error)}); trying ${next.reference}`,
+        );
+      }
+    }
+    throw lastFailure instanceof Error ? lastFailure : new Error(messageOf(lastFailure));
+  }
+
+  /**
+   * One pull attempt, bounded by `SEAMNEX_PULL_TIMEOUT_MS`.
+   *
+   * `dockerode.pull` has no timeout of its own, so a daemon that is receiving 50 KB/s holds the job
+   * open for as long as the job stays cancellable — hours, in the D06-01 case, with a "Downloading"
+   * line every 100 ms that looks like progress. Dropping the response stream is the only handle this
+   * process has on the daemon's copy of the transfer; what matters is that the stage does not wait
+   * for it.
+   */
+  private async pullAttempt(
+    reference: string,
+    label: string,
+    onProgress?: (line: string) => Promise<void>,
+  ): Promise<void> {
+    const timeoutMs = this.config.SEAMNEX_PULL_TIMEOUT_MS ?? DEFAULT_PULL_TIMEOUT_MS;
     await new Promise<void>((resolve, reject) => {
-      void this.docker.pull(ref, (error: Error | null, stream: NodeJS.ReadableStream) => {
+      let settled = false;
+      let stream: NodeJS.ReadableStream | null = null;
+
+      function finish(error: Error | null): void {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (error === null) resolve();
+        else reject(error);
+      }
+
+      const timer = setTimeout(() => {
+        (stream as { destroy?: () => void } | null)?.destroy?.();
+        finish(
+          new AppError({
+            code: 'ADAPTER_UNAVAILABLE',
+            detail: `the pull of ${label} did not finish within ${Math.round(timeoutMs / 1000)} s (SEAMNEX_PULL_TIMEOUT_MS).`,
+            remediation:
+              'Check the registry or mirror this host reaches; the next attempt starts immediately.',
+          }),
+        );
+      }, timeoutMs);
+
+      void this.docker.pull(reference, (error: Error | null, response: NodeJS.ReadableStream) => {
+        stream = response ?? null;
         if (error !== null) {
-          reject(error);
+          finish(error);
           return;
         }
         this.docker.modem.followProgress(
-          stream,
-          (progressError: Error | null) => {
-            if (progressError !== null) reject(progressError);
-            else resolve();
-          },
+          response,
+          (progressError: Error | null) => finish(progressError),
           (event: { status?: string; id?: string }) => {
             if (onProgress !== undefined && typeof event.status === 'string') {
-              void onProgress(`${event.id ?? ref}: ${event.status}`).catch(() => undefined);
+              void onProgress(`${event.id ?? label}: ${event.status}`).catch(() => undefined);
             }
           },
         );
       });
     });
-    return this.imageIdentity(ref);
+  }
+
+  /**
+   * Name a mirror-pulled image with the reference the deployment uses, and drop the transport tag.
+   *
+   * The digest travels with the image, so retagging keeps the pin meaningful: `repoDigest` reports
+   * the mirror-qualified digest the daemon recorded, and it is the same content-addressed value the
+   * entry pins. Untagging the mirror name afterwards keeps `docker images` showing what the platform
+   * will actually start, and is best effort — the canonical tag already exists by then.
+   */
+  private async retag(from: string, to: string): Promise<void> {
+    await runOrThrow('docker', ['tag', from, to], {
+      env: this.dockerEnv(),
+      timeoutMs: 60_000,
+    });
+    try {
+      await run('docker', ['rmi', from], { env: this.dockerEnv(), timeoutMs: 60_000 });
+    } catch {
+      // Best effort: the canonical tag exists by now, so a refused untag changes nothing.
+    }
+  }
+
+  /** A line the job log should carry; a sink that fails must never fail the pull. */
+  private async note(
+    onProgress: ((line: string) => Promise<void>) | undefined,
+    line: string,
+  ): Promise<void> {
+    if (onProgress === undefined) return;
+    await onProgress(line).catch(() => undefined);
   }
 
   async imageIdentity(ref: string): Promise<ImageIdentity> {
@@ -894,6 +1041,11 @@ function isAlreadyExists(error: unknown): boolean {
 
 function isNotRunning(error: unknown): boolean {
   return errorStatus(error) === 304 || errorStatus(error) === 409;
+}
+
+/** One sentence for a job log: an `AppError` carries its own, anything else its message. */
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function isAlreadyStarted(error: unknown): boolean {
