@@ -5,6 +5,7 @@ import type {
   BreakGlassSession,
   CapacitySnapshot,
   CatalogEntry,
+  CatalogRepositoryView,
   ContainerStatus,
   DriftRecord,
   DsarRequest,
@@ -47,6 +48,7 @@ import { clearScheduledTimers } from './timers';
 import { AUDIT_EVENTS, AUDIT_ZERO_HASH, auditHashFor, auditProof } from './fixtures/audit';
 import { BACKUPS, RESTORE_DRILLS, RESTORE_RUNS } from './fixtures/backups';
 import { CATALOG_BY_KEY, CATALOG_ENTRIES, SCAFFOLD_DRAFTS } from './fixtures/catalog';
+import { CATALOG_REPOSITORY } from './fixtures/catalog-repository';
 import { ENV_PROFILES } from './fixtures/env-schema';
 import { CAPACITY, buildCapacity } from './fixtures/capacity';
 import { at } from './fixtures/context';
@@ -92,6 +94,8 @@ import { WORKFLOW_RUNS } from './fixtures/workflow-runs';
 export type MockState = {
   scenario: Scenario;
   catalog: CatalogEntry[];
+  /** ADR-BE-42: the checkout the console reports and the sync action rewrites. */
+  catalogRepository: CatalogRepositoryView;
   instances: Instance[];
   instanceDetails: Record<string, InstanceDetail>;
   containers: Record<string, ContainerStatus[]>;
@@ -154,6 +158,7 @@ function buildBase(): MockState {
   return {
     scenario: DEFAULT_SCENARIO,
     catalog: clone(CATALOG_ENTRIES),
+    catalogRepository: clone(CATALOG_REPOSITORY),
     instances: clone(INSTANCES),
     instanceDetails: clone(INSTANCE_DETAILS),
     containers: clone(CONTAINERS),

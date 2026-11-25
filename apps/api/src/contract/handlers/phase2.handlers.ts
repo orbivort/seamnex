@@ -64,6 +64,11 @@ import {
   type CatalogRepositoryService,
 } from '../../modules/m22-catalog-repository/catalog-repo.contract';
 import {
+  CATALOG_SYNC,
+  type CatalogSyncService,
+} from '../../modules/m22-catalog-repository/catalog-sync.contract';
+import { AUDIT_SERVICE, type AuditService } from '../../modules/m17-audit/audit.contract';
+import {
   ENVIRONMENT_DRIFT,
   type EnvironmentDriftService,
 } from '../../modules/m22-catalog-repository/environment-drift.contract';
@@ -99,6 +104,8 @@ export class Phase2Handlers implements OperationGroup {
     @Inject(CAPACITY_SERVICE) private readonly capacity: CapacityService,
     @Inject(InstanceParamsService) private readonly params: InstanceParamsService,
     @Inject(CATALOG_REPOSITORY) private readonly repository: CatalogRepositoryService,
+    @Inject(CATALOG_SYNC) private readonly catalogSync: CatalogSyncService,
+    @Inject(AUDIT_SERVICE) private readonly audit: AuditService,
     @Inject(ENVIRONMENT_DRIFT) private readonly drift: EnvironmentDriftService,
     @Inject(ADMIN_CREDENTIAL_SERVICE) private readonly adminCredential: AdminCredentialService,
     @Inject(PRODUCT_ACCOUNT_SERVICE) private readonly accounts: ProductAccountService,
@@ -201,6 +208,84 @@ export class Phase2Handlers implements OperationGroup {
             actorId,
           });
           return body({ ...entries, environment, invalid: [...tree.invalid] });
+        },
+      ],
+      [
+        key('GET', '/catalog/repository'),
+        /**
+         * The read model the sync action needs before it can be offered (ADR-BE-42 §10.3, AC-22):
+         * a disabled button needs to know no source is configured, and the dialog needs the last
+         * commit and whether a previous swap left a mixed tree.
+         */
+        async () => body(await this.catalogSync.read()),
+      ],
+      [
+        key('POST', '/catalog/sync'),
+        /**
+         * Fetch → swap → reload, in one request.
+         *
+         * The order matters: a caller must never observe a swapped tree with a stale projection, so
+         * the reload runs here rather than being left to a follow-up call the operator might skip.
+         * The fetch and swap are M22's (`CATALOG_SYNC` owns the working tree); the two projections
+         * and the audit row are this handler's, because M01 may not import M03 and M22 may not
+         * import M17.
+         *
+         * `catalog_commit` is written by the service **before** this reload (AC-19), so a projection
+         * that fails still leaves the provenance of the tree that produced it. A mixed tree is
+         * returned as `staged.pending`, never as a success with an empty list.
+         */
+        async (input) => {
+          const actorId = actor(input);
+          // A bodyless POST is a valid request — the configured default ref applies (§10.2 rule 6).
+          const request = (input.body ?? {}) as { ref?: string };
+          const outcome = await this.catalogSync.sync({
+            ...(request.ref === undefined ? {} : { ref: request.ref }),
+            actorId,
+          });
+
+          const tree = await this.repository.load();
+          const entries = await this.catalog.reload({ actorId, tree });
+          const environment = await this.env.applySchemas({
+            schemas: tree.envSchemas,
+            revision: tree.revision,
+            actorId,
+          });
+          const invalid = [...tree.invalid];
+
+          await this.audit.append({
+            action: 'catalog.source.synced',
+            actorType: 'user',
+            actorId,
+            targetType: 'catalog_repository',
+            targetId: outcome.commit,
+            outcome: 'success',
+            detail: {
+              // The sanitised form: host and path, no scheme, never a credential.
+              source: outcome.url,
+              ref: outcome.ref,
+              commit: outcome.commit,
+              revision: entries.revision,
+              entries: entries.entries,
+              added: entries.added,
+              changed: entries.changed,
+              removed: entries.removed,
+              environment: {
+                added: environment.added,
+                changed: environment.changed,
+                removed: environment.removed,
+              },
+              invalid: invalid.length,
+              staged: outcome.staged === null ? [] : [...outcome.staged.pending],
+            },
+          });
+
+          return body({
+            ...entries,
+            environment,
+            invalid,
+            source: { url: outcome.url, ref: outcome.ref, commit: outcome.commit },
+            staged: outcome.staged ?? { pending: [] },
+          });
         },
       ],
       [

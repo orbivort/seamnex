@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { checkEnvValue, ruleFingerprint, ruleIssues } from '../../src/env-rules';
 import { EnvSchemaFileSchema } from '../../src/schemas/catalog';
@@ -7,14 +5,12 @@ import { EnvSchemaFileSchema } from '../../src/schemas/catalog';
 /**
  * The loader validates `catalog/env/<KEY>.json` with this schema before anything is written, so
  * these cases are the authoring rules — they belong to the contract, not to a screen or a database.
+ *
+ * The declarations themselves are no longer in this repository (ADR-BE-42): they are a checkout, and
+ * `pnpm check:catalog` validates every one of them against this schema in CI. What is left here are
+ * the rules, written over synthetic files — a copy of a real declaration would be the deployable
+ * content that move removed.
  */
-
-// ADR-BE-20: the shipped baseline moved to the composed key (`D01-01`, domain 01 / product 01)
-// before the API could read it; the schema now accepts both grammars, so this asserts the file the
-// build actually ships rather than a legacy spelling nothing writes any more.
-const shipped = fileURLToPath(
-  new URL('../../../../platform/catalog/env/D01-01.json', import.meta.url),
-);
 
 function file(variables: readonly unknown[], entryKey = 'D09-01') {
   return { format: 'env-schema/v1', entryKey, variables };
@@ -43,24 +39,27 @@ function issuesOf(candidate: unknown): string[] {
 }
 
 describe('env-schema file', () => {
-  it('accepts the declaration this build ships for D01-01', () => {
-    const parsed = EnvSchemaFileSchema.safeParse(JSON.parse(readFileSync(shipped, 'utf8')));
-    expect(parsed.success).toBe(true);
-    if (!parsed.success) return;
-    expect(parsed.data.entryKey).toBe('D01-01');
-    // 31 since the OIDC block (`…_OIDC_*`) landed in the shipped baseline: the console renders
-    // those fields, and a schema that omits them shows an empty identity section. The count is
-    // exact on purpose — a variable added without a fixture update is the drift this guards.
-    // The 31st is `ESPOCRM_CONFIG_SITE_URL`, the restart-applied mirror of `ESPOCRM_SITE_URL`
-    // (FR-2.5): without it a route change never reaches a running instance.
-    expect(parsed.data.variables.length).toBe(31);
-    expect(new Set(parsed.data.variables.map((entry) => entry.name)).size).toBe(31);
-    // The variable the served schema used to lose: an enum without options renders an empty select.
-    // Values are the method names EspoCRM 10.0.11 registers (`Espo`, `ApiKey`, `Hmac`, `Oidc`).
-    const method = parsed.data.variables.find(
-      (entry) => entry.name === 'ESPOCRM_CONFIG_AUTHENTICATION_METHOD',
+  it('accepts a complete declaration and keeps its enum options and rule', () => {
+    const parsed = EnvSchemaFileSchema.safeParse(
+      file([
+        variable({ name: 'SITE_URL', type: 'url', required: true }),
+        variable({
+          name: 'AUTHENTICATION_METHOD',
+          type: 'enum',
+          defaultValue: 'Oidc',
+          options: ['Espo', 'ApiKey', 'Hmac', 'Oidc'],
+        }),
+        variable({ name: 'DB_PASSWORD', type: 'secret', secret: true }),
+      ]),
     );
+
+    expect(parsed.success ? [] : parsed.error.issues).toEqual([]);
+    if (!parsed.success) return;
+    // An enum keeps the options the wizard renders: a declaration whose list was dropped shows an
+    // empty select, which is the failure this half of the schema exists to prevent.
+    const method = parsed.data.variables.find((entry) => entry.name === 'AUTHENTICATION_METHOD');
     expect(method?.options).toEqual(['Espo', 'ApiKey', 'Hmac', 'Oidc']);
+    expect(parsed.data.variables).toHaveLength(3);
   });
 
   it('refuses a secret that carries a default value', () => {

@@ -173,12 +173,14 @@ x-api-environment: &api-environment
   # that name as an alias.
   SEAMNEX_IDP_ALIAS: ${SEAMNEX_IDP_ALIAS:-keycloak}
   SEAMNEX_CATALOG_REPO_PATH: /var/lib/seamnex/catalog-repo
-  # Vendored upstream trees. An entry with `<SEAMNEX_SOURCE_MIRROR_DIR>/<entryKey>/` deploys without a
-  # clone, which is the only way a host with no route to the git server can deploy at all.
-  #
-  # Literal, not `${SEAMNEX_SOURCE_MIRROR_DIR}`: the root `.env` carries the *host* path
-  # (`./platform/upstream`) for `pnpm dev`, and that path does not exist inside this container.
-  SEAMNEX_SOURCE_MIRROR_DIR: /var/lib/seamnex/upstream
+  # Upstream trees live inside the checkout (`<root>/upstream/<entryKey>/`), so this is empty on
+  # purpose: a synced tag puts them where the resolver already looks (ADR-BE-42 §8.1). It used to
+  # name a second mount of `platform/upstream`; the platform ships no catalogue content now.
+  SEAMNEX_SOURCE_MIRROR_DIR: ''
+  # The mirror a sync fetches from. Configuration, never a request field: the console sends a ref.
+  SEAMNEX_CATALOG_SOURCE_URL: ${SEAMNEX_CATALOG_SOURCE_URL:-https://github.com/orbivort/seamnex-catalog}
+  SEAMNEX_CATALOG_SOURCE_REF: ${SEAMNEX_CATALOG_SOURCE_REF:-}
+  SEAMNEX_CATALOG_SYNC_COOLDOWN_MS: ${SEAMNEX_CATALOG_SYNC_COOLDOWN_MS:-60000}
   SEAMNEX_KEYCLOAK_ADMIN_URL: http://keycloak:8080
   # `${SEAMNEX_…}` and not the bare name: this is what `.env.example` documents and what the seed
   # and `pnpm kc:admin` read, so one spelling reaches the container *and* the host scripts.
@@ -273,10 +275,10 @@ x-api-volumes: &api-volumes
   # the deployment is refused with REPOSITORY_UNAVAILABLE. The same preparation covers `instances`,
   # `backups`, `age`, `scans` and `traefik/dynamic`, which the deploy job and the route projection
   # write to.
+  # Read-write, and the only catalogue mount: `catalog/`, `catalog/env/` and `upstream/` all live
+  # under this root, and a sync renames them into place from a staging directory inside it
+  # (ADR-BE-42 §10.2 rule 2). A second mount of vendored trees was removed with the content.
   - ../temp/catalog-repo:/var/lib/seamnex/catalog-repo
-  # Vendored upstream trees are reviewed content, so they are mounted read-only: the resolver copies
-  # from them and never writes to them.
-  - ../platform/upstream:/var/lib/seamnex/upstream:ro
   # Read-write: the route projection is the only writer of generated router files (4D.2).
   - ./traefik/dynamic:/etc/traefik/dynamic
 

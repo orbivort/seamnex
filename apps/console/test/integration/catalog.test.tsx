@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { HttpResponse, http } from 'msw';
 import { describe, expect, it } from 'vitest';
-import { scaffoldFor } from '@seamnex/mocks';
+import { getState, scaffoldFor } from '@seamnex/mocks';
 import { server } from '@seamnex/mocks/server';
 import { App } from '../../src/app';
 import { openAs } from '../helpers';
@@ -58,6 +58,90 @@ describe('catalog list', () => {
     expect(
       await screen.findByText('Reloading the catalog needs the platform administrator'),
     ).toBeDefined();
+  });
+});
+
+/**
+ * ADR-BE-42 §10.4 — the fetch action.
+ *
+ * The acquisition is a server operation now, so the console has three things it must get right: it
+ * must not offer a fetch when the deployment has no source (AC-22), it must name the tree a
+ * successful fetch produced rather than only the delta, and it must report a mixed tree as a
+ * standing condition instead of an error the operator can dismiss.
+ */
+describe('catalog sync', () => {
+  it('disables the action and names the command when no source is configured', async () => {
+    openAs('R1', '/catalog');
+    getState().catalogRepository.source = { configured: false, host: null, ref: null };
+    render(<App />);
+    await screen.findByText('Domain catalog');
+
+    const sync = await screen.findByRole('button', { name: 'Sync from source' });
+    expect(sync.hasAttribute('disabled')).toBe(true);
+    // AC-22: the explanation has to name the way out, not just say "disabled".
+    expect(sync.getAttribute('title')).toContain('catalog:sync');
+  });
+
+  it('syncs a tag and names the source, ref and commit in the receipt', async () => {
+    openAs('R1', '/catalog');
+    render(<App />);
+    await screen.findByText('Domain catalog');
+
+    const trigger = await screen.findByRole('button', { name: 'Sync from source' });
+    // The action is disabled until the checkout view loads, and a click on it is then a no-op.
+    await waitFor(() => {
+      expect(trigger.hasAttribute('disabled')).toBe(false);
+    });
+    fireEvent.click(trigger);
+    const dialog = await screen.findByRole('dialog');
+
+    // The ref is pre-filled from configuration, so the operator confirms rather than retypes.
+    expect((within(dialog).getByLabelText(/Tag or commit/i) as HTMLInputElement).value).toBe(
+      'catalog-2026.11.0',
+    );
+    fireEvent.click(
+      within(dialog).getByRole('checkbox', { name: /I understand a sync can remove entries/i }),
+    );
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Sync now' }));
+
+    expect(await screen.findByText(/Catalogue synced at revision/i)).toBeDefined();
+    expect(screen.getByText(/github\.com\/orbivort\/seamnex-catalog/)).toBeDefined();
+  });
+
+  it('reports a refused fetch with its title and refuses to claim anything changed', async () => {
+    openAs('R1', '/catalog');
+    render(<App />);
+    await screen.findByText('Domain catalog');
+
+    const trigger = await screen.findByRole('button', { name: 'Sync from source' });
+    // The action is disabled until the checkout view loads, and a click on it is then a no-op.
+    await waitFor(() => {
+      expect(trigger.hasAttribute('disabled')).toBe(false);
+    });
+    fireEvent.click(trigger);
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText(/Tag or commit/i), {
+      target: { value: 'catalog-2099.01.0' },
+    });
+    fireEvent.click(
+      within(dialog).getByRole('checkbox', { name: /I understand a sync can remove entries/i }),
+    );
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Sync now' }));
+
+    expect(await screen.findByText('The source has no such tag')).toBeDefined();
+    expect(screen.getByText(/Nothing is reported as changed/i)).toBeDefined();
+  });
+
+  it('reports a mixed tree and names the repair', async () => {
+    openAs('R1', '/catalog');
+    const repository = getState().catalogRepository;
+    getState().catalogRepository = { ...repository, staged: { pending: ['upstream', '.git'] } };
+    render(<App />);
+
+    expect(await screen.findByText('The catalogue tree is mixed')).toBeDefined();
+    // AC-18: the banner names what is still old and what repairs it.
+    expect(screen.getByText('upstream, .git')).toBeDefined();
+    expect(screen.getByText(/Re-run the sync at the same ref/)).toBeDefined();
   });
 });
 

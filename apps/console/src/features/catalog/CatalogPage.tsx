@@ -2,7 +2,12 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { ArrowRight } from 'lucide-react';
 import type { CatalogFilters } from '@seamnex/api-client';
-import { useCatalog, useReloadCatalog } from '@seamnex/api-client';
+import {
+  useCatalog,
+  useCatalogRepository,
+  useReloadCatalog,
+  useSyncCatalog,
+} from '@seamnex/api-client';
 import type { CatalogEntry } from '@seamnex/domain';
 import {
   canMutate,
@@ -29,6 +34,8 @@ import {
 import { formatRelative } from '@seamnex/utils';
 import { AsyncPanel, QueryError, useDebouncedValue } from '@seamnex/shell';
 import { useSession } from '../../session';
+import { CatalogReceipt } from './CatalogReceipt';
+import { SyncCatalogDialog } from './SyncCatalogDialog';
 
 const PACKAGING_FILTERS = [
   { value: 'all', label: 'All packaging' },
@@ -152,7 +159,14 @@ const catalogRowLink = (row: CatalogEntry, className: string, children: ReactNod
 export function CatalogPage() {
   const { session } = useSession();
   const reload = useReloadCatalog();
+  // ADR-BE-42: the checkout, and the fetch that rewrites it. The read model is what lets the action
+  // be disabled with an explanation instead of failing at request time (AC-22).
+  const repository = useCatalogRepository();
+  const sync = useSyncCatalog();
+  const [syncOpen, setSyncOpen] = useState(false);
+  const [lastAction, setLastAction] = useState<'reload' | 'sync'>('reload');
   const canReload = canMutate(session.role, 'metadata.manage');
+  const sourceConfigured = repository.data?.source.configured ?? false;
   const [params, setParams] = useSearchParams();
   // The URL is the initial value on every mount, so a shared or bookmarked filter arrives applied
   // and a back step from an entry restores the narrowed list instead of the whole catalog.
@@ -214,30 +228,16 @@ export function CatalogPage() {
     [entries],
   );
 
-  // The delta is the point of a reload: the counts alone cannot tell an operator what moved, and
-  // "13 reconciled" reads the same whether nothing changed or a pinned image was re-pointed.
-  const reconciledChanges = useMemo(
-    () => (reload.data?.reconciled ?? []).filter((item) => item.change !== 'unchanged'),
-    [reload.data],
-  );
-
-  /**
-   * A reload that refused an environment file, or skipped one it could not parse, is **not** a
-   * success — those are the two outcomes that can leave a deployable product refusing to deploy.
-   * The receipt says so instead of painting both as "repository reloaded".
-   */
-  const environment = reload.data?.environment;
-  const refused = environment?.refused ?? [];
-  const invalid = reload.data?.invalid ?? [];
-  const coverage = reload.data?.coverage;
   /*
-   * S-1: a declaration with no entry document is a refusal, not a note — the product cannot be
-   * deployed at all — so it makes the receipt partial for the same reason a refused environment file
-   * does.
+   * One receipt, two ways to produce it: a sync returns the reload receipt plus the provenance of
+   * the tree it read. `lastAction` decides which one is on screen, so a later reload does not leave
+   * a stale sync receipt describing a tree the platform may no longer be serving.
    */
-  const partial = refused.length > 0 || invalid.length > 0 || (coverage?.refused.length ?? 0) > 0;
-  const envChanges = environment?.applied ?? [];
-  const nothingMoved = reconciledChanges.length === 0 && envChanges.length === 0 && !partial;
+  const receipt = lastAction === 'sync' ? sync.data : reload.data;
+  const receiptSource = lastAction === 'sync' ? sync.data?.source : undefined;
+  // A mixed tree is a standing condition reported by the read model, not only a result of the last
+  // action: it survives a page reload until the next successful sync repairs it (AC-18).
+  const staged = repository.data?.staged ?? null;
 
   return (
     <Page>
@@ -246,19 +246,44 @@ export function CatalogPage() {
         title="Domain catalog"
         description="One entry per business domain, each carrying pinned images, packaging availability, authentication guarantee class and verified integration metadata."
         actions={
-          <Button
-            size="sm"
-            variant="secondary"
-            disabled={!canReload || reload.isPending}
-            title={
-              canReload
-                ? 'Re-read catalog entries and environment schemas. A change a running instance depends on is refused, not applied.'
-                : 'R1 reloads the catalog repository'
-            }
-            onClick={() => reload.mutate()}
-          >
-            {reload.isPending ? 'Reloading…' : 'Reload from repository'}
-          </Button>
+          <>
+            {/*
+              ADR-BE-42 §10.4 — a second action, not a replacement. Reload is read-only and
+              idempotent; sync writes to the host. Merging them would give the cheap, frequent
+              action the risk profile of the rare one.
+            */}
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={!canReload || !sourceConfigured || sync.isPending}
+              title={
+                !canReload
+                  ? 'R1 syncs the catalogue source'
+                  : !sourceConfigured
+                    ? 'No catalogue source is configured. Run `catalog:sync --ref <tag>` from a host after placing a clone, or set SEAMNEX_CATALOG_SOURCE_URL.'
+                    : 'Fetch a tagged revision, swap it into the working tree and reconcile the projection. A sync can remove entries.'
+              }
+              onClick={() => setSyncOpen(true)}
+            >
+              Sync from source
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={!canReload || reload.isPending}
+              title={
+                canReload
+                  ? 'Re-read catalog entries and environment schemas. A change a running instance depends on is refused, not applied.'
+                  : 'R1 reloads the catalog repository'
+              }
+              onClick={() => {
+                setLastAction('reload');
+                reload.mutate();
+              }}
+            >
+              {reload.isPending ? 'Reloading…' : 'Reload from repository'}
+            </Button>
+          </>
         }
         meta={
           <>
@@ -283,125 +308,42 @@ export function CatalogPage() {
           <QueryError error={reload.error} compact />
         </div>
       ) : null}
-      {reload.data ? (
+      {/*
+        ADR-BE-42 §10.2 rule 8 — a swap that stopped between renames is a standing condition, not a
+        result: it survives a page reload until the next successful sync repairs it, so it is read
+        from the repository view rather than from the last action's receipt.
+      */}
+      {staged === null ? null : (
         <div className="mb-3">
-          <Alert
-            tone={partial ? 'caution' : 'positive'}
-            title={
-              partial
-                ? `Repository reloaded at revision ${reload.data.revision}, with changes refused`
-                : `Repository reloaded at revision ${reload.data.revision}`
-            }
-          >
+          <Alert tone="caution" title="The catalogue tree is mixed">
             <span className="block">
-              {reload.data.entries} entries reconciled: {reload.data.added} added,{' '}
-              {reload.data.changed} changed, {reload.data.removed} removed.
-              {environment === undefined
-                ? null
-                : ` Environment: ${environment.added} added, ${environment.changed} changed, ${environment.removed} removed.`}{' '}
-              The repository remains authoritative over the control-plane projection.
+              These still hold their previous content:{' '}
+              <span className="font-mono">{staged.pending.join(', ')}</span>. Re-run the sync at the
+              same ref — the next successful swap repairs the tree, and nothing is reported as a
+              success until then.
             </span>
-
-            {/*
-              S-1 / S-2 — the coverage verdict on the receipt. Deliberately beside the delta rather
-              than on a separate screen: a reload that leaves three products undeployable reads as a
-              success unless the receipt says how much of the catalogue is actually documented.
-            */}
-            {coverage === undefined ? null : (
-              <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-current/15 pt-2">
-                <Badge tone="neutral" size="sm">
-                  {coverage.declaredEnvironments} declared
-                </Badge>
-                <Badge tone="positive" size="sm">
-                  {coverage.documentedEnvironments} documented
-                </Badge>
-                {coverage.refused.length === 0 ? null : (
-                  <Badge tone="danger" size="sm">
-                    {coverage.refused.length} refused
-                  </Badge>
-                )}
-                <Badge tone={coverage.floorMet ? 'positive' : 'caution'} size="sm">
-                  {coverage.nativeDeployments} native of {coverage.floor} required
-                </Badge>
-                <span className="text-micro">
-                  {coverage.deployments} deployments, shared instances counted once. The floor is
-                  S-2's; GET /posture serves the target in force.
-                </span>
-              </div>
-            )}
-
-            {coverage === undefined || coverage.refused.length === 0 ? null : (
-              <ul className="mt-2 space-y-1 border-t border-current/15 pt-2">
-                {coverage.refused.map((item) => (
-                  <li key={item.key} className="text-meta">
-                    <span className="font-mono font-medium">{item.key}</span>
-                    <Badge tone="danger" size="sm">
-                      entry document missing
-                    </Badge>
-                    <span className="block leading-snug">Refused: {item.reason}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-
-            {refused.length > 0 ? (
-              <ul className="mt-2 space-y-1 border-t border-current/15 pt-2">
-                {refused.map((item) => (
-                  <li key={`${item.key}:${item.name ?? '*'}`} className="text-meta">
-                    <span className="font-mono font-medium">{item.key}</span>
-                    {item.name === null ? null : <span className="font-mono"> · {item.name}</span>}
-                    <span className="block leading-snug">
-                      File skipped, nothing was written: {item.reason}.
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-
-            {invalid.length > 0 ? (
-              <ul className="mt-2 space-y-1 border-t border-current/15 pt-2">
-                {invalid.map((item) => (
-                  <li key={item.path} className="text-meta">
-                    <span className="font-mono font-medium">{item.path}</span>
-                    <span className="block leading-snug">
-                      Not applied, left as projected: {item.reason}.
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-
-            {nothingMoved ? (
-              <span className="mt-1 block text-meta">
-                No drift: every entry and environment schema already matched this revision.
-              </span>
-            ) : (
-              <ul className="mt-2 space-y-1 border-t border-current/15 pt-2">
-                {reconciledChanges.map((item) => (
-                  <li key={item.key} className="flex items-start justify-between gap-3 text-meta">
-                    <span className="font-mono font-medium">{item.key}</span>
-                    <span className="min-w-0 flex-1 text-right">{item.detail}</span>
-                    <span className="shrink-0 font-mono label-caps">{item.change}</span>
-                  </li>
-                ))}
-                {envChanges.map((item) => (
-                  <li
-                    key={`env:${item.key}`}
-                    className="flex items-start justify-between gap-3 text-meta"
-                  >
-                    <span className="font-mono font-medium">{item.key}</span>
-                    <span className="min-w-0 flex-1 text-right">
-                      environment: {item.added} added, {item.changed} changed, {item.removed}{' '}
-                      removed
-                    </span>
-                    <span className="shrink-0 font-mono label-caps">env</span>
-                  </li>
-                ))}
-              </ul>
-            )}
           </Alert>
         </div>
+      )}
+      {receipt ? (
+        <div className="mb-3">
+          <CatalogReceipt
+            data={receipt}
+            mode={lastAction === 'sync' ? 'sync' : 'reload'}
+            {...(receiptSource === undefined ? {} : { source: receiptSource })}
+          />
+        </div>
       ) : null}
+
+      {repository.data === undefined ? null : (
+        <SyncCatalogDialog
+          open={syncOpen}
+          onOpenChange={setSyncOpen}
+          repository={repository.data}
+          sync={sync}
+          onSynced={() => setLastAction('sync')}
+        />
+      )}
 
       <Panel>
         <PanelHeader

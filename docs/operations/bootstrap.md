@@ -113,7 +113,7 @@ pnpm bootstrap
 It installs the workspace from the frozen lockfile, creates `.env` from `.env.example` **only if it is
 absent**, writes the root key and Keycloak credential files if they are missing, brings up the stack
 (schema first, then services, then the realm import and the admin-client reconcile), seeds the
-identity mirror and the default catalogue, and waits for `/api/v1/readyz`.
+identity mirror, projects whichever catalogue checkout is present, and waits for `/api/v1/readyz`.
 
 Expected last lines:
 
@@ -125,7 +125,30 @@ Expected last lines:
 If a step fails, the command stops at that step and names it. Every step is idempotent, so fixing the
 cause and re-running is the intended recovery, not a reinstall.
 
-### 3. Start the console
+### 3. Acquire the catalogue
+
+The install ships no catalogue documents: the bootstrap projects a checkout, it never creates one. A
+clean host therefore serves an empty catalogue until this step runs, and the bootstrap's last line says
+so. Fetch a tag through the API — the same operation the console offers:
+
+```bash
+SEAMNEX_API_TOKEN=<R1 token> pnpm catalog:sync --ref catalog-2026.11.0
+```
+
+With no token, use Catalog → "Sync from source" after the console is up. On an air-gapped host, place a
+checkout and project it instead; nothing needs a network:
+
+```bash
+git clone --depth 1 --branch catalog-2026.11.0 https://github.com/orbivort/seamnex-catalog temp/catalog-repo
+pnpm db:seed            # the documents, into an empty catalogue
+pnpm catalog:project    # the environment declarations
+```
+
+Every path is idempotent and none of them invents content: `db:seed` never tops up a catalogue that
+already has rows, and an interrupted sync is reported as a mixed tree rather than as success — re-run
+the same ref to repair it.
+
+### 4. Start the console
 
 The console is a Vite application, not a stack service:
 
@@ -142,17 +165,17 @@ development accounts (`dev-admin`, `dev-auditor`, `dev-owner`, `dev-product`, `d
 their role bindings come from the seed. This is the platform's current identity story and it is a
 limitation, not a hidden convenience — see [what this does not do](#what-this-does-not-do).
 
-### 4. Deploy one product
+### 5. Deploy one product
 
 This is S-9's second half and AC-19's evidence. From the console: **Deployments → New deployment**,
-choose a catalogue entry (the default set ships six — `D01-01`, `D02-01`, `D06-01`, `D07-01`,
-`D09-01`, `D11-01`), accept the plan and watch the job.
+choose a catalogue entry (the tag acquired in step 3 declares six — `D01-01`, `D02-01`, `D06-01`,
+`D07-01`, `D09-01`, `D11-01`), accept the plan and watch the job.
 
 A deployment that reaches `succeeded` proves the whole path: catalogue, render, policy, Docker, edge
 routing and the job queue. A deployment that stalls at `Resolve source` usually means the runtime
 directories were not writable; re-run `pnpm bootstrap`.
 
-### 5. Take a backup
+### 6. Take a backup
 
 From **Governance → Recovery**, start an instance backup and let it finish. Then start a platform
 backup. The instance backup proves the dump and object-store path; the platform set is what a
@@ -173,7 +196,7 @@ Then the two facts the command cannot see:
 
 | Fact (AC-19)                                          | Where to look                                                             |
 | ----------------------------------------------------- | ------------------------------------------------------------------------- |
-| A product deploys from version-controlled definitions | the deployment from step 4 reached `succeeded`                            |
+| A product deploys from version-controlled definitions | the deployment from step 5 reached `succeeded`                            |
 | The instance set matches the reference                | **Deployments** lists the same set as the reference environment's capture |
 
 ## Re-run and recovery

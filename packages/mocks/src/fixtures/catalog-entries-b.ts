@@ -82,13 +82,14 @@ export const ENTRY_SEEDS_B: EntrySeed[] = [
     guaranteeClass: 'fa_gate',
     authMethod:
       'Proxy gate only: the product keeps its own local credential (native OIDC/SAML needs the Enterprise token for `sso_auth_providers`)',
-    // The vendored tree is a Compose file pinning the all-in-one image (17.9.6); the entry still
-    // said `dockerfile` at 16.4.1, which the console renders as the packaging column and which was
-    // two releases behind the image the deployment actually runs. The live catalogue document
-    // already reads `compose`; the fixture had drifted, exactly as it had for `httpPort`.
+    // The tree is a Compose file pinning the all-in-one image (17.9.6); the entry still said
+    // `dockerfile` at 16.4.1, which the console renders as the packaging column and which was two
+    // releases behind the image the deployment actually runs. The live catalogue document already
+    // reads `compose`; the fixture had drifted, exactly as it had for `httpPort`.
     packaging: 'compose',
+    // ADR-BE-42: the tree comes from the catalogue checkout, not from a directory in this repository.
     packagingSource:
-      'vendored definition (platform/upstream/D09-01) pinning the published all-in-one image @ 17.9.6',
+      'upstream definition (upstream/D09-01 in the catalogue checkout) pinning the published all-in-one image @ 17.9.6',
     primaryInstanceId: 'inst-projects',
     sharedWith: [],
     // The container port, not a host port: the definition declares `expose: ['80']`, and the

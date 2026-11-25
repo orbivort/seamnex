@@ -74,8 +74,8 @@ export function decideProjection(input: {
           code: 1,
           lines: [
             `no catalogue working tree at ${root} while ${projectedEntries} catalog entries are projected`,
-            '  either the seed and this process resolved different roots, or the tree was removed while the projection stayed',
-            '  if the projection is the default set, `pnpm catalog:restore` writes the tree back from the vendored documents,',
+            '  either the seed and this process resolved different roots, or the checkout was removed while the projection stayed',
+            '  restore the checkout at the tag it was serving: `pnpm catalog:sync --ref <tag>` (or a `git clone` on an air-gapped host),',
             '  then run `pnpm catalog:project` again; re-seeding is not the fix, because the seed only writes into an empty projection',
           ],
         };
@@ -93,8 +93,8 @@ export function decideProjection(input: {
       code: 1,
       lines: [
         `${tree.revision}: the tree declares ${tree.documents.length} entries but none are projected`,
-        '  project them first: `pnpm db:seed` does it for the default set when catalog_entry is empty,',
-        '  `POST /catalog/reload` does it for a full tree and needs the API up with an R1 session',
+        '  project them first: `pnpm db:seed` does it for a fresh database when catalog_entry is empty,',
+        '  `POST /catalog/reload` does it for a populated catalogue and needs the API up with an R1 session',
         '  declarations cannot be applied to an entry that is not projected',
       ],
     };

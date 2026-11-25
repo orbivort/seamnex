@@ -32,6 +32,12 @@ env:
   # Unset on forks and on a repository without the secret; turbo then stays on the local cache.
   TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
   TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
+  # ADR-BE-42: the platform holds no catalogue content, so the coverage gate reads a checkout of the
+  # mirror instead of a directory in this repository. Both values are repository variables so a
+  # release candidate can be checked against its own tag without editing this file; the defaults are
+  # the shipped mirror and the tag this release was cut from.
+  CATALOG_MIRROR_REPOSITORY: ${{ vars.SEAMNEX_CATALOG_SOURCE_URL || 'https://github.com/orbivort/seamnex-catalog' }}
+  CATALOG_MIRROR_REF: ${{ vars.SEAMNEX_CATALOG_SOURCE_REF || 'catalog-2026.11.0' }}
 
 # Actions are referenced by major version only (`@v7`, not `@v7.0.1`): every publisher used here
 # maintains that tag as a moving pointer across its minor and patch releases, so a major-only ref
@@ -74,10 +80,23 @@ jobs:
         run: pnpm audit --dev --audit-level high
       - name: migration pairs and numbering
         run: pnpm check:migrations
-      # The default set is data, so no type checks it: an entry document and the environment
+      # The catalogue is data, so no type checks it: an entry document and the environment
       # declaration beside it are only consistent if something compares them. The gate needs no
-      # database — it reads the two directories the seed reads.
+      # database — it reads `catalog/` and `catalog/env/` under a checkout, so the checkout comes
+      # first. Missing tag, unreachable mirror or an empty tree all fail the job on purpose: a
+      # release that cannot find its catalogue must not go out (AC-9).
+      - name: checkout the catalogue mirror
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/catalog-repo"
+          rm -rf "$root"
+          git init --quiet "$root"
+          git -C "$root" remote add origin "$CATALOG_MIRROR_REPOSITORY"
+          git -C "$root" fetch --quiet --depth 1 origin "refs/tags/$CATALOG_MIRROR_REF"
+          git -C "$root" checkout --quiet FETCH_HEAD
       - name: catalogue coverage and the native floor
+        env:
+          SEAMNEX_CATALOG_REPO_PATH: ${{ runner.temp }}/catalog-repo
         run: pnpm check:catalog
       # Full, not `--affected`: a change to eslint.config.mjs or packages/config is not a
       # change to any package, so an affected filter would quietly skip the packages it governs.

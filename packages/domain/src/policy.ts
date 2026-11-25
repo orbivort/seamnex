@@ -144,6 +144,14 @@ export const POLICY_KEYS: Readonly<Record<string, PolicyKey>> = {
 
   // Catalog
   'GET /catalog': 'catalog.browse',
+  /*
+   * ADR-BE-42: reading the checkout's state is the same reach as browsing its projection, and
+   * fetching a new revision is the same reach the reload already takes. A dedicated capability would
+   * split one operator's job in two with no separation-of-duties argument: the write is to the
+   * catalogue tree, which `metadata.manage` already owns.
+   */
+  'GET /catalog/repository': 'catalog.browse',
+  'POST /catalog/sync': 'metadata.manage',
   'POST /catalog/reload': 'metadata.manage',
   'GET /catalog/:key': 'catalog.read_metadata',
   'GET /catalog/:key/env-schema': 'catalog.read_metadata',

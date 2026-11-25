@@ -29,6 +29,7 @@ import * as authSchema from '../../src/schemas/auth';
 import * as backupSchema from '../../src/schemas/backup';
 import * as capacitySchema from '../../src/schemas/capacity';
 import * as catalogSchema from '../../src/schemas/catalog';
+import * as catalogRepositorySchema from '../../src/schemas/catalog-repository';
 import * as commonSchema from '../../src/schemas/common';
 import * as governanceSchema from '../../src/schemas/governance';
 import * as identitySchema from '../../src/schemas/identity';
@@ -87,6 +88,8 @@ const MODULES = [
   ['schemas/backup', backupSchema],
   ['schemas/capacity', capacitySchema],
   ['schemas/catalog', catalogSchema],
+  // ADR-BE-42: the checkout's state and the fetch that replaces it.
+  ['schemas/catalog-repository', catalogRepositorySchema],
   ['schemas/common', commonSchema],
   ['schemas/field-discovery', fieldDiscoverySchema],
   ['schemas/governance', governanceSchema],

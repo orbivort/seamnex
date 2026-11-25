@@ -39,6 +39,7 @@
     "db:seed": "pnpm --filter @seamnex/db seed",
     "catalog:project": "pnpm --filter @seamnex/api catalog:project",
     "catalog:restore": "pnpm --filter @seamnex/db catalog:restore",
+    "catalog:sync": "node scripts/catalog-sync.mjs",
     "scan:db:update": "node scripts/trivy-db.mjs",
     "check:migrations": "node scripts/check-migrations.mjs",
     "check:catalog": "pnpm --filter @seamnex/db check:catalog",

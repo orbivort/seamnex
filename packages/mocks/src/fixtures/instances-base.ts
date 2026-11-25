@@ -49,7 +49,7 @@ export const INSTANCE_SEEDS: InstanceSeed[] = [
     source: {
       path: 'compose',
       // The application repository ships no Compose file and has no `v`-prefixed tags; the reviewed
-      // Compose definition is vendored at `platform/upstream/D01-01/docker-compose.yml`.
+      // Compose definition is at `upstream/D01-01/docker-compose.yml` in the catalogue checkout.
       sourceUrl: 'https://github.com/espocrm/espocrm@9.2.4',
       sourceRevision: '9c2f1ab',
       policyVerdict: 'compliant',

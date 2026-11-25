@@ -61,7 +61,8 @@ const LOGIN_FORM_MARKER = 'user-login--form';
 
 /**
  * Apache answers `200` with a placeholder page before Rails is up. Treating that as success is the
- * documented trap that once declared a healthy container unhealthy (`platform/upstream/D09-01`).
+ * documented trap that once declared a healthy container unhealthy (`upstream/D09-01` in the
+ * catalogue checkout).
  */
 const PLACEHOLDER_MARKER = 'expects to be reached on the following domain';
 

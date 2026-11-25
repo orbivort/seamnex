@@ -98,7 +98,25 @@ function services() {
     },
     repository: {
       load: vi.fn().mockResolvedValue({ entries: [], envSchemas: [], revision: 'r1', invalid: [] }),
+      recordCommit: vi.fn().mockResolvedValue(undefined),
+      revision: vi.fn().mockResolvedValue('r1'),
     },
+    // ADR-BE-42: the fetch/swap service. The handler only orchestrates around it.
+    catalogSync: {
+      read: vi.fn().mockResolvedValue({
+        revision: 'r1',
+        source: { configured: true, host: 'github.com/o/r', ref: 'catalog-2026.11.0' },
+        commit: null,
+        staged: null,
+      }),
+      sync: vi.fn().mockResolvedValue({
+        url: 'github.com/o/r',
+        ref: 'catalog-2026.11.0',
+        commit: 'c0ffee',
+        staged: null,
+      }),
+    },
+    audit: { append: vi.fn().mockResolvedValue({ seq: '1', hash: 'h' }) },
     // FR-1.29: the env screen's drift badge is the producer's open rows, not M03's proxy.
     drift: {
       scan: vi.fn().mockResolvedValue({ observed: true, detected: [], created: [], resolved: 0 }),
@@ -160,6 +178,8 @@ beforeEach(() => {
     s.capacity as never,
     s.params as never,
     s.repository as never,
+    s.catalogSync as never,
+    s.audit as never,
     s.drift as never,
     s.adminCredential as never,
     s.accounts as never,
@@ -247,6 +267,66 @@ describe('catalog handlers', () => {
         invalid: [],
       },
     });
+  });
+
+  it('GET /catalog/repository serves the checkout state without reloading', async () => {
+    const result = await call('GET /catalog/repository');
+    expect(s.catalogSync.read).toHaveBeenCalledOnce();
+    expect(s.repository.load).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      kind: 'body',
+      body: expect.objectContaining({ revision: 'r1', staged: null }),
+    });
+  });
+
+  it('POST /catalog/sync fetches, reloads and audits inside one request', async () => {
+    const result = await call('POST /catalog/sync', { body: { ref: 'catalog-2026.11.0' } });
+
+    expect(s.catalogSync.sync).toHaveBeenCalledWith({
+      ref: 'catalog-2026.11.0',
+      actorId: 'sub-1',
+    });
+    // Fetch → swap → reload, so no caller sees a swapped tree with a stale projection.
+    expect(s.catalog.reload).toHaveBeenCalledWith({ actorId: 'sub-1', tree: expect.anything() });
+    expect(s.audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'catalog.source.synced',
+        targetId: 'c0ffee',
+        detail: expect.objectContaining({
+          source: 'github.com/o/r',
+          ref: 'catalog-2026.11.0',
+          commit: 'c0ffee',
+        }),
+      }),
+    );
+    expect(result).toEqual({
+      kind: 'body',
+      body: expect.objectContaining({
+        source: { url: 'github.com/o/r', ref: 'catalog-2026.11.0', commit: 'c0ffee' },
+        staged: { pending: [] },
+      }),
+    });
+  });
+
+  it('POST /catalog/sync reports a mixed tree instead of claiming success', async () => {
+    s.catalogSync.sync.mockResolvedValueOnce({
+      url: 'github.com/o/r',
+      ref: 'catalog-2026.11.0',
+      commit: 'c0ffee',
+      staged: { pending: ['upstream', '.git'] },
+    });
+
+    const result = await call('POST /catalog/sync');
+
+    expect(result).toEqual({
+      kind: 'body',
+      body: expect.objectContaining({ staged: { pending: ['upstream', '.git'] } }),
+    });
+    expect(s.audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        detail: expect.objectContaining({ staged: ['upstream', '.git'] }),
+      }),
+    );
   });
 
   it('GET /catalog/:key and its env surfaces pass the key through', async () => {
@@ -674,8 +754,8 @@ describe('relay provisioning (ADR-BE-22)', () => {
 describe('phase 2 handler registry', () => {
   it('implements every key exactly once', () => {
     // 60 originally, plus the five FR-1.26 profile operations (create, patch, values, delete and
-    // the request-only change path).
-    expect(handlers.size).toBe(65);
+    // the request-only change path), plus the two ADR-BE-42 catalogue checkout operations.
+    expect(handlers.size).toBe(67);
     expect(new Set(handlers.keys()).size).toBe(handlers.size);
   });
 

@@ -1,12 +1,8 @@
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  DEFAULT_CATALOG_FIXTURES,
-  DEFAULT_PRODUCT_KEYS,
-  SHIPPED_DECLARATIONS,
-} from '../../../src/seed/default-catalog';
+import { writeCheckout } from './sample-entry';
 
 /**
  * The seed is a script, like `cli.ts`: it loads the environment, resolves subject ids from the
@@ -492,22 +488,27 @@ describe('development seed under an OIDC provider', () => {
   });
 });
 
-describe('default catalog', () => {
-  it('seeds the six products into an empty projection and writes the working tree', async () => {
-    const code = await runSeed({ DATABASE_URL: CONNECTION, AUTH_PROVIDER: undefined });
+/**
+ * ADR-BE-42 §9.3 — the seed projects a checkout and writes no file.
+ *
+ * The suite creates the checkout itself, because the platform no longer ships one: `writeCheckout`
+ * builds synthetic documents in the temporary root. What is asserted is the projector's behaviour,
+ * not the content of any particular product.
+ */
+describe('catalog projection', () => {
+  it('projects a checkout into an empty projection and writes nothing into the tree', async () => {
+    const code = await runSeed({ DATABASE_URL: CONNECTION, AUTH_PROVIDER: undefined }, (root) =>
+      writeCheckout(root, ['D01-01', 'D02-01']),
+    );
 
     expect(code).toBe(0);
 
     // The projection: the columns are copied out of each document, the document itself is the payload.
     const entries = paramsFor('INSERT INTO catalog_entry (');
-    expect(entries.map((params) => params[0])).toEqual([...DEFAULT_PRODUCT_KEYS]);
+    expect(entries.map((params) => params[0])).toEqual(['D01-01', 'D02-01']);
     expect(entries.map((params) => params[1])).toEqual([
-      'CRM & Sales Pipeline',
-      'Marketing & Lead Generation',
-      'ERP & Business Operations',
-      'HR & People Operations',
-      'Project & Work Management',
-      'Data, Reporting & BI',
+      'Testing & Fixtures',
+      'Testing & Fixtures',
     ]);
     expect(JSON.parse(String(entries[0]?.[8])).key).toBe('D01-01');
 
@@ -515,60 +516,54 @@ describe('default catalog', () => {
     // never an invented `seed`: the first reload is the thing that stamps a whole-tree revision, and
     // claiming one here would be inventing evidence. The full hash is kept beside it.
     const revisions = paramsFor('INSERT INTO catalog_entry_revision');
-    expect(revisions.map((params) => params[0])).toEqual([...DEFAULT_PRODUCT_KEYS]);
-    expect(revisions.map((params) => params[1])).toEqual(
-      DEFAULT_PRODUCT_KEYS.map(() => expect.stringMatching(/^content-[0-9a-f]{16}$/)),
-    );
-    expect(revisions.map((params) => params[2])).toEqual(
-      DEFAULT_PRODUCT_KEYS.map(() => expect.stringMatching(/^[0-9a-f]{64}$/)),
-    );
+    expect(revisions.map((params) => params[0])).toEqual(['D01-01', 'D02-01']);
+    expect(revisions.map((params) => params[1])).toEqual([
+      expect.stringMatching(/^content-[0-9a-f]{16}$/),
+      expect.stringMatching(/^content-[0-9a-f]{16}$/),
+    ]);
+    expect(revisions.map((params) => params[2])).toEqual([
+      expect.stringMatching(/^[0-9a-f]{64}$/),
+      expect.stringMatching(/^[0-9a-f]{64}$/),
+    ]);
 
-    // The tree the API reads: the documents a later reload reconciles against, and the declarations
-    // the environment pass projects. Both halves, or the reload would treat the entries as drift.
-    expect(existsSync(join(currentTree, 'catalog', 'D01-01.json'))).toBe(true);
-    expect(existsSync(join(currentTree, 'catalog', 'D09-01.json'))).toBe(true);
-    expect(existsSync(join(currentTree, 'catalog', 'env', 'D07-01.json'))).toBe(true);
+    // The tree is the operator's: the seed added no file to it.
+    expect(readdirSync(join(currentTree, 'catalog')).sort()).toEqual([
+      'D01-01.json',
+      'D02-01.json',
+      'env',
+    ]);
 
-    // Rows and files are reported separately: this run writes one document and one declaration per
-    // product, and "seeded (none)" used to describe neither of the two truthfully.
-    expect(logSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        'default catalog: 6 entries declared, 6 rows inserted into catalog_entry (12 files written',
-      ),
-    );
-    // No product was skipped, so the operator is not told about a gap that does not exist.
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('catalog: 2 entries declared in'));
+    // No document was skipped, so the operator is not told about a gap that does not exist.
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
-  it('projects a tree that survived a database reset, and says so', async () => {
-    // The exact state that stopped `pnpm dev`: `catalog_entry` empty, the working tree intact. The
-    // seed used to plan rows from the files *it wrote*, so this run inserted nothing, exited 0, and
-    // the projector then refused every declaration against an entry nobody had projected.
-    const code = await runSeed({ DATABASE_URL: CONNECTION, AUTH_PROVIDER: undefined }, (root) => {
-      const catalogDir = join(root, 'catalog');
-      const envDir = join(catalogDir, 'env');
-      mkdirSync(envDir, { recursive: true });
-      for (const key of DEFAULT_PRODUCT_KEYS) {
-        copyFileSync(
-          join(DEFAULT_CATALOG_FIXTURES, `${key}.json`),
-          join(catalogDir, `${key}.json`),
-        );
-        copyFileSync(join(SHIPPED_DECLARATIONS, `${key}.json`), join(envDir, `${key}.json`));
-      }
-    });
+  it('skips with exit 0 and names the acquisition step when no checkout exists', async () => {
+    // AC-7: a host that has never fetched a tag is a supported state — and the alternative, failing
+    // the seed, would stop `pnpm dev` on a stack whose catalogue simply has not been acquired yet.
+    const code = await runSeed({ DATABASE_URL: CONNECTION, AUTH_PROVIDER: undefined });
 
     expect(code).toBe(0);
-
-    const entries = paramsFor('INSERT INTO catalog_entry (');
-    expect(entries.map((params) => params[0])).toEqual([...DEFAULT_PRODUCT_KEYS]);
-    expect(logSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        'default catalog: 6 entries declared, 6 rows inserted into catalog_entry (0 files written',
-      ),
-    );
+    expect(paramsFor('INSERT INTO catalog_entry (')).toEqual([]);
+    expect(existsSync(join(currentTree, 'catalog'))).toBe(false);
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('pnpm catalog:sync --ref <tag>'));
   });
 
-  it('leaves an operator catalogue alone, and does not seed files beside it', async () => {
+  it('fails when the checkout exists and declares no readable document', async () => {
+    // AC-8: projecting nothing looks exactly like a database nobody seeded, so the run must not
+    // report success. `{}` is a JSON object the served schema refuses.
+    const code = await runSeed({ DATABASE_URL: CONNECTION, AUTH_PROVIDER: undefined }, (root) => {
+      mkdirSync(join(root, 'catalog'), { recursive: true });
+      writeFileSync(join(root, 'catalog', 'D01-01.json'), '{}', 'utf8');
+    });
+
+    expect(code).toBe(1);
+    expect(statements()).toContain('ROLLBACK');
+    expect(statements()).not.toContain('COMMIT');
+    expect(String(errorSpy.mock.calls[0]?.[0])).toMatch(/declares no readable entry document/);
+  });
+
+  it('leaves an operator catalogue alone, and does not seed beside it', async () => {
     doubles.query.mockImplementation((sql: unknown) => {
       if (String(sql).includes('count(*)::int AS total FROM catalog_entry')) {
         return Promise.resolve({ rows: [{ total: 4 }], rowCount: 1 });
@@ -581,11 +576,9 @@ describe('default catalog', () => {
     expect(code).toBe(0);
     expect(paramsFor('INSERT INTO catalog_entry (')).toEqual([]);
     expect(paramsFor('INSERT INTO catalog_entry_revision')).toEqual([]);
-    // "Default" means nothing has been chosen. Topping up a configured catalogue would make the
-    // seed a second author of rows the repository owns.
+    // A configured catalogue is authoritative. Topping it up would make the seed a second author of
+    // rows the checkout owns, and the reload would then delete the difference.
     expect(existsSync(join(currentTree, 'catalog'))).toBe(false);
-    expect(logSpy).toHaveBeenCalledWith(
-      'default catalog not seeded: 4 entries are already projected',
-    );
+    expect(logSpy).toHaveBeenCalledWith('catalog not projected: 4 entries are already projected');
   });
 });

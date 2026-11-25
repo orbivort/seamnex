@@ -3,9 +3,10 @@ import { resolve } from 'node:path';
 /**
  * The monorepo root, from `packages/db/src`.
  *
- * This package resolves two things against it — the root `.env` here and the checked-in catalogue
- * artefacts in `seed/default-catalog.ts` — so the depth is stated once. A second `'../../../..'`
- * next to a caller's own path would be one move away from reading a different directory.
+ * This package resolves two things against it — the root `.env` here and the catalogue checkout path
+ * (`catalog-root.ts`, `./temp/catalog-repo`) — so the depth is stated once. A second
+ * `'../../../..'` next to a caller's own path would be one move away from reading a different
+ * directory. The catalogue documents themselves are not here: they are a checkout (ADR-BE-42).
  */
 export const REPOSITORY_ROOT = resolve(import.meta.dirname, '../../..');
 

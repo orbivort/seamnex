@@ -10,6 +10,7 @@ import {
 } from '@seamnex/domain';
 import { at } from '../fixtures/context';
 import { ENV_SCHEMAS } from '../fixtures/catalog';
+import { CATALOG_SYNC_COMMIT, CATALOG_SYNC_TAGS } from '../fixtures/catalog-repository';
 import { resolveEnv } from '../fixtures/env-plan';
 import { envSchemaFor } from '../fixtures/env-schema';
 import { appendAudit, envProfiles, meFor, scaffoldFor, getState } from '../store';
@@ -35,6 +36,100 @@ export const catalogHandlers = [
       return matchesQuery && matchesCluster && matchesPackaging;
     });
     return HttpResponse.json(items);
+  }),
+
+  /*
+   * ADR-BE-42 — registered **before** `/catalog/:key`, because MSW matches in registration order and
+   * `:key` would otherwise capture `repository` and answer with an entry-not-found problem. The
+   * console test would then pass against the wrong shape, which is worse than failing.
+   */
+  http.get('/api/v1/catalog/repository', ({ request }) => {
+    const guard = requireCapability(roleOf(request), 'catalog.browse');
+    if (guard) return guard;
+    return HttpResponse.json(getState().catalogRepository);
+  }),
+
+  /** ADR-BE-42 §10.3: fetch, swap and reconcile. The mock has one tag, so an unknown ref refuses. */
+  http.post('/api/v1/catalog/sync', async ({ request }) => {
+    const role = roleOf(request);
+    const guard = deny(role, ['R1'], 'catalog sync');
+    if (guard) return guard;
+    const state = getState();
+    if (!state.catalogRepository.source.configured) {
+      return problem(
+        503,
+        'SOURCE_NOT_CONFIGURED',
+        'No catalogue source is configured',
+        'Nothing to fetch: SEAMNEX_CATALOG_SOURCE_URL is unset.',
+        'Set the source URL, or place a catalogue tag in the working tree by hand and reload.',
+      );
+    }
+
+    const body = await readBody<{ ref?: string }>(request);
+    const ref = (body.ref ?? state.catalogRepository.source.ref ?? '').trim();
+    if (!(CATALOG_SYNC_TAGS as readonly string[]).includes(ref)) {
+      return problem(
+        404,
+        'SOURCE_REF_NOT_FOUND',
+        'The source has no such tag',
+        `The source has no tag "${ref}".`,
+        'Use catalog-2026.11.0, or name a tag that exists in the mirror.',
+      );
+    }
+
+    // A successful sync reconciles the tree, so any mixed state the mock was showing is repaired.
+    state.catalogRepository = {
+      revision: CATALOG_SYNC_COMMIT.sha,
+      source: { ...state.catalogRepository.source, ref },
+      commit: {
+        sha: CATALOG_SYNC_COMMIT.sha,
+        actor: actorFor(role).id,
+        message: `catalog sync ${ref} at ${CATALOG_SYNC_COMMIT.sha}`,
+        recordedAt: CATALOG_SYNC_COMMIT.recordedAt,
+      },
+      staged: null,
+    };
+
+    appendAudit({
+      action: 'catalog.source.synced',
+      targetType: 'catalog',
+      targetId: CATALOG_SYNC_COMMIT.sha,
+      targetLabel: `Catalogue source ${ref}`,
+      outcome: 'success',
+      detail: `Fetched ${state.catalogRepository.source.host ?? 'the configured source'} at ${ref} (${CATALOG_SYNC_COMMIT.sha}); ${String(state.catalog.length)} entries reconciled.`,
+      actor: actorFor(role),
+    });
+
+    return HttpResponse.json({
+      reloadedAt: at(0),
+      revision: CATALOG_SYNC_COMMIT.sha,
+      entries: state.catalog.length,
+      added: 0,
+      changed: 0,
+      removed: 0,
+      reconciled: state.catalog.map((entry) => ({
+        key: entry.key,
+        change: 'unchanged' as const,
+        detail: `${entry.key} matches repository revision`,
+      })),
+      environment: { added: 0, changed: 0, removed: 0, refused: [], applied: [] },
+      invalid: [],
+      coverage: computeCatalogCoverage({
+        entries: state.catalog.map((entry) => ({
+          key: entry.key,
+          guaranteeClass: entry.guaranteeClass,
+          primaryInstanceId: entry.primaryInstanceId,
+        })),
+        declaredEnvironments: state.catalog.length,
+        refused: [],
+      }),
+      source: {
+        url: state.catalogRepository.source.host ?? 'the configured source',
+        ref,
+        commit: CATALOG_SYNC_COMMIT.sha,
+      },
+      staged: { pending: [] },
+    });
   }),
 
   http.get('/api/v1/catalog/:key', ({ params, request }) => {

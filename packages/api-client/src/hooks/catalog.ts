@@ -10,6 +10,8 @@ import {
   AccessRequestSchema,
   CatalogEntrySchema,
   CatalogReloadResultSchema,
+  CatalogRepositoryViewSchema,
+  CatalogSyncResultSchema,
   EnvImportResultSchema,
   EnvPlanSchema,
   EnvProfileDeleteResponseSchema,
@@ -262,6 +264,48 @@ export function useReloadCatalog() {
       request('/catalog/reload', { schema: CatalogReloadResultSchema, method: 'POST' }),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.catalog });
+      void client.invalidateQueries({ queryKey: queryKeys.posture });
+      void client.invalidateQueries({ queryKey: queryKeys.registry });
+      void client.invalidateQueries({ queryKey: queryKeys.audit });
+    },
+  });
+}
+
+/**
+ * ADR-BE-42: the checkout being served — revision, configured source, last fetched commit, and
+ * whether an interrupted swap left a mixed tree.
+ *
+ * Read separately from the reload receipt because it answers a different question: a receipt
+ * describes the projection, this describes the tree that produced it, and only this can say that a
+ * source is *not* configured — which is what disables the sync action instead of failing at request
+ * time (AC-22).
+ */
+export function useCatalogRepository() {
+  return useQuery({
+    queryKey: queryKeys.catalogRepository,
+    queryFn: ({ signal }) =>
+      request('/catalog/repository', { schema: CatalogRepositoryViewSchema, signal }),
+  });
+}
+
+/**
+ * ADR-BE-42 §10.3: fetch a tag, swap it in and reconcile, in one request.
+ *
+ * The body carries a ref and never a URL — the source is deployment configuration, so the console
+ * cannot become an SSRF proxy. The receipt is the reload receipt plus the provenance of the tree.
+ */
+export function useSyncCatalog() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { ref?: string }) =>
+      request('/catalog/sync', {
+        schema: CatalogSyncResultSchema,
+        method: 'POST',
+        body: input.ref === undefined ? {} : { ref: input.ref },
+      }),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.catalog });
+      void client.invalidateQueries({ queryKey: queryKeys.catalogRepository });
       void client.invalidateQueries({ queryKey: queryKeys.posture });
       void client.invalidateQueries({ queryKey: queryKeys.registry });
       void client.invalidateQueries({ queryKey: queryKeys.audit });

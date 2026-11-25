@@ -27,6 +27,7 @@ export * from './sample-path';
 export * from './schemas/auth';
 export * from './schemas/common';
 export * from './schemas/catalog';
+export * from './schemas/catalog-repository';
 export * from './schemas/instance';
 export * from './schemas/job';
 export * from './schemas/backup';

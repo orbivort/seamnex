@@ -253,6 +253,84 @@ export const PROBLEM_CATALOG = {
     remediation: 'Use an https URL on an allow-listed host, without embedded credentials.',
     slug: 'source-url-rejected',
   },
+  /*
+   * ADR-BE-42 §10.3 — the catalogue fetch. Each code names one thing an operator can act on; a
+   * single `SOURCE_SYNC_FAILED` would send them to the wrong remedy for every one of them.
+   */
+  SOURCE_NOT_CONFIGURED: {
+    status: 503,
+    title: 'No catalogue source is configured',
+    remediation:
+      'Set SEAMNEX_CATALOG_SOURCE_URL, or place a catalogue tag in SEAMNEX_CATALOG_REPO_PATH by hand and reload. The working tree is still the authority.',
+    slug: 'source-not-configured',
+  },
+  SOURCE_REF_REQUIRED: {
+    status: 422,
+    title: 'The sync named no revision',
+    remediation:
+      'Name the tag to fetch (catalog-YYYY.MM.<patch>), or set SEAMNEX_CATALOG_SOURCE_REF to a default.',
+    slug: 'source-ref-required',
+  },
+  SOURCE_REF_REJECTED: {
+    status: 422,
+    title: 'The ref is not a tag or commit name',
+    remediation:
+      'Name an annotated tag or a full commit SHA. A branch would change the catalogue under a running installation.',
+    slug: 'source-ref-rejected',
+  },
+  SOURCE_REF_IS_BRANCH: {
+    status: 422,
+    title: 'The ref is a branch',
+    remediation:
+      'Tag the release and sync the tag; a branch tip is not a reviewed revision. Nothing was changed.',
+    slug: 'source-ref-is-branch',
+  },
+  SOURCE_REF_NOT_FOUND: {
+    status: 404,
+    title: 'The source has no such tag',
+    remediation: 'Check the tag name (catalog-YYYY.MM.<patch>), then retry. Nothing was changed.',
+    slug: 'source-ref-not-found',
+  },
+  SOURCE_CLONE_FAILED: {
+    status: 502,
+    title: 'The catalogue source could not be fetched',
+    remediation:
+      'Check the host network and the tag, then retry. Nothing in the working tree was changed.',
+    slug: 'source-clone-failed',
+  },
+  SOURCE_EMPTY_TREE: {
+    status: 422,
+    title: 'The fetched revision carries no catalogue',
+    remediation:
+      'Check the tag: a catalogue root is catalog/<KEY>.json, catalog/env/<KEY>.json and upstream/<KEY>/. Swapping an empty tree in would delete the catalogue.',
+    slug: 'source-empty-tree',
+  },
+  SOURCE_SYNC_IN_PROGRESS: {
+    status: 409,
+    title: 'Another catalogue sync is running',
+    remediation: 'Wait for the running sync to finish, then run this one again.',
+    slug: 'source-sync-in-progress',
+  },
+  SOURCE_SYNC_COOLDOWN: {
+    status: 429,
+    title: 'The previous sync was too recent',
+    remediation: 'Wait for the cooldown in the detail, then retry.',
+    slug: 'source-sync-cooldown',
+  },
+  SOURCE_ROOT_NOT_WRITABLE: {
+    status: 503,
+    title: 'The catalogue root is not writable by the platform',
+    remediation:
+      'Make the host directory writable by the API container uid/gid and let git accept it (safe.directory when the host uid differs), then retry.',
+    slug: 'source-root-not-writable',
+  },
+  SOURCE_SWAP_INCOMPLETE: {
+    status: 500,
+    title: 'The catalogue swap stopped between renames',
+    remediation:
+      'Re-run the sync at the same ref. GET /catalog/repository reports the same pending order, and the next successful sync repairs the mixed tree.',
+    slug: 'source-swap-incomplete',
+  },
   /**
    * 4A.3 / NFR-4.15: an ingested definition the policy refuses. The code keeps its original name
    * because it is published, but the source may be a Compose file, a Dockerfile, or the artefacts of

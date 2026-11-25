@@ -294,6 +294,23 @@ const EnvironmentSchema = z
      * without cloning; production sets it explicitly (ADR-BE-08).
      */
     SEAMNEX_CATALOG_REPO_PATH: z.string().min(1).default('./temp/catalog-repo'),
+    /**
+     * ADR-BE-42 §10.2 rule 1 — the catalogue mirror, as configuration only.
+     *
+     * `POST /catalog/sync` takes a ref and never a URL, so there is no request-supplied host to
+     * validate: the SSRF surface is this setting, reviewed once, instead of a console that can reach
+     * any address the control plane can. Empty is a supported configuration, not an error — it is
+     * the air-gapped install, where the operator places a tag in `SEAMNEX_CATALOG_REPO_PATH` by hand
+     * and the console action is disabled with an explanation (§10.6).
+     */
+    SEAMNEX_CATALOG_SOURCE_URL: z.string().default('https://github.com/orbivort/seamnex-catalog'),
+    /** Default ref the console pre-fills; a caller may name another per run. A tag or commit. */
+    SEAMNEX_CATALOG_SOURCE_REF: z.string().default(''),
+    /**
+     * Per-actor cooldown beside the advisory lock (§10.2 rule 7): the lock serialises concurrent
+     * syncs, this stops one operator queueing 300-second clones one after another.
+     */
+    SEAMNEX_CATALOG_SYNC_COOLDOWN_MS: z.coerce.number().int().min(0).max(3_600_000).default(60_000),
 
     // ---- Phase 4 adapters (ADR-BE-12) -------------------------------------------------------
     /**

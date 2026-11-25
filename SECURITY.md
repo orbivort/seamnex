@@ -148,7 +148,8 @@ the component.
   routers (`ADR-BE-39`, NFR-4.1). A deployment of the shipped assets that exposes a product over plain
   HTTP is a defect in this project: report it. The development stack's self-signed certificate is
   covered by the development-affordance exception above.
-- **Third-party software.** Vulnerabilities in upstream products (`platform/upstream/*`, Keycloak,
+- **Third-party software.** Vulnerabilities in upstream products (`upstream/*` in the catalogue
+  checkout, Keycloak,
   PostgreSQL, Redis, Traefik, n8n, the S3 target) belong upstream; we will relay a report but cannot
   patch them. Dependency advisories are tracked by Renovate, and a CVE in a direct dependency with no
   reachable path through this code is maintenance, not a security report. Licence matters are covered

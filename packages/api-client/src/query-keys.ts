@@ -6,6 +6,12 @@ export const queryKeys = {
   launchTarget: (instanceId: string) => ['portal', 'launch-target', instanceId] as const,
   requestable: ['portal', 'requestable'] as const,
   catalog: ['catalog'] as const,
+  /**
+   * ADR-BE-42: the checkout the platform is serving. Under `catalog` so a reload or a sync
+   * invalidates it with the projection it describes; an entry key can never be `repository`, because
+   * `EntryKeySchema` admits only `D…` forms.
+   */
+  catalogRepository: ['catalog', 'repository'] as const,
   catalogEntry: (key: string) => ['catalog', key] as const,
   envSchema: (key: string) => ['catalog', key, 'env-schema'] as const,
   envPlan: (key: string, profile: string, overrides: Record<string, string>) =>

@@ -34,6 +34,11 @@ import {
   ScaffoldDraftSchema,
 } from './schemas/catalog';
 import {
+  CatalogRepositoryViewSchema,
+  CatalogSyncRequestSchema,
+  CatalogSyncResultSchema,
+} from './schemas/catalog-repository';
+import {
   AdminCredentialRequestSchema,
   AdminCredentialSchema,
   BackupPostureSchema,
@@ -464,6 +469,25 @@ const DECLARED_OPERATIONS: readonly DeclaredOperation[] = [
     summary: 'Re-read the catalog repository and reconcile the projection (M1/M22).',
     tag: 'catalog',
     response: CatalogReloadResultSchema,
+  }),
+  op({
+    method: 'GET',
+    path: '/catalog/repository',
+    summary:
+      'The catalogue checkout being served: revision, configured source, last fetched commit, ' +
+      'and whether an interrupted swap left a mixed tree (ADR-BE-42).',
+    tag: 'catalog',
+    response: CatalogRepositoryViewSchema,
+  }),
+  op({
+    method: 'POST',
+    path: '/catalog/sync',
+    summary:
+      'Fetch the configured catalogue source at a tag or commit, swap it into the working tree and ' +
+      'reconcile the projection. The URL is configuration; the tree swap is not atomic (ADR-BE-42).',
+    tag: 'catalog',
+    response: CatalogSyncResultSchema,
+    request: CatalogSyncRequestSchema,
   }),
   op({
     method: 'GET',

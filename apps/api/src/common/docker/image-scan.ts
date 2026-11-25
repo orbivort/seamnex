@@ -28,7 +28,8 @@ import {
  *   1. **The scanner gets a tar, not the socket.** Mounting the daemon socket into a scanner
  *      container is the usual shortcut, and it hands a third-party image the platform's whole
  *      Engine API. The socket proxy already refuses BuildKit sessions for the same reason
- *      (`platform/upstream/D02-01/docker-compose.yml`). `docker save` gives the scanner the bytes it
+ *      (`upstream/D02-01/docker-compose.yml` in the catalogue checkout). `docker save` gives the
+ *      scanner the bytes it
  *      needs and nothing else.
  *   2. **The answer is a verdict, not a log line.** `passed`, `blocked` and `error` are distinct:
  *      `error` is "we could not look", and treating it as a pass is the defect S-10 names.

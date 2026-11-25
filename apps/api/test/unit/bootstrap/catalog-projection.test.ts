@@ -100,9 +100,9 @@ describe('decideProjection', () => {
     expect(decision.apply).toBe(false);
     expect(decision.code).toBe(1);
     expect(decision.lines.join('\n')).toContain('3 catalog entries are projected');
-    // The step that ends the state is named, and it is not the seed: re-seeding writes only into an
-    // empty projection, so an operator told to "restore the tree, deliberately" had no command.
-    expect(decision.lines.join('\n')).toContain('pnpm catalog:restore');
+    // The step that ends the state is named, and it is not the seed: the platform holds no catalogue
+    // content, so the repair is a checkout at a tag, not a copy from this repository.
+    expect(decision.lines.join('\n')).toContain('pnpm catalog:sync --ref <tag>');
   });
 
   it("names the unprojected entries instead of repeating M03's per-file refusal", () => {

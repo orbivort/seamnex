@@ -169,23 +169,25 @@ function migrate(env) {
   const seeded = runPnpm(['--filter', '@seamnex/db', 'seed'], {
     env: { ...process.env, DATABASE_URL: env.DATABASE_URL },
   });
-  // The seed's status used to be dropped, so a stack whose default catalogue failed to materialise
-  // still booted and every catalogue screen showed an empty product. A failed seed is a failed
-  // startup, exactly like a failed migration.
+  // The seed's status used to be dropped, so a stack whose catalogue could not be projected still
+  // booted and every catalogue screen showed an empty product. A failed seed is a failed startup,
+  // exactly like a failed migration. An *absent* checkout is not a failure: the seed says so and
+  // exits 0 (ADR-BE-42 §9.3), which is what keeps a fresh clone bootable before its first sync.
   if (seeded.status !== 0) {
-    fail('the development seed failed; the default catalogue is not usable');
+    fail('the development seed failed; the catalogue projection is not usable');
     return false;
   }
 
   /*
-   * The seed writes `catalog/env/<KEY>.json`; `env_schema_var` is M03's and is projected by its own
-   * command. Running it here is what makes "a fresh clone is usable after one command" true for the
-   * environment half as well: without it the deploy wizard has no variables to offer and
+   * The checkout carries `catalog/env/<KEY>.json`; `env_schema_var` is M03's and is projected by its
+   * own command. Running it here is what makes "a fresh clone is usable after one command" true for
+   * the environment half as well: without it the deploy wizard has no variables to offer and
    * `GET /catalog/:key/env-schema` answers `[]` for a product that declares 30.
    *
-   * Idempotent by content hash, so a warm stack pays one read per file and writes nothing.
+   * Idempotent by content hash, so a warm stack pays one read per file and writes nothing. With no
+   * checkout it exits 0 and says there is nothing to project, so this step stays safe.
    */
-  log('projecting the default environment schemas');
+  log('projecting the catalogue environment schemas');
   const projected = runPnpm(['catalog:project'], {
     env: { ...process.env, DATABASE_URL: env.DATABASE_URL },
   });

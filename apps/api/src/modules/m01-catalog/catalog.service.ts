@@ -715,6 +715,6 @@ function incompleteProjection(key: string): AppError {
     code: 'INTERNAL_ERROR',
     detail: `Catalog entry ${key} is projected without the fields its contract requires.`,
     remediation:
-      'Run POST /catalog/reload to re-read the catalog repository, or reseed the development database.',
+      'Run POST /catalog/reload to re-read the catalogue checkout. If no checkout is present, acquire one first (pnpm catalog:sync --ref <tag>) — reseeding projects existing documents and cannot produce a missing one.',
   });
 }

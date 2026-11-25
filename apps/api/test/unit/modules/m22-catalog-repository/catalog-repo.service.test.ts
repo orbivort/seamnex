@@ -343,6 +343,34 @@ describe('revision', () => {
       revision: expect.stringMatching(/^content-/),
     });
   });
+
+  /*
+   * The read model's own accessor (ADR-BE-42 §10.3). It has to answer `null` for "nothing cloned
+   * yet", which `revision: 'absent'` cannot express on a screen that also has to say whether a source
+   * is configured — and it must not project anything to find out.
+   */
+  it('answers null when there is no checkout at all', async () => {
+    const { repo } = tree({});
+
+    await expect(repo.revision()).resolves.toBeNull();
+  });
+
+  it('answers the git head without parsing a single document', async () => {
+    // A document that does not parse is left out of `load()`; the label must still be the commit.
+    const { repo } = tree({
+      'catalog/D01-01.json': '{ broken',
+      '.git/HEAD': 'ref: refs/heads/main',
+    });
+    h.execFileSync.mockReturnValue('abc123def456\n');
+
+    await expect(repo.revision()).resolves.toBe('abc123def456');
+  });
+
+  it('falls back to the content hash for a hand-placed tree', async () => {
+    const { repo } = tree({ 'catalog/D01-01.json': ENTRY });
+
+    await expect(repo.revision()).resolves.toMatch(/^content-[0-9a-f]{16}$/);
+  });
 });
 
 describe('write-behind records', () => {

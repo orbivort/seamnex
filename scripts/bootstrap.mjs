@@ -18,7 +18,7 @@ import { pnpmCommandLine } from './lib/pnpm.mjs';
  * bootstrap that drifts from them.
  *
  * What it adds on top: a preflight that names the missing prerequisite instead of failing inside
- * turbo, the deterministic projection of the default catalogue, an independent readiness check, and
+ * turbo, the deterministic projection of whichever catalogue checkout exists, an independent readiness check, and
  * a summary of what is now reachable and what still needs a human (NFR-6.2's timing budget, S-9's
  * "unfamiliar operator").
  *
@@ -238,12 +238,16 @@ function bringUpStack() {
  * `dev-*` accounts their role bindings — without it the console signs in and every screen is empty,
  * which reads as a broken install. `catalog:project` is content-hash driven, so a warm host pays one
  * read per file.
+ *
+ * Neither step fetches anything (ADR-BE-42): the catalogue is a checkout, and a host that has not
+ * synced one starts with an empty catalogue on purpose. The closing note names that step instead of
+ * promising content this repository no longer ships.
  */
 function projectData(env) {
   const databaseUrl = env.DATABASE_URL ?? process.env.DATABASE_URL ?? '';
   for (const [label, args] of [
-    ['seeding identity and the default catalogue', ['--filter', '@seamnex/db', 'seed']],
-    ['projecting the default environment schemas', ['catalog:project']],
+    ['seeding identity and projecting the catalogue checkout', ['--filter', '@seamnex/db', 'seed']],
+    ['projecting the catalogue environment schemas', ['catalog:project']],
   ]) {
     log(label);
     const result = runPnpm(args, {
@@ -251,10 +255,14 @@ function projectData(env) {
       env: { ...process.env, DATABASE_URL: databaseUrl },
     });
     if ((result.status ?? 1) !== 0) {
-      fail(`"${args.join(' ')}" failed; the platform would start with no catalogue.`);
+      fail(`"${args.join(' ')}" failed; the platform would start with an unusable catalogue.`);
       return false;
     }
   }
+  log(
+    'catalogue content is not shipped with the platform: run `pnpm catalog:sync --ref <tag>` ' +
+      '(Catalog → "Sync from source") to serve a tag.',
+  );
   return true;
 }
 

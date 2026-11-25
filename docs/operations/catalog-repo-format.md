@@ -5,8 +5,10 @@ host, loaded by `POST /catalog/reload` and by `pnpm catalog:project`, and projec
 `catalog_entry` and `env_schema_var`. This page is the on-disk contract: what the loader reads, what it
 refuses, and how it labels a revision.
 
-The default set that ships with the repository is an instance of the same format, not a second one —
-see [the default set](#the-default-set) at the end.
+Nothing in this repository is an instance of that format: the platform ships no documents, so the only
+checkout this page describes is one fetched with `pnpm catalog:sync`, cloned by hand, or produced by an
+operator. [`orbivort/seamnex-catalog`](https://github.com/orbivort/seamnex-catalog) is the reference
+instance (ADR-BE-42).
 
 ## Where the loader looks
 
@@ -57,9 +59,10 @@ third:
 The content hash covers both artefact kinds, so an environment-only edit still produces a new
 revision, and a warm reload that finds no change writes nothing.
 
-`pnpm db:seed` records a per-file `content-<16 hex>` instead, because it projects a file it just wrote
-rather than a tree under version control. The first reload therefore reports those entries as
-`updated` — that is the truth: they were seeded, not read from a revision.
+`pnpm db:seed` records a per-file `content-<16 hex>` instead, because it projects one document rather
+than the tree it belongs to. The first reload therefore reports those entries as `updated` — that is
+the truth: they were seeded from a file, not read from a revision. A checkout fetched by
+`catalog:sync` does have a `.git`, so the same rows move to the commit on the first reload.
 
 ## Reconciliation
 
@@ -68,49 +71,55 @@ This is why a row is never seeded without a file behind it: the next reload woul
 a deletion. A declaration whose entry document is missing cannot be projected, and is reported as
 refused rather than applied.
 
-## The default set
+## Where the catalogue comes from
 
-A virgin stack has no catalogue. `pnpm db:seed` materialises a checked-in default set into the working
-tree — `catalog/<KEY>.json` and `catalog/env/<KEY>.json` — and then projects it, but only into a
-`catalog_entry` that is empty. An operator's catalogue is never topped up, merged into or replaced.
+The catalogue is deployable product content, and it lives in its own repository (ADR-BE-42):
+`https://github.com/orbivort/seamnex-catalog`. The platform repository holds none of it — no entry
+documents, no declarations, no upstream trees — so a clone of the platform has no catalogue to serve. A
+virgin stack has an empty catalogue until one is acquired.
 
-The default set lives beside the shipped catalogue artefacts, not inside them:
+Acquisition is a server operation, because the request that swaps a tree is also the request that
+records `catalog_commit` and reconciles the projection:
 
-| Path                                  | Holds                                                    |
-| ------------------------------------- | -------------------------------------------------------- |
-| `platform/default-catalog/<KEY>.json` | the entry documents the seed copies                      |
-| `platform/catalog/env/<KEY>.json`     | the declarations the seed copies, one owner per artefact |
+| Path                                                            | Use                                                                                         |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `POST /catalog/sync`                                            | fetch a tag, swap it into the working tree, reload in one go                                |
+| Catalog → "Sync from source"                                    | the same request, with the ref pre-filled and the receipt shown                             |
+| `pnpm catalog:sync --ref <tag>`                                 | the same request from a script, given `SEAMNEX_API_TOKEN`                                   |
+| `git clone --depth 1 --branch <tag> <mirror> temp/catalog-repo` | air-gapped hosts, then `pnpm db:seed` (documents) and `pnpm catalog:project` (declarations) |
 
-`platform/default-catalog/` is deliberately **not** `platform/catalog/`. The latter is shaped like a
-catalog root (`env/` inside it), so entry documents at its root would turn it into a loadable
-repository holding only the default set — and a reload against it would delete every other entry.
-A sibling directory is read by nothing.
+The source URL is deployment configuration (`SEAMNEX_CATALOG_SOURCE_URL`), never a request field: a
+signed-in operator choosing a ref cannot make the platform reach a host of their choosing. Empty is a
+supported setting — the console action is disabled and explains what to run instead.
 
-`pnpm check:catalog` asserts the two halves pair up: every key in `DEFAULT_PRODUCT_KEYS` has a
-document and a declaration, every document and declaration belongs to a key, each document parses as
-the served schema and pins its image, and the coverage the set proves is reported against S-2's native
-floor.
+`pnpm db:seed` projects whatever the checkout declares, and writes nothing. It skips with exit 0 when
+there is no checkout, naming `catalog:sync`; it fails when a checkout exists but yields no parseable
+document, because projecting nothing is indistinguishable from a database nobody seeded.
+
+`pnpm check:catalog` reads the same checkout (`SEAMNEX_CATALOG_REPO_PATH`), derives the key set from
+the documents, and asserts the two halves pair up: every document has a declaration and every
+declaration has a document, each document declares its own key and pins its image, and the coverage
+the tag proves is reported against S-2's native floor. A missing checkout fails the gate rather than
+passing vacuously.
 
 ### When the working tree is gone
 
 The projection and the tree are two halves of one state, and they live in different places: the rows
 are in PostgreSQL's volume, the documents are under `SEAMNEX_CATALOG_REPO_PATH` (by default
 `./temp/catalog-repo`). Deleting `temp/`, moving the checkout or restoring a database onto another host
-can therefore keep one half and lose the other. Both steps that would repair it refuse by design —
-`pnpm db:seed` writes the default set only into an empty projection, and `pnpm catalog:project` stops
-rather than report "nothing to project".
+can therefore keep one half and lose the other. Both repair steps refuse by design — `pnpm db:seed`
+projects only into an empty `catalog_entry`, and `pnpm catalog:project` stops rather than report
+"nothing to project".
 
-`pnpm catalog:restore` is the deliberate step. It writes the default tree back, and only when the two
-halves provably belong together:
+The repair is to put the checkout back at the tag the projection came from:
 
-| Condition                                                     | Outcome                                    |
-| ------------------------------------------------------------- | ------------------------------------------ |
-| `<root>/catalog` exists                                       | nothing written; the tree is the authority |
-| `catalog_entry` is empty                                      | nothing written; `pnpm db:seed` seeds it   |
-| `catalog_entry` is exactly the keys of `DEFAULT_PRODUCT_KEYS` | both halves restored from `platform/`      |
-| any other key set                                             | refused, with the keys that do not line up |
+| Condition                         | Outcome                                                    |
+| --------------------------------- | ---------------------------------------------------------- |
+| `<root>/catalog` exists           | nothing to repair; the tree is the authority               |
+| `catalog_entry` is empty          | `pnpm db:seed` projects the checkout                       |
+| the checkout is gone              | `pnpm catalog:sync --ref <tag>` (or restore a `git clone`) |
+| the tag is unknown or unreachable | refused, naming the code; nothing is written               |
 
 The last row is the important one: rows from a tree this repository cannot reproduce are restored from
-a checkout or a backup, never reconstructed by guesswork. Existing files are never replaced, so the
-command cannot overwrite a tree that appears while it runs. It writes files only — run
-`pnpm catalog:project` afterwards, or simply `pnpm dev`, which runs both.
+the catalogue repository or a backup, never reconstructed by guesswork. `pnpm catalog:restore` used to
+do that from vendored files; it now prints this table and exits non-zero.

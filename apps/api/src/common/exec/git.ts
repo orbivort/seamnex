@@ -116,6 +116,47 @@ export async function cloneAtRevision(options: CloneOptions): Promise<CloneResul
   return { commit: await commitOf(options.targetDir), revision };
 }
 
+/**
+ * What a ref that a caller named actually is.
+ *
+ * `cloneAtRevision` alone cannot tell `catalog-2026.11.0` from `main`: both fetch, both check out a
+ * commit, and the difference only shows as "the catalogue changed under a running installation" the
+ * next time someone syncs. ADR-BE-42 §10.2 rule 5 makes the ref a tag or a commit, so the check
+ * happens before the clone and names all four outcomes instead of guessing from a message.
+ */
+export type RefKind = 'tag' | 'commit' | 'branch' | 'missing';
+
+// eslint-disable-next-line security/detect-unsafe-regex -- both alternatives are fixed-length ({40} and {24}), so matching is linear in the input.
+const COMMIT_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i;
+
+export async function resolveRefKind(options: {
+  readonly url: string;
+  readonly ref: string;
+  readonly allowedHosts: readonly string[];
+  readonly timeoutMs?: number;
+}): Promise<RefKind> {
+  const url = assertAllowedSourceUrl(options.url, options.allowedHosts);
+  if (COMMIT_PATTERN.test(options.ref)) return 'commit';
+
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  const tag = await listRef(url.toString(), ['--tags'], `refs/tags/${options.ref}`, timeoutMs);
+  if (tag.length > 0) return 'tag';
+
+  // Only reached when the tag lookup found nothing, so the happy path is one round trip.
+  const head = await listRef(url.toString(), ['--heads'], `refs/heads/${options.ref}`, timeoutMs);
+  return head.length > 0 ? 'branch' : 'missing';
+}
+
+async function listRef(
+  url: string,
+  kind: readonly string[],
+  ref: string,
+  timeoutMs: number,
+): Promise<string> {
+  const result = await runOrThrow('git', ['ls-remote', '--refs', ...kind, url, ref], { timeoutMs });
+  return result.stdout.trim();
+}
+
 /** The commit the working tree is on; the resolver records it, the renderer hashes files. */
 export async function commitOf(directory: string): Promise<string> {
   const result = await runOrThrow('git', ['rev-parse', 'HEAD'], {

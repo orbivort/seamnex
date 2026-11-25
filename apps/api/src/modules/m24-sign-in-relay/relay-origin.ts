@@ -20,7 +20,8 @@ export function internalOriginFor(slug: string, payload: Record<string, unknown>
 
 /**
  * The origin a browser uses. `Host`, `Origin` and `Referer` all carry it: the product compares the
- * three, and builds its own redirects from them (measured — see `platform/upstream/D09-01`).
+ * three, and builds its own redirects from them (measured — see `upstream/D09-01` in the catalogue
+ * checkout).
  *
  * The port is stripped from `routeHost` first. The edge forwards the browser's `Host` verbatim, and a
  * browser includes a non-default port (`openproject.localhost:8443`), so appending the configured
