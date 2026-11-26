@@ -38,6 +38,11 @@ entryPoints:
   web:
     address: ':80'
     http:
+      # v3.7 warns at startup for every entry point that leaves this unstated, because the headers
+      # middleware each router carries (HSTS, nosniff) relies on it to resolve a duplicated header
+      # name. `keep` is v3.7's default — stated so the edge boots without that warning, and so a later
+      # default cannot move the policy this deployment ships.
+      aliasHeadersStrategy: keep
       redirections:
         entryPoint:
           to: websecure
@@ -47,6 +52,9 @@ entryPoints:
           permanent: true
   websecure:
     address: ':443'
+    http:
+      # Same reason as `web`: this entry point serves the same headers middleware.
+      aliasHeadersStrategy: keep
 
 certificatesResolvers:
   seamnex:

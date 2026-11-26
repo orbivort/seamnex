@@ -82,6 +82,41 @@ describe('catalogue sync dialog', () => {
     expect(screen.getByText(/Retry the action\. If it persists/i)).toBeDefined();
   });
 
+  it('starts a reopened dialog from a clean slate', async () => {
+    // A refusal belongs to the attempt that produced it and the acknowledgement to the operator who
+    // gave it. Carrying either across openings showed a stale failure and left the removal already
+    // accepted, which is exactly what explicit confirmation exists to prevent.
+    server.use(
+      http.post('/api/v1/catalog/sync', () => HttpResponse.text('Bad Gateway', { status: 502 })),
+    );
+
+    const dialog = await openDialog();
+    const acknowledge = () =>
+      within(dialog).getByRole('checkbox', { name: /I understand a sync can remove entries/i });
+
+    fireEvent.click(acknowledge());
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Sync now' }));
+    expect(await screen.findByText('Bad Gateway')).toBeDefined();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).toBeNull();
+    });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Sync from source' }));
+    const reopened = await screen.findByRole('dialog');
+
+    expect(within(reopened).queryByText('Bad Gateway')).toBeNull();
+    expect(
+      (within(reopened).getByRole('checkbox', {
+        name: /I understand a sync can remove entries/i,
+      }) as HTMLInputElement).checked,
+    ).toBe(false);
+    expect(within(reopened).getByRole('button', { name: 'Sync now' }).hasAttribute('disabled')).toBe(
+      true,
+    );
+  });
+
   it('closes on cancel without sending anything', async () => {
     const dialog = await openDialog();
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));

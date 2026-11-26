@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { toProblem } from '@seamnex/api-client';
 import type { useSyncCatalog } from '@seamnex/api-client';
 import type { CatalogRepositoryView } from '@seamnex/domain';
@@ -35,9 +35,33 @@ export function SyncCatalogDialog({
 }) {
   const [ref, setRef] = useState(repository.source.ref ?? '');
   const [acknowledged, setAcknowledged] = useState(false);
+  const wasOpen = useRef(open);
   const problem = sync.error ? toProblem(sync.error) : null;
+
+  /*
+   * One attempt per opening. The dialog stays mounted between openings (the page owns `open`), so
+   * without this a refusal from the previous attempt was still on screen the next time the dialog
+   * appeared — reading as a fresh failure — and an acknowledgement given for that attempt carried
+   * over, turning a write that may remove entries into a one-click action. The field is re-seeded
+   * from the source's recorded ref for the same reason: the tree may have moved on since.
+   */
+  useEffect(() => {
+    if (open && !wasOpen.current) {
+      setRef(repository.source.ref ?? '');
+      setAcknowledged(false);
+      // Only a refusal is cleared: resetting unconditionally would also drop the successful
+      // receipt the page is still showing, and would disturb a sync that is still in flight.
+      if (sync.error) sync.reset();
+    }
+    wasOpen.current = open;
+  }, [open, repository.source.ref, sync]);
+
   const trimmed = ref.trim();
   const ready = trimmed.length > 0 && acknowledged;
+  // `host` never carries a scheme (ADR-BE-42 §10.3), and it is deployment configuration rather
+  // than operator input, so prefixing `https://` here cannot point the browser anywhere new.
+  const sourceHost = repository.source.host;
+  const sourceUrl = sourceHost === null ? null : `https://${sourceHost}`;
 
   const submit = () => {
     if (!ready) return;
@@ -75,7 +99,25 @@ export function SyncCatalogDialog({
           label="Tag or commit"
           htmlFor="catalog-sync-ref"
           required
-          hint={`Source ${repository.source.host ?? 'not configured'}. Tags look like catalog-YYYY.MM.<patch>.`}
+          hint={
+            <>
+              Source{' '}
+              {sourceUrl === null ? (
+                'not configured'
+              ) : (
+                <a
+                  href={sourceUrl}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  title={`Open ${sourceHost} in a new tab`}
+                  className="font-medium"
+                >
+                  {sourceHost}
+                </a>
+              )}
+              {'. Tags look like catalog-YYYY.MM.<patch>.'}
+            </>
+          }
         >
           <Input
             id="catalog-sync-ref"

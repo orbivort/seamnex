@@ -349,7 +349,7 @@ export function CatalogPage() {
         <PanelHeader
           eyebrow="Entries"
           title={`${counted(entries.length, 'domain entry', 'domain entries')}, ${counted(deploymentCount, 'deployment', 'deployments')}`}
-          description="Entries can share a deployment (D05-01 and D06-01 share one ERPNext instance). Guarantee class is mandatory: no entry may be unclassified."
+          description=""
         />
         <FilterBar
           search={query}

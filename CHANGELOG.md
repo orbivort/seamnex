@@ -47,6 +47,11 @@ Action required when upgrading an existing install; everything else is additive.
   `./platform/upstream` path no longer exists. `pnpm catalog:restore` is gone and exits non-zero with
   the replacement; `pnpm db:seed` no longer writes documents, so a host with no checkout starts with
   an empty catalogue until one is fetched.
+- Keycloak moves from 26.0.5 to 26.8.2. On an existing host the Keycloak schema migrates in place on
+  the first start and does not migrate back, so a host that must stay on 26.0.5 recreates the
+  `seamnex_keycloak` database rather than downgrading. 26.8.2 also validates the Admin API audience:
+  `seamnex-platform-admin` now carries the `kc-admin-api` client scope, and a realm applied without
+  it answers `401` on every call to `/admin/...`, including `pnpm kc:admin --check`.
 
 ### Summary
 
@@ -175,6 +180,35 @@ the running container, and an export, backup and restore path that proves what i
 
 ### Changed
 
+- **The dev stack pins images by digest** (`NFR-4.15`) — every registry reference in
+  `docker/compose.dev.yml` now carries the `sha256` of its multi-platform manifest index, so a re-push
+  of a tag cannot change what a developer runs; `redis` names 7.4.12 (RSALv2/SSPLv1) instead of the
+  floating `7-alpine`, and `postgres` names 18.7 instead of the 18 line. The six observability images
+  stay tag-only until a host with registry access records theirs.
+- **The dev edge runs a Traefik line that still receives fixes** (`NFR-4.15`) — `traefik` moves from
+  v3.3.7, whose line ended support on 2025-05-05, to v3.7.20, the line still taking security fixes,
+  pinned to its manifest index. Routing, TLS and ACME behaviour is unchanged; the static config now
+  states `aliasHeadersStrategy: keep` instead of accepting the startup warning v3.7 raises without it.
+- **The dev DNS server runs a CoreDNS release that still receives fixes** (`NFR-4.15`) — `1.12.0` was
+  pinned in November 2024 and predated the listener fixes that shipped in `1.14.7`; `1.15.0`, current
+  since 2026-10-21, is built with Go 1.27.3 and closes several CVEs. The zone configures `template`,
+  `forward` and `errors` only, and `forward` targets `/etc/resolv.conf` rather than a hostname, so the
+  change `1.15.0` makes to upstream hostnames does not apply.
+- **The dev identity provider runs a Keycloak line that still receives security fixes**
+  (`NFR-4.15`) — `26.0.5` was pinned in November 2024, before the 26.8.2 security release, whose notes
+  list roughly 35 CVEs (SAML parser DoS/OOM, stored XSS on the login page, IdP email auto-linking,
+  DCR/CIBA/UMA token handling). The realm-as-code CLI moves with it to `6.6.0-26.8.1`, the newest
+  build target that release ships; its start-up check compares the major segment only, so the
+  one-patch gap is accepted rather than hidden. Hostname v2, the management-port health probe and the
+  realm import are unchanged, and `seamnex-platform-admin` gains the `kc-admin-api` scope 26.8.2
+  requires before it accepts an Admin API token from a custom client.
+- **The dev socket proxy runs a HAProxy line that still receives fixes** (`NFR-4.15`) — `0.3.0` was
+  built on `haproxy:2.2-alpine`, a branch upstream left unmaintained in 2025-Q2, and its tag family is
+  itself retired: `v0.6.0` dropped `:vX.Y.Z` and `:edge` for `lts`, `latest` and the major-minor
+  lines. The pin names `3.4`, the line that stays on 3.4 when `lts` moves to 3.6, and carries the
+  digest of its manifest index so a rebuild of that tag cannot change what a developer runs. The
+  allow-list is unchanged — every toggle this stack sets still exists, the routes still match, and
+  `EXEC=0` with `BUILD=1` mean what they meant on `0.3.0`.
 - **"Prefetch images" builds a `build:` entry instead of pulling its tag** (`FR-1.7`, `ADR-BE-40`) —
   pulling would fetch the registry's tag the next deployment then refuses; everything else is still
   pulled and verified, and a job with no entry fails `VALIDATION_FAILED`.

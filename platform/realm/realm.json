@@ -160,7 +160,16 @@
       "protocol": "openid-connect",
       "attributes": { "access.token.lifespan": "300" },
       "redirectUris": [],
-      "webOrigins": []
+      "webOrigins": [],
+      "defaultClientScopes": [
+        "profile",
+        "email",
+        "roles",
+        "web-origins",
+        "acr",
+        "basic",
+        "kc-admin-api"
+      ]
     }
   ],
   "authenticatorConfig": [
