@@ -493,6 +493,14 @@ export class DeploymentPipeline implements OnModuleInit {
     });
 
     /*
+     * NFR-4.6 / S-10 — the scan below asks the daemon about every image by name, so a sidecar nobody
+     * has fetched yet is an inspect 404 rather than a finding. `compose up` would fetch it, but `up`
+     * runs after the scan on purpose; on a host that had never pulled `mariadb:11.4.13@sha256:…` the
+     * first deployment of D01-01 died here with the daemon's `no such image` and no stage had tried.
+     */
+    await this.ensureImagesLocal(state, renderSet, context);
+
+    /*
      * NFR-4.6 / S-10 — scan what is about to start, after every image is local and before any
      * container exists. Placed here rather than in `prepull` because the build stage produced the
      * images: a Dockerfile path has no image to scan until `build` has run.
@@ -1356,6 +1364,36 @@ export class DeploymentPipeline implements OnModuleInit {
   }
 
   /**
+   * Every image the definition starts, present locally — before the scan asks about them.
+   *
+   * `assertPinnedImages` speaks only for the entry's own image; a sidecar such as
+   * `mariadb:11.4.13@sha256:…` is normally left to `compose up`. The scan runs before `up`, so a host
+   * that had never fetched the sidecar answered the scan with the daemon's `404 no such image`, and
+   * the deployment failed at a stage that was only supposed to look. Pulling here keeps the scan's
+   * precondition true and turns an unreachable pin into the pull's own message.
+   *
+   * Images this run built are skipped: their tag is the artefact `build` produced, and a pull would
+   * replace it with the registry's idea of the tag. `assertLocalImages` has already refused the case
+   * where such a tag is absent.
+   */
+  private async ensureImagesLocal(
+    state: RunState,
+    renderSet: RenderSet,
+    context: PipelineContext,
+  ): Promise<void> {
+    const built = new Set(state.builds?.keys() ?? []);
+    for (const ref of imagesOf(renderSet)) {
+      if (built.has(ref)) continue;
+      if (await this.docker.imageExists(ref)) continue;
+      await context.log('stdout', `${ref} is not present locally; pulling it before the scan`);
+      await this.docker.pull(ref, (line) => context.log('stdout', line), {
+        // A reference that names its own digest is already exact; the pull then checks that pin.
+        expectedDigest: digestNamedIn(ref),
+      });
+    }
+  }
+
+  /**
    * The local pin: the tag must still resolve to the image this run built. That is the whole claim,
    * and it is the one a pull cannot fake.
    *
@@ -2169,6 +2207,12 @@ function imagesOf(renderSet: RenderSet): string[] {
     }
   }
   return [...images];
+}
+
+/** The digest a reference names itself (`repo:tag@sha256:…`), or `null` when it names none. */
+function digestNamedIn(reference: string): string | null {
+  const index = reference.indexOf('@sha256:');
+  return index === -1 ? null : reference.slice(index + 1);
 }
 
 /** The tag a service's definition names, or `null` when it declares none. */

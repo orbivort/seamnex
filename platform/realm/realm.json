@@ -57,7 +57,7 @@
   "clientScopes": [
     {
       "name": "groups",
-      "description": "Group membership, sent as a full path so the platform can map it.",
+      "description": "Group membership, sent as a full path so the platform can map it. Declared here, not created at registration time: Keycloak 26.8.2 requires manage-realm for protocol-mapper writes on client scopes, and the platform admin client holds manage-clients only.",
       "protocol": "openid-connect",
       "attributes": { "include.in.token.scope": "true", "display.on.consent.screen": "false" },
       "protocolMappers": [
@@ -70,7 +70,8 @@
             "full.path": "true",
             "id.token.claim": "true",
             "access.token.claim": "true",
-            "userinfo.token.claim": "true"
+            "userinfo.token.claim": "true",
+            "jsonType.label": "String"
           }
         }
       ]

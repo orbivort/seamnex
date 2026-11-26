@@ -2970,6 +2970,43 @@ describe('apply image evidence', () => {
     expect(h.docker.composeUp).toHaveBeenCalled();
   });
 
+  it('pulls a sidecar image before the scan asks the daemon about it', async () => {
+    const h = setup();
+    const pinned = `mariadb:11.4.13@sha256:${'e'.repeat(64)}`;
+    h.renderer.render.mockResolvedValue(
+      renderSetOf({
+        files: [
+          {
+            path: COMPOSE,
+            sha256: 'c'.repeat(64),
+            content:
+              'services:\n  app:\n    image: repo/crm:7.4\n    expose:\n      - "80"\n' +
+              `  db:\n    image: ${pinned}\n`,
+          },
+        ],
+      }),
+    );
+    // A host that has never fetched the sidecar: the shape D01-01's first deployment met, where the
+    // scan reached the daemon before `compose up` could pull it and reported `404 no such image`.
+    h.docker.imageExists.mockImplementation(async (ref: string) => ref !== pinned);
+    const context = ctx();
+    await reachApply(h, context);
+
+    await h.run('deploy', 'apply', context);
+
+    expect(h.docker.pull).toHaveBeenCalledWith(pinned, expect.any(Function), {
+      // The reference names its own digest, so the pull is where that pin is checked.
+      expectedDigest: `sha256:${'e'.repeat(64)}`,
+    });
+    expect(context.log).toHaveBeenCalledWith(
+      'stdout',
+      `${pinned} is not present locally; pulling it before the scan`,
+    );
+    expect(h.docker.pull.mock.invocationCallOrder[0]).toBeLessThan(
+      h.images.scanForDeploy.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+    );
+  });
+
   it('does not summarise an unscannable image as "no blocking findings"', async () => {
     const h = setup();
     h.renderer.render.mockResolvedValue(

@@ -51,7 +51,10 @@ Action required when upgrading an existing install; everything else is additive.
   the first start and does not migrate back, so a host that must stay on 26.0.5 recreates the
   `seamnex_keycloak` database rather than downgrading. 26.8.2 also validates the Admin API audience:
   `seamnex-platform-admin` now carries the `kc-admin-api` client scope, and a realm applied without
-  it answers `401` on every call to `/admin/...`, including `pnpm kc:admin --check`.
+  it answers `401` on every call to `/admin/...`, including `pnpm kc:admin --check`. And 26.8.2
+  requires `manage-realm` for protocol-mapper writes on clients and client scopes, so the `groups`
+  scope the products need is owned by `platform/realm/realm.json`; re-apply the realm with
+  `pnpm kc:admin` after upgrading, or a product's ID token arrives without the claim.
 
 ### Summary
 
@@ -238,6 +241,26 @@ the running container, and an export, backup and restore path that proves what i
 
 ### Fixed
 
+- **A product's sign-in survives the identity provider being re-created** (`FR-2.16`, `NFR-4.17`) — the
+  IdP side of a product's identity is runtime state: `registerIdentity` creates the client during a
+  deployment, realm-as-code never carries it, and a Keycloak upgrade or a `compose up` on a fresh
+  volume leaves the next sign-in dying in the popup on "Client not found" with every recorded check
+  still green. The scheduler pass now re-applies each stored registration before it measures — the
+  same reasoning as the network attachment — and the check does it too, so the repair takes one
+  interval instead of one deployment. The pass also counts a failed re-application as a broken login
+  instead of leaving the last "ok" row standing.
+- **A refused identity registration fails the deployment instead of reporting a capability**
+  (`FR-2.16`) — every non-2xx from the Admin API is reduced to `ADAPTER_UNAVAILABLE`, and
+  `registerIdentity` exempted that code wholesale as "this host has no admin client", so a `403` from
+  the provider registered nothing and the deployment stayed green. The exemption now covers only a
+  host with no admin client configured; with one configured, a refusal is raised.
+- **The group-claim scope is realm-as-code, not a runtime write** (`FR-2.16`, `NFR-4.17`) — Keycloak
+  26.8.2 requires `manage-realm` to create, update or delete a protocol mapper on a client _or a
+  client scope_ unless the type is allow-listed for client administrators, and the platform admin
+  client holds `manage-clients`. The `groups` scope and its mapper therefore stay declared in
+  `platform/realm/realm.json` (now byte-for-byte what the platform used to write), the platform
+  reuses a scope that already mints the claim, and a refusal names the release and the one change
+  that avoids it instead of surfacing as a bare `403`.
 - **ERPNext's single sign-on is the flow the portal claims** (`FR-2.16`, `NFR-4.17`) — four defects
   made the entry a label and the platform's own check passed them: the minted secret reached the
   secret store but never `instance_env_value`, and was minted after `apply`, so no container saw it;
@@ -297,6 +320,11 @@ the running container, and an export, backup and restore path that proves what i
   Engine's own pulls had no mirror, so D06-01 spent hours on ~940 MB of `frappe/erpnext` at 50–100 KB/s;
   `SEAMNEX_PULL_MIRROR` prefixes the reference and retags it onto the canonical name, the pinned digest
   still decides, and every attempt is bounded by `SEAMNEX_PULL_TIMEOUT_MS`.
+- **A sidecar image is fetched before the scan that asks about it** (`NFR-4.6`, `S-10`) — `apply`
+  scanned every image the definition starts while only the entry's own image had been pulled, so a host
+  that had never fetched `mariadb:11.4.13@sha256:…` failed the first deployment of D01-01 at the scan
+  with the daemon's `no such image` and no stage had tried to fetch it; the images the definition names
+  are now pulled before the scan, and a reference that names its own digest is checked by that pull.
 
 ### Internal
 

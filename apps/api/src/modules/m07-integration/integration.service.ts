@@ -381,7 +381,15 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
         // deployment must not fail for it: a `native` product authenticates against its own store
         // and is fully usable without an IdP client. Record the gap instead of inventing success
         // (inv. 12), and let the readiness verdict decide what it means for this guarantee class.
-        if (!(error instanceof AppError) || error.code !== 'ADAPTER_UNAVAILABLE') throw error;
+        //
+        // The exemption is narrowed to that one case on purpose. `ADAPTER_UNAVAILABLE` is also what
+        // every refusal from the IdP is reduced to, so swallowing the code wholesale reported
+        // "unsupported" — a capability statement — for a registered-but-broken client, and the
+        // deployment stayed green while the product's sign-in was dead. With an admin client
+        // configured, a refusal is a fault to raise, not a host to exempt.
+        const adminConfigured = this.config.SEAMNEX_KEYCLOAK_ADMIN_CLIENT_SECRET_FILE.length > 0;
+        if (!(error instanceof AppError) || error.code !== 'ADAPTER_UNAVAILABLE' || adminConfigured)
+          throw error;
         await this.audit.append({
           action: 'instance.idp_client.unavailable',
           actorType: 'system',
@@ -677,8 +685,14 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
       client_id: string;
       client_secret_ref: string | null;
       redirect_uris: string[];
+      protocol: string;
+      access_token_lifespan_seconds: number;
+      offline_access_disabled: boolean;
+      backchannel_logout_url: string | null;
     }>(
-      `SELECT client_id, client_secret_ref, redirect_uris FROM idp_client WHERE instance_id = $1`,
+      `SELECT client_id, client_secret_ref, redirect_uris, protocol,
+              access_token_lifespan_seconds, offline_access_disabled, backchannel_logout_url
+         FROM idp_client WHERE instance_id = $1`,
       [instanceId],
     );
     const row = result.rows[0];
@@ -726,6 +740,27 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
       };
     }
 
+    const instance = await this.instanceOf(instanceId);
+    const groupClaim = oidcGroupClaimFor(instance.entryKey);
+
+    /**
+     * Stage 0.25 — the registration itself, re-applied before it is checked.
+     *
+     * The IdP side of a product's identity is runtime state: it is created by `registerIdentity`
+     * during a deployment and lives in Keycloak's database, which a Keycloak upgrade migrates and a
+     * `compose up` of a fresh volume replaces. Realm-as-code does not carry it — `platform/realm/*.json`
+     * declares the platform's own clients, not one client per instance — so after the IdP comes back
+     * without it the product's next login dies at the authorization leg (`invalid_client`, the
+     * popup never closes) and nothing repairs it until the instance is deployed again. The same
+     * reasoning as `ensureIdentityAttachment` below: a step the platform can perform in one call is
+     * performed before it is measured, so the check reports the deployment that exists after the
+     * repair rather than the one that existed before it. The upsert is idempotent and reuses the
+     * stored secret, so a healthy client is rewritten with the values it already has.
+     */
+    const converged = await this.convergeIdentityClient(row, redirectUri, secret, groupClaim);
+    if (!converged.ok)
+      return { ok: false, detail: `stage 0.25 (client registration): ${converged.detail}` };
+
     /**
      * Stage 0 — the leg that was missing.
      *
@@ -735,7 +770,6 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
      * platform ran stayed green. Asking the same question from a container on the instance network
      * is the difference between checking the realm and checking the login.
      */
-    const instance = await this.instanceOf(instanceId);
     if (!attachment.ok) {
       return { ok: false, detail: `stage 0 (product network): ${attachment.detail}` };
     }
@@ -787,7 +821,6 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
       if (!signIn.ok) return { ok: false, detail: `stage 0.5 (sign-in page): ${signIn.detail}` };
     }
 
-    const groupClaim = oidcGroupClaimFor(instance.entryKey);
     const probe = await this.ssoProbe.verify({
       clientId: row.client_id,
       redirectUri,
@@ -810,6 +843,46 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
       detail:
         established.length === 0 ? probe.detail : `${established.join(', ')}; ${probe.detail}`,
     };
+  }
+
+  /**
+   * Re-applies the IdP-side client for an instance from what the platform already holds, without
+   * minting anything new. Used by the SSO check, which runs on every deployment and on the
+   * scheduler's reconciliation: a client that Keycloak lost with the realm is restored in one call
+   * instead of waiting for the next deployment of the instance.
+   */
+  private async convergeIdentityClient(
+    row: {
+      client_id: string;
+      protocol: string;
+      access_token_lifespan_seconds: number;
+      offline_access_disabled: boolean;
+      backchannel_logout_url: string | null;
+    },
+    redirectUri: string,
+    secret: string,
+    groupClaim: string | null,
+  ): Promise<{ ok: true } | { ok: false; detail: string }> {
+    try {
+      await this.keycloak.upsertClient({
+        clientId: row.client_id,
+        redirectUris: [redirectUri],
+        protocol: row.protocol === 'saml' ? 'saml' : 'oidc',
+        accessTokenLifespanSeconds: row.access_token_lifespan_seconds,
+        offlineAccessDisabled: row.offline_access_disabled,
+        secret,
+        ...(row.backchannel_logout_url === null
+          ? {}
+          : { backchannelLogoutUrl: row.backchannel_logout_url }),
+        ...(groupClaim === null ? {} : { groupClaim }),
+      });
+      return { ok: true };
+    } catch (error) {
+      return {
+        ok: false,
+        detail: `client ${row.client_id} could not be re-applied to the identity provider (${error instanceof Error ? error.message : String(error)}); the product's login fails at the authorization leg until it is`,
+      };
+    }
   }
 
   /**
@@ -890,8 +963,20 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
   }> {
     if (this.config.SEAMNEX_IDP_CONTAINER.length === 0)
       return { instances: 0, failed: 0, verified: 0 };
-    const result = await this.pool.query<{ id: string; last_checked: Date | null }>(
-      `SELECT i.id,
+    const result = await this.pool.query<{
+      id: string;
+      entry_key: string;
+      client_id: string;
+      client_secret_ref: string | null;
+      redirect_uris: string[];
+      protocol: string;
+      access_token_lifespan_seconds: number;
+      offline_access_disabled: boolean;
+      backchannel_logout_url: string | null;
+      last_checked: Date | null;
+    }>(
+      `SELECT i.id, i.entry_key, c.client_id, c.client_secret_ref, c.redirect_uris, c.protocol,
+              c.access_token_lifespan_seconds, c.offline_access_disabled, c.backchannel_logout_url,
               (SELECT max(ic.checked_at) FROM integration_check ic
                 WHERE ic.instance_id = i.id AND ic.check_type = 'sso_login') AS last_checked
          FROM instance i JOIN idp_client c ON c.instance_id = i.id
@@ -902,21 +987,28 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
     let verified = 0;
 
     for (const row of result.rows) {
+      /**
+       * The registration is repaired on every pass, not only when the evidence is stale.
+       *
+       * The verdict this pass reads (`last_checked`) is a statement about the *last* probe; it says
+       * nothing about whether the client still exists. A Keycloak upgrade that migrates the realm,
+       * or a `compose up` on a fresh volume, removes it and leaves the old "ok" row behind, so a
+       * staleness gate would keep a dead login advertised as working for half the freshness window.
+       * Re-applying is idempotent, and the repair is the same call the deployment makes.
+       */
+      const fault = await this.reapplyRegistration(row);
+      if (fault !== null) {
+        failed += 1;
+        this.logger.warn(fault);
+        await this.recordBrokenLogin(row.id, fault);
+        continue;
+      }
+
       const attachment = await this.ensureIdentityAttachment(row.id);
       if (!attachment.ok) {
         failed += 1;
         this.logger.warn(attachment.detail);
-        // One row per breakage, not one per pass: the same sentence is not re-recorded for five
-        // minutes, which keeps a permanently broken instance readable.
-        await this.pool.query(
-          `INSERT INTO integration_check (instance_id, check_type, ok, detail)
-           SELECT $1, 'sso_login', false, $2
-            WHERE NOT EXISTS (
-                    SELECT 1 FROM integration_check ic
-                     WHERE ic.instance_id = $1 AND ic.check_type = 'sso_login' AND ic.ok = false
-                       AND ic.detail = $2 AND ic.checked_at > now() - interval '5 minutes')`,
-          [row.id, attachment.detail],
-        );
+        await this.recordBrokenLogin(row.id, attachment.detail);
         continue;
       }
 
@@ -930,6 +1022,51 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
       if (verdict.ok) verified += 1;
     }
     return { instances: result.rowCount ?? 0, failed, verified };
+  }
+
+  /** The stored registration re-applied from the client row; `null` when it worked. */
+  private async reapplyRegistration(row: {
+    id: string;
+    entry_key: string;
+    client_id: string;
+    client_secret_ref: string | null;
+    redirect_uris: string[];
+    protocol: string;
+    access_token_lifespan_seconds: number;
+    offline_access_disabled: boolean;
+    backchannel_logout_url: string | null;
+  }): Promise<string | null> {
+    const redirectUri = row.redirect_uris[0];
+    if (row.client_secret_ref === null || redirectUri === undefined)
+      return `client ${row.client_id} has no secret or redirect URI on record; re-register it`;
+    try {
+      const secret = await this.secrets.open(row.client_secret_ref, `identity reconcile ${row.id}`);
+      const converged = await this.convergeIdentityClient(
+        row,
+        redirectUri,
+        secret,
+        oidcGroupClaimFor(row.entry_key),
+      );
+      return converged.ok ? null : converged.detail;
+    } catch (error) {
+      return `the client secret recorded for ${row.client_id} could not be opened (${error instanceof Error ? error.message : String(error)})`;
+    }
+  }
+
+  /**
+   * One row per breakage, not one per pass: the same sentence is not re-recorded for five minutes,
+   * which keeps a permanently broken instance readable.
+   */
+  private async recordBrokenLogin(instanceId: string, detail: string): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO integration_check (instance_id, check_type, ok, detail)
+       SELECT $1, 'sso_login', false, $2
+        WHERE NOT EXISTS (
+                SELECT 1 FROM integration_check ic
+                 WHERE ic.instance_id = $1 AND ic.check_type = 'sso_login' AND ic.ok = false
+                   AND ic.detail = $2 AND ic.checked_at > now() - interval '5 minutes')`,
+      [instanceId, detail],
+    );
   }
 
   /** The last recorded SSO verdict, or `undefined` when the check has never run. */

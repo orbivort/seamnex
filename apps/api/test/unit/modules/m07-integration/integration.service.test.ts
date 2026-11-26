@@ -29,6 +29,9 @@ const CONFIG = {
   SEAMNEX_IDP_CONTAINER: 'seamnex-idp',
   SEAMNEX_IDP_INTERNAL_PORT: 8080,
   SEAMNEX_KEYCLOAK_REALM: 'seamnex',
+  // Presence of this path is what distinguishes "no IdP admin client on this host" (a deployment
+  // may proceed) from "the IdP refused" (a deployment must fail) — see `registerIdentity`.
+  SEAMNEX_KEYCLOAK_ADMIN_CLIENT_SECRET_FILE: '/run/seamnex/kc-admin-client-secret',
   SEAMNEX_SSO_EVIDENCE_TTL_MINUTES: 60,
   SEAMNEX_INGRESS_DOMAIN: 'seamnex.local',
   SEAMNEX_EDGE_CONTAINER: 'seamnex-edge',
@@ -241,6 +244,10 @@ function clientRow(overrides: Record<string, unknown> = {}): Record<string, unkn
     client_id: 'seamnex-crm',
     client_secret_ref: 'secret-1',
     redirect_uris: ['http://crm.seamnex.local:8020/oauth-callback.php'],
+    protocol: 'oidc',
+    access_token_lifespan_seconds: 300,
+    offline_access_disabled: true,
+    backchannel_logout_url: 'http://crm.seamnex.local:8020/api/v1/Oidc/action/backchannelLogout',
     ...overrides,
   };
 }
@@ -756,6 +763,7 @@ describe('registering the identity client', () => {
   it('records a host with no admin client instead of failing the deployment', async () => {
     const { audit, db, service } = build({
       routes: [['LEFT JOIN instance_route r', [instanceRow()]]],
+      config: { SEAMNEX_KEYCLOAK_ADMIN_CLIENT_SECRET_FILE: '' },
       keycloak: {
         upsertClient: vi.fn(async () =>
           Promise.reject(
@@ -785,6 +793,33 @@ describe('registering the identity client', () => {
     });
     // Nothing was registered, so nothing is claimed in the table either.
     expect(statement(db, 'INSERT INTO idp_client')).toBeUndefined();
+  });
+
+  /**
+   * The exemption above is for a host that *cannot* provision a client, not for one whose provider
+   * said no. Every non-2xx from the Admin API is reduced to `ADAPTER_UNAVAILABLE`, so a refusal —
+   * a 403 after a permission change, a 500 — used to be recorded as "unsupported" and the
+   * deployment stayed green with a product whose sign-in was dead.
+   */
+  it('fails the deployment when the provider refuses a registration it is configured to make', async () => {
+    const { audit, service } = build({
+      routes: [['LEFT JOIN instance_route r', [instanceRow()]]],
+      keycloak: {
+        upsertClient: vi.fn(async () =>
+          Promise.reject(
+            new AppError({
+              code: 'ADAPTER_UNAVAILABLE',
+              detail: 'Keycloak POST /client-scopes answered 403.',
+            }),
+          ),
+        ),
+      },
+    });
+
+    await expect(service.registerIdentity(CRM, ACTOR)).rejects.toMatchObject({
+      code: 'ADAPTER_UNAVAILABLE',
+    });
+    expect(audit.append).not.toHaveBeenCalled();
   });
 
   it('lets a failure that is not an unavailable adapter through', async () => {
@@ -1483,6 +1518,65 @@ describe('the SSO check itself', () => {
     });
   });
 
+  /**
+   * Keycloak keeps a product's client in its own database: a Keycloak upgrade that migrates the
+   * realm, or a `compose up` on a fresh volume, leaves the product's next login failing at the
+   * authorization leg (`invalid_client`, the popup never closes) while the platform still has a row
+   * to read. The check re-applies the registration from what it already holds before it measures,
+   * so the repair does not wait for the next deployment of the instance.
+   */
+  it('re-applies the client registration before it probes the login', async () => {
+    const { keycloak, ssoProbe, service } = build({
+      routes: [
+        ['LEFT JOIN instance_route r', [instanceRow()]],
+        ['FROM instance_route WHERE instance_id', [routeRow()]],
+        ['FROM idp_client WHERE instance_id', [clientRow()]],
+        ['SELECT ok FROM integration_check', []],
+        ['INSERT INTO integration_check', []],
+      ],
+    });
+
+    await service.verifyIdentity(CRM);
+
+    expect(keycloak.upsertClient).toHaveBeenCalledWith(
+      expect.objectContaining({
+        clientId: 'seamnex-crm',
+        secret: 'operator-secret',
+        redirectUris: ['http://crm.seamnex.local:8020/oauth-callback.php'],
+        protocol: 'oidc',
+      }),
+    );
+    expect(ssoProbe.verify).toHaveBeenCalled();
+  });
+
+  it('reports a client the IdP refuses to re-apply instead of probing', async () => {
+    const { ssoProbe, service } = build({
+      routes: [
+        ['LEFT JOIN instance_route r', [instanceRow()]],
+        ['FROM instance_route WHERE instance_id', [routeRow()]],
+        ['FROM idp_client WHERE instance_id', [clientRow()]],
+        ['SELECT ok FROM integration_check', []],
+        ['INSERT INTO integration_check', []],
+      ],
+      keycloak: {
+        upsertClient: vi.fn(async () =>
+          Promise.reject(
+            new AppError({
+              code: 'ADAPTER_UNAVAILABLE',
+              detail: 'Keycloak PUT /clients/uuid-1 answered 403.',
+            }),
+          ),
+        ),
+      },
+    });
+
+    await expect(service.verifyIdentity(CRM)).resolves.toMatchObject({
+      ok: false,
+      detail: expect.stringContaining('stage 0.25 (client registration)'),
+    });
+    expect(ssoProbe.verify).not.toHaveBeenCalled();
+  });
+
   it('stops at stage 0 when the IdP is not on the instance network', async () => {
     const { service } = build({
       routes: [
@@ -1634,6 +1728,15 @@ describe('the SSO check itself', () => {
 
 describe('reconciling the identity networks', () => {
   const RECONCILE = 'JOIN idp_client c ON';
+  // The pass reads the client row and re-applies it: the registration is runtime state at the IdP,
+  // so it is part of what a repair pass repairs.
+  const row = (overrides: Record<string, unknown> = {}) => ({
+    id: CRM,
+    entry_key: 'D01-01',
+    last_checked: null as Date | null,
+    ...clientRow(),
+    ...overrides,
+  });
 
   it('does nothing at all when no IdP container is configured', async () => {
     const { db, docker, service } = build({ config: { SEAMNEX_IDP_CONTAINER: '' } });
@@ -1650,7 +1753,7 @@ describe('reconciling the identity networks', () => {
   it('re-applies the attachment and records one row per breakage', async () => {
     const { db, docker, service } = build({
       routes: [
-        [RECONCILE, [{ id: CRM, last_checked: null }]],
+        [RECONCILE, [row()]],
         ['LEFT JOIN instance_route r', [instanceRow()]],
         ['INSERT INTO integration_check', []],
       ],
@@ -1673,7 +1776,7 @@ describe('reconciling the identity networks', () => {
   it('leaves fresh evidence alone', async () => {
     const { docker, service } = build({
       routes: [
-        [RECONCILE, [{ id: CRM, last_checked: new Date() }]],
+        [RECONCILE, [row({ last_checked: new Date() })]],
         ['LEFT JOIN instance_route r', [instanceRow()]],
       ],
     });
@@ -1690,7 +1793,7 @@ describe('reconciling the identity networks', () => {
     const stale = new Date(Date.now() - 3_600_000);
     const { db, service } = build({
       routes: [
-        [RECONCILE, [{ id: CRM, last_checked: stale }]],
+        [RECONCILE, [row({ last_checked: stale })]],
         ['LEFT JOIN instance_route r', [instanceRow()]],
         ['FROM instance_route WHERE instance_id', [routeRow()]],
         ...ssoRoutes({ verdict: [{ ok: true }] }),
@@ -1709,7 +1812,7 @@ describe('reconciling the identity networks', () => {
   it('counts an instance whose never-checked login leg fails to re-verify', async () => {
     const { db, service } = build({
       routes: [
-        [RECONCILE, [{ id: CRM, last_checked: null }]],
+        [RECONCILE, [row()]],
         ['LEFT JOIN instance_route r', [instanceRow()]],
         ['FROM instance_route WHERE instance_id', [routeRow()]],
         ...ssoRoutes(),
@@ -1728,7 +1831,7 @@ describe('reconciling the identity networks', () => {
   it('quotes a non-Error failure to re-verify as the periodic check sentence', async () => {
     const { service } = build({
       routes: [
-        [RECONCILE, [{ id: CRM, last_checked: null }]],
+        [RECONCILE, [row()]],
         ['LEFT JOIN instance_route r', [instanceRow()]],
         ['FROM instance_route WHERE instance_id', [routeRow()]],
         ...ssoRoutes(),

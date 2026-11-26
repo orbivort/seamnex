@@ -327,6 +327,8 @@ describe('upsertClient', () => {
   it('assigns the group claim scope on both create and update', async () => {
     const scopes: Array<{ id: string; name: string }> = [];
     const fetchMock = realm({
+      '/protocol-mappers/models': (init) =>
+        init.method === 'GET' ? jsonResponse([]) : new Response('', { status: 201 }),
       '/clients?clientId=shop': () => jsonResponse([{ id: 'uuid-1', clientId: 'shop' }]),
       '/client-scopes': (init) => {
         if (init.method === 'POST') {
@@ -335,7 +337,6 @@ describe('upsertClient', () => {
         }
         return jsonResponse(scopes);
       },
-      '/protocol-mappers/models': () => new Response('', { status: 201 }),
       '/admin/realms/seamnex/clients/uuid-1': () => new Response(null, { status: 204 }),
       '/default-client-scopes/scope-1': () => new Response(null, { status: 204 }),
     });
@@ -371,8 +372,10 @@ describe('ensureGroupClaimScope', () => {
     expect(callsOf(fetchMock).some((call) => call.url.includes('/client-scopes'))).toBe(false);
   });
 
-  it('reuses an existing scope rather than creating a duplicate', async () => {
+  it('reuses an existing scope that already mints the claim', async () => {
     const fetchMock = realm({
+      '/protocol-mappers/models': () =>
+        jsonResponse([{ name: 'groups', config: { 'claim.name': 'groups' } }]),
       '/clients?clientId=shop': () => jsonResponse([{ id: 'uuid-1', clientId: 'shop' }]),
       '/client-scopes': () => jsonResponse([{ id: 'scope-9', name: 'groups' }]),
       '/default-client-scopes/scope-9': () => new Response(null, { status: 204 }),
@@ -384,12 +387,17 @@ describe('ensureGroupClaimScope', () => {
     expect(urls.some((entry) => entry.includes('POST') && entry.endsWith('/client-scopes'))).toBe(
       false,
     );
+    expect(
+      urls.some((entry) => entry.includes('POST') && entry.endsWith('/protocol-mappers/models')),
+    ).toBe(false);
     expect(urls.some((entry) => entry.endsWith('/default-client-scopes/scope-9'))).toBe(true);
   });
 
   it('adds a group membership mapper to a scope it just created', async () => {
     let created = false;
     const fetchMock = realm({
+      '/protocol-mappers/models': (init) =>
+        init.method === 'GET' ? jsonResponse([]) : new Response('', { status: 201 }),
       '/clients?clientId=shop': () => jsonResponse([{ id: 'uuid-1', clientId: 'shop' }]),
       '/client-scopes': (init) => {
         if (init.method === 'POST') {
@@ -398,13 +406,14 @@ describe('ensureGroupClaimScope', () => {
         }
         return jsonResponse(created ? [{ id: 'scope-new', name: 'groups' }] : []);
       },
-      '/protocol-mappers/models': () => new Response('', { status: 201 }),
       '/default-client-scopes/scope-new': () => new Response(null, { status: 204 }),
     });
 
     await new KeycloakAdminClient(makeConfig()).ensureGroupClaimScope('shop', 'groups');
 
-    const mapper = callsOf(fetchMock).find((call) => call.url.endsWith('/protocol-mappers/models'));
+    const mapper = callsOf(fetchMock).find(
+      (call) => call.init.method === 'POST' && call.url.endsWith('/protocol-mappers/models'),
+    );
     expect(bodyOf(mapper)).toEqual({
       name: 'groups',
       protocol: 'openid-connect',
@@ -417,6 +426,30 @@ describe('ensureGroupClaimScope', () => {
         'userinfo.token.claim': 'true',
         'jsonType.label': 'String',
       },
+    });
+  });
+
+  /**
+   * Keycloak 26.8.2: a protocol mapper on a client scope now needs `manage-realm`, which the platform
+   * admin client does not hold. Before this, the refusal surfaced as a bare `ADAPTER_UNAVAILABLE`
+   * ("Keycloak POST … answered 403"), which read like a transient fault; the operator needs the
+   * permission, the release that introduced it, and the one change that avoids it entirely.
+   */
+  it('names the 26.8.2 mapper permission when the schema write is refused', async () => {
+    realm({
+      '/protocol-mappers/models': (init) =>
+        init.method === 'GET' ? jsonResponse([]) : new Response('', { status: 403 }),
+      '/clients?clientId=shop': () => jsonResponse([{ id: 'uuid-1', clientId: 'shop' }]),
+      '/client-scopes': () => jsonResponse([{ id: 'scope-9', name: 'groups' }]),
+      '/default-client-scopes/scope-9': () => new Response(null, { status: 204 }),
+    });
+
+    await expect(
+      new KeycloakAdminClient(makeConfig()).ensureGroupClaimScope('shop', 'groups'),
+    ).rejects.toMatchObject({
+      code: 'ADAPTER_UNAVAILABLE',
+      detail: expect.stringContaining('26.8.2'),
+      remediation: expect.stringContaining('platform/realm/realm.json'),
     });
   });
 
