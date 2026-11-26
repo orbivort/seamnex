@@ -210,7 +210,7 @@ describe('workflow inventory', () => {
       target: { value: 'not json' },
     });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Import draft' }));
-    expect(await within(dialog).findByText('The document could not be read')).toBeDefined();
+    expect(await within(dialog).findByText(/not valid JSON/)).toBeDefined();
 
     // Dismissing with the close control is what resets the form; the state is dropped with it.
     fireEvent.click(within(dialog).getByRole('button', { name: 'Close dialog' }));
@@ -221,7 +221,7 @@ describe('workflow inventory', () => {
     expect((within(dialog).getByLabelText(/Export document/) as HTMLTextAreaElement).value).toBe(
       '',
     );
-    expect(within(dialog).queryByText('The document could not be read')).toBeNull();
+    expect(within(dialog).queryByText(/not valid JSON/)).toBeNull();
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());

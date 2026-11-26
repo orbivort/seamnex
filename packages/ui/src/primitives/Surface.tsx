@@ -185,8 +185,17 @@ export function Callout({
   action?: ReactNode;
   className?: string;
 }) {
+  /*
+   * Only `danger` is a live region. A danger callout states that something failed — it mounts as
+   * the answer to an action and has to be announced. `info` and `caution` callouts explain the
+   * screen ("What gets created", "Imported definitions are inert") and are part of the document:
+   * announcing them on mount would interrupt the operator with text they are about to read anyway.
+   */
   return (
-    <div className={cn('flex gap-3 rounded-md border px-3.5 py-3', toneBox(tone), className)}>
+    <div
+      role={tone === 'danger' ? 'alert' : undefined}
+      className={cn('flex gap-3 rounded-md border px-3.5 py-3', toneBox(tone), className)}
+    >
       {icon ? <span className="mt-0.5 shrink-0 text-muted [&>svg]:size-4">{icon}</span> : null}
       <div className="min-w-0 flex-1">
         <p className="text-body font-semibold text-text">{title}</p>

@@ -93,6 +93,8 @@ export function WorkflowCanvas({
 }) {
   const registry = useRegistry();
   const { session } = useSession();
+  /** Read once: the inspector, the footer and the workbench must agree on it. */
+  const mayAuthor = can(session.role, 'workflow.author');
   const selected = workflow.nodes.find((node) => node.id === selectedId) ?? null;
   /**
    * The workbench is opened from the selected node, not toggled from the canvas: one node at a time,
@@ -283,7 +285,7 @@ export function WorkflowCanvas({
               ) : (
                 <MappingSummary
                   node={selected}
-                  canAuthor={can(session.role, 'workflow.author')}
+                  canAuthor={mayAuthor}
                   onMap={() => setMappingNodeId(selected.id)}
                 />
               )}
@@ -334,8 +336,14 @@ export function WorkflowCanvas({
           )}
         </div>
         <div className="border-t border-line px-3 py-2">
+          {/*
+            The sentence describes what *this* role may do. It claimed "mappings editable" to a
+            reviewer who has no Map fields button — the one line in the canvas that told them the
+            opposite of what the page would do.
+          */}
           <span className="inline-flex items-center gap-1 font-mono text-micro text-faint">
-            <Play className="size-3" aria-hidden /> layout read-only · mappings editable
+            <Play className="size-3" aria-hidden /> layout read-only ·{' '}
+            {mayAuthor ? 'mappings editable' : 'mappings read-only'}
           </span>
         </div>
       </Panel>

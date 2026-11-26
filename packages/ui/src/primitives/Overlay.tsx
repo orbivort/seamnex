@@ -1,10 +1,51 @@
 import type { ReactNode } from 'react';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Dialog as DialogPrimitive } from 'radix-ui';
 import { X } from 'lucide-react';
 import { cn } from '@seamnex/utils';
 import { Button } from './Button';
 import { Input } from './Field';
+
+/**
+ * Focus handling shared by every overlay.
+ *
+ * Two defects, one cause. Radix restores focus to the element that opened the surface only when
+ * that element is a `Dialog.Trigger`; every console dialog is opened from a plain button in a page
+ * header, so `triggerRef` was empty, Radix's own close handler had already claimed the event, and
+ * focus fell to `<body>` — a keyboard user re-entered the page at the skip link. And the first
+ * tabbable element here is the header's close control, so a form dialog opened with focus on the
+ * thing that dismisses it.
+ *
+ * The opener is captured *before* the autofocus move (Radix dispatches `onOpenAutoFocus` first, so
+ * `activeElement` is still the trigger at that point), which avoids both a render-phase write and
+ * an effect that would run after focus had already moved.
+ */
+function useOverlayFocus() {
+  const opener = useRef<HTMLElement | null>(null);
+
+  return {
+    onOpenAutoFocus: (event: Event) => {
+      const content = event.target;
+      if (document.activeElement instanceof HTMLElement) opener.current = document.activeElement;
+      if (!(content instanceof HTMLElement)) return;
+      // Only a form field claims focus; a confirmation with no input keeps the default, which is
+      // the first control in the body — not the close button in the header.
+      const field = content.querySelector<HTMLElement>(
+        'input:not([type="hidden"]):not([disabled]), select:not([disabled]), textarea:not([disabled])',
+      );
+      if (field === null) return;
+      event.preventDefault();
+      field.focus();
+    },
+    onCloseAutoFocus: (event: Event) => {
+      const target = opener.current;
+      opener.current = null;
+      if (target === null || !target.isConnected) return;
+      event.preventDefault();
+      target.focus();
+    },
+  };
+}
 
 /**
  * Title, description, close control and footer — the chrome both surfaces share. It used to be
@@ -73,6 +114,7 @@ export function Dialog({
   footer?: ReactNode;
   size?: 'sm' | 'md' | 'lg';
 }) {
+  const focus = useOverlayFocus();
   return (
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
       <DialogPrimitive.Portal>
@@ -80,6 +122,7 @@ export function Dialog({
             that already dims to `ink/45`. */}
         <DialogPrimitive.Overlay className="fixed inset-0 z-overlay animate-fade bg-overlay" />
         <DialogPrimitive.Content
+          {...focus}
           className={cn(
             'fixed top-1/2 left-1/2 z-modal max-h-[88vh] w-[calc(100vw-2rem)] -translate-x-1/2 -translate-y-1/2',
             'animate-rise overflow-y-auto rounded-lg border border-line-strong bg-panel shadow-lift',
@@ -118,11 +161,13 @@ export function Drawer({
   footer?: ReactNode;
   width?: 'sm' | 'md' | 'lg' | 'xl';
 }) {
+  const focus = useOverlayFocus();
   return (
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="fixed inset-0 z-overlay animate-fade bg-overlay" />
         <DialogPrimitive.Content
+          {...focus}
           className={cn(
             'fixed top-0 right-0 bottom-0 z-modal flex w-full flex-col border-l border-line-strong bg-panel shadow-lift',
             'animate-fade',

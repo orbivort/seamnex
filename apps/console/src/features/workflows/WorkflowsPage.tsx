@@ -11,7 +11,6 @@ import {
 import type { Workflow, WorkflowExport } from '@seamnex/domain';
 import { can, TRIGGER_LABELS, WORKFLOW_STATE_LABELS } from '@seamnex/domain';
 import {
-  Alert,
   Badge,
   Button,
   Callout,
@@ -37,11 +36,42 @@ import { AsyncPanel, QueryError } from '@seamnex/shell';
 import { useSession } from '../../session';
 
 /**
+ * The validation verdict, as one badge.
+ *
+ * Three states, not two: a draft that has never been validated is neither "valid" nor "N errors" —
+ * the API reports `checkedAt: null` for exactly that case, and claiming "valid" used to enable
+ * Activate on a definition nothing had checked.
+ */
+function ValidationBadge({ validation }: { validation: Workflow['validation'] }) {
+  if (validation.valid) {
+    return (
+      <Badge tone="positive" size="sm">
+        valid
+      </Badge>
+    );
+  }
+  if (validation.checkedAt === null) {
+    return (
+      <Badge tone="neutral" size="sm">
+        not validated
+      </Badge>
+    );
+  }
+  const errors = validation.issues.filter((issue) => issue.severity === 'error').length;
+  return (
+    <Badge tone="danger" size="sm">
+      {errors} error{errors === 1 ? '' : 's'}
+    </Badge>
+  );
+}
+
+/**
  * Module scope: no cell here reads component state, so the array and its closures are built once.
  *
  * `name` is the row's identity and carries the link; the trailing "Open" cell is a second, explicit
  * affordance to the same destination in a different cell, so the two anchors are siblings and never
- * nested.
+ * nested — and it is the cell that goes first on a narrow screen, where the row link already is the
+ * affordance and the validation verdict is not.
  */
 const WORKFLOW_COLUMNS = defineColumns<Workflow>([
   {
@@ -128,39 +158,23 @@ const WORKFLOW_COLUMNS = defineColumns<Workflow>([
   },
   {
     id: 'validation',
-    header: 'Validation',
-    hideBelow: 'xl',
     /**
-     * Three states, not two: a draft that has never been validated is neither "valid" nor
-     * "N errors" — the API reports `checkedAt: null` for exactly that case, and claiming "valid"
-     * used to enable Activate on a definition nothing had checked.
+     * No `hideBelow`. This column was hidden below `xl`, so a phone showed the state (`DRAFT`) and
+     * no way to learn whether anything had ever validated it — the one column that decides whether
+     * the definition can be activated. It keeps its place at every width; the table scrolls, which
+     * is what the `edge-fade-x` wrapper exists for.
      */
-    cell: (row) => {
-      if (row.validation.valid) {
-        return (
-          <Badge tone="positive" size="sm">
-            valid
-          </Badge>
-        );
-      }
-      if (row.validation.checkedAt === null) {
-        return (
-          <Badge tone="neutral" size="sm">
-            not validated
-          </Badge>
-        );
-      }
-      const errors = row.validation.issues.filter((issue) => issue.severity === 'error').length;
-      return (
-        <Badge tone="danger" size="sm">
-          {errors} error{errors === 1 ? '' : 's'}
-        </Badge>
-      );
-    },
+    header: 'Validation',
+    cell: (row) => <ValidationBadge validation={row.validation} />,
   },
   {
     id: 'open',
-    header: '',
+    /**
+     * The header is empty on screen — the column holds one repeated word — but a `<th>` with no
+     * content gives the column no name in the table's reading order. Hidden text names it.
+     */
+    header: <span className="sr-only">Actions</span>,
+    hideBelow: 'md',
     align: 'right',
     cell: (row) => (
       <Link
@@ -423,6 +437,12 @@ export function WorkflowsPage() {
             label="Name"
             required
             htmlFor="wf-name"
+            /*
+             * The three-character floor is enforced by disabling the footer button, which states
+             * nothing: a two-character name left the dialog with no enabled action and no reason.
+             * The hint makes the rule visible, and the control's `aria-describedby` carries it.
+             */
+            hint="At least three characters. It names the workflow in the inventory and the audit trail."
             {...(fieldError('name') ? { error: fieldError('name') } : {})}
           >
             <Input
@@ -572,18 +592,18 @@ export function WorkflowsPage() {
           </>
         }
       >
-        {importError ? (
-          <div className="mb-3">
-            <Alert tone="caution" title="The document could not be read">
-              {importError}
-            </Alert>
-          </div>
-        ) : null}
         {importer.isError ? <QueryError error={importer.error} compact /> : null}
         <div className="space-y-3">
           <Field
             label="Export document"
             htmlFor="workflow-import"
+            /*
+             * The read error belongs to the field, not to a banner above it: as a `Field` error the
+             * control owns it (`aria-invalid`, `aria-describedby`, `aria-errormessage`) and a screen
+             * reader announces it with the textarea it applies to. As a banner it was an unowned
+             * sentence that also outlived the document it described.
+             */
+            error={importError ?? undefined}
             hint="apiVersion seamnex.workflow/v1. Exported from a workflow workspace with the Export action."
           >
             <Textarea
@@ -594,7 +614,10 @@ export function WorkflowsPage() {
               placeholder={
                 '{\n "apiVersion": "seamnex.workflow/v1",\n "exportedAt": "…",\n "irHash": "…",\n "workflow": { … }\n}'
               }
-              onChange={(event) => setDocumentText(event.target.value)}
+              onChange={(event) => {
+                setImportError(null);
+                setDocumentText(event.target.value);
+              }}
             />
           </Field>
           <Callout tone="caution" title="Imported definitions are inert">

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import {
   ArrowLeft,
@@ -19,12 +19,19 @@ import {
   useWorkflow,
   useWorkflowAction,
 } from '@seamnex/api-client';
-import { can, RUN_STATE_LABELS, TRIGGER_LABELS, WORKFLOW_STATE_LABELS } from '@seamnex/domain';
+import {
+  can,
+  ROLE_LABELS,
+  RUN_STATE_LABELS,
+  TRIGGER_LABELS,
+  WORKFLOW_STATE_LABELS,
+} from '@seamnex/domain';
 import type { Tone, Workflow, WorkflowRun, WorkflowValidationResult } from '@seamnex/domain';
 import {
   Alert,
   Badge,
   Button,
+  buttonVariants,
   Callout,
   Dialog,
   Field,
@@ -81,7 +88,13 @@ export function WorkflowWorkspacePage() {
    * claimed "Validation passed, activation is available" beside a disabled Activate button and no
    * issue list. The banner now belongs to the version it was produced for.
    */
-  const [notice, setNotice] = useState<{ tone: Tone; text: string; version: number } | null>(null);
+  const [notice, setNotice] = useState<{
+    tone: Tone;
+    text: string;
+    version: number;
+    /** A copy of this workflow is a real destination; the banner carries the way to it. */
+    action?: ReactNode;
+  } | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [draftName, setDraftName] = useState('');
@@ -95,6 +108,12 @@ export function WorkflowWorkspacePage() {
    * hides the authoring actions from that role, and this screen now agrees with it.
    */
   const canRun = can(session.role, 'workflow.run');
+  /**
+   * A disabled action explains itself twice: a `title` for a mouse, and the read-only note below,
+   * which the button *describes*. `title` alone was the whole story, and a disabled button takes
+   * no focus and a tooltip has no place on a touch screen.
+   */
+  const readOnlyNote = canWrite ? {} : { 'aria-describedby': 'workspace-read-only' };
 
   if (workflow.isPending) {
     return (
@@ -192,12 +211,35 @@ export function WorkflowWorkspacePage() {
             text: 'Run requested. The Runs tab follows it to its outcome.',
           });
         }
-        if (next === 'duplicate')
+        if (next === 'duplicate') {
+          /*
+           * "It appears in the workflow list" sent the operator to another screen to find one row
+           * among rows, then back here-shaped: the copy is a workflow with an id, and its
+           * workspace is the only place the next step (validate, map, activate) exists. The
+           * response is the new workflow, so the banner links to it directly.
+           */
+          const copy = asWorkflow(result);
           setNotice({
             tone: 'positive',
             version,
-            text: 'A draft copy was created. It appears in the workflow list.',
+            text:
+              copy === null
+                ? 'A draft copy was created. It appears in the workflow list.'
+                : `A draft copy was created: ${copy.name}.`,
+            ...(copy === null
+              ? {}
+              : {
+                  action: (
+                    <Link
+                      to={`/workflows/${copy.id}`}
+                      className={buttonVariants({ variant: 'secondary', size: 'sm' })}
+                    >
+                      Open the copy
+                    </Link>
+                  ),
+                }),
           });
+        }
       },
     });
   };
@@ -236,6 +278,7 @@ export function WorkflowWorkspacePage() {
               icon={<BadgeCheck />}
               disabled={action.isPending || !canWrite}
               title={canWrite ? undefined : 'workflow.author is required to validate'}
+              {...readOnlyNote}
               onClick={() => runAction('validate')}
             >
               Validate
@@ -246,6 +289,7 @@ export function WorkflowWorkspacePage() {
                 variant="ghost"
                 icon={<Pencil />}
                 disabled={!canWrite || rename.isPending}
+                {...readOnlyNote}
                 onClick={() => {
                   setDraftName(data.name);
                   setDraftDescription(data.description ?? '');
@@ -262,6 +306,7 @@ export function WorkflowWorkspacePage() {
                 icon={<PowerOff />}
                 disabled={action.isPending || !canWrite}
                 title={canWrite ? undefined : 'workflow.author is required to disable'}
+                {...readOnlyNote}
                 onClick={() => runAction('disable')}
               >
                 Disable
@@ -273,6 +318,7 @@ export function WorkflowWorkspacePage() {
                 icon={<Power />}
                 disabled={action.isPending || !canWrite}
                 title={canWrite ? undefined : 'workflow.author is required to activate'}
+                {...readOnlyNote}
                 onClick={() => runAction('activate')}
               >
                 Activate
@@ -285,7 +331,13 @@ export function WorkflowWorkspacePage() {
                     : 'Resolve blocking validation errors first'
                 }
               >
-                <Button size="sm" variant="primary" icon={<Power />} disabled>
+                <Button
+                  size="sm"
+                  variant="primary"
+                  icon={<Power />}
+                  disabled
+                  aria-describedby="activation-blocked"
+                >
                   Activate
                 </Button>
               </Tooltip>
@@ -319,6 +371,7 @@ export function WorkflowWorkspacePage() {
               icon={<Copy />}
               disabled={action.isPending || !canWrite}
               title={canWrite ? undefined : 'workflow.author is required to duplicate'}
+              {...readOnlyNote}
               onClick={() => runAction('duplicate')}
             >
               Duplicate
@@ -330,6 +383,7 @@ export function WorkflowWorkspacePage() {
                 icon={<Trash2 />}
                 disabled={remove.isPending || !canWrite}
                 title={canWrite ? undefined : 'workflow.author is required to delete'}
+                {...readOnlyNote}
                 onClick={() => setDeleteOpen(true)}
               >
                 Delete
@@ -350,7 +404,11 @@ export function WorkflowWorkspacePage() {
       {/* A verdict for a definition that has since changed is not a statement about this one. */}
       {notice !== null && notice.version === data.version ? (
         <div className="mb-3">
-          <Alert tone={notice.tone} title={notice.text} />
+          <Alert
+            tone={notice.tone}
+            title={notice.text}
+            {...(notice.action === undefined ? {} : { action: notice.action })}
+          />
         </div>
       ) : null}
       {/*
@@ -359,10 +417,27 @@ export function WorkflowWorkspacePage() {
         issue list disappeared with the validation pass it belonged to.
       */}
       {data.state !== 'active' && data.validation.checkedAt === null ? (
-        <p className="mb-3 text-meta text-muted">
+        <p id="activation-blocked" className="mb-3 text-meta text-muted">
           This version has not been validated since it changed. Run Validate before activating.
         </p>
       ) : null}
+      {/*
+        The third case: a pass ran and refused. The reason lived only in a tooltip on a disabled
+        button, and a disabled button takes no focus — so the sentence was unreachable with a
+        keyboard, and invisible on touch.
+      */}
+      {data.state !== 'active' && data.validation.checkedAt !== null && !data.validation.valid ? (
+        <p id="activation-blocked" className="mb-3 text-meta text-muted">
+          Activation is blocked by {errors.length !== 0 ? errors.length : 'at least one'} validation
+          error{errors.length === 1 ? '' : 's'}, listed under the canvas.
+        </p>
+      ) : null}
+      {canWrite ? null : (
+        <p id="workspace-read-only" className="mb-3 text-meta text-muted">
+          Read-only: the {ROLE_LABELS[session.role].name} role can inspect and export this
+          definition, but cannot change it.
+        </p>
+      )}
       {action.isError ? <QueryError error={action.error} compact /> : null}
       {exporter.isError ? <QueryError error={exporter.error} compact /> : null}
       {removeProblem ? (
@@ -593,4 +668,15 @@ function asValidationResult(value: unknown): WorkflowValidationResult | null {
   if (typeof value !== 'object' || value === null) return null;
   if (!('checkedAt' in value) || !('issues' in value) || !Array.isArray(value.issues)) return null;
   return value as WorkflowValidationResult;
+}
+
+/**
+ * `duplicate` and `activate`/`disable` answer with the workflow itself, narrowed the same way —
+ * the union carries no published discriminant, so identity is checked structurally.
+ */
+function asWorkflow(value: unknown): Workflow | null {
+  if (typeof value !== 'object' || value === null) return null;
+  if (!('id' in value) || !('name' in value) || !('state' in value)) return null;
+  if (typeof value.id !== 'string' || typeof value.name !== 'string') return null;
+  return value as Workflow;
 }

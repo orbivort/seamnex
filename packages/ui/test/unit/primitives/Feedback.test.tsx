@@ -194,6 +194,11 @@ describe('ErrorState', () => {
     expect(screen.queryByRole('button', { name: /Retry/ })).toBeNull();
   });
 
+  it('is a live region, so a refused write is announced where it is looked for', () => {
+    render(<ErrorState problem={problem} />);
+    expect(screen.getByRole('alert')).toBeDefined();
+  });
+
   it('offers a retry only when the caller can retry', () => {
     const onRetry = vi.fn();
     render(<ErrorState problem={problem} onRetry={onRetry} />);

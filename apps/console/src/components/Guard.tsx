@@ -26,7 +26,12 @@ export function Forbidden({
   const { session } = useSession();
   return (
     <Panel className="mx-auto mt-6 max-w-2xl">
-      <PanelHeader eyebrow="403 · deny by default" title={title} />
+      {/*
+        `headingLevel={1}`: this panel *is* the screen. At the default level two, a refused route
+        left the document with no level-one heading at all, so the outline started at h2 and
+        nothing named the page. The portal's 404 and 403 surfaces already pass it.
+      */}
+      <PanelHeader headingLevel={1} eyebrow="403 · deny by default" title={title} />
       <div className="p-6">
         <EmptyState
           icon={<Lock className="size-5" />}
@@ -150,6 +155,7 @@ export function ForbiddenRoles() {
   return (
     <Panel className="mx-auto mt-6 max-w-2xl">
       <PanelHeader
+        headingLevel={1}
         eyebrow="Not an operator surface"
         title="The console is for platform and domain operators"
       />
