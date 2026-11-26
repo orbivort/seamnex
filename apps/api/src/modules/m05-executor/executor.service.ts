@@ -2,6 +2,11 @@ import { statSync } from 'node:fs';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { DeployPreview, DriftRecord, Instance, InstanceDetail } from '@seamnex/domain';
 import {
+  collectionScopeArrays,
+  type CollectionScope,
+  type ScopedCollectionScope,
+} from '@seamnex/domain';
+import {
   IMAGE_SCAN_SERVICE,
   type DeployInput,
   type DeployResult,
@@ -303,8 +308,20 @@ export class PostgresExecutorService implements ExecutorService {
     return this.lifecycleService.prefetch(entryKey, actorId);
   }
 
-  async instances(filter: { q?: string; state?: string; entryKey?: string }): Promise<Instance[]> {
+  async instances(
+    filter: { q?: string; state?: string; entryKey?: string },
+    scope?: CollectionScope,
+  ): Promise<Instance[]> {
     const q = (filter.q ?? '').toLowerCase();
+    /*
+     * ADR-BE-44: a domain-scoped operator lists the rows their grant reaches, and the filter is the
+     * one the policy guard published — never a second derivation. `$4` is the unrestricted answer
+     * (R1/R2), so the scoped and platform cases share one statement and one plan.
+     */
+    const reach =
+      scope === undefined
+        ? { unrestricted: true, domains: [], instanceIds: [] }
+        : collectionScopeArrays(scope);
     const result = await this.pool.query<InstanceRow>(
       `${INSTANCE_SELECT}
         WHERE i.deleted_at IS NULL
@@ -315,10 +332,31 @@ export class PostgresExecutorService implements ExecutorService {
                OR lower(coalesce(i.payload->>'domain', e.domain, '')) LIKE '%' || $1 || '%')
           AND ($2 = '' OR i.state = $2)
           AND ($3 = '' OR i.entry_key = $3)
+          AND ($4::boolean OR e.domain = ANY($5::text[]) OR i.id = ANY($6::uuid[]))
         ORDER BY i.created_at DESC, i.id`,
-      [q, filter.state ?? '', filter.entryKey ?? ''],
+      [
+        q,
+        filter.state ?? '',
+        filter.entryKey ?? '',
+        reach.unrestricted,
+        reach.domains,
+        reach.instanceIds,
+      ],
     );
     return result.rows.map((row) => this.toInstance(row));
+  }
+
+  async instanceIdsInScope(scope: ScopedCollectionScope): Promise<string[]> {
+    const reach = collectionScopeArrays(scope);
+    const result = await this.pool.query<{ id: string }>(
+      `SELECT i.id
+         FROM instance i
+         JOIN catalog_entry c ON c.key = i.entry_key
+        WHERE i.deleted_at IS NULL
+          AND (c.domain = ANY($1::text[]) OR i.id = ANY($2::uuid[]))`,
+      [reach.domains, reach.instanceIds],
+    );
+    return result.rows.map((row) => row.id);
   }
 
   async instance(id: string): Promise<InstanceDetail> {

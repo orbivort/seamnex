@@ -6,6 +6,8 @@ import {
   accessFor,
   can,
   canMutate,
+  capabilitySets,
+  entryAccess,
   requiresMfa,
   scopedReason,
 } from '../../src/capabilities';
@@ -101,6 +103,59 @@ describe('capability matrix (§5.2)', () => {
       if (accessFor('R6', capability) === 'none') continue;
       expect(capability.startsWith('portal.'), capability).toBe(true);
     }
+  });
+});
+
+/**
+ * The sets are a rendering input, not a second policy: every member has to be the same answer the
+ * PDP would give, or a guard and the server disagree about the same role.
+ */
+describe('capabilitySets', () => {
+  it('is exactly can() and canMutate() over the capability list', () => {
+    for (const role of PLATFORM_ROLES) {
+      const { held, mutable } = capabilitySets(role);
+      for (const capability of CAPABILITIES) {
+        expect(held.has(capability), `${role} held ${capability}`).toBe(can(role, capability));
+        expect(mutable.has(capability), `${role} mutable ${capability}`).toBe(
+          canMutate(role, capability),
+        );
+      }
+    }
+  });
+
+  it('keeps a scoped grant in held and out of mutable', () => {
+    const { held, mutable } = capabilitySets('R3');
+    expect(held.has('instance.view_logs')).toBe(true);
+    expect(mutable.has('instance.view_logs')).toBe(false);
+  });
+});
+
+/**
+ * ADR-FE-01: a menu entry is a three-valued question. `can()` collapses `none` and `scoped`, which
+ * is how an entry the role may only partly use came to look like one it may not open at all.
+ */
+describe('entryAccess', () => {
+  it('answers the best of the listed capabilities', () => {
+    expect(entryAccess('R1', ['instance.view_logs'])).toBe('full');
+    expect(entryAccess('R3', ['instance.view_logs'])).toBe('scoped');
+    expect(entryAccess('R6', ['instance.view_logs'])).toBe('none');
+  });
+
+  it('prefers a full grant over a scoped one in the same entry', () => {
+    // The maintenance entry lists three capabilities with different cells per role.
+    expect(entryAccess('R1', ['maintenance.configure', 'settings.view', 'exception.decide'])).toBe(
+      'full',
+    );
+    expect(entryAccess('R3', ['maintenance.configure', 'settings.view', 'exception.decide'])).toBe(
+      'full',
+    );
+    // An approver-only entry: the request capability is R1-scoped, approval is R2-scoped.
+    expect(entryAccess('R2', ['breakglass.request', 'breakglass.approve'])).toBe('scoped');
+    expect(entryAccess('R4', ['breakglass.request', 'breakglass.approve'])).toBe('none');
+  });
+
+  it('is none for an empty set, so a mis-declared entry hides instead of opening', () => {
+    expect(entryAccess('R1', [])).toBe('none');
   });
 });
 

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Phase2Handlers } from '../../../../src/contract/handlers/phase2.handlers';
 import type { OperationHandler } from '../../../../src/contract/operation-handler';
 import { AppError } from '../../../../src/common/problem/app-error';
-import { callHandler, operationInput } from '../../../support/operation-input';
+import { callHandler, operationInput, testContext } from '../../../support/operation-input';
 
 /**
  * Handlers are orchestration, so each case asserts the delegation it performs and the result shape
@@ -373,15 +373,37 @@ describe('catalog handlers', () => {
 });
 
 describe('instance handlers', () => {
-  it('GET /instances forwards present filters only', async () => {
+  it('GET /instances forwards present filters and the published scope', async () => {
     await call('GET /instances');
-    expect(s.executor.instances).toHaveBeenCalledWith({});
+    expect(s.executor.instances).toHaveBeenCalledWith({}, { kind: 'platform' });
     await call('GET /instances', { query: { q: 'x', state: 'ready', entryKey: 'D01-01' } });
-    expect(s.executor.instances).toHaveBeenLastCalledWith({
-      q: 'x',
-      state: 'ready',
-      entryKey: 'D01-01',
+    expect(s.executor.instances).toHaveBeenLastCalledWith(
+      {
+        q: 'x',
+        state: 'ready',
+        entryKey: 'D01-01',
+      },
+      { kind: 'platform' },
+    );
+  });
+
+  it('GET /instances confines a scoped caller to the rows the decision named', async () => {
+    // The handler does not derive the scope; it forwards what the guard published (ADR-BE-44), so a
+    // domain owner's list is the predicate the PDP already answered.
+    await call('GET /instances', {
+      context: testContext({
+        policyScope: { kind: 'scoped', domains: ['CRM & Sales Pipeline'], instanceIds: [] },
+      }),
     });
+
+    expect(s.executor.instances).toHaveBeenLastCalledWith(
+      {},
+      {
+        kind: 'scoped',
+        domains: ['CRM & Sales Pipeline'],
+        instanceIds: [],
+      },
+    );
   });
 
   it('GET /instances/:id combines the instance with its integration checks', async () => {
@@ -599,11 +621,11 @@ describe('admin handlers', () => {
 });
 
 describe('capacity and registry handlers', () => {
-  it('delegates the capacity reads', async () => {
+  it('delegates the capacity reads with the published scope', async () => {
     await call('GET /capacity');
     await call('GET /capacity/forecast');
-    expect(s.capacity.snapshot).toHaveBeenCalledOnce();
-    expect(s.capacity.forecast).toHaveBeenCalledOnce();
+    expect(s.capacity.snapshot).toHaveBeenCalledWith({ kind: 'platform' });
+    expect(s.capacity.forecast).toHaveBeenCalledWith({ kind: 'platform' });
   });
 
   it('delegates the registry reads', async () => {

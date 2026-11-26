@@ -1,6 +1,7 @@
 import type * as NodeFs from 'node:fs';
 import type * as NodeOs from 'node:os';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { CapacitySnapshot, CollectionScope } from '@seamnex/domain';
 import { fakeDb } from '../../../support/fakes';
 import type { AppConfig } from '../../../../src/config/config';
 import {
@@ -74,6 +75,38 @@ function setup(routes: Parameters<typeof fakeDb>[0] = []) {
 
 const SNAPSHOT_SELECT = 'FROM capacity_snapshot ORDER BY ts DESC LIMIT 1';
 const LEDGER = 'WITH declared';
+/** The ADR-BE-44 visibility query — the one statement that turns a scope into instance ids. */
+const VISIBILITY = 'JOIN catalog_entry c ON c.key = i.entry_key';
+
+const SCOPED: CollectionScope = {
+  kind: 'scoped',
+  domains: ['CRM & Sales Pipeline'],
+  instanceIds: ['4c3f0a66-0000-4000-8000-000000000001'],
+};
+
+function usage(instanceId: string): CapacitySnapshot['instanceUsage'][number] {
+  return {
+    instanceId,
+    entryKey: 'D01-01',
+    product: 'EspoCRM',
+    slug: instanceId,
+    state: 'ready',
+    cpuCores: 2,
+    memoryMb: 4_096,
+    diskMb: 20_480,
+    diskQuotaMb: 20_480,
+    measuredAt: null,
+  };
+}
+
+function persisted(instanceUsage: CapacitySnapshot['instanceUsage']) {
+  return [
+    {
+      ts: new Date('2026-03-04T05:06:07.000Z'),
+      per_instance: { ...SNAPSHOT, instanceUsage },
+    },
+  ];
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -96,6 +129,36 @@ describe('snapshot', () => {
       ts: '2026-03-04T05:06:07.000Z',
       host: SNAPSHOT.host,
     });
+  });
+
+  it('confines the per-instance table to a scoped caller and keeps the host figures', async () => {
+    const { db, service } = setup([
+      [SNAPSHOT_SELECT, persisted([usage('inst-1'), usage('inst-2')])],
+      [VISIBILITY, [{ id: 'inst-2' }]],
+    ]);
+
+    const snapshot = await service.snapshot(SCOPED);
+
+    // ADR-BE-44: only the table is filtered; the totals and the verdict still describe the machine.
+    expect(snapshot.instanceUsage.map((row) => row.instanceId)).toEqual(['inst-2']);
+    expect(snapshot.host).toEqual(SNAPSHOT.host);
+    expect(snapshot.verdict).toEqual(SNAPSHOT.verdict);
+
+    const visibility = db.calls.find((call) => call.sql.includes(VISIBILITY));
+    // Both halves of the grant are bound: domain membership and individually granted instances.
+    expect(visibility?.params).toEqual([SCOPED.domains, SCOPED.instanceIds]);
+  });
+
+  it('does not filter the table for a platform-wide scope', async () => {
+    const { db, service } = setup([
+      [SNAPSHOT_SELECT, persisted([usage('inst-1'), usage('inst-2')])],
+    ]);
+
+    const snapshot = await service.snapshot({ kind: 'platform' });
+
+    expect(snapshot.instanceUsage).toHaveLength(2);
+    // "Unrestricted" is expressed by not asking, never by a query that binds an empty scope.
+    expect(db.calls.some((call) => call.sql.includes(VISIBILITY))).toBe(false);
   });
 
   it('measures and records one when nothing has been recorded yet', async () => {
@@ -262,6 +325,76 @@ describe('record', () => {
     // that stopped being true.
     expect(snapshot?.instanceUsage[1]?.cpuConsumedMilli).toBeUndefined();
     expect(snapshot?.instanceUsage[1]?.measuredAt).toBeNull();
+  });
+
+  it('treats a fresh sample with no containers as absent rather than as zero usage', async () => {
+    const { service } = setup([
+      ['FROM settings', []],
+      [LEDGER, []],
+      [
+        'FROM instance i',
+        [
+          {
+            id: 'inst-1',
+            entry_key: 'D01-01',
+            product: 'EspoCRM',
+            slug: 'crm',
+            state: 'ready',
+            resources: { cpu: 2, memoryMb: 4_096, diskMb: 20_480 },
+            sampled_at: new Date(Date.now() - 30_000),
+            cpu_milli: 480,
+            memory_mb: 1_200,
+            disk_mb: 3_000,
+            containers: 0,
+          },
+        ],
+      ],
+      ['INSERT INTO capacity_snapshot', []],
+    ]);
+
+    const snapshot = await service.record();
+
+    // A recent timestamp alone is not a reading: with nothing running there is nothing measured.
+    expect(snapshot?.instanceUsage[0]?.measuredAt).toBeNull();
+    expect(snapshot?.instanceUsage[0]?.cpuConsumedMilli).toBeUndefined();
+  });
+
+  it('reports a fresh sample whose figures are null as zero consumed', async () => {
+    const sampledAt = new Date(Date.now() - 30_000);
+    const { service } = setup([
+      ['FROM settings', []],
+      [LEDGER, []],
+      [
+        'FROM instance i',
+        [
+          {
+            id: 'inst-1',
+            entry_key: 'D01-01',
+            product: 'EspoCRM',
+            slug: 'crm',
+            state: 'ready',
+            resources: { cpu: 2, memoryMb: 4_096, diskMb: 20_480 },
+            sampled_at: sampledAt,
+            cpu_milli: null,
+            memory_mb: null,
+            disk_mb: null,
+            containers: 1,
+          },
+        ],
+      ],
+      ['INSERT INTO capacity_snapshot', []],
+    ]);
+
+    const snapshot = await service.record();
+
+    // Containers are up and the sample is current, so a missing figure is zero usage with a
+    // timestamp — not the "dash" a stale or container-less sample earns.
+    expect(snapshot?.instanceUsage[0]).toMatchObject({
+      cpuConsumedMilli: 0,
+      memoryConsumedMb: 0,
+      diskConsumedMb: 0,
+      measuredAt: sampledAt.toISOString(),
+    });
   });
 
   it('returns null when no filesystem can be measured', async () => {

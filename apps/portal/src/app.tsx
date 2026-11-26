@@ -8,6 +8,7 @@ import { SessionProvider, readSession, useSession } from './session';
 import { SessionGate } from './session-gate';
 import { lazyScreen } from './lazy';
 import { PortalLayout } from './components/PortalLayout';
+import { portalGates } from './guards';
 
 /**
  * Routes are split per screen. `lazyScreen` adds one retry to each import, and every route
@@ -23,6 +24,13 @@ const ProductPage = lazyScreen(() => import('./features/product/ProductPage'), '
 const GuestPage = lazyScreen(() => import('./features/guest/GuestPage'), 'GuestPage');
 const ForbiddenPage = lazyScreen(() => import('./features/errors/ForbiddenPage'), 'ForbiddenPage');
 const NotFoundPage = lazyScreen(() => import('./features/errors/NotFoundPage'), 'NotFoundPage');
+
+/**
+ * ADR-FE-01: a gate runs hooks, so it is mounted as an element instead of called inside `screen()`.
+ * Calling it there would run those hooks in the route table's own scope — legal only while the
+ * table never branches, which is exactly the kind of thing a route list grows into.
+ */
+const RequirePortalCapability = portalGates.RequireCapability;
 
 function RouteFallback() {
   return (
@@ -68,8 +76,33 @@ function Shell() {
       <Routes>
         <Route element={<PortalLayout />}>
           <Route index element={screen(<PortalHome />)} />
-          <Route path="entitlements" element={screen(<EntitlementsPage />)} />
-          <Route path="product/:slug" element={screen(<ProductPage />)} />
+          {/*
+            ADR-FE-01: the two screens that read a scoped resource are admitted here, with the same
+            gate the console uses. `portal.launch` is scoped for a guest, so the invitation keeps
+            opening its single product while `/entitlements` stops pretending a guest may read it.
+          */}
+          <Route
+            path="entitlements"
+            element={screen(
+              <RequirePortalCapability
+                capability="portal.view_entitlements"
+                fallback={() => <ForbiddenPage />}
+              >
+                <EntitlementsPage />
+              </RequirePortalCapability>,
+            )}
+          />
+          <Route
+            path="product/:slug"
+            element={screen(
+              <RequirePortalCapability
+                capability="portal.launch"
+                fallback={() => <ForbiddenPage />}
+              >
+                <ProductPage />
+              </RequirePortalCapability>,
+            )}
+          />
           <Route path="forbidden" element={screen(<ForbiddenPage />)} />
           <Route path="not-found" element={screen(<NotFoundPage />)} />
           <Route path="*" element={screen(<NotFoundPage />)} />

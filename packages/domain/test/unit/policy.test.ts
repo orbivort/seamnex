@@ -2,9 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   ANONYMOUS_OPERATIONS,
   ANY_OF_POLICY_KEYS,
+  COLLECTION_PATHS,
   POLICY_KEYS,
   RESERVED_POLICY_KEYS,
   SERVICE_SCOPES,
+  collectionScopeArrays,
+  isCollectionPath,
   isReservedPolicyKey,
   isServiceScope,
   resourceForRequest,
@@ -113,7 +116,7 @@ describe('resourceForRequest', () => {
   });
 
   it('classifies the path when the parameter name is generic', () => {
-    expect(resourceForRequest('/instances', {})).toEqual({ type: 'instance', id: '' });
+    expect(resourceForRequest('/instances', {})).toEqual({ type: 'collection', id: '' });
     expect(resourceForRequest('/backups/verify', { id: 'b-1' })).toEqual({
       type: 'instance',
       id: 'b-1',
@@ -148,6 +151,88 @@ describe('resourceForRequest', () => {
   });
 
   it('falls back to a platform-scoped resource for anything else', () => {
-    expect(resourceForRequest('/capacity', {})).toEqual({ type: 'platform', id: '' });
+    expect(resourceForRequest('/settings', {})).toEqual({ type: 'platform', id: '' });
+  });
+});
+
+/**
+ * ADR-BE-44: a collection has no id, so scope resolution has nothing to join against. The type is
+ * what tells the PDP to answer from the grant instead of from the resource.
+ */
+describe('collection reads', () => {
+  it('names exactly the unaddressed reads that are scope-filtered', () => {
+    expect([...COLLECTION_PATHS].sort()).toEqual([
+      '/capacity',
+      '/capacity/forecast',
+      '/instances',
+      '/jobs',
+    ]);
+    expect(isCollectionPath('/instances')).toBe(true);
+    expect(isCollectionPath('/jobs')).toBe(true);
+  });
+
+  it('keeps an addressed read out of the collection set', () => {
+    // A prefix match would turn `/instances/:id` into a list read and drop its row check.
+    expect(isCollectionPath('/instances/:id')).toBe(false);
+    expect(resourceForRequest('/instances/:id', { id: 'inst-1' })).toEqual({
+      type: 'instance',
+      id: 'inst-1',
+    });
+    expect(resourceForRequest('/jobs/:id', { id: 'job-1' })).toEqual({
+      type: 'instance',
+      id: 'job-1',
+    });
+  });
+
+  it('classifies every declared collection path the same way', () => {
+    for (const path of COLLECTION_PATHS) {
+      expect(resourceForRequest(path, {}), path).toEqual({ type: 'collection', id: '' });
+    }
+  });
+});
+
+/**
+ * ADR-BE-44: the scope is bound as SQL parameters, so a platform grant must say "unrestricted"
+ * rather than asking for an empty filter — an empty `IN ()` reads as "nothing", not "everything".
+ */
+describe('collectionScopeArrays', () => {
+  it('binds a platform grant as unrestricted and asks for no rows', () => {
+    expect(collectionScopeArrays({ kind: 'platform' })).toEqual({
+      unrestricted: true,
+      domains: [],
+      instanceIds: [],
+    });
+  });
+
+  it('binds a scoped grant as filtered to exactly its domains and instances', () => {
+    expect(
+      collectionScopeArrays({
+        kind: 'scoped',
+        domains: ['crm', 'billing'],
+        instanceIds: ['inst-1', 'inst-2'],
+      }),
+    ).toEqual({
+      unrestricted: false,
+      domains: ['crm', 'billing'],
+      instanceIds: ['inst-1', 'inst-2'],
+    });
+  });
+
+  it('keeps an empty scoped grant filtered, so it matches no rows', () => {
+    const arrays = collectionScopeArrays({ kind: 'scoped', domains: [], instanceIds: [] });
+
+    expect(arrays.unrestricted).toBe(false);
+    expect(arrays.domains).toEqual([]);
+    expect(arrays.instanceIds).toEqual([]);
+  });
+
+  it('passes the scope arrays through without copying them', () => {
+    const domains = ['crm'];
+    const instanceIds = ['inst-1'];
+
+    const arrays = collectionScopeArrays({ kind: 'scoped', domains, instanceIds });
+
+    expect(arrays.domains).toBe(domains);
+    expect(arrays.instanceIds).toBe(instanceIds);
   });
 });

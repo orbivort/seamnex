@@ -243,7 +243,12 @@ describe('audit trail range and paging', () => {
     render(<App />);
     await screen.findByRole('heading', { name: 'Audit trail' });
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Verify chain' }));
+    // The header action is `disabled` until the first page of events has loaded, and a click on a
+    // disabled button is a no-op — so the wait is for the list, not merely for the button's markup.
+    const verify = await screen.findByRole('button', { name: 'Verify chain' });
+    await waitFor(() => expect(verify.hasAttribute('disabled')).toBe(false));
+    fireEvent.click(verify);
+
     const drawer = await screen.findByRole('dialog');
     await within(drawer).findByText('SHA-256 hash chain');
 
@@ -278,7 +283,11 @@ describe('audit trail range and paging', () => {
     render(<App />);
     await screen.findByRole('heading', { name: 'Audit trail' });
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Verify chain' }));
+    // Same gate as the test above: the action cannot verify a chain the page has not loaded.
+    const verify = await screen.findByRole('button', { name: 'Verify chain' });
+    await waitFor(() => expect(verify.hasAttribute('disabled')).toBe(false));
+    fireEvent.click(verify);
+
     const drawer = await screen.findByRole('dialog');
 
     expect(await within(drawer).findByText('No')).toBeDefined();

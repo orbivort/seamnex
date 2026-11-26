@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { JobHandlers } from '../../../../src/contract/handlers/jobs.handlers';
 import type { OperationHandler } from '../../../../src/contract/operation-handler';
 import { AppError } from '../../../../src/common/problem/app-error';
-import { callHandler, operationInput } from '../../../support/operation-input';
+import { callHandler, operationInput, testContext } from '../../../support/operation-input';
 
 const JOB_ID = '018f0000-0000-4000-8000-000000000000';
 
@@ -28,21 +28,45 @@ function services() {
       detail: vi.fn().mockResolvedValue({ id: JOB_ID }),
     },
     streams: { open: vi.fn().mockResolvedValue(undefined) },
+    executor: { instanceIdsInScope: vi.fn().mockResolvedValue(['inst-crm']) },
   };
 }
 
 beforeEach(() => {
   s = services();
-  handlers = new JobHandlers(s.jobs as never, s.query as never, s.streams as never).handlers();
+  handlers = new JobHandlers(
+    s.jobs as never,
+    s.query as never,
+    s.streams as never,
+    s.executor as never,
+  ).handlers();
 });
 
 const call = (key: string, overrides = {}) =>
   callHandler(handlers, key, operationInput(key, overrides));
 
 describe('GET /jobs', () => {
-  it('forwards no filter keys when the query is empty', async () => {
+  it('forwards no filter keys when the query is empty, and no instance filter for a platform scope', async () => {
     await call('GET /jobs');
-    expect(s.query.list).toHaveBeenCalledWith({});
+    // ADR-BE-44: a platform decision means "no filter", expressed by not asking for ids — the
+    // handler must not scan the instance table to discover that everything is visible.
+    expect(s.executor.instanceIdsInScope).not.toHaveBeenCalled();
+    expect(s.query.list).toHaveBeenCalledWith({}, undefined);
+  });
+
+  it('resolves a scoped decision to the instance ids the reader may page', async () => {
+    await call('GET /jobs', {
+      context: testContext({
+        policyScope: { kind: 'scoped', domains: ['CRM & Sales Pipeline'], instanceIds: [] },
+      }),
+    });
+
+    expect(s.executor.instanceIdsInScope).toHaveBeenCalledWith({
+      kind: 'scoped',
+      domains: ['CRM & Sales Pipeline'],
+      instanceIds: [],
+    });
+    expect(s.query.list).toHaveBeenCalledWith({}, ['inst-crm']);
   });
 
   it('forwards every declared filter that is present', async () => {
@@ -56,13 +80,16 @@ describe('GET /jobs', () => {
       },
     });
 
-    expect(s.query.list).toHaveBeenCalledWith({
-      instanceId: 'i1',
-      kind: 'deploy',
-      state: 'running',
-      cursor: 'abc',
-      limit: '10',
-    });
+    expect(s.query.list).toHaveBeenCalledWith(
+      {
+        instanceId: 'i1',
+        kind: 'deploy',
+        state: 'running',
+        cursor: 'abc',
+        limit: '10',
+      },
+      undefined,
+    );
   });
 });
 

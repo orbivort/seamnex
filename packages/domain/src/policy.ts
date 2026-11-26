@@ -47,8 +47,14 @@ export const ANONYMOUS_OPERATIONS: readonly string[] = [
  */
 export type ScopeRule = 'platform' | 'self' | 'domain' | 'instance' | 'request';
 
-/** Which scope a capability is resolved against when the matrix says `scoped`. */
-const SCOPE_RULES: Partial<Record<Capability, ScopeRule>> = {
+/**
+ * Which scope a capability is resolved against when the matrix says `scoped`.
+ *
+ * Exported as data because the compiled policy fingerprint covers it (ADR-BE-44): a change to how
+ * a scope resolves changes what a version means, and a denial must stay attributable to the rules
+ * that produced it.
+ */
+export const SCOPE_RULES: Partial<Record<Capability, ScopeRule>> = {
   'catalog.browse': 'self',
   'catalog.read_metadata': 'self',
   'instance.configure': 'instance',
@@ -379,17 +385,94 @@ export const ANY_OF_POLICY_KEYS: Readonly<Record<string, readonly PolicyKey[]>> 
 };
 
 /**
+ * The rows a collection read is confined to (ADR-BE-44).
+ *
+ * A collection has no id, so there is nothing for `domainOf` or the instance branch to resolve
+ * against and a scoped grant used to be refused outright. The grant *is* the scope: a domain
+ * binding reaches its domain's rows, an instance binding its instance, a platform binding
+ * everything. The decision carries it so an allow can never be separated from the predicate it
+ * implies — a collection allow with no scope is a leak, not a wider grant.
+ */
+export type CollectionScope =
+  | { readonly kind: 'platform' }
+  | {
+      readonly kind: 'scoped';
+      readonly domains: readonly string[];
+      readonly instanceIds: readonly string[];
+    };
+
+/**
+ * The unaddressed reads whose rows are confined to the caller's scope.
+ *
+ * Exact declared paths, checked before the prefix branches of `resourceForRequest`: `/instances/:id`
+ * is an addressed read and keeps its own resolution. `/capacity/forecast` is listed beside
+ * `/capacity` because one screen reads both — a fixed board next to a refused sparkline is worse
+ * than either answer on its own.
+ */
+export const COLLECTION_PATHS: readonly string[] = [
+  '/instances',
+  '/jobs',
+  '/capacity',
+  '/capacity/forecast',
+];
+
+export function isCollectionPath(path: string): boolean {
+  return COLLECTION_PATHS.includes(path);
+}
+
+/**
+ * The narrower half of `CollectionScope` — what a list query must be confined to.
+ *
+ * A caller that resolves this to instance ids cannot do it for `platform`, and should not try: the
+ * absence of a filter is expressed by not asking, not by asking for "everything".
+ */
+export type ScopedCollectionScope = Extract<CollectionScope, { readonly kind: 'scoped' }>;
+
+/**
+ * The scope in the shape a list query binds.
+ *
+ * `unrestricted` is a SQL parameter rather than a second statement shape, so one query serves both
+ * answers and a scoped read cannot silently fall into the unfiltered branch of a `WHERE`.
+ */
+export type CollectionScopeArrays = {
+  readonly unrestricted: boolean;
+  readonly domains: readonly string[];
+  readonly instanceIds: readonly string[];
+};
+
+export function collectionScopeArrays(scope: CollectionScope): CollectionScopeArrays {
+  return scope.kind === 'platform'
+    ? { unrestricted: true, domains: [], instanceIds: [] }
+    : { unrestricted: false, domains: scope.domains, instanceIds: scope.instanceIds };
+}
+
+/**
  * Derives the resource a decision is about from the matched path and its parameters. The route
  * table passes this to the PDP; without a resolvable instance or domain the scope rules deny.
  */
 export type PolicyResource = {
-  type: 'platform' | 'self' | 'instance' | 'domain' | 'user' | 'catalog' | 'workflow' | 'request';
+  type:
+    | 'platform'
+    | 'self'
+    | 'instance'
+    | 'domain'
+    | 'user'
+    | 'catalog'
+    | 'workflow'
+    | 'request'
+    | 'collection';
   id: string;
 };
 
 export function resourceForRequest(path: string, params: Record<string, string>): PolicyResource {
   const id =
     params.id ?? params.instanceId ?? params.key ?? params.slug ?? params.runId ?? params.seq ?? '';
+  /*
+   * Before the prefix branches: a collection is not an instance with an empty id. Answering
+   * `{type:'instance', id:''}` sent `scopeCovers` looking for a domain to join on and denied every
+   * scoped grant; answering `collection` makes the grant itself the answer.
+   */
+  if (isCollectionPath(path)) return { type: 'collection', id: '' };
   if (path.includes('instanceId')) return { type: 'instance', id };
   if (path.startsWith('/instances') || path.startsWith('/backups')) return { type: 'instance', id };
   if (path.startsWith('/jobs')) return { type: 'instance', id };

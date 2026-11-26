@@ -6,6 +6,7 @@ import {
   scopeRuleFor,
   selectEgressInstance,
   type Capability,
+  type CollectionScope,
   type PolicyKey,
   type PolicyResource,
 } from '@seamnex/domain';
@@ -23,6 +24,12 @@ export type PolicyDecision = {
   readonly allowed: boolean;
   readonly policyVersion: number;
   readonly reason: string;
+  /**
+   * The rows the caller may see, present only on an allow for a collection read (ADR-BE-44).
+   * Absent means "this was not a collection decision"; a collection allow always carries it, so a
+   * handler cannot act on the allow without the predicate it implies.
+   */
+  readonly scope?: CollectionScope;
 };
 
 /**
@@ -172,29 +179,47 @@ export class PdpService {
       }
     }
 
+    /*
+     * A collection read is answered from the grant, not from the resource (ADR-BE-44): there is no
+     * id to resolve, and the grant's own scope is the predicate the handler will apply. Its allows
+     * are never cached — the cache stores the literal `'allow'`, which would come back without the
+     * scope and leave the handler unable to filter.
+     */
+    const collection = resource.type === 'collection';
     const cacheKey = this.cacheKey(version, context.subject.idpId, policyKey, resource);
-    const cached = await this.redis.get(cacheKey).catch(() => null);
-    if (cached === 'allow')
-      return { allowed: true, policyVersion: version, reason: 'cached allow' };
+    if (!collection) {
+      const cached = await this.redis.get(cacheKey).catch(() => null);
+      if (cached === 'allow')
+        return { allowed: true, policyVersion: version, reason: 'cached allow' };
+    }
 
     const grants = await this.grantsFor(context);
     const rule = scopeRuleFor(policyKey);
     let scoped = false;
+    const collectionScopes: CollectionScope[] = [];
 
     for (const grant of grants) {
       const access = CAPABILITY_MATRIX[policyKey as Capability]?.[grant.role];
       if (access === undefined) continue;
       if (access === 'none') continue;
       if (access === 'full') {
-        await this.cacheAllow(cacheKey);
+        if (!collection) await this.cacheAllow(cacheKey);
         return {
           allowed: true,
           policyVersion: version,
           reason: `${grant.role} holds ${policyKey}`,
+          ...(collection ? { scope: { kind: 'platform' } as const } : {}),
         };
       }
       // `scoped` is not a weaker yes: it must resolve to a scope this actor actually owns.
       scoped = true;
+      if (collection) {
+        const grantScope = collectionScopeFor(grant, rule);
+        // Every covering grant contributes: a subject bound to two domains lists both, where
+        // returning on the first would hide the second behind a filter nobody asked for.
+        if (grantScope !== null) collectionScopes.push(grantScope);
+        continue;
+      }
       if (await this.scopeCovers(grant, rule, resource, context)) {
         await this.cacheAllow(cacheKey);
         return {
@@ -203,6 +228,16 @@ export class PdpService {
           reason: `${grant.role} holds ${policyKey} within ${grant.scopeType}`,
         };
       }
+    }
+
+    const collectionScope = collection ? mergeCollectionScopes(collectionScopes) : null;
+    if (collectionScope !== null) {
+      return {
+        allowed: true,
+        policyVersion: version,
+        reason: 'the scoped grants cover this collection',
+        scope: collectionScope,
+      };
     }
 
     return {
@@ -483,6 +518,39 @@ export class PdpService {
       this.logger.warn(`decision cache unavailable (${String(error)})`);
     });
   }
+}
+
+/**
+ * The rows one grant reaches on a collection read (ADR-BE-44).
+ *
+ * No resource lookup: a collection has no id, so the grant is the whole answer. A `platform` rule
+ * is refused rather than widened — every collection path declares `instance` or `domain`, and a
+ * capability that resolves platform-wide must not acquire a scope filter it never described.
+ */
+function collectionScopeFor(
+  grant: Grant,
+  rule: ReturnType<typeof scopeRuleFor>,
+): CollectionScope | null {
+  if (rule === 'platform') return null;
+  if (rule === 'self' || rule === 'request') return { kind: 'platform' };
+  if (grant.scopeType === 'platform') return { kind: 'platform' };
+  if (grant.scopeId === null) return null;
+  if (grant.scopeType === 'domain')
+    return { kind: 'scoped', domains: [grant.scopeId], instanceIds: [] };
+  return { kind: 'scoped', domains: [], instanceIds: [grant.scopeId] };
+}
+
+/** The union of the grants that cover the collection; `null` when none of them reaches it. */
+function mergeCollectionScopes(scopes: readonly CollectionScope[]): CollectionScope | null {
+  const domains = new Set<string>();
+  const instanceIds = new Set<string>();
+  for (const scope of scopes) {
+    if (scope.kind === 'platform') return { kind: 'platform' };
+    for (const domain of scope.domains) domains.add(domain);
+    for (const instanceId of scope.instanceIds) instanceIds.add(instanceId);
+  }
+  if (domains.size === 0 && instanceIds.size === 0) return null;
+  return { kind: 'scoped', domains: [...domains].sort(), instanceIds: [...instanceIds].sort() };
 }
 
 /**

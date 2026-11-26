@@ -1010,3 +1010,142 @@ describe('workflow scope resolution', () => {
     ).resolves.toMatchObject({ allowed: false });
   });
 });
+
+/**
+ * ADR-BE-44 — a collection has no id, so scope resolution has nothing to join against. The grant
+ * itself is the answer, every covering grant contributes, and an allow always carries the predicate
+ * the handler must apply. These cases pin the shapes, the union, and the one failure that must stay
+ * a denial rather than becoming an unfiltered read.
+ */
+const COLLECTION_READ = { type: 'collection', id: '' } as never;
+
+describe('collection reads (ADR-BE-44)', () => {
+  it('answers a domain-scoped list with the domain, not a refusal', async () => {
+    const { db, service } = setup({
+      grants: [
+        { role: 'R3', scopeType: 'domain', scopeId: 'CRM & Sales Pipeline', expiresAt: null },
+      ],
+    });
+
+    await expect(
+      service.decide({
+        context: context({ role: 'R3' }),
+        policyKey: 'instance.view_logs',
+        resource: COLLECTION_READ,
+      }),
+    ).resolves.toEqual({
+      allowed: true,
+      policyVersion: 3,
+      reason: 'the scoped grants cover this collection',
+      scope: { kind: 'scoped', domains: ['CRM & Sales Pipeline'], instanceIds: [] },
+    });
+    // Nothing to resolve: the decision never reaches the domain join.
+    expect(db.calls).toHaveLength(0);
+  });
+
+  it('unions every covering grant instead of returning on the first', async () => {
+    const { service } = setup({
+      grants: [
+        { role: 'R3', scopeType: 'domain', scopeId: 'HR & People Operations', expiresAt: null },
+        { role: 'R3', scopeType: 'domain', scopeId: 'CRM & Sales Pipeline', expiresAt: null },
+        { role: 'R4', scopeType: 'instance', scopeId: 'inst-crm', expiresAt: null },
+      ],
+    });
+
+    const decision = await service.decide({
+      context: context({ role: 'R3' }),
+      policyKey: 'instance.view_logs',
+      resource: COLLECTION_READ,
+    });
+
+    expect(decision.scope).toEqual({
+      kind: 'scoped',
+      domains: ['CRM & Sales Pipeline', 'HR & People Operations'],
+      instanceIds: ['inst-crm'],
+    });
+  });
+
+  it('narrows an instance-scoped operator to that instance', async () => {
+    const { service } = setup({
+      grants: [{ role: 'R4', scopeType: 'instance', scopeId: 'inst-crm', expiresAt: null }],
+    });
+
+    await expect(
+      service.decide({
+        context: context({ role: 'R4' }),
+        policyKey: 'instance.view_logs',
+        resource: COLLECTION_READ,
+      }),
+    ).resolves.toMatchObject({
+      allowed: true,
+      scope: { kind: 'scoped', domains: [], instanceIds: ['inst-crm'] },
+    });
+  });
+
+  it('answers a full grant with a platform scope, so the handler has one predicate shape', async () => {
+    const { service } = setup({
+      grants: [{ role: 'R1', scopeType: 'platform', scopeId: null, expiresAt: null }],
+    });
+
+    await expect(
+      service.decide({
+        context: context({ role: 'R1' }),
+        policyKey: 'instance.view_logs',
+        resource: COLLECTION_READ,
+      }),
+    ).resolves.toMatchObject({ allowed: true, scope: { kind: 'platform' } });
+  });
+
+  it('still refuses a collection whose grant names no scope, and audits it', async () => {
+    const { audit, service } = setup({
+      grants: [{ role: 'R3', scopeType: 'domain', scopeId: null, expiresAt: null }],
+    });
+
+    const decision = await service.decide({
+      context: context({ role: 'R3' }),
+      policyKey: 'instance.view_logs',
+      resource: COLLECTION_READ,
+    });
+
+    expect(decision).toEqual({
+      allowed: false,
+      policyVersion: 3,
+      reason: 'the scoped grant does not cover this resource',
+    });
+    // An unresolved scope is still a denial with evidence, not an unfiltered read.
+    expect(audit.denied).toHaveBeenCalledWith(
+      expect.objectContaining({ targetType: 'collection', targetId: 'instance.view_logs' }),
+    );
+  });
+
+  it('never caches a collection allow, because the cache cannot carry the predicate', async () => {
+    const { redis, service } = setup({
+      grants: [
+        { role: 'R3', scopeType: 'domain', scopeId: 'CRM & Sales Pipeline', expiresAt: null },
+      ],
+    });
+
+    await service.decide({
+      context: context({ role: 'R3' }),
+      policyKey: 'instance.view_logs',
+      resource: COLLECTION_READ,
+    });
+
+    expect(redis.get).not.toHaveBeenCalled();
+    expect(redis.set).not.toHaveBeenCalled();
+  });
+
+  it('keeps caching the addressed reads it always cached', async () => {
+    const { redis, service } = setup({
+      grants: [{ role: 'R1', scopeType: 'platform', scopeId: null, expiresAt: null }],
+    });
+
+    await service.decide({
+      context: context({ role: 'R1' }),
+      policyKey: 'instance.view_logs',
+      resource: { type: 'instance', id: 'inst-1' } as never,
+    });
+
+    expect(redis.set).toHaveBeenCalled();
+  });
+});

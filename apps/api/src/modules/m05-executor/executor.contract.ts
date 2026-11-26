@@ -1,5 +1,7 @@
 import type { z } from 'zod';
 import {
+  type CollectionScope,
+  type ScopedCollectionScope,
   type ImageSchema,
   type ImageScanReport,
   type ImageScanSummary,
@@ -99,7 +101,22 @@ export type LifecycleInput = {
  * methods stay exactly as Phase 2 shaped them so no screen changes.
  */
 export interface ExecutorService {
-  instances(filter: { q?: string; state?: string; entryKey?: string }): Promise<Instance[]>;
+  /**
+   * The instance list. `scope` is the predicate the policy guard published for a collection read
+   * (ADR-BE-44); omitting it means "unrestricted", which only internal callers that already hold a
+   * platform decision may do.
+   */
+  instances(
+    filter: { q?: string; state?: string; entryKey?: string },
+    scope?: CollectionScope,
+  ): Promise<Instance[]>;
+  /**
+   * The instances a scoped collection reaches, in one statement (ADR-BE-44).
+   *
+   * The domain → instance mapping lives here because `catalog_entry` is this module's table; a
+   * reader in another module asks for ids instead of learning to join across the platform.
+   */
+  instanceIdsInScope(scope: ScopedCollectionScope): Promise<string[]>;
   instance(id: string): Promise<InstanceDetail>;
   /**
    * FR-1.13 / AC-20 — the portable exports on disk, newest first.

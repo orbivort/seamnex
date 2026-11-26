@@ -23,6 +23,7 @@ import {
 } from '@seamnex/ui';
 import { cn, formatDateTime, formatRelative } from '@seamnex/utils';
 import { AsyncPanel, QueryError } from '@seamnex/shell';
+import { ScopeNote } from '../../components/ScopeNote';
 
 /** Fallback bands when a snapshot predates the configurable thresholds. */
 const DEFAULT_THRESHOLDS: CapacityThresholds = {
@@ -264,6 +265,12 @@ export function CapacityPage() {
           ) : null
         }
       />
+
+      {/* The table is filtered; the totals above it are not, and the board must not imply they are. */}
+      <ScopeNote capability="capacity.view">
+        Per-instance rows are limited to your grant. Host totals and the admission verdict describe
+        the whole machine, so the table will not add up to them.
+      </ScopeNote>
 
       <AsyncPanel
         query={capacity}

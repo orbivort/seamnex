@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { ApiOperation } from '@seamnex/domain';
+import type { ApiOperation, CollectionScope } from '@seamnex/domain';
 import { PolicyGuard, policyRefusalDetail } from '../../../../src/contract/guards/policy.guard';
 import type { OperationGuardContext } from '../../../../src/contract/guards/operation-guard';
 import { MFA_REASON } from '../../../../src/modules/m09-access-control/pdp.service';
@@ -21,17 +21,20 @@ function pdpDouble(
     allowed?: boolean;
     reason?: string;
     anyOf?: boolean;
+    scope?: CollectionScope;
   } = {},
 ) {
   const decide = vi.fn().mockResolvedValue({
     allowed: options.allowed ?? true,
     policyVersion: 1,
     reason: options.reason ?? 'role grants it',
+    scope: options.scope,
   });
   const decideAny = vi.fn().mockResolvedValue({
     allowed: options.allowed ?? true,
     policyVersion: 1,
     reason: options.reason ?? 'role grants it',
+    scope: options.scope,
   });
   return { decide, decideAny } as unknown as { decide: typeof decide; decideAny: typeof decideAny };
 }
@@ -85,6 +88,34 @@ describe('PolicyGuard', () => {
     const guard = new PolicyGuard(pdp as never);
     await expect(guard.canActivate(context())).resolves.toBeUndefined();
     expect(pdp.decideAny).not.toHaveBeenCalled();
+  });
+
+  it('publishes the collection scope on the context the handler receives', async () => {
+    const scope: CollectionScope = {
+      kind: 'scoped',
+      domains: ['CRM & Sales Pipeline'],
+      instanceIds: [],
+    };
+    const pdp = pdpDouble({ allowed: true, scope });
+    const guard = new PolicyGuard(pdp as never);
+    const input = context();
+
+    await guard.canActivate(input);
+
+    // ADR-BE-44: the allow and its predicate travel together, on the object the handler is handed.
+    expect(input.context?.policyScope).toBe(scope);
+  });
+
+  it('leaves an existing scope untouched when the decision carries none', async () => {
+    const pdp = pdpDouble({ allowed: true });
+    const guard = new PolicyGuard(pdp as never);
+    const existing: CollectionScope = { kind: 'platform' };
+    const input = context({ context: testContext({ policyScope: existing }) });
+
+    await guard.canActivate(input);
+
+    // A non-collection allow must not erase what an earlier decision published.
+    expect(input.context?.policyScope).toBe(existing);
   });
 
   it('evaluates an any-of operation as one decision', async () => {

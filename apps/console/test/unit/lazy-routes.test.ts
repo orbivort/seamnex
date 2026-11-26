@@ -6,10 +6,19 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
  * to do the real work.
  */
 afterEach(() => {
+  vi.doUnmock('../../src/routes');
   vi.unstubAllGlobals();
   vi.useRealTimers();
   vi.resetModules();
 });
+
+/** The registry's own answer for a path, so a renamed route fails here rather than silently. */
+async function routeForHref(href: string) {
+  const { CONSOLE_ROUTES, hrefOf } = await import('../../src/routes');
+  const route = CONSOLE_ROUTES.find((candidate) => hrefOf(candidate) === href);
+  if (route === undefined) throw new Error(`the registry no longer declares ${href}`);
+  return route;
+}
 
 describe('route preloading', () => {
   it('warms a known route without awaiting it', async () => {
@@ -82,5 +91,63 @@ describe('route preloading', () => {
       expect(() => preloadRoute(href)).not.toThrow();
     }
     await Promise.resolve();
+  });
+
+  it('warms a route once, however often the sidebar is hovered', async () => {
+    const { preloadRoute } = await import('../../src/lazy-routes');
+    const route = await routeForHref('/catalog');
+    const preload = vi.spyOn(route.screen, 'preload').mockResolvedValue(undefined);
+
+    preloadRoute('/catalog');
+    preloadRoute('/catalog');
+    preloadRoute('/catalog');
+
+    // The chunk is expensive and the hover events arrive in bursts: one warm per href per session.
+    expect(preload).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases a route whose prefetch failed so the next hover retries', async () => {
+    const { preloadRoute } = await import('../../src/lazy-routes');
+    const route = await routeForHref('/catalog');
+    let fail!: (error: Error) => void;
+    const failing = new Promise<unknown>((_resolve, reject) => {
+      fail = reject;
+    });
+    // Only the first attempt fails; the retry after the release must reach the real loader.
+    const preload = vi.spyOn(route.screen, 'preload').mockReturnValueOnce(failing);
+
+    preloadRoute('/catalog');
+    expect(preload).toHaveBeenCalledTimes(1);
+
+    fail(new Error('the chunk was replaced by a newer deployment'));
+    await failing.catch(() => undefined);
+
+    // Otherwise one transient failure would leave that section cold for the rest of the session.
+    preloadRoute('/catalog');
+    expect(preload).toHaveBeenCalledTimes(2);
+  });
+
+  it('skips a critical id the registry no longer declares', async () => {
+    const preload = vi.fn(() => Promise.resolve());
+    vi.doMock('../../src/routes', () => ({
+      CONSOLE_ROUTES: [],
+      hrefOf: () => '/instances',
+      routeById: (id: string) =>
+        id === 'instances'
+          ? { id, path: 'instances', capabilities: [], admits: 'any', screen: { preload } }
+          : undefined,
+    }));
+    vi.resetModules();
+    const idle = vi.fn((callback: () => void) => {
+      callback();
+      return 1;
+    });
+    vi.stubGlobal('requestIdleCallback', idle);
+    const { preloadCriticalRoutes } = await import('../../src/lazy-routes');
+
+    preloadCriticalRoutes();
+
+    // `catalog` is gone from the registry: warming the surviving critical screen must not throw.
+    expect(preload).toHaveBeenCalledTimes(1);
   });
 });

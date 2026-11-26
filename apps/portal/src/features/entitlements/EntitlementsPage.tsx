@@ -139,18 +139,11 @@ export function EntitlementsPage() {
         </div>
       </div>
 
-      {!can(session.role, 'portal.view_entitlements') ? (
-        <EmptyState
-          title="Guest access is scoped to one product"
-          description="Your invitation links directly to the shared surface. Catalog browsing and entitlement summaries are not available to guests."
-          action={
-            <Button variant="primary" onClick={() => setSignOutOpen(true)}>
-              End guest session
-            </Button>
-          }
-        />
-      ) : null}
-
+      {/*
+        The guest branch that used to explain "guest access is scoped to one product" is gone: the
+        route now refuses a guest outright (ADR-FE-01), so a guest never renders this page and a
+        second refusal inside it was a promise the router had already broken.
+      */}
       {can(session.role, 'portal.view_entitlements') ? (
         <>
           <SplitLayout ratio="content" className="mb-4">

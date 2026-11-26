@@ -5,7 +5,12 @@ import type { OperationGroup } from '../operation-handlers';
 import type { OperationHandler } from '../operation-handler';
 import { JobService } from '../../jobs/job.service';
 import { JobQueryService } from '../../jobs/job-query.service';
+import { requireCollectionScope } from '../../common/policy/collection-scope';
 import { JobStreamService } from '../../jobs/job-stream';
+import {
+  EXECUTOR_SERVICE,
+  type ExecutorService,
+} from '../../modules/m05-executor/executor.contract';
 import { readIdempotencyKey } from '../../common/http/idempotency';
 import { AppError } from '../../common/problem/app-error';
 import { isUuid } from '../../common/http/uuid';
@@ -21,22 +26,37 @@ export class JobHandlers implements OperationGroup {
     @Inject(JobService) private readonly jobs: JobService,
     @Inject(JobQueryService) private readonly query: JobQueryService,
     @Inject(JobStreamService) private readonly streams: JobStreamService,
+    // A list read needs the instance ids its scope reaches (ADR-BE-44). The mapping lives in M05,
+    // which owns the instance and catalog entry tables; this group only asks for the ids.
+    @Inject(EXECUTOR_SERVICE) private readonly executor: ExecutorService,
   ) {}
 
   handlers(): ReadonlyMap<string, OperationHandler> {
     return new Map<string, OperationHandler>([
       [
         key('GET', '/jobs'),
-        async (input) => ({
-          kind: 'body',
-          body: await this.query.list({
-            ...(input.query.instanceId === undefined ? {} : { instanceId: input.query.instanceId }),
-            ...(input.query.kind === undefined ? {} : { kind: input.query.kind }),
-            ...(input.query.state === undefined ? {} : { state: input.query.state }),
-            ...(input.query.cursor === undefined ? {} : { cursor: input.query.cursor }),
-            ...(input.query.limit === undefined ? {} : { limit: input.query.limit }),
-          }),
-        }),
+        async (input) => {
+          // ADR-BE-44: a scoped operator pages their own jobs, and the total is the size of the
+          // filtered set — a page of rows the caller cannot see is not a page.
+          const scope = requireCollectionScope(input.context);
+          const visible =
+            scope.kind === 'platform' ? undefined : await this.executor.instanceIdsInScope(scope);
+          return {
+            kind: 'body',
+            body: await this.query.list(
+              {
+                ...(input.query.instanceId === undefined
+                  ? {}
+                  : { instanceId: input.query.instanceId }),
+                ...(input.query.kind === undefined ? {} : { kind: input.query.kind }),
+                ...(input.query.state === undefined ? {} : { state: input.query.state }),
+                ...(input.query.cursor === undefined ? {} : { cursor: input.query.cursor }),
+                ...(input.query.limit === undefined ? {} : { limit: input.query.limit }),
+              },
+              visible,
+            ),
+          };
+        },
       ],
       [
         key('GET', '/jobs/:id'),

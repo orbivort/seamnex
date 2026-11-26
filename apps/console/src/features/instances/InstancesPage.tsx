@@ -23,6 +23,8 @@ import {
 } from '@seamnex/ui';
 import { cn, formatRelative } from '@seamnex/utils';
 import { AsyncPanel, QueryError } from '@seamnex/shell';
+import { ScopeNote } from '../../components/ScopeNote';
+import { useCapabilities } from '../../use-capabilities';
 
 const STATE_FILTERS = ['all', 'ready', 'degraded', 'stopped', 'failed', 'upgrading'] as const;
 type StateFilter = (typeof STATE_FILTERS)[number];
@@ -170,6 +172,7 @@ const instanceRowLink = (row: Instance, className: string, children: ReactNode) 
 );
 
 export function InstancesPage() {
+  const capabilities = useCapabilities();
   const [searchParams, setSearchParams] = useSearchParams();
   const state = parseState(searchParams.get('state'));
   const urlQuery = searchParams.get('q') ?? '';
@@ -269,11 +272,18 @@ export function InstancesPage() {
         eyebrow="Deployments"
         title="Instances"
         description="Every deployed copy, its derived state and the evidence behind it. Container detail stays one click away."
-        actions={
-          <Link to="/catalog" className={buttonVariants({ variant: 'primary', size: 'sm' })}>
-            Deploy a product
-          </Link>
-        }
+        // The affordance is only offered to a role that may actually deploy; the route is open to
+        // anyone who may read the fleet, so the button was previously a link to a screen that
+        // refused the operation at the last step.
+        {...(capabilities.held.has('instance.deploy')
+          ? {
+              actions: (
+                <Link to="/catalog" className={buttonVariants({ variant: 'primary', size: 'sm' })}>
+                  Deploy a product
+                </Link>
+              ),
+            }
+          : {})}
         meta={
           <>
             <Badge tone="accent" size="sm">
@@ -289,7 +299,9 @@ export function InstancesPage() {
         }
       />
 
-      <Panel>
+      <ScopeNote capability="instance.view_logs" />
+
+      <Panel className="mt-3">
         <PanelHeader
           eyebrow="Fleet"
           title="Deployment inventory"

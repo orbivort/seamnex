@@ -315,6 +315,57 @@ export function canMutate(role: PlatformRole, capability: Capability): boolean {
   return accessFor(role, capability) === 'full';
 }
 
+/**
+ * A role's capabilities as two lookups instead of two predicate calls.
+ *
+ * Both predicates answer by reading one cell of a frozen `const` matrix, so the answer cannot
+ * change while the role does not. Deriving the sets once per role turns every consumer (route
+ * guards, the navigation filter, the command palette) into a membership test against a value that
+ * comes from the same matrix, so there is no second list that could drift from the source.
+ */
+export type CapabilitySets = {
+  /**
+   * Every capability the role holds at any level: `can()` as a set. A `scoped` grant is included,
+   * because a scope still opens the screen — the screen is then responsible for stating the
+   * narrower scope. This set answers "may they read it?", never "may they change it?".
+   */
+  readonly held: ReadonlySet<Capability>;
+  /**
+   * The subset granted outright: `canMutate()` as a set. Mutating affordances are only enabled on a
+   * `full` grant, so a guard that checked `held` would put an enabled-looking control in front of
+   * an auditor.
+   */
+  readonly mutable: ReadonlySet<Capability>;
+};
+
+export function capabilitySets(role: PlatformRole): CapabilitySets {
+  const held = new Set<Capability>();
+  const mutable = new Set<Capability>();
+  for (const capability of CAPABILITIES) {
+    if (can(role, capability)) held.add(capability);
+    if (canMutate(role, capability)) mutable.add(capability);
+  }
+  return { held, mutable };
+}
+
+/**
+ * The three-valued answer for a surface that names several capabilities.
+ *
+ * `full` when any of them is granted outright, `scoped` when the best of them is narrower, `none`
+ * when the role holds none. A menu entry needs the distinction: `can()` collapses `none` and
+ * `scoped`, which is how a screen the role may only partly use came to look identical to one it may
+ * not open at all — the sidebar said "Instances" and the list answered 403.
+ */
+export function entryAccess(role: PlatformRole, capabilities: readonly Capability[]): Access {
+  let best: Access = 'none';
+  for (const capability of capabilities) {
+    const access = accessFor(role, capability);
+    if (access === 'full') return 'full';
+    if (access === 'scoped') best = 'scoped';
+  }
+  return best;
+}
+
 export function scopedReason(role: PlatformRole, capability: Capability): string {
   const access = accessFor(role, capability);
   if (access === 'none')

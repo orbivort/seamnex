@@ -32,6 +32,7 @@ import {
   ACCESS_CONTROL_SERVICE,
   type AccessControlService,
 } from '../../modules/m09-access-control/access-control.contract';
+import { requireCollectionScope } from '../../common/policy/collection-scope';
 import {
   PORTAL_BFF_SERVICE,
   type PortalBffService,
@@ -388,11 +389,16 @@ export class Phase2Handlers implements OperationGroup {
         key('GET', '/instances'),
         async (input) =>
           body(
-            await this.executor.instances({
-              ...optional('q', input.query.q),
-              ...optional('state', input.query.state),
-              ...optional('entryKey', input.query.entryKey),
-            }),
+            await this.executor.instances(
+              {
+                ...optional('q', input.query.q),
+                ...optional('state', input.query.state),
+                ...optional('entryKey', input.query.entryKey),
+              },
+              // ADR-BE-44: the guard published the rows this caller may see; a list that reached
+              // its handler without that predicate is a wiring defect, not a platform-wide read.
+              requireCollectionScope(input.context),
+            ),
           ),
       ],
       [
@@ -639,8 +645,14 @@ export class Phase2Handlers implements OperationGroup {
       [key('GET', '/break-glass-sessions'), async () => body(await this.governance.breakGlass())],
 
       // ---- Capacity -----------------------------------------------------------------------------
-      [key('GET', '/capacity'), async () => body(await this.capacity.snapshot())],
-      [key('GET', '/capacity/forecast'), async () => body(await this.capacity.forecast())],
+      [
+        key('GET', '/capacity'),
+        async (input) => body(await this.capacity.snapshot(requireCollectionScope(input.context))),
+      ],
+      [
+        key('GET', '/capacity/forecast'),
+        async (input) => body(await this.capacity.forecast(requireCollectionScope(input.context))),
+      ],
 
       // ---- Registry -----------------------------------------------------------------------------
       [key('GET', '/registry/instances'), async () => body(await this.registry.entries())],

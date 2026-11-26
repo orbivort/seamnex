@@ -186,10 +186,25 @@ describe('JobQueryService.list', () => {
     });
 
     const count = fake.calls[0];
-    expect(count?.sql).toContain('instance_id = $1');
-    expect(count?.sql).toContain('kind = $2');
-    expect(count?.sql).toContain('state = $3');
-    expect(count?.params).toEqual([INSTANCE_ID, 'deploy', 'succeeded']);
+    expect(count?.sql).toContain('j.instance_id = $1');
+    expect(count?.sql).toContain('j.kind = $2');
+    expect(count?.sql).toContain('j.state = $3');
+    // The scope predicate is always bound (ADR-BE-44): `true` means unrestricted, and the array is
+    // the caller's predicate. Leaving it out would make the SQL parameter count lie.
+    expect(count?.params).toEqual([INSTANCE_ID, 'deploy', 'succeeded', true, []]);
+  });
+
+  it('binds the resolved instance ids, and the count applies the same predicate', async () => {
+    const fake = db();
+    await new JobQueryService(fake.pool).list({}, [INSTANCE_ID]);
+
+    const [count, page] = fake.calls;
+    expect(count?.sql).toContain('j.instance_id = ANY($2::uuid[])');
+    expect(count?.params).toEqual([false, [INSTANCE_ID]]);
+    // Same FROM and predicate: the total is the size of the set the page draws from.
+    expect(page?.params.slice(0, 2)).toEqual([false, [INSTANCE_ID]]);
+    // The scope is resolved by M05, so this module never joins `catalog_entry` (ADR-BE-18).
+    expect(count?.sql).not.toContain('catalog_entry');
   });
 
   it('applies a keyset cursor and derives the next one from the over-fetched row', async () => {
@@ -204,8 +219,10 @@ describe('JobQueryService.list', () => {
     const page = await new JobQueryService(fake.pool).list({ limit: '2', cursor });
 
     const pageQuery = fake.calls[1];
-    expect(pageQuery?.sql).toContain('AND (created_at, id) <');
-    expect(pageQuery?.params).toEqual(['2026-01-01T00:00:00.000Z', 'z', 3]);
+    // Qualified since the page joins `instance` and `catalog_entry`: an unqualified `created_at`
+    // is ambiguous once those joins are present, which is why the keyset names its table.
+    expect(pageQuery?.sql).toContain('AND (j.created_at, j.id) <');
+    expect(pageQuery?.params).toEqual([true, [], '2026-01-01T00:00:00.000Z', 'z', 3]);
     expect(page.items).toHaveLength(2);
     expect(decodeCursor(page.nextCursor ?? undefined)).toBeTruthy();
   });
@@ -214,7 +231,7 @@ describe('JobQueryService.list', () => {
     const fake = db();
     const cursor = Buffer.from(JSON.stringify({ seq: '9' }), 'utf8').toString('base64url');
     await new JobQueryService(fake.pool).list({ cursor });
-    expect(fake.calls[1]?.sql).not.toContain('AND (created_at, id) <');
+    expect(fake.calls[1]?.sql).not.toContain('AND (j.created_at, j.id) <');
   });
 
   it('refuses a malformed cursor', async () => {

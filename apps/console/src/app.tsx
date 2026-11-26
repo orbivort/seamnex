@@ -1,4 +1,4 @@
-import { Suspense, useState, type ReactNode } from 'react';
+import { Suspense, createElement, useState, type ReactNode } from 'react';
 import { ApiProvider } from '@seamnex/api-client';
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router';
 import {
@@ -13,85 +13,17 @@ import { SignInPage } from '@seamnex/shell';
 import { can } from '@seamnex/domain';
 import { SessionProvider, readSession, useSession } from './session';
 import { SessionGate } from './session-gate';
-import { lazyScreen } from './lazy';
 import { ConsoleLayout } from './components/ConsoleLayout';
 import {
+  Forbidden,
   ForbiddenRoles,
   RequireAnyCapability,
+  RequireAnyFullCapability,
   RequireCapability,
   RequireFullCapability,
 } from './components/Guard';
 import { defaultRouteFor } from './navigation';
-
-/**
- * Routes are split per screen: the console does not ship every governance and admin screen in
- * the first chunk. `lazyScreen` adds one retry to each import, and every route renders inside
- * `RouteBoundary`, so a render throw or a chunk that a newer deployment replaced keeps the
- * navigation usable instead of blanking the shell.
- */
-const OverviewPage = lazyScreen(() => import('./features/overview/OverviewPage'), 'OverviewPage');
-const CatalogPage = lazyScreen(() => import('./features/catalog/CatalogPage'), 'CatalogPage');
-const EntryDetailPage = lazyScreen(
-  () => import('./features/catalog/EntryDetailPage'),
-  'EntryDetailPage',
-);
-const DeployWizardPage = lazyScreen(
-  () => import('./features/deploy/DeployWizardPage'),
-  'DeployWizardPage',
-);
-const InstancesPage = lazyScreen(
-  () => import('./features/instances/InstancesPage'),
-  'InstancesPage',
-);
-const InstanceDetailPage = lazyScreen(
-  () => import('./features/instances/InstanceDetailPage'),
-  'InstanceDetailPage',
-);
-const JobsPage = lazyScreen(() => import('./features/jobs/JobsPage'), 'JobsPage');
-const JobDetailPage = lazyScreen(() => import('./features/jobs/JobDetailPage'), 'JobDetailPage');
-const WorkflowsPage = lazyScreen(
-  () => import('./features/workflows/WorkflowsPage'),
-  'WorkflowsPage',
-);
-const WorkflowWorkspacePage = lazyScreen(
-  () => import('./features/workflows/WorkflowWorkspacePage'),
-  'WorkflowWorkspacePage',
-);
-const AuditPage = lazyScreen(() => import('./features/governance/AuditPage'), 'AuditPage');
-const LicensesPage = lazyScreen(() => import('./features/governance/LicensesPage'), 'LicensesPage');
-const PatchesPage = lazyScreen(() => import('./features/governance/PatchesPage'), 'PatchesPage');
-const PosturePage = lazyScreen(() => import('./features/governance/PosturePage'), 'PosturePage');
-const AccessRequestsPage = lazyScreen(
-  () => import('./features/governance/AccessRequestsPage'),
-  'AccessRequestsPage',
-);
-const BreakGlassPage = lazyScreen(
-  () => import('./features/governance/BreakGlassPage'),
-  'BreakGlassPage',
-);
-const MaintenancePage = lazyScreen(
-  () => import('./features/governance/MaintenancePage'),
-  'MaintenancePage',
-);
-const PrivacyPage = lazyScreen(() => import('./features/governance/PrivacyPage'), 'PrivacyPage');
-const RecoveryPage = lazyScreen(() => import('./features/governance/RecoveryPage'), 'RecoveryPage');
-const GroupsPage = lazyScreen(() => import('./features/admin/GroupsPage'), 'GroupsPage');
-const EnvironmentProfilesPage = lazyScreen(
-  () => import('./features/admin/EnvironmentProfilesPage'),
-  'EnvironmentProfilesPage',
-);
-const IdentitySyncPage = lazyScreen(
-  () => import('./features/admin/IdentitySyncPage'),
-  'IdentitySyncPage',
-);
-const SettingsPage = lazyScreen(() => import('./features/admin/SettingsPage'), 'SettingsPage');
-const UserDetailPage = lazyScreen(
-  () => import('./features/admin/UserDetailPage'),
-  'UserDetailPage',
-);
-const UsersPage = lazyScreen(() => import('./features/admin/UsersPage'), 'UsersPage');
-const CapacityPage = lazyScreen(() => import('./features/capacity/CapacityPage'), 'CapacityPage');
-const RegistryPage = lazyScreen(() => import('./features/registry/RegistryPage'), 'RegistryPage');
+import { CONSOLE_ROUTES, type ConsoleRoute } from './routes';
 
 function RouteFallback() {
   return (
@@ -122,14 +54,43 @@ function screen(node: ReactNode) {
   return <RouteBoundary>{node}</RouteBoundary>;
 }
 
-function guard(
-  capability: Parameters<typeof RequireCapability>[0]['capability'],
-  children: ReactNode,
-) {
-  return <RequireCapability capability={capability}>{children}</RequireCapability>;
+/**
+ * The gate a registry entry asks for, chosen from its declaration alone.
+ *
+ * `admits`, `scopedRead` and the number of capabilities are the whole decision: one capability is
+ * the single-key gate, several are the any-of gate, and a surface that needs an outright grant —
+ * `full`, or `any` where the platform cannot serve a narrowed read — swaps `held` for `mutable`.
+ * An entry that declares no capability is admitted for nobody: a declaration error hides rather
+ * than opens.
+ */
+function Admitted({ route, children }: { route: ConsoleRoute; children: ReactNode }) {
+  const [first, ...rest] = route.capabilities;
+  if (first === undefined) return <Forbidden />;
+  if (route.admits === 'full' || route.scopedRead !== true) {
+    return rest.length === 0 ? (
+      <RequireFullCapability capability={first}>{children}</RequireFullCapability>
+    ) : (
+      <RequireAnyFullCapability capabilities={[...route.capabilities]}>
+        {children}
+      </RequireAnyFullCapability>
+    );
+  }
+  return rest.length === 0 ? (
+    <RequireCapability capability={first}>{children}</RequireCapability>
+  ) : (
+    <RequireAnyCapability capabilities={[...route.capabilities]}>{children}</RequireAnyCapability>
+  );
 }
 
-function ConsoleHome() {
+/**
+ * The index route: overview for a role that may read capacity, otherwise the first surface it may
+ * read, otherwise the "not an operator surface" panel.
+ *
+ * The page still comes from the registry — the sidebar entry and the page it opens are one
+ * declaration — but the landing decision stays here because it is about this route, not about
+ * anything the sidebar renders.
+ */
+function IndexRoute({ route }: { route: ConsoleRoute }) {
   const { session } = useSession();
   if (!can(session.role, 'capacity.view') && !can(session.role, 'instance.view_logs')) {
     return <ForbiddenRoles />;
@@ -137,7 +98,7 @@ function ConsoleHome() {
   if (!can(session.role, 'capacity.view')) {
     return <Navigate to={defaultRouteFor(session.role)} replace />;
   }
-  return <OverviewPage />;
+  return <Admitted route={route}>{createElement(route.screen)}</Admitted>;
 }
 
 function NotFound() {
@@ -171,117 +132,22 @@ function Shell() {
     <ApiProvider resetKey={`${session.role}:${session.scenario}`}>
       <Routes>
         <Route element={<ConsoleLayout />}>
-          <Route index element={screen(<ConsoleHome />)} />
-          <Route path="catalog" element={screen(guard('catalog.browse', <CatalogPage />))} />
-          <Route
-            path="catalog/:key"
-            element={screen(guard('catalog.read_metadata', <EntryDetailPage />))}
-          />
-          <Route
-            path="deploy/:entryKey"
-            element={screen(guard('instance.deploy', <DeployWizardPage />))}
-          />
-          <Route
-            path="instances"
-            element={screen(guard('instance.view_logs', <InstancesPage />))}
-          />
-          <Route
-            path="instances/:id"
-            element={screen(guard('instance.view_logs', <InstanceDetailPage />))}
-          />
-          <Route path="jobs" element={screen(guard('instance.view_logs', <JobsPage />))} />
-          <Route path="jobs/:id" element={screen(guard('instance.view_logs', <JobDetailPage />))} />
-          <Route path="registry" element={screen(guard('registry.view', <RegistryPage />))} />
-          <Route path="capacity" element={screen(guard('capacity.view', <CapacityPage />))} />
-          <Route
-            path="workflows"
-            element={screen(guard('workflow.view_runs', <WorkflowsPage />))}
-          />
-          <Route
-            path="workflows/:id"
-            element={screen(guard('workflow.view_runs', <WorkflowWorkspacePage />))}
-          />
-          <Route path="governance/audit" element={screen(guard('audit.view', <AuditPage />))} />
-          <Route
-            path="governance/licenses"
-            element={screen(guard('license.view', <LicensesPage />))}
-          />
-          <Route path="governance/patches" element={screen(guard('patch.view', <PatchesPage />))} />
-          <Route
-            path="governance/posture"
-            element={screen(guard('posture.view', <PosturePage />))}
-          />
-          <Route
-            path="governance/recovery"
-            element={screen(guard('recovery.view', <RecoveryPage />))}
-          />
-          <Route
-            path="governance/privacy"
-            element={screen(guard('privacy.view', <PrivacyPage />))}
-          />
-          <Route
-            path="governance/break-glass"
-            element={screen(
-              <RequireAnyCapability capabilities={['breakglass.request', 'breakglass.approve']}>
-                <BreakGlassPage />
-              </RequireAnyCapability>,
-            )}
-          />
-          <Route
-            path="governance/access-requests"
-            element={screen(guard('entitlement.grant', <AccessRequestsPage />))}
-          />
-          <Route
-            path="governance/maintenance"
-            element={screen(
-              // Same set as the navigation entry: the guard can never admit a role the sidebar
-              // hides, and the page states the rule for each panel it cannot read.
-              <RequireAnyCapability
-                capabilities={['maintenance.configure', 'settings.view', 'exception.decide']}
-              >
-                <MaintenancePage />
-              </RequireAnyCapability>,
-            )}
-          />
-          <Route path="admin/users" element={screen(guard('identity.view_users', <UsersPage />))} />
-          <Route
-            path="admin/users/:id"
-            element={screen(guard('identity.view_users', <UserDetailPage />))}
-          />
-          <Route
-            path="admin/groups"
-            element={screen(
-              <RequireFullCapability capability="identity.manage_groups">
-                <GroupsPage />
-              </RequireFullCapability>,
-            )}
-          />
-          <Route
-            path="admin/identity-sync"
-            element={screen(
-              <RequireFullCapability capability="identity.manage_users">
-                <IdentitySyncPage />
-              </RequireFullCapability>,
-            )}
-          />
-          <Route
-            path="admin/environment-profiles"
-            element={screen(
-              // FR-1.26: R1 writes profiles, R3 may read them and file a change request. Both
-              // grants are `full` on their own capability, so the guard admits exactly those two.
-              <RequireAnyCapability capabilities={['profile.manage', 'profile.request']}>
-                <EnvironmentProfilesPage />
-              </RequireAnyCapability>,
-            )}
-          />
-          <Route
-            path="admin/settings"
-            element={screen(
-              <RequireFullCapability capability="settings.view">
-                <SettingsPage />
-              </RequireFullCapability>,
-            )}
-          />
+          {/*
+            One route per registry entry (ADR-FE-01). The capability a route checks and the
+            capability the sidebar advertises are now the same field, so the "same set as the
+            navigation entry" comment this block used to need has nothing left to describe.
+          */}
+          {CONSOLE_ROUTES.map((route) =>
+            route.index === true ? (
+              <Route key={route.id} index element={screen(<IndexRoute route={route} />)} />
+            ) : (
+              <Route
+                key={route.id}
+                path={route.path}
+                element={screen(<Admitted route={route}>{createElement(route.screen)}</Admitted>)}
+              />
+            ),
+          )}
           <Route path="forbidden" element={<ForbiddenRoles />} />
           <Route path="*" element={<NotFound />} />
         </Route>

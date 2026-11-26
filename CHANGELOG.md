@@ -39,6 +39,9 @@ Action required when upgrading an existing install; everything else is additive.
   reload. Leave `SEAMNEX_SOURCE_MIRROR_DIR` empty: a tag puts render sets under `<root>/upstream/`.
   `pnpm catalog:restore` is gone, and `pnpm db:seed` no longer writes documents, so a host with no
   checkout starts with an empty catalogue until one is fetched.
+- The first boot after upgrading stores one new `policy_version` row: its source hash now covers the
+  scope rules and the collection set (ADR-BE-44). No action is required, and a denial recorded before
+  the upgrade keeps the version it named.
 - Keycloak moves from 26.0.5 to 26.8.2. The schema migrates in place on the first start and does not
   migrate back, so a host that must stay on 26.0.5 recreates the `seamnex_keycloak` database rather
   than downgrading. Re-apply the realm with `pnpm kc:admin` after upgrading: 26.8.2 validates the
@@ -189,6 +192,21 @@ an export, backup and restore path that proves what it holds.
   field error naming the profile, and the callout reads `Reconfigure queued`, not `Restart required`.
 - **A volume quota is stated against the disk it will consume** (`FR-1.9`, `AC-13`) — the catalog
   entry, the deploy wizard and the instance panel now show the quota beside the reservation.
+- **A scoped list answers with the rows the grant reaches** (`AC-38`, `ADR-BE-44`) — `GET /instances`,
+  `GET /jobs`, `GET /capacity` and `GET /capacity/forecast` are collection reads: the decision carries
+  the predicate and the handler applies it, so a domain-scoped operator reads their own fleet instead
+  of a `403` whose reason was that an unaddressed read has no domain to resolve. Collection allows
+  are not cached, an unresolved scope still denies and audits, and the compiled `policy_version`
+  now covers the scope rules and the collection set.
+- **The console menu renders the matrix three-valued, from one registry** (`ADR-FE-01`) — a surface's
+  capability is declared once (`apps/console/src/routes.ts`) and drives the sidebar, the router, the
+  command palette and chunk prefetching; an entry held only within a narrower scope stays visible and
+  is marked, with one line on the screen stating the scope applied. The marker is claimed only for a
+  surface the platform can actually serve narrowed (`scopedRead`), so the five governance screens
+  whose reads are still platform-wide — audit, patch register, posture, recovery, access requests —
+  are no longer offered to a domain-scoped role as scope-limited entries that answer `403`. The
+  capability hook and the route gates moved to `@seamnex/shell`, and the portal gained the route
+  guards it never had on `/entitlements` and `/product/:slug`.
 
 ### Fixed
 

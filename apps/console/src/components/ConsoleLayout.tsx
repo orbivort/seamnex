@@ -137,6 +137,18 @@ export function ConsoleLayout() {
           label: item.label,
           icon: <item.icon />,
           active: active?.href === item.href,
+          // ADR-FE-01: a `scoped` grant opens the screen, so the entry stays — but the sidebar says
+          // the reach is narrower than the label implies, instead of leaving the screen to explain.
+          ...(item.scopeLimited
+            ? {
+                badge: (
+                  <Badge tone="caution" size="sm">
+                    scoped
+                  </Badge>
+                ),
+                hint: 'Held within a narrower scope — the screen states which rows it covers.',
+              }
+            : {}),
         })),
       }))}
       // A real router link, so modifier-click and "open in new tab" behave as links should, and

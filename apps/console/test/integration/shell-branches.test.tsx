@@ -291,13 +291,19 @@ describe('console shell chrome', () => {
 });
 
 describe('route guards', () => {
-  it('falls back to the portal sign-in capability when a guard names no capability', async () => {
-    // `RequireAnyCapability` reads `capabilities[0]` for its 403 panel; an empty list has to name
-    // something, and the capability every role holds is the honest answer.
+  it('refuses a guard that names no capability, without inventing one', async () => {
+    // An empty list is a declaration error, not a user condition, so the panel says so rather than
+    // naming a capability nobody asked for (ADR-FE-01). The registry test catches it before it can
+    // ship; this pins the fail-closed answer if one is ever rendered anyway.
     openAs('R5', '/forbidden');
     renderGuard(<RequireAnyCapability capabilities={[]}>{'guarded content'}</RequireAnyCapability>);
 
-    expect(await screen.findByText('capability: portal.sign_in')).toBeDefined();
+    expect(
+      await screen.findByText(
+        'This console section declares no capability, so it cannot be admitted for any role.',
+      ),
+    ).toBeDefined();
+    expect(screen.queryByText(/^capability: /)).toBeNull();
     expect(screen.queryByText('guarded content')).toBeNull();
   });
 

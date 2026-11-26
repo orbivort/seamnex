@@ -181,7 +181,8 @@ describe('instances', () => {
     const result = await service.instances({ q: 'CRM', state: 'ready', entryKey: 'D01-01' });
 
     expect(result).toHaveLength(1);
-    expect(db.calls[0]?.params).toEqual(['crm', 'ready', 'D01-01']);
+    // `$4` is the unrestricted answer; the two arrays are the scope predicate (ADR-BE-44).
+    expect(db.calls[0]?.params).toEqual(['crm', 'ready', 'D01-01', true, [], []]);
   });
 
   it('passes empty filters through as empty strings', async () => {
@@ -190,7 +191,26 @@ describe('instances', () => {
     await service.instances({});
 
     // `($1 = '' OR …)` is the shape that keeps one prepared statement for every filter combination.
-    expect(db.calls[0]?.params).toEqual(['', '', '']);
+    expect(db.calls[0]?.params).toEqual(['', '', '', true, [], []]);
+  });
+
+  it('confines a scoped list to the domains and instances the decision named', async () => {
+    const { db, service } = setup([['FROM instance i', []]]);
+
+    await service.instances(
+      {},
+      { kind: 'scoped', domains: ['CRM & Sales Pipeline'], instanceIds: ['inst-crm'] },
+    );
+
+    expect(db.calls[0]?.params).toEqual([
+      '',
+      '',
+      '',
+      false,
+      ['CRM & Sales Pipeline'],
+      ['inst-crm'],
+    ]);
+    expect(db.calls[0]?.sql).toContain('e.domain = ANY($5::text[]) OR i.id = ANY($6::uuid[])');
   });
 
   // The search box offered "product, domain, slug or key" while the query matched only the first

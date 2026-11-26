@@ -3,8 +3,10 @@ import { cpus, freemem, totalmem } from 'node:os';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import {
   admissionVerdict,
+  collectionScopeArrays,
   type CapacitySnapshot,
   type CapacityThresholds,
+  type CollectionScope,
   type ForecastPoint,
 } from '@seamnex/domain';
 import { withTransaction } from '@seamnex/db';
@@ -67,17 +69,52 @@ export class PostgresCapacityService implements CapacityService {
    * the wizard's admission step and `admit()` all agree on a fresh install instead of the console
    * sitting on "Waiting for the capacity snapshot" forever.
    */
-  async snapshot(): Promise<CapacitySnapshot> {
+  async snapshot(scope?: CollectionScope): Promise<CapacitySnapshot> {
     const result = await this.pool.query<SnapshotRow>(
       `SELECT ts, host, per_instance FROM capacity_snapshot ORDER BY ts DESC LIMIT 1`,
     );
     const row = result.rows[0];
     if (row !== undefined)
-      return { ...(row.per_instance as CapacitySnapshot), ts: row.ts.toISOString() };
+      return this.applyScope(
+        { ...(row.per_instance as CapacitySnapshot), ts: row.ts.toISOString() },
+        scope,
+      );
 
     const recorded = await this.record();
     if (recorded === null) throw this.empty();
-    return recorded;
+    return this.applyScope(recorded, scope);
+  }
+
+  /**
+   * ADR-BE-44: the stored document is platform-wide on purpose — one sampler writes it, and every
+   * reader must see the same host figures. The scope is applied on the way out, to the per-instance
+   * table only, so the verdict and the totals still describe the machine the operator is asking
+   * about.
+   */
+  private async applyScope(
+    document: CapacitySnapshot,
+    scope: CollectionScope | undefined,
+  ): Promise<CapacitySnapshot> {
+    if (scope === undefined || scope.kind === 'platform') return document;
+    const visible = await this.visibleInstanceIds(scope);
+    return {
+      ...document,
+      instanceUsage: document.instanceUsage.filter((row) => visible.has(row.instanceId)),
+    };
+  }
+
+  private async visibleInstanceIds(scope: CollectionScope): Promise<Set<string>> {
+    if (scope.kind === 'platform') return new Set<string>();
+    const arrays = collectionScopeArrays(scope);
+    const result = await this.pool.query<{ id: string }>(
+      `SELECT i.id
+         FROM instance i
+         JOIN catalog_entry c ON c.key = i.entry_key
+        WHERE i.deleted_at IS NULL
+          AND (c.domain = ANY($1::text[]) OR i.id = ANY($2::uuid[]))`,
+      [arrays.domains, arrays.instanceIds],
+    );
+    return new Set(result.rows.map((row) => row.id));
   }
 
   /**
@@ -164,10 +201,10 @@ export class PostgresCapacityService implements CapacityService {
    * the observed 14-day slope and adds 1 % per day of data growth. It is labelled as a placeholder
    * in the response rather than being presented as a model.
    */
-  async forecast(): Promise<ForecastPoint[]> {
+  async forecast(scope?: CollectionScope): Promise<ForecastPoint[]> {
     let snapshot: CapacitySnapshot;
     try {
-      snapshot = await this.snapshot();
+      snapshot = await this.snapshot(scope);
     } catch {
       const decision = await this.admit({ resources: { cpuMilli: 0, memoryMb: 0, diskMb: 0 } });
       const cpu = percent(decision.used.cpuMilli, decision.limits.cpuMilli);

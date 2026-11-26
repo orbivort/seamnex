@@ -22,6 +22,7 @@ import {
 } from '@seamnex/ui';
 import { formatRelative } from '@seamnex/utils';
 import { AsyncPanel, QueryError } from '@seamnex/shell';
+import { ScopeNote } from '../../components/ScopeNote';
 
 const KINDS = ['all', 'deploy', 'upgrade', 'backup', 'restore', 'rollback', 'delete'] as const;
 const STATES = ['all', 'running', 'succeeded', 'failed', 'queued'] as const;
@@ -177,7 +178,9 @@ export function JobsPage() {
         }
       />
 
-      <Panel>
+      <ScopeNote capability="instance.view_logs" />
+
+      <Panel className="mt-3">
         <PanelHeader
           eyebrow="History"
           title="All jobs"
