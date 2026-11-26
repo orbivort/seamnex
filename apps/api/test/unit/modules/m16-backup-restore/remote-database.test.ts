@@ -167,7 +167,7 @@ describe('restoreRemoteDatabase', () => {
         '--clean',
         '--if-exists',
         '--single-transaction',
-        'postgres:18-alpine',
+        'postgres:18.7-alpine@sha256:0115267ab5a509022df9319c77be365cef335adb71556c75f60f5360ee247e71',
       ]),
     );
     // `--no-privileges` would drop the grants the application role needs to read its own tables.

@@ -108,13 +108,15 @@ describe('catalogue sync dialog', () => {
 
     expect(within(reopened).queryByText('Bad Gateway')).toBeNull();
     expect(
-      (within(reopened).getByRole('checkbox', {
-        name: /I understand a sync can remove entries/i,
-      }) as HTMLInputElement).checked,
+      (
+        within(reopened).getByRole('checkbox', {
+          name: /I understand a sync can remove entries/i,
+        }) as HTMLInputElement
+      ).checked,
     ).toBe(false);
-    expect(within(reopened).getByRole('button', { name: 'Sync now' }).hasAttribute('disabled')).toBe(
-      true,
-    );
+    expect(
+      within(reopened).getByRole('button', { name: 'Sync now' }).hasAttribute('disabled'),
+    ).toBe(true);
   });
 
   it('closes on cancel without sending anything', async () => {

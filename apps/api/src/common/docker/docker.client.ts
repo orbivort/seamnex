@@ -8,6 +8,7 @@ import { requireAdapters } from '../adapters';
 import { run, runOrThrow, spawnProcess } from '../exec/exec';
 import { AppError } from '../problem/app-error';
 import { digestPinVerdict } from './digest-pin';
+import { ALPINE_IMAGE } from './images.generated';
 import {
   IMAGE_TRUST_GUARD,
   type ImageTrustGuard,
@@ -302,7 +303,7 @@ export class DockerEngineClient {
     this.guard();
     const result = await runOrThrow(
       'docker',
-      ['run', '--rm', '-v', `${name}:/src:ro`, 'alpine:3.20', 'du', '-sm', '/src'],
+      ['run', '--rm', '-v', `${name}:/src:ro`, ALPINE_IMAGE, 'du', '-sm', '/src'],
       { env: this.dockerEnv(), timeoutMs: 300_000 },
     );
     const match = /^(\d+)/.exec(result.stdout.trim());

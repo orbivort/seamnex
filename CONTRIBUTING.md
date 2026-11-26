@@ -109,15 +109,16 @@ local run is a red pull request.
 
 Gates for specific changes:
 
-| Command                   | Run when                                        |
-| ------------------------- | ----------------------------------------------- |
-| `pnpm check:migrations`   | a migration was added or renumbered             |
-| `pnpm check:route-policy` | a route was added or changed                    |
-| `pnpm check:bundle`       | first-load size changed                         |
-| `pnpm check:version`      | manifests or the release identity changed       |
-| `pnpm check:license`      | any licence declaration or distributed artefact |
-| `pnpm check:images`       | a container image tag changed (needs network)   |
-| `pnpm check:s3`           | backup or S3 code changed                       |
+| Command                     | Run when                                                                |
+| --------------------------- | ----------------------------------------------------------------------- |
+| `pnpm check:migrations`     | a migration was added or renumbered                                     |
+| `pnpm check:route-policy`   | a route was added or changed                                            |
+| `pnpm check:bundle`         | first-load size changed                                                 |
+| `pnpm check:version`        | manifests or the release identity changed                               |
+| `pnpm check:license`        | any licence declaration or distributed artefact                         |
+| `pnpm check:images:offline` | `docker/images.json`, a scanner default or the generated module changed |
+| `pnpm check:images`         | a container image reference changed (needs network)                     |
+| `pnpm check:s3`             | backup or S3 code changed                                               |
 
 Notes:
 

@@ -448,7 +448,16 @@ describe('volumes', () => {
     await expect(makeClient().volumeUsageMb('seamnex-shop_data')).resolves.toBe(2_048);
     expect(runOrThrowMock).toHaveBeenCalledWith(
       'docker',
-      ['run', '--rm', '-v', 'seamnex-shop_data:/src:ro', 'alpine:3.20', 'du', '-sm', '/src'],
+      [
+        'run',
+        '--rm',
+        '-v',
+        'seamnex-shop_data:/src:ro',
+        'alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf',
+        'du',
+        '-sm',
+        '/src',
+      ],
       expect.objectContaining({ timeoutMs: 300_000 }),
     );
   });

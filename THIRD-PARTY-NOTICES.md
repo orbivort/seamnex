@@ -174,11 +174,11 @@ in one place what the toolchain is built from and under what terms.
 
 ## 5. Container images
 
-The table immediately below is the dev stack: every row in it is referenced by
-`docker/compose.dev.yml`, which is the source of the tag, and the row is a copy of it. Every
-reference that carries a digest names its version in the tag and holds it still in the manifest index
-it pinned on 2026-11-25, so a row below is both what the compose file says and what runs; the digests
-live in the compose file rather than in this table, which stays readable.
+The table immediately below is the dev stack: every row is a reference `docker/images.json` lists
+under `devStack`, and `docker/compose.dev.yml` is checked against that file rather than being the
+authority itself. Every reference that carries a digest names its version in the tag and holds it
+still in the manifest index it pinned on 2026-11-25, so a row below is both what the manifest says and
+what runs; the digests live in `docker/images.json` rather than in this table, which stays readable.
 
 One gap remains. The six `observability` images name a full version but carry no digest yet, because
 no index for them was on the host that recorded the others. Record one with
@@ -190,15 +190,15 @@ tag the compose file names", not "the version that runs".
 | `adorsys/keycloak-config-cli`   | 6.6.0-26.8.1  | Apache-2.0                                                    | adorsys                             | Applies `platform/realm/*.json` so the realm is reviewed code rather than a console click. Its suffix names the Keycloak release it was built against — 26.8.1, one patch behind the server above, which the CLI's major-only start-up check accepts. | [adorsys/keycloak-config-cli](https://github.com/adorsys/keycloak-config-cli)     |
 | `axllent/mailpit`               | v1.32.0       | MIT                                                           | Ralph Slooten (axllent)             | Mail catcher for outbound-email flows during development                                                                                                                                                                                              | [axllent/mailpit](https://github.com/axllent/mailpit)                             |
 | `coredns/coredns`               | 1.15.0        | Apache-2.0                                                    | The CoreDNS Authors                 | Answers the `seamnex.localhost` zone for the clients that do not apply RFC 6761 themselves (Node, `curl`, Playwright), bound to loopback and only the zone                                                                                            | [coredns/coredns](https://github.com/coredns/coredns)                             |
-| `grafana/alloy`                 | v1.6.1        | Apache-2.0                                                    | Grafana Labs                        | Log and metric collector feeding Loki (observability profile)                                                                                                                                                                                         | [grafana/alloy](https://github.com/grafana/alloy)                                 |
-| `grafana/grafana`               | 11.5.1        | AGPL-3.0                                                      | Grafana Labs                        | Dashboards over Prometheus and Loki (observability profile)                                                                                                                                                                                           | [grafana/grafana](https://github.com/grafana/grafana)                             |
-| `grafana/loki`                  | 3.4.2         | AGPL-3.0                                                      | Grafana Labs                        | Log aggregation store (observability profile)                                                                                                                                                                                                         | [grafana/loki](https://github.com/grafana/loki)                                   |
+| `grafana/alloy`                 | v1.22.0       | Apache-2.0                                                    | Grafana Labs                        | Log and metric collector feeding Loki (observability profile)                                                                                                                                                                                         | [grafana/alloy](https://github.com/grafana/alloy)                                 |
+| `grafana/grafana`               | 13.3.2        | AGPL-3.0                                                      | Grafana Labs                        | Dashboards over Prometheus and Loki (observability profile)                                                                                                                                                                                           | [grafana/grafana](https://github.com/grafana/grafana)                             |
+| `grafana/loki`                  | 3.7.10        | AGPL-3.0                                                      | Grafana Labs                        | Log aggregation store (observability profile)                                                                                                                                                                                                         | [grafana/loki](https://github.com/grafana/loki)                                   |
 | `moby/buildkit`                 | v0.34.2       | Apache-2.0                                                    | Docker, Inc. and the Moby project   | The builder a product's `build` stage talks to, over its own gRPC endpoint: the socket proxy refuses a hijacked build session before a Dockerfile is read (ADR-BE-40 §7). Privileged, and never given the Engine socket                               | [moby/buildkit](https://github.com/moby/buildkit)                                 |
 | `n8nio/n8n`                     | 1.123.87      | Sustainable Use Licence                                       | n8n GmbH                            | Workflow runtime; runs in queue mode with two workers                                                                                                                                                                                                 | [n8n-io/n8n](https://github.com/n8n-io/n8n)                                       |
 | `postgres`                      | 18.7-alpine   | PostgreSQL Licence                                            | PostgreSQL Global Development Group | Primary datastore: platform, Keycloak and n8n databases in one cluster with separate roles                                                                                                                                                            | [docker-library/postgres](https://github.com/docker-library/postgres)             |
-| `prom/alertmanager`             | v0.28.0       | Apache-2.0                                                    | Prometheus authors                  | Routes alerts raised by `docker/observability/alerts.yml`                                                                                                                                                                                             | [prometheus/alertmanager](https://github.com/prometheus/alertmanager)             |
-| `prom/node-exporter`            | v1.8.2        | Apache-2.0                                                    | Prometheus authors                  | Host CPU, memory and disk metrics for the admission verdict                                                                                                                                                                                           | [prometheus/node_exporter](https://github.com/prometheus/node_exporter)           |
-| `prom/prometheus`               | v3.1.0        | Apache-2.0                                                    | Prometheus authors                  | Metric store scraped from the API's `/metrics`                                                                                                                                                                                                        | [prometheus/prometheus](https://github.com/prometheus/prometheus)                 |
+| `prom/alertmanager`             | v0.35.1       | Apache-2.0                                                    | Prometheus authors                  | Routes alerts raised by `docker/observability/alerts.yml`                                                                                                                                                                                             | [prometheus/alertmanager](https://github.com/prometheus/alertmanager)             |
+| `prom/node-exporter`            | v1.13.1       | Apache-2.0                                                    | Prometheus authors                  | Host CPU, memory and disk metrics for the admission verdict                                                                                                                                                                                           | [prometheus/node_exporter](https://github.com/prometheus/node_exporter)           |
+| `prom/prometheus`               | v3.16.0       | Apache-2.0                                                    | Prometheus authors                  | Metric store scraped from the API's `/metrics`                                                                                                                                                                                                        | [prometheus/prometheus](https://github.com/prometheus/prometheus)                 |
 | `quay.io/keycloak/keycloak`     | 26.8.2        | Apache-2.0                                                    | Red Hat                             | Identity provider: OIDC issuer, realm `seamnex`, group-to-entitlement source                                                                                                                                                                          | [keycloak/keycloak](https://github.com/keycloak/keycloak)                         |
 | `redis`                         | 7.4.12-alpine | RSALv2 or SSPLv1 (7.4 and later); BSD-3-Clause only up to 7.2 | Redis Ltd.                          | BullMQ broker, session store and rate-limit counters                                                                                                                                                                                                  | [redis/redis](https://github.com/redis/redis)                                     |
 | `tecnativa/docker-socket-proxy` | 3.4           | Apache-2.0                                                    | Tecnativa                           | The only container that sees the Docker socket; exposes an allow-listed Engine API to the control plane                                                                                                                                               | [Tecnativa/docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy) |
@@ -249,11 +249,19 @@ in the modules that use them, not entries in a manifest.
 row below names the default and not a guarantee — a host pointed at an internal mirror runs a
 different image.
 
+Each of the three is pinned `tag@sha256:…` in `docker/images.json`, and the API takes the value from
+the module generated from it (`apps/api/src/common/docker/images.generated.ts`) instead of carrying a
+literal — so a re-push of `3.24.4`, `1.38.0` or `0.76.2` is a pull error rather than different bytes
+producing a scan verdict, a probe answer or a backup archive. Those digests live in the manifest, not
+in this table, which stays readable. The `pg_dump`/`pg_restore` helper (`remote-database.ts` and
+`scripts/restore-platform-db.mjs`) runs §5's `postgres` pin unchanged — one entry, two consumers —
+which is why it has no row of its own.
+
 | Image           | Version | Licence                                                                                             | Maintainer               | Role in this project                                                                                                                                                                           | Source                                                                    |
 | --------------- | ------- | --------------------------------------------------------------------------------------------------- | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| `alpine`        | 3.20    | MIT for Alpine's own files; the userland it ships is predominantly GPL-2.0 (BusyBox) and MIT (musl) | Alpine Linux maintainers | Archive and measurement helper: `pg_dump`/`tar` for the backup runner and the export action, `du` for volume measurement (`backup-runner.service.ts`, `export-archive.ts`, `docker.client.ts`) | [alpinelinux/docker-alpine](https://github.com/alpinelinux/docker-alpine) |
-| `aquasec/trivy` | 0.57.1  | Apache-2.0                                                                                          | Aqua Security            | The scanner `SEAMNEX_SCANNER_IMAGE` names: a sibling `docker run` for every `scan` step (NFR-4.6), reading the advisory database from `SEAMNEX_SCAN_CACHE_DIR`                                 | [aquasec/trivy](https://github.com/aquasecurity/trivy)                    |
-| `busybox`       | 1.36    | GPL-2.0                                                                                             | The BusyBox project      | Probe and HTTP-call container for the sign-in, IdP and reachability checks (`common/exec/http-probe.ts`, `idp-probe.ts`, `sign-in-probe.ts`, `http-call.ts`)                                   | [busybox.net](https://busybox.net)                                        |
+| `alpine`        | 3.24.4  | MIT for Alpine's own files; the userland it ships is predominantly GPL-2.0 (BusyBox) and MIT (musl) | Alpine Linux maintainers | Archive and measurement helper: `pg_dump`/`tar` for the backup runner and the export action, `du` for volume measurement (`backup-runner.service.ts`, `export-archive.ts`, `docker.client.ts`) | [alpinelinux/docker-alpine](https://github.com/alpinelinux/docker-alpine) |
+| `aquasec/trivy` | 0.76.2  | Apache-2.0                                                                                          | Aqua Security            | The scanner `SEAMNEX_SCANNER_IMAGE` names: a sibling `docker run` for every `scan` step (NFR-4.6), reading the advisory database from `SEAMNEX_SCAN_CACHE_DIR`                                 | [aquasec/trivy](https://github.com/aquasecurity/trivy)                    |
+| `busybox`       | 1.38.0  | GPL-2.0                                                                                             | The BusyBox project      | Probe and HTTP-call container for the sign-in, IdP and reachability checks (`common/exec/http-probe.ts`, `idp-probe.ts`, `sign-in-probe.ts`, `http-call.ts`)                                   | [busybox.net](https://busybox.net)                                        |
 
 - `busybox` is `GPL-2.0`, which §7 lists as **not permitted in first-party code**, and it is permitted
   here for a reason the policy table does not spell out: executing a binary in a helper container
@@ -262,9 +270,9 @@ different image.
   the rule on every probe. `alpine` is the same shape with a mixed licence, and its row states the mix
   rather than a single identifier, because the image ships a BusyBox userland whose terms are not
   Alpine's.
-- None of the three pins is a compose tag: two are `const`s in their call sites and one is a schema
-  default, so `pnpm check:images` does not see them at all (§9.2) and a bump is a code edit plus a row
-  edit in the same commit.
+- None of the three is a compose tag: they are `controlPlane` entries in `docker/images.json`, so both
+  gate halves see them (§9.2) and a bump is a manifest edit, `pnpm images:generate`, and a row edit in
+  the same commit.
 - The advisory database is the second thing the scanner pulls, and it has no row because it is data
   rather than software: `ghcr.io/aquasec/trivy-db`, defaulted by `SEAMNEX_SCAN_DB_REPOSITORY` and
   refreshed by `pnpm scan:db:update`. It is named here because a stale copy is what lets a scan pass
@@ -386,12 +394,12 @@ Follow these in order; the pull request is not ready until all of them are done.
   new licence is not in §7.
 - **A removal** deletes the row and the name from §2. If the package was the last user of a table,
   remove the heading with it.
-- **A new container image** needs the licence of the image _and_ of its base image, plus a
-  `pnpm check:images` run to prove the tag resolves — and a manual check of the tag, because that
-  script covers `docker/compose.dev.yml` and the API `Dockerfile` only. An image named by a `const` or
-  a schema default in `apps/api/src`, and a tag like `18-alpine` or `24-alpine`, reach this document
-  with nothing behind them (§5). A catalogue image is a change in the mirror first: its row belongs in
-  that repository's notices, and what changes here is §5.1's tag line.
+- **A new container image** needs the licence of the image _and_ of its base image, an entry in
+  `docker/images.json`, and a row here — `pnpm check:images:offline` fails when the row is missing,
+  and `pnpm check:images` proves the tag resolves where a registry is reachable. The API `Dockerfile`
+  base is the one reference outside that file, so its bump stays a manual check of the tag; a tag like
+  `18-alpine` or `24-alpine` is refused for the same reason (§5). A catalogue image is a change in the
+  mirror first: its row belongs in that repository's notices, and what changes here is §5.1's tag line.
 
 ### 9.3 Review gate
 
@@ -410,30 +418,32 @@ A pull request that touches any of the following **must** touch this document in
   has a row for every `imageRef` and every `build:` base the tag declares, then move §5.1's tag line in
   the same commit. The mirror carries the inventory and its own `check:notices`; this file keeps the tag
   and the two combined works the platform builds.
-- an image reference in `apps/api/src` — the `SEAMNEX_SCANNER_IMAGE` default in `config/config.ts`, or
-  a helper `const` (`alpine:3.20`, `busybox:1.36`). These are third-party images the control plane
-  pulls at runtime, no compose file names them, and §5.2 is their only row.
+- `docker/images.json` — every reference it adds or moves. `controlPlane` holds the images the control
+  plane pulls at runtime (`alpine`, `busybox`, `postgres`, `aquasec/trivy`); no compose file names
+  three of them, and §5.2 is their only row. A digest bump is such a change: move the pin, not only
+  the tag.
 
 A reviewer should treat "manifest changed, notices unchanged" as a blocking comment. That single rule
 is what keeps this file honest.
 
-**What backs that rule.** Nothing yet. No task reads this document against the manifests, the compose
-files or the catalogue: `scripts/check-license.mjs` asserts only that `GPL-3.0-only` appears in it, and
-`scripts/check-images.mjs` reads two files and reports pins rather than licences. The gate above is
-therefore a reviewer's discipline, not a build failure — which is how `coredns/coredns`,
-`moby/buildkit`, `aquasec/trivy` and seven of the catalogue's images stayed out of this inventory while
-every gate passed. A `check:notices` task that diffs the set of `image:` references and `catalog:`
-names against the tables here is the change that would make the rule mechanical.
+**What backs that rule.** Half of it is mechanical. `pnpm check:images:offline` fails when a repository
+in `docker/images.json` has no backticked row here, so adding an image and forgetting §5 is a build
+failure rather than a reviewer's catch — which is how `coredns/coredns`, `moby/buildkit` and
+`aquasec/trivy` stayed out of this inventory while every gate passed, before the manifest existed. The
+catalogue's half is still a reviewer's discipline: it arrives from the mirror (ADR-BE-42), and the tag
+line in §5.1 is the only thing this repository can diff. `scripts/check-license.mjs` still asserts only
+that `GPL-3.0-only` appears in this document; nothing yet checks a licence claim against a manifest.
 
 ## 10. Review record
 
-| Date       | Change                                                                                                                                                                                    | Reviewer                  |
-| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
-| 2026-11-06 | Initial inventory                                                                                                                                                                         | Platform maintainers      |
-| 2026-11-25 | §5.1 reduced to the platform's half: these third-party images are inventoried by the mirror's `THIRD-PARTY-NOTICES.md`                                                                    |
-| 2026-11-25 | §5: dev-stack references carry the digest of their manifest index; `redis` pinned to 7.4.12-alpine (RSALv2/SSPLv1, no longer floating), `traefik` to v3.3.7 and `postgres` to 18.7-alpine | Pending maintainer review |
-| 2026-11-25 | §5: `traefik` to v3.7.20 — the v3.3 line this pin named ended support on 2025-05-05 and receives no fix, while v3.7 still takes security fixes. Licence unchanged (MIT)                   | Pending maintainer review |
-| 2026-11-25 | §5: `coredns/coredns` to 1.15.0 — the 1.12.0 pin was two years old and predated the listener fixes that shipped in 1.14.7. Licence unchanged (Apache-2.0)                                 | Pending maintainer review |
+| Date       | Change                                                                                                                                                                                                                                                    | Reviewer                  |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| 2026-11-06 | Initial inventory                                                                                                                                                                                                                                         | Platform maintainers      |
+| 2026-11-25 | §5.1 reduced to the platform's half: these third-party images are inventoried by the mirror's `THIRD-PARTY-NOTICES.md`                                                                                                                                    |
+| 2026-11-25 | §5: dev-stack references carry the digest of their manifest index; `redis` pinned to 7.4.12-alpine (RSALv2/SSPLv1, no longer floating), `traefik` to v3.3.7 and `postgres` to 18.7-alpine                                                                 | Pending maintainer review |
+| 2026-11-26 | §5 / §5.2 / §9.3: `docker/images.json` is the authority for every reference the platform starts; `check:images:offline` compares this file, the compose stack, the scanner defaults and the generated module, and fails when a repository here has no row | Pending maintainer review |
+| 2026-11-25 | §5: `traefik` to v3.7.20 — the v3.3 line this pin named ended support on 2025-05-05 and receives no fix, while v3.7 still takes security fixes. Licence unchanged (MIT)                                                                                   | Pending maintainer review |
+| 2026-11-25 | §5: `coredns/coredns` to 1.15.0 — the 1.12.0 pin was two years old and predated the listener fixes that shipped in 1.14.7. Licence unchanged (Apache-2.0)                                                                                                 | Pending maintainer review |
 
 Add a row whenever the inventory changes materially. One line is enough; the tables carry the detail.
 

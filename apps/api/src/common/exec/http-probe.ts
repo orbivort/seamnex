@@ -1,4 +1,5 @@
 import type { ExecResult } from './exec';
+import { BUSYBOX_IMAGE } from '../docker/images.generated';
 
 /**
  * One HTTP readiness probe, executed from a throwaway container on the instance network.
@@ -30,7 +31,7 @@ import type { ExecResult } from './exec';
  * parameters, so a slug cannot become shell syntax.
  */
 
-const PROBE_IMAGE = 'busybox:1.36';
+const PROBE_IMAGE = BUSYBOX_IMAGE;
 
 const PROBE_SCRIPT = [
   'out=$(wget -S -T 5 -O /dev/null "http://$1:$2/" 2>&1)',

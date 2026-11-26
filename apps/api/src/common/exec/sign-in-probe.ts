@@ -1,4 +1,5 @@
 import type { ExecResult } from './exec';
+import { BUSYBOX_IMAGE } from '../docker/images.generated';
 
 /**
  * Does the product's own sign-in page offer the platform identity provider?
@@ -20,7 +21,7 @@ import type { ExecResult } from './exec';
  * become shell syntax.
  */
 
-const PROBE_IMAGE = 'busybox:1.36';
+const PROBE_IMAGE = BUSYBOX_IMAGE;
 
 const PROBE_SCRIPT = [
   'body=$(wget -q -T 5 -O - "http://$1:$2$3" 2>&1)',

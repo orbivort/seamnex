@@ -1,4 +1,5 @@
 import type { ExecResult } from './exec';
+import { BUSYBOX_IMAGE } from '../docker/images.generated';
 
 /**
  * One authenticated JSON POST from a throwaway container on an instance network (FR-2.4).
@@ -13,7 +14,7 @@ import type { ExecResult } from './exec';
  * or a path can never become shell syntax. Only failures are returned, never the request.
  */
 
-const CALL_IMAGE = 'busybox:1.36';
+const CALL_IMAGE = BUSYBOX_IMAGE;
 
 const CALL_SCRIPT = [
   'IFS= read -r token',

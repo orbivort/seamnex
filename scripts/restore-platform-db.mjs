@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { parseEnv } from 'node:util';
+import { loadImageManifest } from './image-manifest.mjs';
 
 /**
  * `pnpm restore:platform-db --dump <platform.dump>` — the control-plane database, restored by an
@@ -27,6 +28,13 @@ const root = dirname(import.meta.dirname);
 
 /** Addresses a helper container on the host network can reach; a compose name cannot be resolved. */
 const HOST_REACHABLE = ['127.0.0.1', 'localhost', '::1', 'host.docker.internal'];
+
+/**
+ * The `pg_restore` helper, on the release `docker/compose.dev.yml` pins for the platform's own
+ * `postgres` service: the dump this script loads was written by that server. The pin lives in
+ * `docker/images.json`, one entry shared by the stack and by `remote-database.ts`.
+ */
+const POSTGRES_HELPER_IMAGE = loadImageManifest(root).controlPlane.postgres;
 
 /** Tables worth printing after the restore: a row count is the cheapest proof it is not empty. */
 const PROOF_TABLES = [
@@ -217,7 +225,7 @@ function runHelper({ directory, passFile, args }) {
       `PGDATABASE=${connection.database}`,
       '-e',
       `PGUSER=${connection.user}`,
-      'postgres:18-alpine',
+      POSTGRES_HELPER_IMAGE,
       ...args,
     ],
     { env: { PATH: process.env.PATH ?? '', DOCKER_HOST: dockerHost }, encoding: 'utf8' },

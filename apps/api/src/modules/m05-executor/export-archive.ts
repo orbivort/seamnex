@@ -8,6 +8,7 @@ import {
   engineOf,
 } from '../../common/engine/database';
 import { ensureDir, isFile, removeTree, sha256File, writeFileAtomic } from '../../common/fs/files';
+import { ALPINE_IMAGE } from '../../common/docker/images.generated';
 import { dockerMountSource } from '../../common/docker/mount';
 import { instanceNetwork } from '../../common/docker/naming';
 import { AppError } from '../../common/problem/app-error';
@@ -92,7 +93,7 @@ export type ExportArtefact = {
   readonly excluded: readonly { readonly item: string; readonly reason: string }[];
 };
 
-const HELPER_IMAGE = 'alpine:3.20';
+const HELPER_IMAGE = ALPINE_IMAGE;
 const HELPER_TIMEOUT_MS = 900_000;
 const ARCHIVE_TIMEOUT_MS = 3_600_000;
 /** Docker volume and compose service names both live inside this grammar; anything else is renamed. */

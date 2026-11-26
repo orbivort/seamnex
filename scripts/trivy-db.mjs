@@ -17,11 +17,18 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { parseEnv } from 'node:util';
+import { loadImageManifest } from './image-manifest.mjs';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const env = { ...readEnvFile(), ...process.env };
 
-const SCANNER_IMAGE = env.SEAMNEX_SCANNER_IMAGE ?? 'aquasec/trivy:0.57.1';
+/**
+ * The same entry the API's scanner default comes from (`docker/images.json` through the generated
+ * module): this script writes the cache and that scanner reads it, so the two must be the same
+ * binary or the cache they disagree about is nobody's fault but this file's. An explicit
+ * `SEAMNEX_SCANNER_IMAGE` still wins, and then the manifest is not read at all.
+ */
+const SCANNER_IMAGE = env.SEAMNEX_SCANNER_IMAGE ?? loadImageManifest(ROOT).controlPlane.trivy;
 const DB_MODE = env.SEAMNEX_SCAN_DB_MODE ?? 'cached';
 const DB_REPOSITORY = env.SEAMNEX_SCAN_DB_REPOSITORY ?? 'ghcr.io/aquasec/trivy-db';
 const CACHE_DIR = resolveFromRoot(env.SEAMNEX_SCAN_CACHE_DIR ?? './temp/trivy-cache');

@@ -55,7 +55,7 @@ describe('postProductJson', () => {
       '--interactive',
       '--network',
       'seamnex-inst-crm',
-      'busybox:1.36',
+      'busybox:1.38.0@sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4',
     ]);
     // Host, port and path are positional parameters of `sh`, so a slug or a path can never become
     // shell syntax.

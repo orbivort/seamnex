@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import { ensureDir, removeQuietly, writeFileAtomic } from '../../common/fs/files';
 import { runOrThrow } from '../../common/exec/exec';
+import { POSTGRES_IMAGE } from '../../common/docker/images.generated';
 import { dockerMountSource } from '../../common/docker/mount';
 import { AppError } from '../../common/problem/app-error';
 
@@ -37,6 +38,13 @@ export type RemoteDatabaseInput = {
 
 /** A database address the helper can reach from the host network. */
 const HOST_REACHABLE_DATABASE_HOSTS = ['127.0.0.1', 'localhost', '::1', 'host.docker.internal'];
+
+/**
+ * The `pg_dump`/`pg_restore` helper, on the release `docker/compose.dev.yml` pins for the platform's
+ * own `postgres` service — a dump this helper writes is one that server can load. The pin lives in
+ * `docker/images.json`, one entry shared by both.
+ */
+const POSTGRES_HELPER_IMAGE = POSTGRES_IMAGE;
 
 /**
  * `pg_dump --format=custom` into `<directory>/<dumpFileName>`.
@@ -134,7 +142,7 @@ async function runWithPasswordFile(
         '-v',
         `${dockerMountSource(input.directory, input.pathMap)}:/backup`,
         ...Object.entries(environment).flatMap(([key, value]) => ['-e', `${key}=${value}`]),
-        'postgres:18-alpine',
+        POSTGRES_HELPER_IMAGE,
         ...command(connection),
       ],
       {

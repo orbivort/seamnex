@@ -1,40 +1,48 @@
 /**
  * Image-pin gate (deliverable 1.8, NFR-4.15).
  *
- * Every image the development stack runs must name a version that a registry actually serves, and
- * it must resolve to a tag that does not drift. This script does two things a reviewer cannot do by
- * reading a diff:
+ * `docker/images.json` is the authority for every image this repository starts. This script proves
+ * four things a reviewer cannot see in a diff, and only the last of them needs the network:
  *
- *   1. It collects every `image:` in `docker/compose.dev.yml` and every `FROM` in the Dockerfiles,
- *      so a new reference cannot be introduced without being checked.
- *   2. It asks the registry for each manifest. A missing tag is a hard failure, because it is the
- *      failure that only shows up as `manifest unknown` halfway through `compose up`.
+ *   1. every registry `image:` in `docker/compose.dev.yml` is named by the manifest, and every
+ *      `devStack` entry is still used by a service;
+ *   2. the scanner default in `.env.example` and in the compose environment is the manifest's;
+ *   3. `apps/api/src/common/docker/images.generated.ts` is what `pnpm images:generate` would write,
+ *      and every repository in the manifest has a row in `THIRD-PARTY-NOTICES.md`;
+ *   4. every reference resolves to a published manifest — the original job, and the reason this
+ *      script asks a registry rather than a file.
  *
- * It also fails on a reference with no tag at all, and warns on a bare major (`n8n:1`, `redis:7`),
- * which silently floats across minors — reproducible in name only.
- *
- * An `image:` on a service that also declares `build:` names an image *this repository builds*, not
- * a registry reference. `seamnex-dev-api` has no tag by design, and asking a registry about it
- * reports a missing pin for a name that never leaves the machine. Those are listed as `LOCAL`:
- * neither a pass nor a failure.
- *
- * Requires Docker and registry access; it is deliberately not part of `pnpm test`, which must stay
- * runnable on a machine with no network. CI runs it in the `image` job, where both are guaranteed.
+ * `--offline` stops after (3). That half needs neither a daemon nor egress, so it belongs beside
+ * `pnpm lint`; the online half is deliberately not part of `pnpm test`, which must stay runnable on
+ * a machine with no route. An `image:` on a service that also declares `build:` names an image *this
+ * repository builds*, not a registry reference; those are counted as local, never resolved.
  *
  *   pnpm check:images
+ *   pnpm check:images:offline
  *   node scripts/check-images.mjs --json
  */
 import { execFile } from 'node:child_process';
-import { readFileSync, existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import {
+  GENERATED_MODULE,
+  MANIFEST_FILE,
+  loadImageManifest,
+  manifestReferences,
+  renderModule,
+  repositoryOf,
+} from './image-manifest.mjs';
 
 const run = promisify(execFile);
 const root = resolve(process.cwd());
 const asJson = process.argv.includes('--json');
+const offlineOnly = process.argv.includes('--offline');
 
-const COMPOSE_FILES = ['docker/compose.dev.yml'];
+const COMPOSE_FILE = 'docker/compose.dev.yml';
 const DOCKERFILE_GLOBS = ['apps/api/Dockerfile'];
+const ENV_EXAMPLE = '.env.example';
+const NOTICES = 'THIRD-PARTY-NOTICES.md';
 
 const IMAGE_LINE = /^\s*image:\s*['"]?([^'"\s#]+)['"]?/;
 // A compose service is a two-space key; its properties are four-space keys. Both patterns are
@@ -87,18 +95,21 @@ function collectComposeImages(file) {
   return out;
 }
 
-/** @returns {{ file: string, line: number, ref: string, local: boolean }[]} */
+/** @returns {{ file: string, line: number, ref: string, local: boolean, kind: 'compose' | 'dockerfile' }[]} */
 function collect() {
   const found = [];
-  const compose = [];
-  for (const file of COMPOSE_FILES) compose.push(...collectComposeImages(file));
+  const compose = collectComposeImages(COMPOSE_FILE);
   // `deploy-worker`, `status-sampler` and the rest reuse the image `api` builds without declaring a
   // build of their own, so "local" is a property of the *name*, not of the one service that builds
   // it. Any service that builds an image makes every reference to that name local.
   const builtHere = new Set(compose.filter((entry) => entry.builds).map((entry) => entry.ref));
   for (const entry of compose) {
     const { builds, ...reference } = entry;
-    found.push({ ...reference, local: builds || builtHere.has(entry.ref) });
+    found.push({
+      ...reference,
+      local: builds || builtHere.has(entry.ref),
+      kind: 'compose',
+    });
   }
   for (const file of DOCKERFILE_GLOBS) {
     const path = join(root, file);
@@ -110,7 +121,7 @@ function collect() {
         const ref = match?.[1];
         // `scratch` has no manifest, and a build argument is resolved at build time, not here.
         if (ref === undefined || ref === 'scratch' || ref.includes('$')) return;
-        found.push({ file, line: index + 1, ref, local: false });
+        found.push({ file, line: index + 1, ref, local: false, kind: 'dockerfile' });
       });
   }
   return found;
@@ -173,26 +184,130 @@ async function resolveManifest(ref) {
   return { kind: 'single manifest', platforms: 0 };
 }
 
-const results = [];
-const references = collect();
-
-for (const entry of references) {
-  if (entry.local) {
-    results.push({
-      ...entry,
-      status: 'local',
-      warning: null,
-      detail: 'built from this repository, no registry manifest',
-    });
-    continue;
+function fileText(path) {
+  try {
+    return readFileSync(join(root, path), 'utf8');
+  } catch {
+    return null;
   }
-  const pin = inspectPin(entry.ref);
-  const result = {
-    ...entry,
-    status: 'ok',
-    warning: pin.warning,
-    detail: '',
-  };
+}
+
+/**
+ * The checks that need no daemon and no route.
+ *
+ * A failure here is always a disagreement about *which* reference runs, so each message names the
+ * file that has to move. The manifest is the one place none of them may contradict.
+ */
+function offlineProblems(manifest, composeRefs) {
+  const problems = [];
+  const named = new Set(manifestReferences(manifest).map((entry) => entry.reference));
+
+  for (const entry of composeRefs) {
+    if (!named.has(entry.ref)) {
+      problems.push(
+        `${entry.file}:${entry.line} names ${entry.ref}, which ${MANIFEST_FILE} does not list`,
+      );
+    }
+  }
+
+  const composeNamed = new Set(composeRefs.map((entry) => entry.ref));
+  for (const reference of manifest.devStack) {
+    if (!composeNamed.has(reference)) {
+      problems.push(
+        `${MANIFEST_FILE} lists ${reference} under devStack, but no compose service names it`,
+      );
+    }
+  }
+
+  const scanner = manifest.controlPlane.trivy;
+  if (scanner === undefined) {
+    problems.push(`${MANIFEST_FILE} must name the scanner under controlPlane.trivy`);
+  } else {
+    const fromExample = /^SEAMNEX_SCANNER_IMAGE=(.+)$/m.exec(fileText(ENV_EXAMPLE) ?? '')?.[1];
+    if (fromExample?.trim() !== scanner) {
+      problems.push(
+        `${ENV_EXAMPLE}: SEAMNEX_SCANNER_IMAGE must be ${scanner} ` +
+          `(found ${fromExample?.trim() ?? 'no line'})`,
+      );
+    }
+    const fromCompose = /SEAMNEX_SCANNER_IMAGE:\s*\$\{SEAMNEX_SCANNER_IMAGE:-([^}]+)\}/.exec(
+      fileText(COMPOSE_FILE) ?? '',
+    )?.[1];
+    if (fromCompose?.trim() !== scanner) {
+      problems.push(
+        `${COMPOSE_FILE}: the SEAMNEX_SCANNER_IMAGE default must be ${scanner} ` +
+          `(found ${fromCompose?.trim() ?? 'no default'})`,
+      );
+    }
+  }
+
+  const generated = fileText(GENERATED_MODULE);
+  if (generated !== renderModule(manifest.controlPlane)) {
+    problems.push(
+      `${GENERATED_MODULE} does not match ${MANIFEST_FILE}; run \`pnpm images:generate\``,
+    );
+  }
+
+  const notices = fileText(NOTICES) ?? '';
+  const repositories = [
+    ...new Set(manifestReferences(manifest).map((entry) => repositoryOf(entry.reference))),
+  ];
+  for (const repository of repositories) {
+    // The table lists a repository in backticks; a bare substring would match prose as well.
+    if (!notices.includes(`\`${repository}\``)) {
+      problems.push(`${NOTICES} has no row for \`${repository}\``);
+    }
+  }
+
+  return problems;
+}
+
+const references = collect();
+const composeRefs = references.filter((entry) => entry.kind === 'compose' && !entry.local);
+const dockerfileRefs = references.filter((entry) => entry.kind === 'dockerfile');
+const localCount = references.filter((entry) => entry.local).length;
+
+let manifest;
+try {
+  manifest = loadImageManifest(root);
+} catch (error) {
+  console.error(`\n${error instanceof Error ? error.message : String(error)}`);
+  process.exit(1);
+}
+
+const problems = offlineProblems(manifest, composeRefs);
+if (problems.length > 0) {
+  console.error(`\n${problems.length} image-pin problem(s):`);
+  for (const problem of problems) console.error(`  - ${problem}`);
+  console.error(`The authority is ${MANIFEST_FILE}; \`pnpm images:generate\` rewrites the module.`);
+  process.exit(1);
+}
+
+if (offlineOnly) {
+  console.log(
+    `${MANIFEST_FILE} agrees with ${COMPOSE_FILE}, ${ENV_EXAMPLE}, ${GENERATED_MODULE} and ` +
+      `${NOTICES}; ${localCount} reference(s) built locally and not checked.`,
+  );
+  process.exit(0);
+}
+
+/**
+ * The one online pass: the manifest's references plus the Dockerfile bases, which are out of its
+ * scope because `FROM` is resolved before the build context is read.
+ */
+const targets = [
+  ...manifestReferences(manifest).map((entry) => ({
+    ref: entry.reference,
+    where: entry.name === null ? MANIFEST_FILE : `${MANIFEST_FILE} ${entry.name}`,
+  })),
+  ...dockerfileRefs.map((entry) => ({ ref: entry.ref, where: `${entry.file}:${entry.line}` })),
+];
+
+const results = [];
+
+for (const target of targets) {
+  const pin = inspectPin(target.ref);
+  const result = { ...target, status: 'ok', warning: pin.warning, detail: '' };
   if (!pin.pinned) {
     result.status = 'missing';
     result.detail = pin.warning ?? 'unpinned';
@@ -200,9 +315,9 @@ for (const entry of references) {
     continue;
   }
   try {
-    const manifest = await resolveManifest(entry.ref);
+    const resolved = await resolveManifest(target.ref);
     result.detail =
-      manifest.platforms > 0 ? `${manifest.kind}, ${manifest.platforms} platforms` : manifest.kind;
+      resolved.platforms > 0 ? `${resolved.kind}, ${resolved.platforms} platforms` : resolved.kind;
   } catch (error) {
     result.status = classify(error);
     result.detail =
@@ -219,32 +334,28 @@ if (asJson) {
   console.log(`image references checked: ${results.length}`);
   for (const result of results) {
     const label =
-      result.status === 'local'
-        ? 'LOCAL'
-        : result.status === 'ok'
-          ? result.warning === null
-            ? 'ok  '
-            : 'WARN'
-          : result.status === 'missing'
-            ? 'FAIL'
-            : 'SKIP';
-    const where = `${result.file}:${result.line}`;
+      result.status === 'ok'
+        ? result.warning === null
+          ? 'ok  '
+          : 'WARN'
+        : result.status === 'missing'
+          ? 'FAIL'
+          : 'SKIP';
     const detail = result.warning === null ? result.detail : `${result.detail} — ${result.warning}`;
-    console.log(`  ${label} ${result.ref.padEnd(52)} ${where.padEnd(28)} ${detail}`);
+    console.log(`  ${label} ${result.ref.padEnd(52)} ${result.where.padEnd(28)} ${detail}`);
   }
 }
 
 const missing = results.filter((result) => result.status === 'missing');
 const unreachable = results.filter((result) => result.status === 'unreachable');
 const warnings = results.filter((result) => result.status === 'ok' && result.warning !== null);
-const local = results.filter((result) => result.status === 'local');
 
 if (missing.length > 0) {
   console.error(
     `\n${missing.length} image reference(s) do not resolve. A pin must name a published tag:`,
   );
   for (const failure of missing)
-    console.error(`  - ${failure.ref} (${failure.file}:${failure.line}) — ${failure.detail}`);
+    console.error(`  - ${failure.ref} (${failure.where}) — ${failure.detail}`);
   console.error('Check the tag with `docker manifest inspect <ref>`, then update the reference.');
   process.exitCode = 1;
 } else if (unreachable.length > 0) {
@@ -253,17 +364,15 @@ if (missing.length > 0) {
   console.error(
     `\n${unreachable.length} reference(s) could not be checked — registry unreachable:`,
   );
-  for (const unknown of unreachable)
-    console.error(`  - ${unknown.ref} (${unknown.file}:${unknown.line})`);
-  console.error('Run `docker compose -f docker/compose.dev.yml pull` for the daemon-side answer.');
+  for (const unknown of unreachable) console.error(`  - ${unknown.ref} (${unknown.where})`);
+  console.error(`Run \`docker compose -f ${COMPOSE_FILE} pull\` for the daemon-side answer.`);
   process.exitCode = 2;
 } else {
   if (warnings.length > 0) {
     console.warn(`\n${warnings.length} warning(s): a reference is valid but not fully pinned.`);
   }
-  const registryCount = results.length - local.length;
   console.log(
-    `\nall ${registryCount} registry reference(s) resolve to a published version` +
-      (local.length > 0 ? `; ${local.length} built locally and not checked.` : '.'),
+    `\nall ${results.length} registry reference(s) resolve to a published version` +
+      (localCount > 0 ? `; ${localCount} built locally and not checked.` : '.'),
   );
 }

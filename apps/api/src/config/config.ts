@@ -1,5 +1,6 @@
 import { isAbsolute, resolve } from 'node:path';
 import { z } from 'zod';
+import { TRIVY_IMAGE } from '../common/docker/images.generated';
 
 /**
  * Configuration is parsed once, at boot, and a failure stops the process.
@@ -69,6 +70,14 @@ const DEVELOPMENT_CREDENTIAL_DEFAULTS = {
   S3_ACCESS_KEY: 'seamnex_s3',
   S3_SECRET_KEY: 'seamnex_s3_dev_password',
 } as const;
+
+/**
+ * The scanner image the schema below defaults to (`NFR-4.6`), from `docker/images.json` through the
+ * generated module — the same entry `scripts/trivy-db.mjs` seeds the cache with, so the writer and
+ * the reader of that cache cannot be two different binaries. The tag lets `scannerVersionOf` name
+ * the release in a retained report; the digest is what a re-push of that tag cannot change.
+ */
+const DEFAULT_SCANNER_IMAGE = TRIVY_IMAGE;
 
 const EnvironmentSchema = z
   .object({
@@ -547,9 +556,10 @@ const EnvironmentSchema = z
     SEAMNEX_SCAN_ENABLED: booleanish.default(true),
     /**
      * The scanner image itself. Pinned, and pulled through the same trusted-registry guard, which is
-     * why `docker.io/aquasec` is in the default allow-list above.
+     * why `docker.io/aquasec` is in the default allow-list above. `repository:tag@sha256:…` is the
+     * form to keep: the digest holds the tag still, and the tag keeps the version a report quotes.
      */
-    SEAMNEX_SCANNER_IMAGE: z.string().min(1).default('aquasec/trivy:0.57.1'),
+    SEAMNEX_SCANNER_IMAGE: z.string().min(1).default(DEFAULT_SCANNER_IMAGE),
     /**
      * Where the advisory database comes from.
      *

@@ -33,6 +33,7 @@ import {
 } from '../m07-integration/integration.contract';
 import { JobService } from '../../jobs/job.service';
 import { DockerEngineClient, type ComposeProject } from '../../common/docker/docker.client';
+import { ALPINE_IMAGE } from '../../common/docker/images.generated';
 import { dockerMountSource } from '../../common/docker/mount';
 import { KeycloakAdminClient } from '../../common/keycloak/keycloak-admin.client';
 import { instanceNetwork, projectName } from '../../common/docker/naming';
@@ -83,6 +84,9 @@ type StoredDefinition = {
   readonly files: readonly { path: string; content: string }[];
   readonly composeProject: string;
 };
+
+/** The volume and directory helper; the pin lives in `docker/images.json`. */
+const ALPINE_HELPER_IMAGE = ALPINE_IMAGE;
 
 /**
  * 4C.1–4C.4 — the backup and restore runner, owned by the `backup-runner` role.
@@ -305,7 +309,7 @@ export class BackupRunnerService implements OnModuleInit {
         );
         continue;
       }
-      // gzip, for the reason `archiveDirectory` gives: the helper is plain `alpine:3.20`, whose
+      // gzip, for the reason `archiveDirectory` gives: the helper is plain `alpine:3.24.4`, whose
       // busybox `tar` has no `--zstd`, so every volume capture failed with
       // "tar: unrecognized option: zstd" and a product tier had nothing to restore.
       const archive = join(directory, `${volume.name}.tar.gz`);
@@ -318,7 +322,7 @@ export class BackupRunnerService implements OnModuleInit {
           `${volume.name}:/src:ro`,
           '-v',
           `${this.mountSource(directory)}:/out`,
-          'alpine:3.20',
+          ALPINE_HELPER_IMAGE,
           'tar',
           '-czf',
           `/out/${basename(archive)}`,
@@ -1002,7 +1006,7 @@ export class BackupRunnerService implements OnModuleInit {
   /**
    * Archives a directory through an ephemeral helper rather than walking it in the API process.
    *
-   * gzip, not zstd: the helper is plain `alpine:3.20`, whose `tar` always supports `-z`, while
+   * gzip, not zstd: the helper is plain `alpine:3.24.4`, whose `tar` always supports `-z`, while
    * `--zstd` depends on how that image was built. A slightly larger archive that always works beats
    * a capture that fails on one host.
    */
@@ -1020,7 +1024,7 @@ export class BackupRunnerService implements OnModuleInit {
         `${this.mountSource(input.source)}:/src:ro`,
         '-v',
         `${this.mountSource(input.directory)}:/out`,
-        'alpine:3.20',
+        ALPINE_HELPER_IMAGE,
         'tar',
         '-czf',
         `/out/${input.fileName}`,
@@ -1370,7 +1374,7 @@ export class BackupRunnerService implements OnModuleInit {
         `${this.mountSource(directory)}:/in:ro`,
         '-v',
         `${this.mountSource(target)}:/out`,
-        'alpine:3.20',
+        ALPINE_HELPER_IMAGE,
         'sh',
         '-c',
         'rm -rf /out/* && tar -xzf /in/edge-routes.tar.gz -C /out',
@@ -1432,7 +1436,7 @@ export class BackupRunnerService implements OnModuleInit {
         `${this.mountSource(directory)}:/in:ro`,
         '-v',
         `${this.mountSource(repository)}:/out`,
-        'alpine:3.20',
+        ALPINE_HELPER_IMAGE,
         'tar',
         '-xzf',
         '/in/catalog.tar.gz',
@@ -1939,7 +1943,7 @@ export class BackupRunnerService implements OnModuleInit {
           `${volume.name}:/dst`,
           '-v',
           `${this.mountSource(directory)}:/in:ro`,
-          'alpine:3.20',
+          ALPINE_HELPER_IMAGE,
           'sh',
           '-c',
           `rm -rf /dst/* && tar -xzf /in/${basename(archive)} -C /dst`,
