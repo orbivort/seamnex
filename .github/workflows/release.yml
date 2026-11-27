@@ -363,9 +363,13 @@ jobs:
     needs: [resolve, package]
     # A run started by a pushed tag is already tagged, and a dry run tags nothing: in both cases this
     # job has no work, and `publish` below reads the skipped result rather than inheriting it. The
-    # tag-start fact comes from `resolve` rather than from `github.ref_type`, which does not carry the
-    # caller's ref type here (see the note on that output).
-    if: inputs.dry_run != true && needs.resolve.outputs.tagged != 'true'
+    # results are read explicitly and `!cancelled()` replaces the implicit `success()` that would
+    # otherwise gate this job: the re-used `ci` job is skipped on the normal path, and a skipped
+    # ancestor makes `success()` false regardless of this condition, which is why the job never ran.
+    # The tag-start fact comes from `resolve`, not from `github.ref_type` (see that output's note).
+    if: >-
+      !cancelled() && inputs.dry_run != true && needs.resolve.result == 'success' &&
+      needs.package.result == 'success' && needs.resolve.outputs.tagged != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -487,10 +491,14 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # A dry run that silently skipped is indistinguishable from one that passed, so say so in the UI.
+  # Same reason as `tag`: without a status function the implicit `success()` gates this job, and the
+  # skipped `ci` makes it false, so a real dry run would report nothing.
   dry-run-report:
     name: dry run (nothing tagged or published)
     needs: [resolve, package]
-    if: inputs.dry_run == true
+    if: >-
+      !cancelled() && needs.resolve.result == 'success' &&
+      needs.package.result == 'success' && inputs.dry_run == true
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
