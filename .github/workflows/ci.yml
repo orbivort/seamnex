@@ -37,13 +37,14 @@ env:
   # release candidate can be checked against its own tag without editing this file; the defaults are
   # the shipped mirror and the tag this release was cut from.
   CATALOG_MIRROR_REPOSITORY: ${{ vars.SEAMNEX_CATALOG_SOURCE_URL || 'https://github.com/orbivort/seamnex-catalog' }}
-  CATALOG_MIRROR_REF: ${{ vars.SEAMNEX_CATALOG_SOURCE_REF || 'catalog-2026.11.0' }}
+  CATALOG_MIRROR_REF: ${{ vars.SEAMNEX_CATALOG_SOURCE_REF || 'catalog-2026.11.2' }}
 
 # Actions are referenced by major version only (`@v7`, not `@v7.0.1`): every publisher used here
 # maintains that tag as a moving pointer across its minor and patch releases, so a major-only ref
 # still receives the Node 24 and security fixes the runtime requires, without a pin that has to be
 # chased on every patch. `aquasecurity/trivy-action` is the single exception, explained at its step:
-# it is pre-1.0 and publishes no `v0` tag.
+# it is pre-1.0 and publishes no `v0` tag, and it carries a second pin — the `version` input — that
+# decides which Trivy binary scans.
 #
 # Least privilege: no job here writes to the repository, publishes a package or touches issues, so
 # the default (broad) token is unnecessary. A workflow that needs more must say so explicitly.
@@ -335,9 +336,16 @@ jobs:
       # publish and maintain a moving major tag. `trivy-action` does not: it is a pre-1.0 project
       # with no `v0` tag, and its 0.x minors carry behaviour changes, so the ref stays a full
       # version. Pinning a ref the registry does not serve would fail the job at resolve time.
+      #
+      # `version` is the Trivy binary, pinned to the tag `docker/images.json` names. Without it the
+      # action installs whatever default its own release happens to carry, so this gate would clear
+      # an image with a different scanner than the one that blocks it at "Apply" (NFR-4.6). The
+      # parity is the release tag: the action installs a GitHub release asset, so only the image
+      # reference has a digest to pin — `docker/images.json` holds that one.
       - name: Trivy — fail on a critical vulnerability
         uses: aquasecurity/trivy-action@v0.36.0
         with:
+          version: v0.76.2
           image-ref: seamnex-api:sha-${{ github.sha }}
           format: table
           exit-code: '1'

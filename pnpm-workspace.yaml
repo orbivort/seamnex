@@ -26,14 +26,14 @@ catalog:
   '@types/react': 19.3.0
   '@types/react-dom': 19.3.0
   '@vitejs/plugin-react': 6.3.0
-  '@vitest/coverage-v8': 5.1.0
+  '@vitest/coverage-v8': 5.1.2
   bullmq: 6.7.6
   class-variance-authority: 0.7.1
   clsx: 2.1.1
   dockerode: 5.0.1
-  eslint: 10.14.0
+  eslint: 10.15.0
   eslint-plugin-jsx-a11y: 6.10.2
-  eslint-plugin-n: 18.5.0
+  eslint-plugin-n: 18.6.0
   eslint-plugin-react-hooks: 7.1.1
   eslint-plugin-security: 4.2.1
   fastify: 5.12.8
@@ -52,16 +52,16 @@ catalog:
   react-router: 8.5.1
   reflect-metadata: 0.2.2
   rxjs: 7.8.2
-  stylelint: 18.0.0
-  stylelint-config-standard: 41.0.0
+  stylelint: 18.1.0
+  stylelint-config-standard: 41.1.0
   tailwind-merge: 3.7.0
   tailwindcss: 4.3.5
   tsx: 4.23.15
   turbo: 2.11.10
   typescript: 6.0.3
-  typescript-eslint: 8.72.2
+  typescript-eslint: 8.74.0
   vite: 8.3.8
-  vitest: 5.1.0
+  vitest: 5.1.2
   yaml: 2.9.1
   zod: 4.6.7
 
@@ -82,16 +82,6 @@ savePrefix: ''
 # red `pnpm install` on main.
 minimumReleaseAge: 1440
 minimumReleaseAgeStrict: false
-
-# An advisory whose dependents still ask for a vulnerable range. Pinned to the patched release here
-# rather than by bumping a dependent, because eslint has no release that widens its own range yet.
-# Remove an entry when its dependent does.
-overrides:
-  # GHSA-g3hv-75wg-m249 — eslint 10.14.0, @eslint/config-array and
-  # @typescript-eslint/typescript-estree resolve minimatch ^10, before the globparts amplification
-  # fix. 11 is API-compatible and dual-published, which is what keeps eslint's `require` working.
-  # minimatch 3 (eslint-plugin-jsx-a11y) sits outside the advisory and is left alone on purpose.
-  'minimatch@>=7.0.0 <11.0.1': 11.0.8
 
 # A package that loses its provenance/trusted-publisher status between releases
 # is a signal worth stopping on, not a routine version bump. Releases older than a

@@ -29,8 +29,8 @@
       "import": "./src/layout/index.ts"
     },
     "./time": {
-      "types": "./src/primitives/Time.ts",
-      "import": "./src/primitives/Time.ts"
+      "types": "./src/primitives/Time.tsx",
+      "import": "./src/primitives/Time.tsx"
     },
     "./styles.css": "./src/styles/index.css"
   },

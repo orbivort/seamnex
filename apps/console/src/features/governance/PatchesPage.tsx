@@ -195,9 +195,9 @@ const columns = defineColumns<PatchRecord>([
     hideBelow: 'md',
     cell: (row) => {
       const posture = postureOf(row);
-      if (posture === 'unknown')
-        return <span className="text-micro text-faint">unknown</span>;
-      const tone = posture === 'current' ? 'text-micro text-faint' : 'text-micro text-warning-strong';
+      if (posture === 'unknown') return <span className="text-micro text-faint">unknown</span>;
+      const tone =
+        posture === 'current' ? 'text-micro text-faint' : 'text-micro text-warning-strong';
       /*
        * The arrow is the "move up to this" affordance, so it belongs only to a row that is actually
        * behind. Upstream's newest tag can be older than the running version (a maintenance release
