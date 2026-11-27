@@ -21,6 +21,8 @@ symbol that implements it, and cites the requirement and decision ids (`FR-*`, `
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-27
+
 ### Summary
 
 This release makes the platform build the image it runs and start only that digest, and moves the edge
@@ -347,5 +349,6 @@ Initial release — platform capabilities at the first tag, grouped rather than 
 - **API contract** — `packages/domain/src/contract.ts` as the single source, with
   [`docs/openapi.json`](docs/openapi.json) generated and committed alongside it.
 
-[Unreleased]: https://github.com/orbivort/seamnex/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/orbivort/seamnex/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/orbivort/seamnex/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/orbivort/seamnex/releases/tag/v0.1.0
