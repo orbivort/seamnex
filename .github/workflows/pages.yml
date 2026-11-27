@@ -1,0 +1,107 @@
+name: pages
+
+# The reviewer-facing demo: the operator console and the customer portal built in `--mode demo`,
+# which run the in-browser mock platform instead of a control plane. No API, database or identity
+# provider is started or needed — the artifact is the whole deployment, which is why this lives
+# apart from `ci.yml` and `release.yml`. Both apps share one site: the console at the origin root of
+# `/<repository>/`, the portal in the `portal/` directory beneath it, which is where the console's
+# "Open the portal" control leads.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One deployment at a time, and a publish in flight is never cancelled: an abandoned artifact
+# upload leaves Pages serving the previous release until the next push.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+# Least privilege. The build only reads the repository; publishing goes through the Pages API with
+# an OIDC token, not through a write to the repository.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+env:
+  # `--mode demo` already pins the mock platform in code; setting it here as well states the intent
+  # in the run log instead of leaving it to be inferred from a package script, and keeps the build
+  # identical to a developer's `VITE_API_MODE=mock` demo.
+  VITE_API_MODE: mock
+  TURBO_TELEMETRY_DISABLED: '1'
+
+jobs:
+  build:
+    name: build the mock-driven bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Neither version is written here: pnpm reads `packageManager` from the root manifest and Node
+      # reads `.nvmrc`, the same pins `ci.yml` installs, so a deployment cannot build with a runtime
+      # the gates never saw.
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # `mockServiceWorker.js` is generated, not committed (see `.gitignore`): without this step the
+      # demo bundle ships an app whose mock platform can never start, and every screen fails at its
+      # first request.
+      - name: install the mock service worker
+        run: pnpm mocks:init
+      # `vite build` transpiles and never type-checks. CI gates the same commit, but a bundle that
+      # publishes is harder to correct than one that fails here.
+      - name: typecheck (both apps)
+        run: |
+          pnpm --filter @seamnex/console typecheck
+          pnpm --filter @seamnex/portal typecheck
+      # `build:demo` is the mock bundle (`vite build --mode demo --outDir dist-demo`); the production
+      # `build` would strip the mock platform on purpose.
+      #
+      # GitHub Pages serves a project site under `/<repository>/`, never at the origin root. The base
+      # becomes `import.meta.env.BASE_URL`, which decides the asset URLs, the router basename, the
+      # mock worker URL and the mock API prefix together — one number, four consequences. The console
+      # owns that root; the portal is mounted in a directory beneath it.
+      - name: build the console bundle
+        env:
+          VITE_BASE_PATH: /seamnex/
+          # The console's "Open the portal" control is the only link between the two apps, and it is
+          # compiled into the bundle: an unset value falls back to the development origin
+          # (`https://localhost:5173`), which no visitor of this site can reach.
+          VITE_PORTAL_URL: https://orbivort.github.io/seamnex/portal
+        run: pnpm --filter @seamnex/console build:demo
+      - name: build the portal bundle
+        env:
+          VITE_BASE_PATH: /seamnex/portal/
+        run: pnpm --filter @seamnex/portal build:demo
+      # One artifact, two apps: the console at the site root, the portal in `portal/` beside it, each
+      # with the `mockServiceWorker.js` its own build copied from `public/`. The worker scopes nest
+      # the same way, so neither app's mock platform sees the other's requests.
+      - name: assemble the site
+        run: |
+          mkdir -p dist-pages/portal
+          cp -R apps/console/dist-demo/. dist-pages/
+          cp -R apps/portal/dist-demo/. dist-pages/portal/
+          cp dist-pages/index.html dist-pages/404.html
+      # Pages has no rewrite rule and serves exactly one 404 document per site, so a deep link such
+      # as `/seamnex/instances/<id>` asks for a file that does not exist and receives the console
+      # shell: the browser reports a 404 status, then the router resolves the path it was given. The
+      # portal is entered from the console, so its own deep links are not in that fallback.
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: dist-pages
+
+  deploy:
+    name: publish to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    # The environment is what exposes the URL in the run summary and lets a reviewer approve a
+    # publish from the repository's rules, without a workflow change.
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

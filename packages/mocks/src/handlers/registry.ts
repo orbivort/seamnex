@@ -3,13 +3,13 @@ import { getState } from '../store';
 import { problem, requireCapability, roleOf } from './utils';
 
 export const registryHandlers = [
-  http.get('/api/v1/registry/instances', ({ request }) => {
+  http.get('*/api/v1/registry/instances', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'registry.view');
     if (guard) return guard;
     return HttpResponse.json(getState().registry);
   }),
 
-  http.get('/api/v1/registry/instances/:slug', ({ params, request }) => {
+  http.get('*/api/v1/registry/instances/:slug', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'registry.view');
     if (guard) return guard;
     const entry = getState().registry.find((item) => item.slug === String(params.slug));
@@ -25,7 +25,7 @@ export const registryHandlers = [
     return HttpResponse.json(entry);
   }),
 
-  http.get('/api/v1/registry/stale', ({ request }) => {
+  http.get('*/api/v1/registry/stale', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'registry.view');
     if (guard) return guard;
     return HttpResponse.json(getState().registry.filter((entry) => entry.stale));

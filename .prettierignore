@@ -32,6 +32,7 @@ platform/upstream
 # Build and tooling output.
 **/dist
 **/dist-demo
+**/dist-pages
 **/coverage
 **/.turbo
 temp

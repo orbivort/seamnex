@@ -51,13 +51,13 @@ export const phase4Handlers = [
    * The read is `instance.lifecycle` (R1 only), exactly like the action that produces the archive;
    * a seeded domain owner therefore gets the same refusal the API would send.
    */
-  http.get('/api/v1/instances/:id/exports', ({ params, request }) => {
+  http.get('*/api/v1/instances/:id/exports', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'instance.lifecycle');
     if (guard) return guard;
     return HttpResponse.json(instanceExportsFor(String(params.id)));
   }),
 
-  http.get('/api/v1/instances/:id/exports/:exportId/archive', ({ params, request }) => {
+  http.get('*/api/v1/instances/:id/exports/:exportId/archive', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'instance.lifecycle');
     if (guard) return guard;
     const exportId = String(params.exportId);
@@ -70,7 +70,7 @@ export const phase4Handlers = [
     });
   }),
 
-  http.post('/api/v1/instances/preview', async ({ request }) => {
+  http.post('*/api/v1/instances/preview', async ({ request }) => {
     const guard = requireCapability(roleOf(request), 'instance.deploy');
     if (guard) return guard;
     const body = await readBody<{
@@ -172,7 +172,7 @@ export const phase4Handlers = [
     return HttpResponse.json(preview);
   }),
 
-  http.post('/api/v1/catalog/:key/prefetch', ({ params, request }) => {
+  http.post('*/api/v1/catalog/:key/prefetch', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'metadata.manage');
     if (guard) return guard;
     return HttpResponse.json(
@@ -191,14 +191,14 @@ export const phase4Handlers = [
   }),
 
   // ---- 4E triggers and credential scopes ------------------------------------------------------
-  http.get('/api/v1/instances/:id/triggers', ({ params, request }) => {
+  http.get('*/api/v1/instances/:id/triggers', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'workflow.credentials');
     if (guard) return guard;
     void params;
     return HttpResponse.json([] as TriggerEndpoint[]);
   }),
 
-  http.post('/api/v1/instances/:id/triggers', async ({ params, request }) => {
+  http.post('*/api/v1/instances/:id/triggers', async ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'workflow.credentials');
     if (guard) return guard;
     const body = await readBody<{ eventName?: string; workflowId?: string }>(request);
@@ -215,7 +215,7 @@ export const phase4Handlers = [
     return HttpResponse.json(endpoint);
   }),
 
-  http.delete('/api/v1/instances/:id/triggers/:triggerId', ({ request }) => {
+  http.delete('*/api/v1/instances/:id/triggers/:triggerId', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'workflow.credentials');
     if (guard) return guard;
     return new HttpResponse(null, { status: 204 });
@@ -228,7 +228,7 @@ export const phase4Handlers = [
    * the run it would have started. Never a `200 accepted` without a signature: that would teach a
    * reader the opposite of what the endpoint requires.
    */
-  http.post('/api/v1/trigger/:token', async ({ request }) => {
+  http.post('*/api/v1/trigger/:token', async ({ request }) => {
     const signature = request.headers.get('x-seamnex-signature');
     const bound = getState().workflows.find((workflow) => workflow.state === 'active');
     if (signature === null) {
@@ -248,7 +248,7 @@ export const phase4Handlers = [
     });
   }),
 
-  http.post('/api/v1/instances/:id/credential-scopes', async ({ params, request }) => {
+  http.post('*/api/v1/instances/:id/credential-scopes', async ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'workflow.credentials');
     if (guard) return guard;
     const body = await readBody<{ operations?: string[]; mode?: 'read' | 'write' }>(request);
@@ -262,13 +262,13 @@ export const phase4Handlers = [
     return HttpResponse.json(minted);
   }),
 
-  http.delete('/api/v1/credential-scopes/:id', ({ request }) => {
+  http.delete('*/api/v1/credential-scopes/:id', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'workflow.credentials');
     if (guard) return guard;
     return new HttpResponse(null, { status: 204 });
   }),
 
-  http.post('/api/v1/workflow-approvals/:token/decision', async ({ params, request }) => {
+  http.post('*/api/v1/workflow-approvals/:token/decision', async ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'workflow.approve');
     if (guard) return guard;
     const body = await readBody<{ decision?: 'approve' | 'reject' }>(request);
@@ -282,7 +282,7 @@ export const phase4Handlers = [
   }),
 
   // ---- 4E authoring (canvas remains read-only, EX-2) -----------------------------------------
-  http.post('/api/v1/workflows/:id/nodes', ({ params, request }) => {
+  http.post('*/api/v1/workflows/:id/nodes', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'workflow.author');
     if (guard) return guard;
     return workflowResponse(String(params.id));
@@ -293,7 +293,7 @@ export const phase4Handlers = [
    * mock has to apply them: answering with the definition unchanged made the rail's one editable
    * control look broken, one screen after the same file was fixed to make the mapping save real.
    */
-  http.patch('/api/v1/workflows/:id/nodes/:nodeId', async ({ params, request }) => {
+  http.patch('*/api/v1/workflows/:id/nodes/:nodeId', async ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'workflow.author');
     if (guard) return guard;
     const workflow = getState().workflows.find((item) => item.id === String(params.id));
@@ -318,7 +318,7 @@ export const phase4Handlers = [
     return HttpResponse.json(workflow as Workflow);
   }),
 
-  http.delete('/api/v1/workflows/:id/nodes/:nodeId', ({ params, request }) => {
+  http.delete('*/api/v1/workflows/:id/nodes/:nodeId', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'workflow.author');
     if (guard) return guard;
     return workflowResponse(String(params.id));
@@ -329,7 +329,7 @@ export const phase4Handlers = [
    * looks like: the drawer refetched and showed the old rows again. It now writes to the same array
    * the detail endpoint serves, and refuses a blank side the way `FieldMappingSchema` does.
    */
-  http.put('/api/v1/workflows/:id/nodes/:nodeId/mappings', async ({ params, request }) => {
+  http.put('*/api/v1/workflows/:id/nodes/:nodeId/mappings', async ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'workflow.author');
     if (guard) return guard;
     const workflow = getState().workflows.find((item) => item.id === String(params.id));
@@ -373,7 +373,7 @@ export const phase4Handlers = [
     return HttpResponse.json(workflow as Workflow);
   }),
 
-  http.get('/api/v1/workflows/:id/nodes/:nodeId/fields', ({ params, request }) => {
+  http.get('*/api/v1/workflows/:id/nodes/:nodeId/fields', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'workflow.author');
     if (guard) return guard;
     const workflow = getState().workflows.find((item) => item.id === String(params.id));
@@ -400,7 +400,7 @@ export const phase4Handlers = [
     });
   }),
 
-  http.get('/api/v1/workflows/:id/nodes/:nodeId/sample', ({ params, request }) => {
+  http.get('*/api/v1/workflows/:id/nodes/:nodeId/sample', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'workflow.author');
     if (guard) return guard;
     const workflow = getState().workflows.find((item) => item.id === String(params.id));
@@ -437,7 +437,7 @@ export const phase4Handlers = [
    * a cron, and a scheduled one whose cron the engine cannot compile all fail there, and inventing a
    * default or accepting the third here would teach the opposite of what the platform does.
    */
-  http.put('/api/v1/workflows/:id/trigger', async ({ params, request }) => {
+  http.put('*/api/v1/workflows/:id/trigger', async ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'workflow.author');
     if (guard) return guard;
     const workflow = getState().workflows.find((item) => item.id === String(params.id));
@@ -539,7 +539,7 @@ export const phase4Handlers = [
   }),
 
   // ---- 4F governance -------------------------------------------------------------------------
-  http.post('/api/v1/audit-events/verify', async ({ request }) => {
+  http.post('*/api/v1/audit-events/verify', async ({ request }) => {
     const guard = requireCapability(roleOf(request), 'audit.verify');
     if (guard) return guard;
     const body = await readBody<{ fromSeq?: number; toSeq?: number }>(request);
@@ -555,7 +555,7 @@ export const phase4Handlers = [
     });
   }),
 
-  http.post('/api/v1/break-glass-sessions/:id/reveal', ({ params, request }) => {
+  http.post('*/api/v1/break-glass-sessions/:id/reveal', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'breakglass.request');
     if (guard) return guard;
     const session = getState().breakGlass.find((item) => item.id === String(params.id));
@@ -577,7 +577,7 @@ export const phase4Handlers = [
     return HttpResponse.json(reveal);
   }),
 
-  http.post('/api/v1/admin/settings/alerts/:id/test', ({ params, request }) => {
+  http.post('*/api/v1/admin/settings/alerts/:id/test', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'alert.configure');
     if (guard) return guard;
     return HttpResponse.json({
@@ -595,7 +595,7 @@ export const phase4Handlers = [
    * refuse what the API refuses: an empty scope, an unparseable or reversed window, an instance
    * reference that resolves to nothing.
    */
-  http.post('/api/v1/admin/maintenance-windows', async ({ request }) => {
+  http.post('*/api/v1/admin/maintenance-windows', async ({ request }) => {
     const role = roleOf(request);
     const guard = requireCapability(role, 'maintenance.configure');
     if (guard) return guard;
@@ -683,7 +683,7 @@ export const phase4Handlers = [
     return HttpResponse.json(window);
   }),
 
-  http.patch('/api/v1/admin/maintenance-windows/:id', async ({ params, request }) => {
+  http.patch('*/api/v1/admin/maintenance-windows/:id', async ({ params, request }) => {
     const role = roleOf(request);
     const guard = requireCapability(role, 'maintenance.configure');
     if (guard) return guard;
@@ -732,7 +732,7 @@ export const phase4Handlers = [
     return HttpResponse.json(window);
   }),
 
-  http.delete('/api/v1/admin/maintenance-windows/:id', ({ params, request }) => {
+  http.delete('*/api/v1/admin/maintenance-windows/:id', ({ params, request }) => {
     const role = roleOf(request);
     const guard = requireCapability(role, 'maintenance.configure');
     if (guard) return guard;
@@ -762,7 +762,7 @@ export const phase4Handlers = [
   }),
 
   // ---- 4C / 4D reads -------------------------------------------------------------------------
-  http.get('/api/v1/platform/restore-status', ({ request }) => {
+  http.get('*/api/v1/platform/restore-status', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'recovery.view');
     if (guard) return guard;
     const status: PlatformRestoreStatus = {
@@ -777,7 +777,7 @@ export const phase4Handlers = [
     return HttpResponse.json(status);
   }),
 
-  http.get('/api/v1/registry/operations', ({ request }) => {
+  http.get('*/api/v1/registry/operations', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'registry.view');
     if (guard) return guard;
     const target = new URL(request.url).searchParams.get('target') ?? '';

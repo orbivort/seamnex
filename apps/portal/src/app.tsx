@@ -32,6 +32,15 @@ const NotFoundPage = lazyScreen(() => import('./features/errors/NotFoundPage'), 
  */
 const RequirePortalCapability = portalGates.RequireCapability;
 
+/**
+ * The router mounts under the deployment base, not the origin root. A host that serves the bundle
+ * from a subpath — GitHub Pages publishes a project site at `/<repository>/` — reports that path as
+ * `import.meta.env.BASE_URL`, and a route table keyed on the origin root would otherwise match
+ * nothing and render the catch-all on every screen. The trailing slash is dropped because the
+ * router adds its own when it joins a path.
+ */
+const ROUTER_BASENAME = import.meta.env.BASE_URL.replace(/\/$/, '');
+
 function RouteFallback() {
   return (
     <Panel className="m-4">
@@ -127,7 +136,7 @@ export function App() {
           through `useSearchParams` instead of subscribing to the platform location. The cache
           scope stays inside the provider, because it depends on the resolved role.
         */}
-        <BrowserRouter>
+        <BrowserRouter basename={ROUTER_BASENAME}>
           <SessionProvider>
             <Shell />
           </SessionProvider>

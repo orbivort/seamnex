@@ -28,7 +28,7 @@ import {
 const MIN_JUSTIFICATION = 20;
 
 export const governanceHandlers = [
-  http.get('/api/v1/audit-events', ({ request }) => {
+  http.get('*/api/v1/audit-events', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'audit.view');
     if (guard) return guard;
     const url = new URL(request.url);
@@ -54,7 +54,7 @@ export const governanceHandlers = [
     return HttpResponse.json(paginate(items, request));
   }),
 
-  http.get('/api/v1/audit-events/:seq/proof', ({ params, request }) => {
+  http.get('*/api/v1/audit-events/:seq/proof', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'audit.view');
     if (guard) return guard;
     const seq = Number.parseInt(String(params.seq), 10);
@@ -71,7 +71,7 @@ export const governanceHandlers = [
     return HttpResponse.json(auditProofFor(seq));
   }),
 
-  http.post('/api/v1/audit-events/export', async ({ request }) => {
+  http.post('*/api/v1/audit-events/export', async ({ request }) => {
     const role = roleOf(request);
     const guard = deny(role, ['R1', 'R2'], 'audit.export');
     if (guard) return guard;
@@ -108,7 +108,7 @@ export const governanceHandlers = [
     });
   }),
 
-  http.get('/api/v1/licenses', ({ request }) => {
+  http.get('*/api/v1/licenses', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'license.view');
     if (guard) return guard;
     return HttpResponse.json(getState().licenses);
@@ -119,7 +119,7 @@ export const governanceHandlers = [
    * changing the configuration it certifies is `license.manage` (R1 only), and a restricted or
    * unreviewed licence refuses the change with a reason that names the licence.
    */
-  http.put('/api/v1/licenses/:instanceId/hosted-service', async ({ params, request }) => {
+  http.put('*/api/v1/licenses/:instanceId/hosted-service', async ({ params, request }) => {
     const role = roleOf(request);
     const guard = requireCapability(role, 'license.manage');
     if (guard) return guard;
@@ -195,7 +195,7 @@ export const governanceHandlers = [
    * confirmations, the same state conflict, and the reviewer taken from the role rather than the
    * body.
    */
-  http.put('/api/v1/licenses/:instanceId/review', async ({ params, request }) => {
+  http.put('*/api/v1/licenses/:instanceId/review', async ({ params, request }) => {
     const role = roleOf(request);
     const guard = requireCapability(role, 'license.review');
     if (guard) return guard;
@@ -315,7 +315,7 @@ export const governanceHandlers = [
     return HttpResponse.json(record);
   }),
 
-  http.get('/api/v1/patch-register', ({ request }) => {
+  http.get('*/api/v1/patch-register', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'patch.view');
     if (guard) return guard;
     return HttpResponse.json(getState().patches);
@@ -328,7 +328,7 @@ export const governanceHandlers = [
    * time and the release link. It deliberately does not invent a newer version: a feed that is not
    * reachable is the state the screen has to survive, not a version bump.
    */
-  http.post('/api/v1/patch-register/observe', ({ request }) => {
+  http.post('*/api/v1/patch-register/observe', ({ request }) => {
     const role = roleOf(request);
     const guard = requireCapability(role, 'settings.manage');
     if (guard) return guard;
@@ -376,7 +376,7 @@ export const governanceHandlers = [
     });
   }),
 
-  http.get('/api/v1/posture', ({ request }) => {
+  http.get('*/api/v1/posture', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'posture.view');
     if (guard) return guard;
     return HttpResponse.json(getState().posture);
@@ -388,7 +388,7 @@ export const governanceHandlers = [
    * It refuses a decision that is not a lower floor (the default is the floor; "raising" it would be
    * a re-baseline dressed as a decision) and a reason too short to be a record of what was accepted.
    */
-  http.post('/api/v1/posture/native-floor/decision', async ({ request }) => {
+  http.post('*/api/v1/posture/native-floor/decision', async ({ request }) => {
     const role = roleOf(request);
     const guard = requireCapability(role, 'settings.manage');
     if (guard) return guard;
@@ -444,7 +444,7 @@ export const governanceHandlers = [
     return HttpResponse.json(decision);
   }),
 
-  http.get('/api/v1/break-glass-sessions', ({ request }) => {
+  http.get('*/api/v1/break-glass-sessions', ({ request }) => {
     // Same any-of rule as the live route: the requester and both approvers may read the register,
     // and none of them shares a single capability with the others.
     const guard = requireAnyCapability(roleOf(request), [
@@ -462,7 +462,7 @@ export const governanceHandlers = [
     );
   }),
 
-  http.post('/api/v1/break-glass-sessions', async ({ request }) => {
+  http.post('*/api/v1/break-glass-sessions', async ({ request }) => {
     const role = roleOf(request);
     const guard = deny(role, ['R1'], 'breakglass.request');
     if (guard) return guard;
@@ -532,7 +532,7 @@ export const governanceHandlers = [
     return HttpResponse.json(session, { status: 201 });
   }),
 
-  http.post('/api/v1/break-glass-sessions/:id/:action', ({ params, request }) => {
+  http.post('*/api/v1/break-glass-sessions/:id/:action', ({ params, request }) => {
     const role = roleOf(request);
     const action = String(params.action);
     const session = getState().breakGlass.find((item) => item.id === String(params.id));
@@ -651,13 +651,13 @@ export const governanceHandlers = [
     );
   }),
 
-  http.get('/api/v1/capacity', ({ request }) => {
+  http.get('*/api/v1/capacity', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'capacity.view');
     if (guard) return guard;
     return HttpResponse.json(getState().capacity);
   }),
 
-  http.get('/api/v1/capacity/forecast', ({ request }) => {
+  http.get('*/api/v1/capacity/forecast', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'capacity.view');
     if (guard) return guard;
     return HttpResponse.json(getState().capacity.forecast);

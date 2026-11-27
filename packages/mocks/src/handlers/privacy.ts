@@ -44,7 +44,7 @@ const PLATFORM_SCOPES: PrivacyScope[] = [
 ];
 
 export const privacyHandlers = [
-  http.get('/api/v1/privacy/requests', ({ request }) => {
+  http.get('*/api/v1/privacy/requests', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'privacy.view');
     if (guard) return guard;
     const requests = [...getState().privacy].sort(
@@ -53,7 +53,7 @@ export const privacyHandlers = [
     return HttpResponse.json({ generatedAt: at(0), requests });
   }),
 
-  http.post('/api/v1/privacy/requests', async ({ request }) => {
+  http.post('*/api/v1/privacy/requests', async ({ request }) => {
     const role = roleOf(request);
     const guard = requireCapability(role, 'privacy.manage');
     if (guard) return guard;
@@ -111,7 +111,7 @@ export const privacyHandlers = [
     return HttpResponse.json(created, { status: 201 });
   }),
 
-  http.post('/api/v1/privacy/requests/:id/advance', ({ params, request }) => {
+  http.post('*/api/v1/privacy/requests/:id/advance', ({ params, request }) => {
     const role = roleOf(request);
     const guard = requireCapability(role, 'privacy.manage');
     if (guard) return guard;

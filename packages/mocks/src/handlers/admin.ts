@@ -6,7 +6,7 @@ import { appendAudit, findEntry, getState, meFor, refreshCapacity } from '../sto
 import { actorFor, deny, etagFor, problem, readBody, requireCapability, roleOf } from './utils';
 
 export const adminHandlers = [
-  http.get('/api/v1/admin/users', ({ request }) => {
+  http.get('*/api/v1/admin/users', ({ request }) => {
     const role = roleOf(request);
     const guard = deny(role, ['R1', 'R2'], 'identity.manage_users');
     if (guard) return guard;
@@ -20,7 +20,7 @@ export const adminHandlers = [
     return HttpResponse.json(users);
   }),
 
-  http.get('/api/v1/admin/users/:id', ({ params, request }) => {
+  http.get('*/api/v1/admin/users/:id', ({ params, request }) => {
     const guard = deny(roleOf(request), ['R1', 'R2'], 'identity.manage_users');
     if (guard) return guard;
     const user = getState().users.find((item) => item.id === String(params.id));
@@ -36,7 +36,7 @@ export const adminHandlers = [
     return HttpResponse.json(user);
   }),
 
-  http.get('/api/v1/admin/users/:id/entitlements', ({ params, request }) => {
+  http.get('*/api/v1/admin/users/:id/entitlements', ({ params, request }) => {
     const guard = deny(roleOf(request), ['R1', 'R2'], 'identity.manage_users');
     if (guard) return guard;
     const user = getState().users.find((item) => item.id === String(params.id));
@@ -69,7 +69,7 @@ export const adminHandlers = [
     return HttpResponse.json({ userId: user.id, entitlements });
   }),
 
-  http.post('/api/v1/admin/users/:id/disable', ({ params, request }) => {
+  http.post('*/api/v1/admin/users/:id/disable', ({ params, request }) => {
     const role = roleOf(request);
     const guard = deny(role, ['R1'], 'identity.manage_users');
     if (guard) return guard;
@@ -109,13 +109,13 @@ export const adminHandlers = [
     });
   }),
 
-  http.get('/api/v1/admin/groups', ({ request }) => {
+  http.get('*/api/v1/admin/groups', ({ request }) => {
     const guard = deny(roleOf(request), ['R1', 'R2', 'R3'], 'identity.manage_groups');
     if (guard) return guard;
     return HttpResponse.json(getState().groups);
   }),
 
-  http.put('/api/v1/admin/groups/:id/mapping', async ({ params, request }) => {
+  http.put('*/api/v1/admin/groups/:id/mapping', async ({ params, request }) => {
     const role = roleOf(request);
     const guard = deny(role, ['R1'], 'identity.manage_groups');
     if (guard) return guard;
@@ -161,13 +161,13 @@ export const adminHandlers = [
     return HttpResponse.json(group);
   }),
 
-  http.get('/api/v1/admin/identity-sync', ({ request }) => {
+  http.get('*/api/v1/admin/identity-sync', ({ request }) => {
     const guard = deny(roleOf(request), ['R1', 'R2'], 'identity.manage_users');
     if (guard) return guard;
     return HttpResponse.json(getState().syncRuns);
   }),
 
-  http.post('/api/v1/admin/identity-sync/run', ({ request }) => {
+  http.post('*/api/v1/admin/identity-sync/run', ({ request }) => {
     const role = roleOf(request);
     const guard = deny(role, ['R1'], 'identity sync');
     if (guard) return guard;
@@ -201,14 +201,14 @@ export const adminHandlers = [
     return HttpResponse.json(run, { status: 201 });
   }),
 
-  http.get('/api/v1/admin/settings', ({ request }) => {
+  http.get('*/api/v1/admin/settings', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'settings.view');
     if (guard) return guard;
     const settings = getState().settings;
     return HttpResponse.json(settings, { headers: { ETag: etagFor(settings) } });
   }),
 
-  http.put('/api/v1/admin/settings', async ({ request }) => {
+  http.put('*/api/v1/admin/settings', async ({ request }) => {
     const role = roleOf(request);
     const guard = deny(role, ['R1'], 'settings.manage');
     if (guard) return guard;
@@ -269,13 +269,13 @@ export const adminHandlers = [
     return HttpResponse.json(settings);
   }),
 
-  http.get('/api/v1/admin/settings/alerts', ({ request }) => {
+  http.get('*/api/v1/admin/settings/alerts', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'settings.view');
     if (guard) return guard;
     return HttpResponse.json(getState().alerts);
   }),
 
-  http.put('/api/v1/admin/settings/alerts', async ({ request }) => {
+  http.put('*/api/v1/admin/settings/alerts', async ({ request }) => {
     const role = roleOf(request);
     const guard = deny(role, ['R1'], 'alert.configure');
     if (guard) return guard;
@@ -299,14 +299,14 @@ export const adminHandlers = [
    * page in its sidebar — so the console offered a link to a 403 and the deployment it predicts
    * disagreed with `packages/domain/src/policy.ts`.
    */
-  http.get('/api/v1/admin/access-requests', ({ request }) => {
+  http.get('*/api/v1/admin/access-requests', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'entitlement.grant');
     if (guard) return guard;
     return HttpResponse.json(getState().accessRequests);
   }),
 
   /** FR-3.13: an end user opens a request; it lands in the same queue a second party decides. */
-  http.post('/api/v1/admin/access-requests', async ({ request }) => {
+  http.post('*/api/v1/admin/access-requests', async ({ request }) => {
     const role = roleOf(request);
     const guard = requireCapability(role, 'access.request');
     if (guard) return guard;
@@ -376,7 +376,7 @@ export const adminHandlers = [
     return HttpResponse.json(created, { status: 201 });
   }),
 
-  http.post('/api/v1/admin/access-requests/:id/:decision', ({ params, request }) => {
+  http.post('*/api/v1/admin/access-requests/:id/:decision', ({ params, request }) => {
     const role = roleOf(request);
     const guard = requireCapability(role, 'entitlement.grant');
     if (guard) return guard;
@@ -435,13 +435,13 @@ export const adminHandlers = [
    * was readable with `settings.view`, which the API does not accept either. That divergence is
    * why the console could not be trusted to predict what a deployment would allow.
    */
-  http.get('/api/v1/admin/maintenance-windows', ({ request }) => {
+  http.get('*/api/v1/admin/maintenance-windows', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'settings.view');
     if (guard) return guard;
     return HttpResponse.json(getState().maintenance);
   }),
 
-  http.get('/api/v1/admin/policy-exceptions', ({ request }) => {
+  http.get('*/api/v1/admin/policy-exceptions', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'exception.decide');
     if (guard) return guard;
     return HttpResponse.json(getState().policyExceptions);
@@ -456,7 +456,7 @@ export const adminHandlers = [
    * record in a deployment; a prototype has no refused resolution, and saying so is more honest than
    * inventing one.
    */
-  http.post('/api/v1/admin/policy-exceptions', async ({ request }) => {
+  http.post('*/api/v1/admin/policy-exceptions', async ({ request }) => {
     const role = roleOf(request);
     const guard = requireCapability(role, 'exception.request');
     if (guard) return guard;
@@ -560,7 +560,7 @@ export const adminHandlers = [
   }),
 
   /** NFR-4.15: an exception is approved by a second party, never by the requester. */
-  http.post('/api/v1/admin/policy-exceptions/:id/:decision', ({ params, request }) => {
+  http.post('*/api/v1/admin/policy-exceptions/:id/:decision', ({ params, request }) => {
     const role = roleOf(request);
     // One source of truth: the same capability the route and the button use.
     const guard = requireCapability(role, 'exception.decide');
@@ -608,7 +608,7 @@ export const adminHandlers = [
     return HttpResponse.json(exception);
   }),
 
-  http.get('/api/v1/admin/dsar', ({ request }) => {
+  http.get('*/api/v1/admin/dsar', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'privacy.view');
     if (guard) return guard;
     return HttpResponse.json(getState().dsar);

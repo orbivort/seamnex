@@ -70,7 +70,7 @@ export const workflowHandlers = [
    * same `x-total-count`, so a screen that pages or filters behaves identically against the mock
    * platform and the real API.
    */
-  http.get('/api/v1/workflows', ({ request }) => {
+  http.get('*/api/v1/workflows', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'workflow.view_runs');
     if (guard) return guard;
     const url = new URL(request.url);
@@ -91,7 +91,7 @@ export const workflowHandlers = [
     return HttpResponse.json(page, { headers: { 'x-total-count': String(matched.length) } });
   }),
 
-  http.get('/api/v1/workflows/:id', ({ params, request }) => {
+  http.get('*/api/v1/workflows/:id', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'workflow.view_runs');
     if (guard) return guard;
     const workflow = findWorkflow(String(params.id));
@@ -108,7 +108,7 @@ export const workflowHandlers = [
   }),
 
   /** FR-5.1: authoring starts from discovered operations, not from a blank canvas. */
-  http.post('/api/v1/workflows', async ({ request }) => {
+  http.post('*/api/v1/workflows', async ({ request }) => {
     const role = roleOf(request);
     const guard = deny(role, ['R1', 'R3', 'R4'], 'workflow.create');
     if (guard) return guard;
@@ -292,7 +292,7 @@ export const workflowHandlers = [
     return HttpResponse.json(draft, { status: 201 });
   }),
 
-  http.delete('/api/v1/workflows/:id', ({ params, request }) => {
+  http.delete('*/api/v1/workflows/:id', ({ params, request }) => {
     const role = roleOf(request);
     const guard = deny(role, ['R1', 'R3', 'R4'], 'workflow.delete');
     if (guard) return guard;
@@ -330,7 +330,7 @@ export const workflowHandlers = [
     return new HttpResponse(null, { status: 204 });
   }),
 
-  http.post('/api/v1/workflows/:id/:action', async ({ params, request }) => {
+  http.post('*/api/v1/workflows/:id/:action', async ({ params, request }) => {
     const role = roleOf(request);
     const action = String(params.action);
     const guard = deny(role, ['R1', 'R3', 'R4'], `workflow.${action}`);
@@ -502,7 +502,7 @@ export const workflowHandlers = [
     );
   }),
 
-  http.patch('/api/v1/workflows/:id', async ({ params, request }) => {
+  http.patch('*/api/v1/workflows/:id', async ({ params, request }) => {
     const role = roleOf(request);
     const guard = deny(role, ['R1', 'R3', 'R4'], 'workflow.author');
     if (guard) return guard;
@@ -539,7 +539,7 @@ export const workflowHandlers = [
   }),
 
   /** FR-5.11: an imported document lands as a disabled draft, never as a live workflow. */
-  http.post('/api/v1/workflows/import', async ({ request }) => {
+  http.post('*/api/v1/workflows/import', async ({ request }) => {
     const role = roleOf(request);
     const guard = deny(role, ['R1', 'R3', 'R4'], 'workflow.import');
     if (guard) return guard;
@@ -605,7 +605,7 @@ export const workflowHandlers = [
     return HttpResponse.json(imported, { status: 201 });
   }),
 
-  http.get('/api/v1/workflows/:id/runs', ({ params, request }) => {
+  http.get('*/api/v1/workflows/:id/runs', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'workflow.view_runs');
     if (guard) return guard;
     const workflowId = String(params.id);
@@ -623,7 +623,7 @@ export const workflowHandlers = [
     return HttpResponse.json(runs);
   }),
 
-  http.get('/api/v1/workflow-runs/:runId', ({ params, request }) => {
+  http.get('*/api/v1/workflow-runs/:runId', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'workflow.view_runs');
     if (guard) return guard;
     const run = getState().workflowRuns.find((item) => item.id === String(params.runId));
@@ -639,7 +639,7 @@ export const workflowHandlers = [
     return HttpResponse.json(run);
   }),
 
-  http.post('/api/v1/workflow-runs/:runId/replay', ({ params, request }) => {
+  http.post('*/api/v1/workflow-runs/:runId/replay', ({ params, request }) => {
     const role = roleOf(request);
     const guard = deny(role, ['R1', 'R3'], 'workflow.run');
     if (guard) return guard;
@@ -690,7 +690,7 @@ export const workflowHandlers = [
     return HttpResponse.json(replay, { status: 201 });
   }),
 
-  http.get('/api/v1/workflows/:id/export', ({ params, request }) => {
+  http.get('*/api/v1/workflows/:id/export', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'workflow.view_runs');
     if (guard) return guard;
     const workflow = findWorkflow(String(params.id));

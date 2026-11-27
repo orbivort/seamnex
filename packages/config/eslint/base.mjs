@@ -9,6 +9,9 @@ export const ignores = [
   // The demo build has its own output directory so it cannot be restored over `dist`, which
   // also means it needs its own ignore: linting a minified bundle is noise, not a finding.
   '**/dist-demo/**',
+  // The Pages artifact the deployment workflow assembles from the two demo bundles. Written only by
+  // a local reproduction of that step, and output for the same reason as the two above.
+  '**/dist-pages/**',
   '**/node_modules/**',
   '**/coverage/**',
   '**/temp/**',

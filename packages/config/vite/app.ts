@@ -55,6 +55,19 @@ function parseAllowedHosts(value: string | undefined): string[] {
 const UNKNOWN_VERSION = 'unknown';
 
 /**
+ * A deployment base, always trailing-slashed.
+ *
+ * Every consumer appends a path to `import.meta.env.BASE_URL` (`mockServiceWorker.js`,
+ * `api/v1`), so a value without the trailing slash would concatenate onto the last segment instead
+ * of hanging a new one beneath it.
+ */
+function normalizeBase(value: string | undefined): string {
+  const trimmed = value?.trim() ?? '';
+  if (trimmed === '') return '/';
+  return trimmed.endsWith('/') ? trimmed : `${trimmed}/`;
+}
+
+/**
  * The product version the two SPAs display, read from the root manifest on every config build.
  *
  * It is injected rather than imported because the clients run in a browser: they cannot read
@@ -149,6 +162,13 @@ export function createAppConfig({
     const env = loadEnv(mode, repoRoot, 'VITE_');
     const mocks =
       testing || demo || (!production && env.VITE_API_MODE?.trim().toLowerCase() !== 'live');
+    /**
+     * Where the bundle is served from. `/` for a server that owns the origin root; a subpath such as
+     * `/seamnex/` for a host that mounts the app under a prefix (GitHub Pages serves a project site
+     * at `/<repository>/`). Everything downstream reads `import.meta.env.BASE_URL`, so the router
+     * basename, the mock worker URL and the mock API prefix follow this one value.
+     */
+    const base = normalizeBase(env.VITE_BASE_PATH);
     // `||`, not `??`: `VITE_API_BASE_URL=` is an origin that was cleared, not one that was omitted,
     // and an empty proxy target fails at request time instead of at startup.
     const apiTarget = env.VITE_API_BASE_URL?.trim() || 'http://localhost:8080';
@@ -185,6 +205,7 @@ export function createAppConfig({
     const tls = devTls.certificate === undefined ? {} : { https: devTls.certificate };
 
     return {
+      base,
       envDir: repoRoot,
       // Stated rather than inherited from the default: the root `.env` holds secrets, and only this
       // prefix may reach the client bundle.

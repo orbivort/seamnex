@@ -65,12 +65,12 @@ function sessionFor(role: PlatformRole, authenticated: boolean): AuthSession {
 }
 
 export const authHandlers = [
-  http.get('/api/v1/auth/session', ({ request }) => {
+  http.get('*/api/v1/auth/session', ({ request }) => {
     // In the demo the role control *is* the session; there is no cookie to inspect.
     return HttpResponse.json(sessionFor(roleOf(request), true));
   }),
 
-  http.post('/api/v1/auth/session', ({ request }) => {
+  http.post('*/api/v1/auth/session', ({ request }) => {
     // The demo transport does not perform a PKCE exchange; the request shape is still validated
     // by the API client before it reaches this handler.
     return HttpResponse.json(sessionFor(roleOf(request), true));

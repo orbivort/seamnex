@@ -10,7 +10,7 @@ import { actorFor, problem, readBody, requireCapability, roleOf } from './utils'
 const GB = 1024 ** 3;
 
 export const recoveryHandlers = [
-  http.get('/api/v1/recovery', ({ request }) => {
+  http.get('*/api/v1/recovery', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'recovery.view');
     if (guard) return guard;
     const state = getState();
@@ -49,7 +49,7 @@ export const recoveryHandlers = [
     });
   }),
 
-  http.post('/api/v1/recovery/backups', ({ request }) => {
+  http.post('*/api/v1/recovery/backups', ({ request }) => {
     const role = roleOf(request);
     const guard = requireCapability(role, 'recovery.manage');
     if (guard) return guard;
@@ -95,7 +95,7 @@ export const recoveryHandlers = [
     return HttpResponse.json(accepted, { status: 202 });
   }),
 
-  http.post('/api/v1/recovery/restores', async ({ request }) => {
+  http.post('*/api/v1/recovery/restores', async ({ request }) => {
     const role = roleOf(request);
     const guard = requireCapability(role, 'recovery.manage');
     if (guard) return guard;
@@ -168,7 +168,7 @@ export const recoveryHandlers = [
     return HttpResponse.json(accepted, { status: 202 });
   }),
 
-  http.post('/api/v1/restore-drills', async ({ request }) => {
+  http.post('*/api/v1/restore-drills', async ({ request }) => {
     const role = roleOf(request);
     const guard = requireCapability(role, 'recovery.manage');
     if (guard) return guard;

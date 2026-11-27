@@ -20,12 +20,12 @@
     },
     "build": {
       "dependsOn": ["^build", "typecheck"],
-      "env": ["VITE_API_BASE_URL", "VITE_PORTAL_URL"],
+      "env": ["VITE_API_BASE_URL", "VITE_PORTAL_URL", "VITE_BASE_PATH"],
       "outputs": ["dist/**"]
     },
     "build:demo": {
       "dependsOn": ["^build", "typecheck"],
-      "env": ["VITE_API_BASE_URL", "VITE_PORTAL_URL", "VITE_API_MODE"],
+      "env": ["VITE_API_BASE_URL", "VITE_PORTAL_URL", "VITE_API_MODE", "VITE_BASE_PATH"],
       "outputs": ["dist-demo/**"]
     },
     "typecheck": {

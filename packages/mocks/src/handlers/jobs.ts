@@ -5,7 +5,7 @@ import { enqueueJob } from './job-factory';
 import { actorFor, deny, paginate, problem, requireCapability, roleOf } from './utils';
 
 export const jobHandlers = [
-  http.get('/api/v1/jobs', ({ request }) => {
+  http.get('*/api/v1/jobs', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'instance.view_logs');
     if (guard) return guard;
     const url = new URL(request.url);
@@ -23,7 +23,7 @@ export const jobHandlers = [
     return HttpResponse.json(paginate(items, request));
   }),
 
-  http.get('/api/v1/jobs/:id', ({ params, request }) => {
+  http.get('*/api/v1/jobs/:id', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'instance.view_logs');
     if (guard) return guard;
     const job = getState().jobs.find((item) => item.id === String(params.id));
@@ -39,7 +39,7 @@ export const jobHandlers = [
     return HttpResponse.json(job);
   }),
 
-  http.get('/api/v1/jobs/:id/logs', ({ params, request }) => {
+  http.get('*/api/v1/jobs/:id/logs', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'instance.view_logs');
     if (guard) return guard;
     const job = getState().jobs.find((item) => item.id === String(params.id));
@@ -59,7 +59,7 @@ export const jobHandlers = [
    * Server-sent events: one `job` frame per tick plus every new log line. The client falls
    * back to the polling queries if the stream cannot be established.
    */
-  http.get('/api/v1/jobs/:id/stream', ({ params, request }) => {
+  http.get('*/api/v1/jobs/:id/stream', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'instance.view_logs');
     if (guard) return guard;
     const jobId = String(params.id);
@@ -125,7 +125,7 @@ export const jobHandlers = [
     });
   }),
 
-  http.post('/api/v1/jobs/:id/cancel', ({ params, request }) => {
+  http.post('*/api/v1/jobs/:id/cancel', ({ params, request }) => {
     const role = roleOf(request);
     const guard = deny(role, ['R1'], 'job cancel');
     if (guard) return guard;
@@ -165,7 +165,7 @@ export const jobHandlers = [
     return HttpResponse.json(job);
   }),
 
-  http.post('/api/v1/jobs/:id/retry', ({ params, request }) => {
+  http.post('*/api/v1/jobs/:id/retry', ({ params, request }) => {
     const role = roleOf(request);
     const guard = deny(role, ['R1'], 'job retry');
     if (guard) return guard;

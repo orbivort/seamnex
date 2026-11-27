@@ -36,8 +36,11 @@ function servedOperations(): Set<string> {
   for (const handler of handlers) {
     const info = (handler as { info?: { method?: string; path?: string | RegExp } }).info;
     if (!info?.method || typeof info.path !== 'string') continue;
-    if (info.path === '/api/v1/*') continue;
-    const path = info.path.replace('/api/v1', '');
+    // Handler paths carry a leading wildcard so they also match a bundle served from a deployment
+    // base (`/seamnex/api/v1/...` on GitHub Pages); the contract names the path beneath the prefix.
+    const anchored = info.path.replace(/^\*/, '');
+    if (anchored === '/api/v1/*') continue;
+    const path = anchored.replace('/api/v1', '');
     served.add(`${info.method.toUpperCase()} ${path}`);
   }
   return served;
