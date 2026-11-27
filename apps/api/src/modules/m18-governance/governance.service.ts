@@ -5,6 +5,7 @@ import {
   licenseGateVerdict,
   licenseTerms,
   nativeFloorStatus,
+  updateAvailable,
 } from '@seamnex/domain';
 import type {
   BreakGlassSession,
@@ -489,9 +490,22 @@ export class PostgresGovernanceService implements GovernanceService {
       last_observed_at: Date | null;
     }>(
       `SELECT i.id AS instance_id, i.entry_key,
-             coalesce(i.payload->>'product', c.product, i.entry_key) AS product,
-             coalesce(p.current_version, c.payload->'upstream'->>'currentVersion') AS current_version,
-             coalesce(p.latest_version, c.payload->'upstream'->>'latestVersion') AS latest_version,
+            coalesce(i.payload->>'product', c.product, i.entry_key) AS product,
+            -- What the deployment runs wins over what the catalog pins, exactly as the portal reads
+            -- it: after a rolled-back upgrade the pin names a version the host is not on, and every
+            -- "behind" / "current" verdict below is measured from this number.
+            coalesce(
+              p.current_version,
+              (SELECT CASE WHEN svc.image_ref LIKE '%:%'
+                           THEN substring(split_part(svc.image_ref, '@', 1) from '([^:]+)$')
+                      END
+                 FROM instance_service svc
+                WHERE svc.instance_id = i.id AND svc.role = 'primary'
+                ORDER BY svc.service_name
+                LIMIT 1),
+              c.payload->'upstream'->>'currentVersion'
+            ) AS current_version,
+            coalesce(p.latest_version, c.payload->'upstream'->>'latestVersion') AS latest_version,
              (SELECT max(r.applied_at)
                 FROM render_set r
                WHERE r.instance_id = i.id
@@ -514,7 +528,24 @@ export class PostgresGovernanceService implements GovernanceService {
     return result.rows.map((row) => {
       const currentVersion = row.current_version ?? 'unknown';
       const latestVersion = row.latest_version ?? currentVersion;
-      const behind = latestVersion !== currentVersion;
+      /*
+       * Precedence, not text inequality. GitHub's "latest release" is the most recently *published*
+       * one, so a maintenance release cut on the previous branch can be older than the version a
+       * host already runs; `!==` called that "behind" and told the operator to downgrade. The
+       * comparator also absorbs `v`-prefixed tags and build metadata.
+       */
+      const behind = updateAvailable(currentVersion, latestVersion);
+      /*
+       * NFR-4.7 states two clocks — 7 days for a critical vulnerability, 30 for a high one — so the
+       * severity of the drift is the advisory's severity. Deriving it from the age alone (`> 30`)
+       * gave a critical CVE a 30-day window until it was already 31 days old, which is the window
+       * the register exists to police. Age still escalates an unrated finding past the wider clock.
+       */
+      const severity: PatchRecord['severity'] = !behind
+        ? 'info'
+        : row.advisory_severity === 'critical' || (row.oldest_unapplied_security_days ?? 0) > 30
+          ? 'critical'
+          : 'warning';
       return {
         instanceId: row.instance_id,
         entryKey: row.entry_key,
@@ -527,11 +558,7 @@ export class PostgresGovernanceService implements GovernanceService {
         // `null` stays `null`: with no check there is no age, and reporting 0 would tell the
         // operator "nothing pending" about an instance nobody has looked at.
         oldestUnappliedSecurityDays: row.oldest_unapplied_security_days,
-        severity: !behind
-          ? 'info'
-          : (row.oldest_unapplied_security_days ?? 0) > 30
-            ? 'critical'
-            : 'warning',
+        severity,
         checkedAt: row.checked_at.toISOString(),
         // FR-2.12: the advisory and the release link the register is supposed to surface.
         advisory: row.advisory_id,

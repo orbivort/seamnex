@@ -64,18 +64,20 @@ describe('repositoryOf', () => {
 });
 
 describe('release', () => {
-  it('asks GitHub for the latest release and normalises the tag', async () => {
+  it('asks GitHub for the release list and normalises the tag', async () => {
     fetchMock.mockResolvedValue(
-      jsonResponse({
-        tag_name: 'v5.4.2',
-        html_url: 'https://github.com/mautic/mautic/releases/tag/5.4.2',
-        published_at: '2026-10-01T00:00:00.000Z',
-      }),
+      jsonResponse([
+        {
+          tag_name: 'v5.4.2',
+          html_url: 'https://github.com/mautic/mautic/releases/tag/5.4.2',
+          published_at: '2026-10-01T00:00:00.000Z',
+        },
+      ]),
     );
 
     const outcome = await client().release('https://github.com/mautic/mautic');
 
-    expect(sentUrl()).toBe('https://api.github.com/repos/mautic/mautic/releases/latest');
+    expect(sentUrl()).toBe('https://api.github.com/repos/mautic/mautic/releases?per_page=30');
     expect(sentInit().redirect).toBe('error');
     expect(outcome).toEqual({
       kind: 'ok',
@@ -87,6 +89,39 @@ describe('release', () => {
     });
   });
 
+  /**
+   * Measured on `opf/openproject` on 2026-11-19: `/releases/latest` answered `v17.8.3` (published
+   * 12:07Z) because a maintenance release on the 17.8 branch landed 78 minutes after `v17.9.8`
+   * (10:49Z). The register then offered a version older than the 17.9.6 the host was running.
+   */
+  it('keeps the highest version, so a branch backport published later cannot displace it', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse([
+        { tag_name: 'v17.8.3', published_at: '2026-11-19T12:07:25Z' },
+        { tag_name: 'v17.9.8', published_at: '2026-11-19T10:49:02Z' },
+        { tag_name: 'v17.9.7', published_at: '2026-11-09T08:19:46Z' },
+        { tag_name: 'v17.9.6', published_at: '2026-10-30T13:32:00Z' },
+      ]),
+    );
+
+    const outcome = await client().release('https://github.com/opf/openproject');
+
+    expect(outcome).toEqual({
+      kind: 'ok',
+      value: { version: '17.9.8', url: null, publishedAt: '2026-11-19T10:49:02Z' },
+    });
+  });
+
+  it('orders numerically, not lexically, when it picks the highest', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse([{ tag_name: 'v16.9.0' }, { tag_name: 'v16.10.0' }, { tag_name: 'v16.9.4' }]),
+    );
+
+    const outcome = await client().release('https://github.com/mautic/mautic');
+
+    expect(outcome.kind === 'ok' ? outcome.value?.version : null).toBe('16.10.0');
+  });
+
   it('skips an entry that declares no GitHub repository, without calling anything', async () => {
     const outcome = await client().release(null);
 
@@ -94,12 +129,14 @@ describe('release', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('treats a 404 as "no release published", not as a failed feed', async () => {
+  it('reports a 404 as a repository GitHub cannot answer for, not as "nothing to upgrade"', async () => {
     fetchMock.mockResolvedValue(jsonResponse({ message: 'Not Found' }, { status: 404 }));
 
+    // `[]` with 200 is the answer of an existing repository with no releases; a 404 is a missing or
+    // private one, and reading it as "no release" would leave the row current forever.
     expect(await client().release('https://github.com/mautic/mautic')).toEqual({
-      kind: 'ok',
-      value: null,
+      kind: 'failed',
+      reason: 'GitHub has no repository mautic/mautic',
     });
   });
 
@@ -112,8 +149,8 @@ describe('release', () => {
     });
   });
 
-  it('reports a release without a tag as failed rather than as an empty version', async () => {
-    fetchMock.mockResolvedValue(jsonResponse({ tag_name: '' }));
+  it('reports a published release without a tag as failed rather than as an empty version', async () => {
+    fetchMock.mockResolvedValue(jsonResponse([{ tag_name: '' }]));
 
     expect(await client().release('https://github.com/mautic/mautic')).toEqual({
       kind: 'failed',
@@ -121,17 +158,48 @@ describe('release', () => {
     });
   });
 
-  it('skips a draft or pre-release, because announcing it would advise an upgrade that does not exist', async () => {
-    fetchMock.mockResolvedValue(jsonResponse({ tag_name: 'v6.0.0-rc1', prerelease: true }));
+  it('never announces a draft or pre-release, and picks the stable release beneath them', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse([
+        { tag_name: 'v6.0.0-rc1', prerelease: true },
+        { tag_name: 'v6.0.0', draft: true },
+        { tag_name: 'v5.4.2' },
+      ]),
+    );
 
     expect(await client().release('https://github.com/mautic/mautic')).toEqual({
-      kind: 'skipped',
-      reason: expect.stringContaining('draft or pre-release'),
+      kind: 'ok',
+      value: { version: '5.4.2', url: null, publishedAt: null },
+    });
+  });
+
+  it('answers "no stable release" when the page holds only pre-releases', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse([
+        { tag_name: 'v6.0.0-rc2', prerelease: true },
+        { tag_name: 'v6.0.0-rc1', prerelease: true },
+      ]),
+    );
+
+    // A real answer — the project has shipped nothing stable — and not a "skipped: no feed", which
+    // would be counted as an entry the pass never reached.
+    expect(await client().release('https://github.com/mautic/mautic')).toEqual({
+      kind: 'ok',
+      value: null,
+    });
+  });
+
+  it('answers an empty release list with no release', async () => {
+    fetchMock.mockResolvedValue(jsonResponse([]));
+
+    expect(await client().release('https://github.com/mautic/mautic')).toEqual({
+      kind: 'ok',
+      value: null,
     });
   });
 
   it('answers a release that carries no page or date with nulls rather than invented values', async () => {
-    fetchMock.mockResolvedValue(jsonResponse({ tag_name: 'v2.0.0' }));
+    fetchMock.mockResolvedValue(jsonResponse([{ tag_name: 'v2.0.0' }]));
 
     // A tag is enough to say "a release exists"; the register shows an absent page as absent.
     expect(await client().release('https://github.com/mautic/mautic')).toEqual({
@@ -166,7 +234,7 @@ describe('release', () => {
 
     expect(await client().release('https://github.com/mautic/mautic')).toEqual({
       kind: 'failed',
-      reason: expect.stringContaining('no tag'),
+      reason: expect.stringContaining('release list'),
     });
   });
 });

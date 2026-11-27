@@ -295,6 +295,7 @@
         "subject_ref"
       ],
       "mayImport": ["M08", "M09", "M10", "M17"],
+      "$comment": "FR-4.7: `instance_service` is read for the primary service's image tag — the version a deployment actually runs. The register's `current` is the baseline every `behind` verdict is measured from, and the catalogue pin (M01) is not it.",
       "reads": [
         "instance",
         "integration_metadata",
@@ -304,6 +305,7 @@
         "catalog_entry",
         "instance_status",
         "render_set",
+        "instance_service",
         "idp_user",
         "product_account",
         "source_resolution"

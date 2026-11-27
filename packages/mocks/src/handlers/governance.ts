@@ -7,6 +7,7 @@ import {
   licenseTerms,
   mayApproveAccessMode,
   nativeFloorStatus,
+  updateAvailable,
 } from '@seamnex/domain';
 import type { BreakGlassSession, LicenseReviewRequest } from '@seamnex/domain';
 import { at } from '../fixtures/context';
@@ -336,7 +337,9 @@ export const governanceHandlers = [
     let releases = 0;
     let advisories = 0;
     for (const patch of patches) {
-      const behind = patch.latestVersion !== patch.currentVersion;
+      // The same rule as the API: `releases` counts versions an operator can move up to, and a
+      // maintenance release published on the previous branch is not one of them.
+      const behind = updateAvailable(patch.currentVersion, patch.latestVersion);
       patch.source = 'observed';
       patch.lastObservedAt = at(0);
       patch.checkedAt = at(0);

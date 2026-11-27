@@ -637,6 +637,7 @@ function patchRow(overrides: Row = {}): Row {
     // FR-2.12: the provenance columns the register now carries. `catalog` is the fallback — the row
     // was projected from the entry document and no observation pass has written it.
     advisory_id: null,
+    advisory_severity: null,
     release_url: null,
     source: 'catalog',
     last_observed_at: null,
@@ -724,6 +725,52 @@ describe('patches', () => {
     const [record] = await service.patches();
 
     expect(record).toMatchObject({ severity: 'warning', oldestUnappliedSecurityDays: null });
+  });
+
+  it('reads a maintenance release older than the running version as current, not behind', async () => {
+    const { service } = setup([
+      [
+        PATCH_QUERY,
+        [
+          patchRow({
+            // GitHub's newest *published* release, cut on the previous branch after 17.9.6 shipped.
+            current_version: '17.9.6',
+            latest_version: '17.8.3',
+            oldest_unapplied_security_days: null,
+          }),
+        ],
+      ],
+    ]);
+
+    const [record] = await service.patches();
+
+    // "Different" is not "newer": there is no upgrade to take, and the row must not read as behind.
+    expect(record).toMatchObject({
+      currentVersion: '17.9.6',
+      latestVersion: '17.8.3',
+      severity: 'info',
+    });
+  });
+
+  it('puts a critical advisory on the 7-day clock from the day it opened', async () => {
+    const { service } = setup([
+      [
+        PATCH_QUERY,
+        [
+          patchRow({
+            advisory_id: 'CVE-2026-3118',
+            advisory_severity: 'critical',
+            // Nine days: past NFR-4.7's critical window, nowhere near the 30-day high one.
+            oldest_unapplied_security_days: 9,
+          }),
+        ],
+      ],
+    ]);
+
+    const [record] = await service.patches();
+
+    // Deriving the severity from the age alone gave this row 30 days and a `warning` pill.
+    expect(record?.severity).toBe('critical');
   });
 
   it('falls back to the check time when the row carries no install date', async () => {

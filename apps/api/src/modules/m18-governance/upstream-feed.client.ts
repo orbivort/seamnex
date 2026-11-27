@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import { compareVersions } from '@seamnex/domain';
 import type { ScanSeverity } from '@seamnex/domain';
 import { APP_CONFIG } from '../../config/config.module';
 import type { AppConfig } from '../../config/config';
@@ -20,7 +21,10 @@ import type { AppConfig } from '../../config/config';
  */
 
 export type UpstreamRelease = {
-  /** Release tag with a leading `v` removed; what the register's `latestVersion` shows. */
+  /**
+   * The highest published version, with a leading `v` removed — what the register's `latestVersion`
+   * shows. Not simply the newest publication: see `release()`.
+   */
   readonly version: string;
   readonly url: string | null;
   readonly publishedAt: string | null;
@@ -36,10 +40,10 @@ export type UpstreamAdvisory = {
 };
 
 /**
- * Three outcomes rather than two. `skipped` means "there was nothing to ask" (no GitHub repository,
- * no published release) and is *not* a failure: counting it as one would turn a product without
- * releases into a permanent red row. `failed` means the question was asked and not answered, and the
- * previous observation is kept.
+ * Three outcomes rather than two. `skipped` means "there was nothing to ask" (no GitHub repository)
+ * and is *not* a failure: counting it as one would turn a product with no repository into a
+ * permanent red row. `failed` means the question was asked and not answered, and the previous
+ * observation is kept.
  */
 export type FeedOutcome<T> =
   | { readonly kind: 'ok'; readonly value: T }
@@ -51,6 +55,14 @@ const OSV_HOST = 'api.osv.dev';
 const USER_AGENT = 'seamnex-upstream-tracker';
 /** OSV answers with every advisory ever published; the register shows the open, actionable ones. */
 const MAX_ADVISORIES = 25;
+/**
+ * How many published releases the release answer is chosen from.
+ *
+ * The list is publication-ordered, so the highest version is in the first page unless a project
+ * published thirty releases after it — which would mean it was no longer the highest. The cap keeps
+ * one pass over the catalogue to a bounded response size; every product in it publishes in batches.
+ */
+const MAX_RELEASES = 30;
 
 const OSV_SEVERITY: Readonly<Record<string, ScanSeverity>> = {
   CRITICAL: 'critical',
@@ -84,52 +96,53 @@ export class UpstreamFeedClient {
     return `${owner}/${repo.replace(/\.git$/, '')}`;
   }
 
+  /**
+   * The highest published release — not the most recently published one.
+   *
+   * `/releases/latest` answers "published last", which is a different question and a wrong answer
+   * for a patch register. Measured on `opf/openproject` on 2026-11-19: `v17.9.8` was published at
+   * 10:49Z, the 17.8 maintenance branch's `v17.8.3` at 12:07Z, so the endpoint named `17.8.3` while
+   * the fleet ran `17.9.6` — an older release, on a previous branch, offered as the version to move
+   * to. The list is read instead, and the highest tag by version precedence wins: the same
+   * comparator the register uses to decide what is behind.
+   *
+   * Drafts and pre-releases are dropped from the selection, never announced, and never allowed to
+   * hide the stable release beneath them.
+   */
   async release(repoUrl: string | null): Promise<FeedOutcome<UpstreamRelease | null>> {
     const repository = UpstreamFeedClient.repositoryOf(repoUrl);
     if (repository === null) {
       return { kind: 'skipped', reason: 'no GitHub repository is declared for this entry' };
     }
 
-    const url = `https://${GITHUB_HOST}/repos/${repository}/releases/latest`;
+    const url = `https://${GITHUB_HOST}/repos/${repository}/releases?per_page=${MAX_RELEASES}`;
     const response = await this.get(url, {
       accept: 'application/vnd.github+json',
       'x-github-api-version': '2022-11-28',
     });
     if (response.kind !== 'ok') return response;
-    // 404 means the repository exists and has published no release — a real answer, not an error.
+    /*
+     * An existing repository with no releases answers `[]` with 200. A 404 therefore means the
+     * repository is missing or private — a question that could not be answered, not the answer
+     * "nothing to upgrade", which would leave the row reading as current forever.
+     */
     if (response.status === 404) {
-      return { kind: 'ok', value: null };
+      return { kind: 'failed', reason: `GitHub has no repository ${repository}` };
     }
     if (response.status !== 200) {
       return { kind: 'failed', reason: `GitHub answered ${response.status}` };
     }
-
-    const body = response.body as {
-      tag_name?: unknown;
-      html_url?: unknown;
-      published_at?: unknown;
-      draft?: unknown;
-      prerelease?: unknown;
-    };
-    if (typeof body.tag_name !== 'string' || body.tag_name.length === 0) {
-      return { kind: 'failed', reason: 'the GitHub release carried no tag' };
-    }
-    /*
-     * A draft or pre-release is not "available" for a production patch register: announcing it would
-     * tell an operator to upgrade to a version the project has not shipped.
-     */
-    if (body.draft === true || body.prerelease === true) {
-      return { kind: 'skipped', reason: 'the newest GitHub release is a draft or pre-release' };
+    if (!Array.isArray(response.body)) {
+      return { kind: 'failed', reason: 'the GitHub release list was not an array' };
     }
 
-    return {
-      kind: 'ok',
-      value: {
-        version: normaliseVersion(body.tag_name),
-        url: typeof body.html_url === 'string' ? body.html_url : null,
-        publishedAt: typeof body.published_at === 'string' ? body.published_at : null,
-      },
-    };
+    const { release, unreadable } = highestRelease(response.body);
+    // A page of drafts and pre-releases is a real answer ("nothing stable published"); a page whose
+    // published entries carry no tag at all is not, and must not be reported as "nothing released".
+    if (release === null && unreadable > 0) {
+      return { kind: 'failed', reason: 'a published GitHub release carried no tag' };
+    }
+    return { kind: 'ok', value: release };
   }
 
   async advisories(repoUrl: string | null): Promise<FeedOutcome<readonly UpstreamAdvisory[]>> {
@@ -211,6 +224,63 @@ type FeedResponse = FeedOk | FeedFailure;
 /** `v1.2.3` and `1.2.3` are the same release; the register compares versions, not tag spellings. */
 function normaliseVersion(tag: string): string {
   return tag.trim().replace(/^v(?=\d)/i, '');
+}
+
+type ReleaseSelection = {
+  /** The highest published release in the page, or `null` when it holds no publishable one. */
+  readonly release: UpstreamRelease | null;
+  /** Published entries that could not be read as a release (no tag): an answer that is not usable. */
+  readonly unreadable: number;
+};
+
+/**
+ * The highest release in a publication-ordered list.
+ *
+ * Precedence decides, so a backport published later cannot displace the version it follows. When one
+ * side is not a version this code can order (a date stamp, a branch tag), precedence says nothing
+ * and the earlier entry stands — the list is newest-first, so that is the more recent publication,
+ * the only tie-break GitHub itself offers. Drafts and pre-releases are skipped entirely: announcing
+ * one would advise an upgrade the project has not shipped, and letting one win the page would hide
+ * the stable release beneath it.
+ */
+function highestRelease(values: readonly unknown[]): ReleaseSelection {
+  let best: UpstreamRelease | null = null;
+  let unreadable = 0;
+
+  for (const value of values) {
+    if (typeof value !== 'object' || value === null) continue;
+    const record = value as {
+      tag_name?: unknown;
+      html_url?: unknown;
+      published_at?: unknown;
+      draft?: unknown;
+      prerelease?: unknown;
+    };
+    if (record.draft === true || record.prerelease === true) continue;
+    if (typeof record.tag_name !== 'string' || record.tag_name.length === 0) {
+      unreadable += 1;
+      continue;
+    }
+    const version = normaliseVersion(record.tag_name);
+    if (version === '') {
+      unreadable += 1;
+      continue;
+    }
+
+    const release: UpstreamRelease = {
+      version,
+      url: typeof record.html_url === 'string' ? record.html_url : null,
+      publishedAt: typeof record.published_at === 'string' ? record.published_at : null,
+    };
+    if (best === null) {
+      best = release;
+      continue;
+    }
+    const ordering = compareVersions(best.version, release.version);
+    if (ordering !== null && ordering < 0) best = release;
+  }
+
+  return { release: best, unreadable };
 }
 
 function hostOf(url: string): string | null {

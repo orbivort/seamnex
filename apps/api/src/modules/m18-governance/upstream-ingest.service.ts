@@ -1,6 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { withTransaction, type Queryable } from '@seamnex/db';
 import type { Pool } from 'pg';
+import { updateAvailable } from '@seamnex/domain';
 import type { ScanSeverity, UpstreamObservationResult } from '@seamnex/domain';
 import { APP_CONFIG } from '../../config/config.module';
 import type { AppConfig } from '../../config/config';
@@ -174,7 +175,14 @@ export class UpstreamIngestService implements UpstreamObserver {
         const before = previous.rows[0]?.latest_version ?? null;
         const after = observation.observedRelease?.version ?? null;
         if (after !== null && after !== before) {
-          summary.releases += 1;
+          /*
+           * `releases` is what the operator reads as "N with a newer release". GitHub answers with
+           * the most recently *published* release, so a maintenance cut on the previous branch can
+           * move this value backwards; that is an observation worth auditing, but it is not a
+           * release anyone can upgrade to.
+           */
+          const newer = before === null || updateAvailable(before, after);
+          if (newer) summary.releases += 1;
           /*
            * Audited separately from the per-entry observation so the trail can answer "when did the
            * platform first learn 5.4 was out" without reading every register row.
@@ -187,7 +195,12 @@ export class UpstreamIngestService implements UpstreamObserver {
               targetType: 'catalog_entry',
               targetId: entryKey,
               outcome: 'success',
-              detail: { from: before, to: after, url: observation.observedRelease?.url ?? null },
+              detail: {
+                from: before,
+                to: after,
+                newer,
+                url: observation.observedRelease?.url ?? null,
+              },
             },
             tx,
           );

@@ -289,6 +289,28 @@ describe('observe', () => {
     expect(insert?.params[2]).toBeNull();
   });
 
+  it('does not count a tag that moved backwards as a newer release', async () => {
+    const { audit, feeds, service } = setup([
+      [ENTRIES_QUERY, [entry()]],
+      // The register already carries 17.9.6; GitHub now answers with a backport on the 17.8 branch.
+      [PREVIOUS_QUERY, [{ latest_version: '17.9.6' }]],
+      [UPSERT_RECORD, { rows: [], rowCount: 1 }],
+    ]);
+    feeds.release.mockResolvedValue(ok(release({ version: '17.8.3' })));
+
+    const result = await service.observe(system);
+
+    // It is still an observation worth recording, but nobody can upgrade to it.
+    expect(result.releases).toBe(0);
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'upstream.release.observed',
+        detail: expect.objectContaining({ from: '17.9.6', to: '17.8.3', newer: false }),
+      }),
+      expect.anything(),
+    );
+  });
+
   it('passes the operator through as the audit actor when a person triggers the pass', async () => {
     const { audit, service } = setup(baseRoutes);
 
