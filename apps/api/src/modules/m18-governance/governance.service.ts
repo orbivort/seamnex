@@ -1,10 +1,18 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { breakGlassStateAt, licenseTerms } from '@seamnex/domain';
+import {
+  NATIVE_FLOOR_DEPLOYMENTS,
+  breakGlassStateAt,
+  licenseGateVerdict,
+  licenseTerms,
+  nativeFloorStatus,
+  updateAvailable,
+} from '@seamnex/domain';
 import type {
   BreakGlassSession,
   DsarRequest,
   LicenseGate,
   LicenseRecord,
+  LicenseReviewRequest,
   MaintenanceWindow,
   PatchRecord,
   PolicyException,
@@ -19,14 +27,94 @@ import { isUuid } from '../../common/http/uuid';
 import type { GovernanceService } from './governance.contract';
 import {
   MAINTENANCE_WINDOW_SELECT,
-  policyExceptionDiff,
-  policyExceptionRequester,
+  POLICY_EXCEPTION_SELECT,
   toMaintenanceWindow,
+  toPolicyException,
   type MaintenanceWindowRow,
+  type PolicyExceptionRow,
 } from './maintenance-window';
 
 /** NFR-3.5: a passed restore drill is evidence for one quarter, not forever. */
 const RESTORE_VALID_DAYS = 90;
+
+type LicenseRow = {
+  instance_id: string;
+  entry_key: string;
+  product: string;
+  license_id: string;
+  obligations: unknown;
+  recorded: boolean;
+  resale_restricted: boolean;
+  hosted_service_restricted: boolean;
+  hosted_service_enabled: boolean;
+  reviewed_by: string | null;
+  reviewer_display_name: string | null;
+  reviewer_username: string | null;
+  reviewed_at: Date | null;
+  upstream_ref: string | null;
+  review_note: string | null;
+};
+
+/**
+ * One projection for the list and for the read after a write, so the two cannot describe the same
+ * row differently (the defect that made an unreviewed licence look audited in the first place).
+ */
+const LICENSE_ROW_COLUMNS = `i.id AS instance_id, i.entry_key,
+       coalesce(i.payload->>'product', c.product, i.entry_key) AS product,
+       coalesce(l.license_id, c.license_id, i.payload->>'licenseId', 'unreviewed') AS license_id,
+       coalesce(l.obligations, '[]'::jsonb) AS obligations,
+       (l.instance_id IS NOT NULL) AS recorded,
+       coalesce(l.resale_restricted, false) AS resale_restricted,
+       coalesce(l.hosted_service_restricted, false) AS hosted_service_restricted,
+       coalesce(l.hosted_service_enabled, false) AS hosted_service_enabled,
+       l.reviewed_by, l.reviewed_at, l.upstream_ref, l.review_note,
+       u.display_name AS reviewer_display_name, u.username AS reviewer_username`;
+
+/**
+ * The reviewer is attributed through the identity mirror, not echoed back as the opaque id the
+ * session handed the write path. Left join: a sign-off recorded before the user was synced must
+ * still render, falling back to the id in `toLicenseRecord`.
+ */
+const LICENSE_ROW_FROM = `FROM instance i
+       LEFT JOIN catalog_entry c ON c.key = i.entry_key
+       LEFT JOIN license_record l ON l.instance_id = i.id
+       LEFT JOIN idp_user u ON u.idp_id = l.reviewed_by`;
+
+function toLicenseRecord(row: LicenseRow): LicenseRecord {
+  const terms = licenseTerms(row.license_id);
+  // A review that exists is authoritative: a negotiated commercial licence may lift a default
+  // restriction. Until one exists, the licence table supplies both the obligations and the
+  // restriction flags, so the register states a term instead of an empty cell.
+  const obligations = Array.isArray(row.obligations) ? (row.obligations as string[]) : [];
+  // ADR-BE-25: the database keeps the three evidence columns all-or-nothing; the read requires all
+  // three so a legacy or hand-edited row cannot present itself as cleared.
+  const reviewed =
+    row.reviewed_by !== null && row.reviewed_at !== null && row.upstream_ref !== null;
+  return {
+    instanceId: row.instance_id,
+    entryKey: row.entry_key,
+    product: row.product,
+    licenseId: row.license_id,
+    obligations: obligations.length > 0 ? obligations : [...(terms?.obligations ?? [])],
+    resaleRestricted: row.recorded ? row.resale_restricted : (terms?.resaleRestricted ?? false),
+    hostedServiceRestricted: row.recorded
+      ? row.hosted_service_restricted
+      : (terms?.hostedServiceRestricted ?? false),
+    // The review is evidence: an unreviewed record reports no reviewer and no date rather than
+    // a placeholder name and "today", which made an unreviewed licence look audited.
+    reviewedBy: row.reviewed_by,
+    // The same rule as the workflow owner's: mirror name, then mirror username, then the id — the
+    // last one being the identifier the platform actually holds, not an invented name.
+    reviewedByName: reviewed
+      ? (row.reviewer_display_name ?? row.reviewer_username ?? row.reviewed_by)
+      : null,
+    reviewedAt: row.reviewed_at?.toISOString() ?? null,
+    upstreamRef: row.upstream_ref,
+    reviewNote: row.review_note,
+    status: reviewed ? 'cleared' : 'review_required',
+    hostedService: row.hosted_service_enabled,
+  };
+}
 
 /** M18 read surface plus the one pure-DB write (hosted-service gate). */
 
@@ -46,58 +134,174 @@ export class PostgresGovernanceService implements GovernanceService {
    * entirely — and a register that omits a deployment cannot gate it.
    */
   async licenses(): Promise<LicenseRecord[]> {
-    const result = await this.pool.query<{
-      instance_id: string;
-      entry_key: string;
-      product: string;
-      license_id: string;
-      obligations: unknown;
-      recorded: boolean;
-      resale_restricted: boolean;
-      hosted_service_restricted: boolean;
-      hosted_service_enabled: boolean;
-      reviewed_by: string | null;
-      reviewed_at: Date | null;
-    }>(
-      `SELECT i.id AS instance_id, i.entry_key,
-              coalesce(i.payload->>'product', c.product, i.entry_key) AS product,
-              coalesce(l.license_id, c.license_id, i.payload->>'licenseId', 'unreviewed') AS license_id,
-              coalesce(l.obligations, '[]'::jsonb) AS obligations,
-              (l.instance_id IS NOT NULL) AS recorded,
-              coalesce(l.resale_restricted, false) AS resale_restricted,
-              coalesce(l.hosted_service_restricted, false) AS hosted_service_restricted,
-              coalesce(l.hosted_service_enabled, false) AS hosted_service_enabled,
-              l.reviewed_by, l.reviewed_at
-         FROM instance i
-         LEFT JOIN catalog_entry c ON c.key = i.entry_key
-         LEFT JOIN license_record l ON l.instance_id = i.id
+    const result = await this.pool.query<LicenseRow>(
+      `SELECT ${LICENSE_ROW_COLUMNS}
+         ${LICENSE_ROW_FROM}
         WHERE i.deleted_at IS NULL
         ORDER BY product`,
     );
-    return result.rows.map((row) => {
-      const terms = licenseTerms(row.license_id);
-      // A review that exists is authoritative: a negotiated commercial licence may lift a default
-      // restriction. Until one exists, the licence table supplies both the obligations and the
-      // restriction flags, so the register states a term instead of an empty cell.
-      const obligations = Array.isArray(row.obligations) ? (row.obligations as string[]) : [];
-      return {
-        instanceId: row.instance_id,
-        entryKey: row.entry_key,
-        product: row.product,
-        licenseId: row.license_id,
-        obligations: obligations.length > 0 ? obligations : [...(terms?.obligations ?? [])],
-        resaleRestricted: row.recorded ? row.resale_restricted : (terms?.resaleRestricted ?? false),
-        hostedServiceRestricted: row.recorded
-          ? row.hosted_service_restricted
-          : (terms?.hostedServiceRestricted ?? false),
-        // The review is evidence: an unreviewed record reports no reviewer and no date rather than
-        // a placeholder name and "today", which made an unreviewed licence look audited.
-        reviewedBy: row.reviewed_by,
-        reviewedAt: row.reviewed_at?.toISOString() ?? null,
-        status: row.reviewed_at === null ? 'review_required' : 'cleared',
-        hostedService: row.hosted_service_enabled,
-      };
+    return result.rows.map(toLicenseRecord);
+  }
+
+  /**
+   * FR-1.14 / AC-44 / ADR-BE-25: the auditor records the review.
+   *
+   * The reviewer and the timestamp are supplied here, never by the request. A restriction cannot be
+   * recorded while the instance is offered as a service: R2 cannot turn that mode off (that is
+   * `license.manage`), and the review must not leave the platform in the configuration the gate
+   * exists to prevent.
+   */
+  async recordReview(
+    instanceId: string,
+    request: LicenseReviewRequest,
+    actorId: string,
+  ): Promise<LicenseRecord> {
+    if (!isUuid(instanceId)) throw notFound(instanceId);
+
+    const licenseId = request.licenseId.trim();
+    // The contract validates the shape; the service still enforces the business invariants, so a
+    // direct call cannot write a review with no identifier or no evidence behind it.
+    if (licenseId === '') {
+      throw new AppError({
+        code: 'VALIDATION_FAILED',
+        status: 422,
+        detail: 'A licence identifier is required.',
+        fieldErrors: [
+          { field: 'licenseId', code: 'minLength', message: 'At least one character.' },
+        ],
+        remediation: 'Check the upstream LICENSE file and enter its identifier.',
+      });
+    }
+    const upstreamRef = request.upstreamRef.trim();
+    if (upstreamRef === '') {
+      throw new AppError({
+        code: 'VALIDATION_FAILED',
+        status: 422,
+        detail: 'The artefact the review was checked against is required.',
+        fieldErrors: [
+          {
+            field: 'upstreamRef',
+            code: 'minLength',
+            message: 'A URL or a contract id.',
+          },
+        ],
+        remediation: 'Record the upstream LICENSE URL or the commercial contract id.',
+      });
+    }
+    if (request.obligations.length === 0 && !request.confirmNoObligations) {
+      throw new AppError({
+        code: 'VALIDATION_FAILED',
+        status: 422,
+        detail: 'No obligations were supplied.',
+        fieldErrors: [
+          {
+            field: 'obligations',
+            code: 'confirmation_required',
+            message: 'Confirm explicitly when no obligations apply.',
+          },
+        ],
+        remediation: 'Confirm explicitly that no obligations apply, or list them.',
+      });
+    }
+
+    const terms = licenseTerms(licenseId);
+    if (terms === null && !request.acknowledgeUnknownLicence) {
+      throw new AppError({
+        code: 'VALIDATION_FAILED',
+        status: 422,
+        detail: `"${licenseId}" is not a licence the platform knows, so it cannot be reviewed without confirmation.`,
+        fieldErrors: [
+          {
+            field: 'licenseId',
+            code: 'unknown_licence',
+            message:
+              'Check the identifier, or confirm that you reviewed this licence against its LICENSE file or contract.',
+          },
+        ],
+        remediation:
+          'Correct the identifier, or acknowledge the unknown licence before recording it.',
+      });
+    }
+
+    const result = await this.pool.query<LicenseRow>(
+      `SELECT ${LICENSE_ROW_COLUMNS}
+         ${LICENSE_ROW_FROM}
+        WHERE i.id = $1 AND i.deleted_at IS NULL`,
+      [instanceId],
+    );
+    const row = result.rows[0];
+    if (row === undefined) throw notFound(instanceId);
+
+    const restricts = request.resaleRestricted || request.hostedServiceRestricted;
+    if (restricts && row.hosted_service_enabled) {
+      throw new AppError({
+        code: 'STATE_CONFLICT',
+        detail: `${row.product} is currently offered as a hosted service; disable that configuration before recording a restriction.`,
+        remediation:
+          'Ask the platform administrator (R1) to turn hosted-service mode off, then record the review.',
+      });
+    }
+
+    await withTransaction(this.pool, async (tx) => {
+      await this.audit.lockChain(tx);
+      await tx.query(
+        `INSERT INTO license_record
+                (instance_id, license_id, obligations, resale_restricted, hosted_service_restricted,
+                 reviewed_by, reviewed_at, upstream_ref, review_note)
+         VALUES ($1, $2, $3::jsonb, $4, $5, $6, now(), $7, $8)
+         ON CONFLICT (instance_id) DO UPDATE
+            SET license_id = EXCLUDED.license_id,
+                obligations = EXCLUDED.obligations,
+                resale_restricted = EXCLUDED.resale_restricted,
+                hosted_service_restricted = EXCLUDED.hosted_service_restricted,
+                reviewed_by = EXCLUDED.reviewed_by,
+                reviewed_at = EXCLUDED.reviewed_at,
+                upstream_ref = EXCLUDED.upstream_ref,
+                review_note = EXCLUDED.review_note`,
+        [
+          instanceId,
+          licenseId,
+          JSON.stringify(request.obligations),
+          request.resaleRestricted,
+          request.hostedServiceRestricted,
+          actorId,
+          upstreamRef,
+          request.note ?? null,
+        ],
+      );
+      // The note is not copied: a reviewer may quote contract terms, and the trail needs the fact
+      // of the review, not its prose.
+      await this.audit.append(
+        {
+          action: 'license.review.recorded',
+          actorType: 'user',
+          actorId,
+          targetType: 'instance',
+          targetId: instanceId,
+          outcome: 'success',
+          detail: {
+            licenseId,
+            obligations: request.obligations.length,
+            resaleRestricted: request.resaleRestricted,
+            hostedServiceRestricted: request.hostedServiceRestricted,
+            upstreamRef,
+            noteLength: request.note?.length ?? 0,
+            acknowledgedUnknownLicence: terms === null,
+          },
+        },
+        tx,
+      );
     });
+
+    const updated = await this.pool.query<LicenseRow>(
+      `SELECT ${LICENSE_ROW_COLUMNS}
+         ${LICENSE_ROW_FROM}
+        WHERE i.id = $1`,
+      [instanceId],
+    );
+    const fresh = updated.rows[0];
+    if (fresh === undefined) throw notFound(instanceId);
+    return toLicenseRecord(fresh);
   }
 
   /**
@@ -123,7 +327,9 @@ export class PostgresGovernanceService implements GovernanceService {
       resale_restricted: boolean;
       hosted_service_restricted: boolean;
       hosted_service_enabled: boolean;
+      reviewed_by: string | null;
       reviewed_at: Date | null;
+      upstream_ref: string | null;
     }>(
       `SELECT i.entry_key,
               coalesce(i.payload->>'product', c.product, i.entry_key) AS product,
@@ -133,7 +339,7 @@ export class PostgresGovernanceService implements GovernanceService {
               coalesce(l.resale_restricted, false) AS resale_restricted,
               coalesce(l.hosted_service_restricted, false) AS hosted_service_restricted,
               coalesce(l.hosted_service_enabled, false) AS hosted_service_enabled,
-              l.reviewed_at
+              l.reviewed_by, l.reviewed_at, l.upstream_ref
          FROM instance i
          LEFT JOIN catalog_entry c ON c.key = i.entry_key
          LEFT JOIN license_record l ON l.instance_id = i.id
@@ -154,17 +360,21 @@ export class PostgresGovernanceService implements GovernanceService {
     const hostedServiceRestricted = row.recorded
       ? row.hosted_service_restricted
       : (terms?.hostedServiceRestricted ?? false);
-    const restricted = resaleRestricted || hostedServiceRestricted;
-    // A licence in neither the review record nor the licence table has unverified terms: the gate
-    // refuses rather than assuming the permissive answer (C-3).
-    const unknown = !row.recorded && terms === null;
-    const gateReason = unknown
-      ? `No licence terms are recorded for ${row.product} (${licenseId}), so hosted-service mode stays off.`
-      : restricted
-        ? `${row.product} is licensed under ${licenseId}, which does not permit resale or offering it as a hosted service.`
-        : null;
+    const reviewed =
+      row.reviewed_by !== null && row.reviewed_at !== null && row.upstream_ref !== null;
+    // ADR-BE-25: unknown, unreviewed and restricted all fail closed, in that order. The reason is
+    // built in @seamnex/domain so the mock platform refuses with the same sentence.
+    const verdict = licenseGateVerdict({
+      product: row.product,
+      licenseId,
+      terms,
+      recorded: row.recorded,
+      reviewed,
+      resaleRestricted,
+      hostedServiceRestricted,
+    });
 
-    if (enabled && gateReason !== null) {
+    if (enabled && verdict.reason !== null) {
       await this.audit.append({
         action: 'license.hosted_service.denied',
         actorType: 'user',
@@ -176,16 +386,16 @@ export class PostgresGovernanceService implements GovernanceService {
           enabled,
           licenseId,
           recorded: row.recorded,
-          reviewed: row.reviewed_at !== null,
+          reviewed,
           resaleRestricted,
           hostedServiceRestricted,
+          refusal: verdict.code,
         },
       });
       throw new AppError({
-        code: 'LICENCE_RESTRICTED',
-        detail: gateReason,
-        remediation:
-          'Keep the instance for internal use, or complete the licence review and obtain a commercial licence before enabling hosted-service mode.',
+        code: verdict.code ?? 'LICENCE_UNREVIEWED',
+        detail: verdict.reason,
+        ...(verdict.remediation === null ? {} : { remediation: verdict.remediation }),
       });
     }
 
@@ -237,8 +447,8 @@ export class PostgresGovernanceService implements GovernanceService {
     return {
       instanceId,
       hostedService: enabled,
-      restricted,
-      reason: gateReason,
+      restricted: verdict.restricted,
+      reason: verdict.reason,
       evaluatedAt: new Date().toISOString(),
     };
   }
@@ -272,28 +482,70 @@ export class PostgresGovernanceService implements GovernanceService {
       created_at: Date;
       oldest_unapplied_security_days: number | null;
       checked_at: Date;
+      advisory_id: string | null;
+      advisory_severity: 'critical' | 'high' | 'medium' | 'low' | 'unknown' | null;
+      advisory_url: string | null;
+      release_url: string | null;
+      source: 'observed' | 'catalog' | null;
+      last_observed_at: Date | null;
     }>(
       `SELECT i.id AS instance_id, i.entry_key,
-              coalesce(i.payload->>'product', c.product, i.entry_key) AS product,
-              coalesce(p.current_version, c.payload->'upstream'->>'currentVersion') AS current_version,
-              coalesce(p.latest_version, c.payload->'upstream'->>'latestVersion') AS latest_version,
-              (SELECT max(r.applied_at)
-                 FROM render_set r
-                WHERE r.instance_id = i.id
-                  AND r.applied_at IS NOT NULL) AS last_upgrade_at,
-              i.created_at,
-              p.oldest_unapplied_security_days,
-              coalesce(p.checked_at, c.updated_at, i.updated_at) AS checked_at
-         FROM instance i
-         LEFT JOIN catalog_entry c ON c.key = i.entry_key
-         LEFT JOIN patch_record p ON p.instance_id = i.id
-        WHERE i.deleted_at IS NULL
-        ORDER BY product`,
+            coalesce(i.payload->>'product', c.product, i.entry_key) AS product,
+            -- What the deployment runs wins over what the catalog pins, exactly as the portal reads
+            -- it: after a rolled-back upgrade the pin names a version the host is not on, and every
+            -- "behind" / "current" verdict below is measured from this number.
+            coalesce(
+              p.current_version,
+              (SELECT CASE WHEN svc.image_ref LIKE '%:%'
+                           THEN substring(split_part(svc.image_ref, '@', 1) from '([^:]+)$')
+                      END
+                 FROM instance_service svc
+                WHERE svc.instance_id = i.id AND svc.role = 'primary'
+                ORDER BY svc.service_name
+                LIMIT 1),
+              c.payload->'upstream'->>'currentVersion'
+            ) AS current_version,
+            coalesce(p.latest_version, c.payload->'upstream'->>'latestVersion') AS latest_version,
+             (SELECT max(r.applied_at)
+                FROM render_set r
+               WHERE r.instance_id = i.id
+                 AND r.applied_at IS NOT NULL) AS last_upgrade_at,
+             i.created_at,
+             p.oldest_unapplied_security_days,
+             coalesce(p.checked_at, c.updated_at, i.updated_at) AS checked_at,
+             p.advisory_id,
+             p.advisory_severity,
+             p.advisory_url,
+             p.release_url,
+             p.source,
+             p.last_observed_at
+        FROM instance i
+        LEFT JOIN catalog_entry c ON c.key = i.entry_key
+        LEFT JOIN patch_record p ON p.instance_id = i.id
+       WHERE i.deleted_at IS NULL
+       ORDER BY product`,
     );
     return result.rows.map((row) => {
       const currentVersion = row.current_version ?? 'unknown';
       const latestVersion = row.latest_version ?? currentVersion;
-      const behind = latestVersion !== currentVersion;
+      /*
+       * Precedence, not text inequality. GitHub's "latest release" is the most recently *published*
+       * one, so a maintenance release cut on the previous branch can be older than the version a
+       * host already runs; `!==` called that "behind" and told the operator to downgrade. The
+       * comparator also absorbs `v`-prefixed tags and build metadata.
+       */
+      const behind = updateAvailable(currentVersion, latestVersion);
+      /*
+       * NFR-4.7 states two clocks — 7 days for a critical vulnerability, 30 for a high one — so the
+       * severity of the drift is the advisory's severity. Deriving it from the age alone (`> 30`)
+       * gave a critical CVE a 30-day window until it was already 31 days old, which is the window
+       * the register exists to police. Age still escalates an unrated finding past the wider clock.
+       */
+      const severity: PatchRecord['severity'] = !behind
+        ? 'info'
+        : row.advisory_severity === 'critical' || (row.oldest_unapplied_security_days ?? 0) > 30
+          ? 'critical'
+          : 'warning';
       return {
         instanceId: row.instance_id,
         entryKey: row.entry_key,
@@ -306,12 +558,18 @@ export class PostgresGovernanceService implements GovernanceService {
         // `null` stays `null`: with no check there is no age, and reporting 0 would tell the
         // operator "nothing pending" about an instance nobody has looked at.
         oldestUnappliedSecurityDays: row.oldest_unapplied_security_days,
-        severity: !behind
-          ? 'info'
-          : (row.oldest_unapplied_security_days ?? 0) > 30
-            ? 'critical'
-            : 'warning',
+        severity,
         checkedAt: row.checked_at.toISOString(),
+        // FR-2.12: the advisory and the release link the register is supposed to surface.
+        advisory: row.advisory_id,
+        releaseUrl: row.release_url,
+        /*
+         * FR-2.12's honesty line. `catalog` means these two numbers came from the entry document —
+         * which is what the register presented as "tracking" before the observation pass existed.
+         * The console prints the difference, so an unobserved instance cannot read as current.
+         */
+        source: row.source ?? 'catalog',
+        lastObservedAt: row.last_observed_at?.toISOString() ?? null,
       };
     });
   }
@@ -327,7 +585,7 @@ export class PostgresGovernanceService implements GovernanceService {
    * its date, not as "never verified".
    */
   async posture(): Promise<PostureSummary> {
-    const [instances, restores, stale, managed] = await Promise.all([
+    const [instances, restores, stale, managed, floorDecision] = await Promise.all([
       this.pool.query<{
         id: string;
         product: string;
@@ -363,6 +621,17 @@ export class PostgresGovernanceService implements GovernanceService {
        */
       this.pool.query<{ count: string }>(
         `SELECT count(DISTINCT instance_id)::text AS count FROM product_account`,
+      ),
+      /*
+       * S-2 — the floor in force. It is a row rather than a constant because the requirement allows
+       * a lower floor "only by a recorded owner decision", and a decision nobody can read back is a
+       * re-baseline. `null` means the default (6) applies.
+       */
+      this.pool.query<{ floor: number; reason: string; recorded_by: string; recorded_at: Date }>(
+        `SELECT floor, reason, recorded_by, recorded_at
+           FROM native_floor_decision
+          ORDER BY recorded_at DESC, id DESC
+          LIMIT 1`,
       ),
     ]);
 
@@ -400,6 +669,16 @@ export class PostgresGovernanceService implements GovernanceService {
       .filter((row) => row.ready === null)
       .map((row) => ({ instanceId: row.id, product: row.product }));
 
+    /*
+     * S-2 — the floor is served, not hard-coded in the screen. `nativeFloorStatus` is the same pure
+     * function the catalogue coverage and the gate use, so "6 of 12" cannot mean three things.
+     */
+    const decision = floorDecision.rows[0] ?? null;
+    const floor = nativeFloorStatus(
+      { native, forwardAuth, signInRequired },
+      decision?.floor ?? NATIVE_FLOOR_DEPLOYMENTS,
+    );
+
     return {
       generatedAt: new Date().toISOString(),
       sso: {
@@ -410,6 +689,21 @@ export class PostgresGovernanceService implements GovernanceService {
         // Deployments where the platform holds the product credential (ADR-BE-22). These stay in
         // `signInRequired`: the class does not change, and neither bucket above may claim them.
         platformManagedCredentials: Number(managed.rows[0]?.count ?? 0),
+        nativeFloor: {
+          floor: floor.floor,
+          baseline: floor.baseline,
+          met: floor.met,
+          shortfall: floor.shortfall,
+        },
+        ownerDecision:
+          decision === null
+            ? null
+            : {
+                floor: decision.floor,
+                reason: decision.reason,
+                recordedBy: decision.recorded_by,
+                recordedAt: decision.recorded_at.toISOString(),
+              },
       },
       missingHealthChecks,
       unverifiedRestores,
@@ -451,20 +745,30 @@ export class PostgresGovernanceService implements GovernanceService {
       revoked_at: Date | null;
       created_accounts: unknown;
       retention_reason: string | null;
+      owner_name: string | null;
+      owner_email: string | null;
     }>(
       /*
        * The identities are resolved to something a person can read. The register previously showed
        * a raw `idp_id` under "Approver", and the requester was not on the screen at all — which is
        * the one fact an approver needs before deciding.
+       *
+       * The domain owner comes from the affected instance's catalogue entry (FR-4.11), because that
+       * is the party the grant and expiry notices are addressed to. A session with no instance, or
+       * an entry that declares no owner, is platform-scoped and falls back to "Platform" rather than
+       * inventing a person.
        */
       `SELECT b.id, b.requester, b.instance_id, coalesce(i.payload->>'product', i.entry_key) AS product,
               b.access_mode, b.justification, b.approver, b.self_approved, b.state, b.created_at,
               b.granted_at, b.expires_at, b.revoked_at, b.created_accounts, b.retention_reason,
               coalesce(ru.display_name, ru.username, b.requester) AS requester_name,
               CASE WHEN b.approver IS NULL THEN NULL
-                   ELSE coalesce(au.display_name, au.username, b.approver) END AS approver_name
+                   ELSE coalesce(au.display_name, au.username, b.approver) END AS approver_name,
+              c.payload #>> '{owner,name}' AS owner_name,
+              c.payload #>> '{owner,email}' AS owner_email
          FROM break_glass_session b
          LEFT JOIN instance i ON i.id = b.instance_id
+         LEFT JOIN catalog_entry c ON c.key = i.entry_key
          LEFT JOIN idp_user ru ON ru.idp_id = b.requester
          LEFT JOIN idp_user au ON au.idp_id = b.approver
         ORDER BY b.created_at DESC`,
@@ -474,9 +778,8 @@ export class PostgresGovernanceService implements GovernanceService {
       requester: { id: row.requester, name: row.requester_name },
       instanceId: row.instance_id ?? row.id,
       product: row.product ?? 'Platform',
-      // The elevation records the approver, never a domain owner; the screen says so instead of
-      // presenting the approver as the owner of the domain.
-      domainOwner: 'Platform',
+      domainOwner: row.owner_name ?? 'Platform',
+      domainOwnerEmail: row.owner_email ?? null,
       accessMode: row.access_mode as BreakGlassSession['accessMode'],
       justification: row.justification,
       approver: row.approver_name,
@@ -496,6 +799,35 @@ export class PostgresGovernanceService implements GovernanceService {
     }));
   }
 
+  /**
+   * FR-5.9: an R1 writing through a product is exercising an elevation, not standing authority.
+   *
+   * Four conditions, each load-bearing: the actor must be the **requester** (an elevation
+   * authorises one person's actions, never their approver's), the mode must be `read_write`
+   * (a read-only grant cannot write), the state must still be `active` and the window must be
+   * open. `revoked_at IS NULL` covers a revocation whose state sweep has not run yet.
+   */
+  async activeWriteElevations(
+    actorId: string,
+    instanceIds: readonly string[],
+  ): Promise<{ instanceId: string; sessionId: string }[]> {
+    if (instanceIds.length === 0) return [];
+    const result = await this.pool.query<{ id: string; instance_id: string }>(
+      `SELECT id, instance_id
+         FROM break_glass_session
+        WHERE requester = $1
+          AND access_mode = 'read_write'
+          AND state = 'active'
+          AND revoked_at IS NULL
+          AND expires_at IS NOT NULL
+          AND expires_at > now()
+          AND instance_id = ANY($2::uuid[])
+        ORDER BY expires_at DESC, id`,
+      [actorId, instanceIds],
+    );
+    return result.rows.map((row) => ({ instanceId: row.instance_id, sessionId: row.id }));
+  }
+
   async maintenance(): Promise<MaintenanceWindow[]> {
     /* Newest first: the window an operator needs is the one that is running or next up. */
     const result = await this.pool.query<MaintenanceWindowRow>(
@@ -505,48 +837,10 @@ export class PostgresGovernanceService implements GovernanceService {
   }
 
   async policyExceptions(): Promise<PolicyException[]> {
-    const result = await this.pool.query<{
-      id: string;
-      rule: string;
-      scope: string;
-      justification: string;
-      approver: string;
-      state: string;
-      created_at: Date;
-      expires_at: Date;
-      patch_diff: unknown;
-      requester_name: string | null;
-      approver_name: string | null;
-    }>(
-      /* Both columns hold subject identifiers. The row shows a person on either side, so each is
-         resolved to the directory name once, here, rather than in every screen that reads it. */
-      `SELECT pe.id, pe.rule, pe.scope, pe.justification, pe.approver, pe.state, pe.created_at,
-              pe.expires_at, pe.patch_diff,
-              coalesce(r.display_name, r.username) AS requester_name,
-              coalesce(a.display_name, a.username) AS approver_name
-         FROM policy_exception pe
-         LEFT JOIN idp_user r ON r.idp_id = coalesce(pe.patch_diff->>'requestedBy', pe.approver)
-         LEFT JOIN idp_user a ON a.idp_id = pe.approver
-        ORDER BY pe.created_at DESC`,
+    const result = await this.pool.query<PolicyExceptionRow>(
+      `${POLICY_EXCEPTION_SELECT} ORDER BY pe.created_at DESC`,
     );
-    return result.rows.map((row) => {
-      const state = toPolicyExceptionState(row.state);
-      return {
-        id: row.id,
-        rule: row.rule,
-        scope: row.scope,
-        justification: row.justification,
-        // The requester to the row, never the approver: the console decides who may act on it.
-        requester: row.requester_name ?? policyExceptionRequester(row),
-        // `approver` is NOT NULL and holds the creator until a decision overwrites it, so reading
-        // it raw reported an open exception as already approved by its own requester.
-        approver: state === 'requested' ? null : (row.approver_name ?? row.approver),
-        state,
-        requestedAt: row.created_at.toISOString(),
-        expiresAt: row.expires_at.toISOString(),
-        patchDiff: policyExceptionDiff(row.patch_diff),
-      };
-    });
+    return result.rows.map((row) => toPolicyException(row));
   }
 
   async dsar(): Promise<DsarRequest[]> {
@@ -586,27 +880,6 @@ function toDsarState(state: string): DsarRequest['state'] {
       return 'failed';
     default:
       return 'open';
-  }
-}
-
-/**
- * `policy_exception.state` stores `pending`, `approved`, `rejected`, `expired` (migration 0006);
- * the wire contract names the open state `requested`. Passing the column through untouched made
- * the list fail its own response schema in development — a 500 for every pending exception — and
- * left the console rendering rows whose approve button can never appear, because it keys on
- * `requested`. The mapping belongs here, at the boundary, once.
- */
-function toPolicyExceptionState(state: string): PolicyException['state'] {
-  switch (state) {
-    case 'pending':
-    case 'requested':
-      return 'requested';
-    case 'approved':
-      return 'approved';
-    case 'rejected':
-      return 'rejected';
-    default:
-      return 'expired';
   }
 }
 

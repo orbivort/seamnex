@@ -23,6 +23,8 @@ export class SamplerService implements OnApplicationShutdown {
   private timer: NodeJS.Timeout | undefined;
   private running = false;
   private lastCapacitySampleAt = 0;
+  private lastVolumeSampleAt = 0;
+  private lastUsageSampleAt = 0;
 
   constructor(
     @Inject(APP_CONFIG) private readonly config: AppConfig,
@@ -61,6 +63,10 @@ export class SamplerService implements OnApplicationShutdown {
         `sampled ${summary.instances} instance(s): ${summary.ready} ready, ${summary.degraded} degraded`,
       );
       await this.sampleCapacity();
+      // Disk first: the usage sample sums `instance_volume.used_mb`, so it must read the fresh
+      // measurement rather than the previous cycle's.
+      await this.sampleVolumeUsage();
+      await this.sampleInstanceUsage();
     } catch (error) {
       this.logger.error(
         `sample cycle failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -84,6 +90,49 @@ export class SamplerService implements OnApplicationShutdown {
     } catch (error) {
       this.logger.warn(
         `capacity sample failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * FR-1.9 — the per-volume measurement rides the same slow cadence.
+   *
+   * It costs one helper container per volume, which is far too much for the 30 s status loop and
+   * entirely appropriate for the capacity interval. Like the capacity sample, a failure is logged
+   * and never stops the cycle: an instance whose disk cannot be measured is still an instance whose
+   * readiness matters.
+   */
+  private async sampleVolumeUsage(): Promise<void> {
+    if (Date.now() - this.lastVolumeSampleAt < this.config.SEAMNEX_CAPACITY_SAMPLE_INTERVAL_MS)
+      return;
+    this.lastVolumeSampleAt = Date.now();
+    try {
+      await this.executor.recordVolumeUsage();
+      this.logger.debug('volume usage sampled');
+    } catch (error) {
+      this.logger.warn(
+        `volume usage sample failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * FR-4.5 — measured CPU and memory on the same slow cadence.
+   *
+   * Throttled with the capacity interval for the same reason as the volume walk: it is one daemon
+   * call per running container, and a 30 s loop would multiply that by the portfolio for a figure the
+   * board renders at minute resolution.
+   */
+  private async sampleInstanceUsage(): Promise<void> {
+    if (Date.now() - this.lastUsageSampleAt < this.config.SEAMNEX_CAPACITY_SAMPLE_INTERVAL_MS)
+      return;
+    this.lastUsageSampleAt = Date.now();
+    try {
+      const result = await this.executor.recordInstanceUsage();
+      this.logger.debug(`instance usage sampled for ${result.sampled} instance(s)`);
+    } catch (error) {
+      this.logger.warn(
+        `instance usage sample failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }

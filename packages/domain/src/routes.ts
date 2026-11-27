@@ -247,9 +247,20 @@ export const ROUTES: RouteMeta[] = [
     app: 'console',
     group: 'Administration',
     title: 'Identity sync',
-    purpose: 'Sync evidence: changes, p95 latency and errors against the 5-minute target.',
+    purpose:
+      'Sync evidence: membership changes, propagation p95 with its sample count, mirror latency and errors against the 5-minute target.',
     requirements: ['FR-2.4', 'AC-48', 'S-8'],
-    design: '§7.2 sync_run',
+    design: '§7.2 sync_run, propagation_sample',
+  },
+  {
+    path: '/admin/environment-profiles',
+    app: 'console',
+    group: 'Administration',
+    title: 'Environment profiles',
+    purpose:
+      'Reusable lifecycle value sets, the ceiling that applies to each variable, and which instances use a profile.',
+    requirements: ['FR-1.26', 'AC-51'],
+    design: '§10 env_profile',
   },
   {
     path: '/admin/settings',

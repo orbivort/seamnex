@@ -149,6 +149,39 @@ describe('render', () => {
     });
   });
 
+  it('renders the restart-safe mirror of the site URL, even when no row was ever written for it', async () => {
+    const { service } = setup([
+      [
+        'FROM env_schema_var',
+        [{ name: 'ESPOCRM_SITE_URL', default_value: 'https://old.example.test' }],
+      ],
+      [
+        'FROM instance_env_value',
+        [
+          {
+            var_name: 'ESPOCRM_SITE_URL',
+            value_enc: Buffer.from('https://crm.seamnex.localhost:8443', 'utf8'),
+          },
+        ],
+      ],
+      ['INSERT INTO render_set', [RENDER_ROW]],
+      ['INSERT INTO render_file', []],
+    ]);
+
+    const set = await service.render(input());
+
+    /*
+     * The installer writes `siteUrl` once and never reads the variable again, so an instance whose
+     * address moved (`http://espocrm.localhost:8020` → `https://espocrm.seamnex.localhost:8443`)
+     * keeps answering sign-ins with the old redirect URI until somebody opens the product by hand.
+     * The mirror is what the image's `applyConfigEnv` re-applies on every start.
+     */
+    const env = readFileSync(join(set.directory, 'platform.env'), 'utf8');
+    expect(env).toContain('ESPOCRM_CONFIG_SITE_URL=https://crm.seamnex.localhost:8443');
+    const override = readFileSync(join(set.directory, 'docker-compose.override.yml'), 'utf8');
+    expect(override).toContain('ESPOCRM_CONFIG_SITE_URL: https://crm.seamnex.localhost:8443');
+  });
+
   it('normalises the platform copy: no published ports, absolute build context, slug alias', async () => {
     const { service } = setup([
       ...ENV_ROUTES,
@@ -174,6 +207,69 @@ describe('render', () => {
     expect(platform.services.app?.build?.context).toBe(join('/srv/source/crm', 'app'));
     expect(platform.networks.default?.name).toBe('seamnex-inst-crm');
     expect(set.publishedPorts).toBe(0);
+  });
+
+  /*
+   * FR-1.20 / AC-33: "the platform operates on a platform-owned copy with the patch recorded as a
+   * diff". The copy is `docker-compose.platform.yml`; the diff is written beside it, in the set that
+   * is immutable, backed up and re-materialised on a restore. A patch nobody can read next to the
+   * document it describes is not a record.
+   */
+  it('writes the applied patch into the render set when the policy changed something', async () => {
+    const { service } = setup([
+      ...ENV_ROUTES,
+      ['INSERT INTO render_set', [RENDER_ROW]],
+      ['INSERT INTO render_file', []],
+    ]);
+    const base = input();
+
+    const set = await service.render(
+      input({
+        source: {
+          ...base.source,
+          policy: {
+            ...policy(base.source.policy.document),
+            verdict: 'unsafe_approved',
+            waived: ['privileged'],
+            violations: [
+              {
+                rule: 'privileged',
+                service: 'app',
+                detail: 'service app requests privileged mode.',
+              },
+            ],
+            patch: [{ path: 'services.app.ports', from: ['8080:80'], to: ['80'] }],
+          },
+        },
+      }),
+    );
+
+    expect(set.files.map((file) => file.path)).toContain('policy-patch.json');
+    const recorded = JSON.parse(
+      readFileSync(join(set.directory, 'policy-patch.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(recorded).toEqual({
+      version: 1,
+      verdict: 'unsafe_approved',
+      waived: ['privileged'],
+      violations: [
+        { rule: 'privileged', service: 'app', detail: 'service app requests privileged mode.' },
+      ],
+      patch: [{ path: 'services.app.ports', from: ['8080:80'], to: ['80'] }],
+    });
+  });
+
+  it('leaves the patch out of a clean render', async () => {
+    const { service } = setup([
+      ...ENV_ROUTES,
+      ['INSERT INTO render_set', [RENDER_ROW]],
+      ['INSERT INTO render_file', []],
+    ]);
+
+    const set = await service.render(input());
+
+    // An empty file on every clean deployment is noise that hides the ones that matter.
+    expect(set.files.map((file) => file.path)).not.toContain('policy-patch.json');
   });
 
   it('injects resource ceilings, restart policy, labels and log rotation in the override', async () => {

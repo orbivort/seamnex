@@ -1065,7 +1065,7 @@
         "tags": [
           "portal"
         ],
-        "x-policy-key": "portal.view_entitlements",
+        "x-policy-key": "portal.launch",
         "responses": {
           "200": {
             "description": "Success.",
@@ -1258,6 +1258,15 @@
                               "string",
                               "null"
                             ]
+                          },
+                          "relayState": {
+                            "default": "unavailable",
+                            "type": "string",
+                            "enum": [
+                              "ready",
+                              "preparing",
+                              "unavailable"
+                            ]
                           }
                         },
                         "required": [
@@ -1280,7 +1289,8 @@
                           "degradedReason",
                           "maintenanceTitle",
                           "lastVerifiedAt",
-                          "badge"
+                          "badge",
+                          "relayState"
                         ],
                         "additionalProperties": false
                       }
@@ -1470,6 +1480,26 @@
                         "additionalProperties": false
                       }
                     },
+                    "singleLogout": {
+                      "type": "object",
+                      "properties": {
+                        "identityProviderEnded": {
+                          "type": "boolean"
+                        },
+                        "products": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        }
+                      },
+                      "required": [
+                        "identityProviderEnded",
+                        "products"
+                      ],
+                      "additionalProperties": false
+                    },
                     "statement": {
                       "type": "string",
                       "minLength": 1
@@ -1478,6 +1508,7 @@
                   "required": [
                     "signedOutAt",
                     "residualSessions",
+                    "singleLogout",
                     "statement"
                   ],
                   "additionalProperties": false
@@ -2279,7 +2310,7 @@
             }
           }
         ],
-        "x-policy-key": "portal.view_entitlements",
+        "x-policy-key": "portal.launch",
         "responses": {
           "200": {
             "description": "Success.",
@@ -2459,6 +2490,15 @@
                         "string",
                         "null"
                       ]
+                    },
+                    "relayState": {
+                      "default": "unavailable",
+                      "type": "string",
+                      "enum": [
+                        "ready",
+                        "preparing",
+                        "unavailable"
+                      ]
                     }
                   },
                   "required": [
@@ -2481,7 +2521,8 @@
                     "degradedReason",
                     "maintenanceTitle",
                     "lastVerifiedAt",
-                    "badge"
+                    "badge",
+                    "relayState"
                   ],
                   "additionalProperties": false
                 }
@@ -2914,6 +2955,40 @@
                           "sloSupported": {
                             "type": "boolean"
                           },
+                          "defaultProductRole": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "rolePush": {
+                            "type": "object",
+                            "properties": {
+                              "path": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "method": {
+                                "default": "POST",
+                                "type": "string",
+                                "const": "POST"
+                              },
+                              "roleField": {
+                                "default": "role",
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "secretName": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            },
+                            "required": [
+                              "path",
+                              "method",
+                              "roleField",
+                              "secretName"
+                            ],
+                            "additionalProperties": false
+                          },
                           "verifiedBy": {
                             "type": "string",
                             "minLength": 1
@@ -2956,6 +3031,10 @@
                           "team": {
                             "type": "string",
                             "minLength": 1
+                          },
+                          "email": {
+                            "type": "string",
+                            "minLength": 3
                           }
                         },
                         "required": [
@@ -3290,6 +3369,121 @@
                         "type": "string",
                         "pattern": "^D(?:[1-9]\\d{0,2}|(?:0[1-9]|[1-9]\\d)-(?:0[1-9]|[1-9]\\d))$"
                       }
+                    },
+                    "coverage": {
+                      "type": "object",
+                      "properties": {
+                        "entries": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "deployments": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "declaredEnvironments": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "documentedEnvironments": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "refused": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "key": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "reason": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            },
+                            "required": [
+                              "key",
+                              "reason"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "byClass": {
+                          "type": "object",
+                          "properties": {
+                            "native": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "fa_header": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "fa_delegated": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "fa_gate": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            }
+                          },
+                          "required": [
+                            "native",
+                            "fa_header",
+                            "fa_delegated",
+                            "fa_gate"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "nativeDeployments": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "floor": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "baseline": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "floorMet": {
+                          "type": "boolean"
+                        },
+                        "shortfall": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "entries",
+                        "deployments",
+                        "declaredEnvironments",
+                        "documentedEnvironments",
+                        "refused",
+                        "byClass",
+                        "nativeDeployments",
+                        "floor",
+                        "baseline",
+                        "floorMet",
+                        "shortfall"
+                      ],
+                      "additionalProperties": false
                     }
                   },
                   "required": [
@@ -3300,6 +3494,675 @@
                     "changed",
                     "removed",
                     "reconciled"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/catalog/repository": {
+      "get": {
+        "operationId": "get-catalog-repository",
+        "summary": "The catalogue checkout being served: revision, configured source, last fetched commit, and whether an interrupted swap left a mixed tree (ADR-BE-42).",
+        "tags": [
+          "catalog"
+        ],
+        "x-policy-key": "catalog.browse",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "revision": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "source": {
+                      "type": "object",
+                      "properties": {
+                        "configured": {
+                          "type": "boolean"
+                        },
+                        "host": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "ref": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "configured",
+                        "host",
+                        "ref"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "commit": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "sha": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "actor": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "message": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "recordedAt": {
+                              "type": "string",
+                              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                            }
+                          },
+                          "required": [
+                            "sha",
+                            "actor",
+                            "message",
+                            "recordedAt"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "staged": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "pending": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            }
+                          },
+                          "required": [
+                            "pending"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "revision",
+                    "source",
+                    "commit",
+                    "staged"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/catalog/sync": {
+      "post": {
+        "operationId": "post-catalog-sync",
+        "summary": "Fetch the configured catalogue source at a tag or commit, swap it into the working tree and reconcile the projection. The URL is configuration; the tree swap is not atomic (ADR-BE-42).",
+        "tags": [
+          "catalog"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "ref": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 255
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-policy-key": "metadata.manage",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "reloadedAt": {
+                      "type": "string",
+                      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                    },
+                    "revision": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "entries": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "added": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "changed": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "removed": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "reconciled": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "key": {
+                            "type": "string",
+                            "pattern": "^D(?:[1-9]\\d{0,2}|(?:0[1-9]|[1-9]\\d)-(?:0[1-9]|[1-9]\\d))$"
+                          },
+                          "change": {
+                            "type": "string",
+                            "enum": [
+                              "unchanged",
+                              "added",
+                              "updated",
+                              "removed"
+                            ]
+                          },
+                          "detail": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "key",
+                          "change",
+                          "detail"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "environment": {
+                      "type": "object",
+                      "properties": {
+                        "added": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "changed": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "removed": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "refused": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "key": {
+                                "type": "string",
+                                "pattern": "^D(?:[1-9]\\d{0,2}|(?:0[1-9]|[1-9]\\d)-(?:0[1-9]|[1-9]\\d))$"
+                              },
+                              "name": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "reason": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            },
+                            "required": [
+                              "key",
+                              "name",
+                              "reason"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "applied": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "key": {
+                                "type": "string",
+                                "pattern": "^D(?:[1-9]\\d{0,2}|(?:0[1-9]|[1-9]\\d)-(?:0[1-9]|[1-9]\\d))$"
+                              },
+                              "added": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              "changed": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              "removed": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              }
+                            },
+                            "required": [
+                              "key",
+                              "added",
+                              "changed",
+                              "removed"
+                            ],
+                            "additionalProperties": false
+                          }
+                        }
+                      },
+                      "required": [
+                        "added",
+                        "changed",
+                        "removed",
+                        "refused",
+                        "applied"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "invalid": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "scope": {
+                            "type": "string",
+                            "enum": [
+                              "entry",
+                              "environment"
+                            ]
+                          },
+                          "key": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "reason": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "path",
+                          "scope",
+                          "key",
+                          "reason"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "deprecated": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "pattern": "^D(?:[1-9]\\d{0,2}|(?:0[1-9]|[1-9]\\d)-(?:0[1-9]|[1-9]\\d))$"
+                      }
+                    },
+                    "coverage": {
+                      "type": "object",
+                      "properties": {
+                        "entries": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "deployments": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "declaredEnvironments": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "documentedEnvironments": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "refused": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "key": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "reason": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            },
+                            "required": [
+                              "key",
+                              "reason"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "byClass": {
+                          "type": "object",
+                          "properties": {
+                            "native": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "fa_header": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "fa_delegated": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "fa_gate": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            }
+                          },
+                          "required": [
+                            "native",
+                            "fa_header",
+                            "fa_delegated",
+                            "fa_gate"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "nativeDeployments": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "floor": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "baseline": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "floorMet": {
+                          "type": "boolean"
+                        },
+                        "shortfall": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "entries",
+                        "deployments",
+                        "declaredEnvironments",
+                        "documentedEnvironments",
+                        "refused",
+                        "byClass",
+                        "nativeDeployments",
+                        "floor",
+                        "baseline",
+                        "floorMet",
+                        "shortfall"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "source": {
+                      "type": "object",
+                      "properties": {
+                        "url": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "ref": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "commit": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "url",
+                        "ref",
+                        "commit"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "staged": {
+                      "type": "object",
+                      "properties": {
+                        "pending": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        }
+                      },
+                      "required": [
+                        "pending"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "reloadedAt",
+                    "revision",
+                    "entries",
+                    "added",
+                    "changed",
+                    "removed",
+                    "reconciled",
+                    "source",
+                    "staged"
                   ],
                   "additionalProperties": false
                 }
@@ -3706,6 +4569,40 @@
                         "sloSupported": {
                           "type": "boolean"
                         },
+                        "defaultProductRole": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "rolePush": {
+                          "type": "object",
+                          "properties": {
+                            "path": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "method": {
+                              "default": "POST",
+                              "type": "string",
+                              "const": "POST"
+                            },
+                            "roleField": {
+                              "default": "role",
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "secretName": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "path",
+                            "method",
+                            "roleField",
+                            "secretName"
+                          ],
+                          "additionalProperties": false
+                        },
                         "verifiedBy": {
                           "type": "string",
                           "minLength": 1
@@ -3748,6 +4645,10 @@
                         "team": {
                           "type": "string",
                           "minLength": 1
+                        },
+                        "email": {
+                          "type": "string",
+                          "minLength": 3
                         }
                       },
                       "required": [
@@ -4756,6 +5657,881 @@
             }
           }
         }
+      },
+      "post": {
+        "operationId": "post-env-profiles",
+        "summary": "Create a lifecycle environment profile (FR-1.26).",
+        "tags": [
+          "catalog"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_-]{1,31}$"
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "target": {
+                    "type": "string",
+                    "enum": [
+                      "production",
+                      "staging"
+                    ]
+                  }
+                },
+                "required": [
+                  "key",
+                  "name",
+                  "target"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-policy-key": "profile.manage",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "target": {
+                      "type": "string",
+                      "enum": [
+                        "production",
+                        "staging"
+                      ]
+                    },
+                    "updatedBy": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                    },
+                    "values": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "varName": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "value": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "secretRef": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "varName",
+                          "value",
+                          "secretRef"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "key",
+                    "name",
+                    "target",
+                    "updatedBy",
+                    "updatedAt",
+                    "values"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/env-profiles/{key}": {
+      "patch": {
+        "operationId": "patch-env-profiles-key",
+        "summary": "Rename a profile or move it to another lifecycle target (FR-1.26).",
+        "tags": [
+          "catalog"
+        ],
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "target": {
+                    "type": "string",
+                    "enum": [
+                      "production",
+                      "staging"
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-policy-key": "profile.manage",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "target": {
+                      "type": "string",
+                      "enum": [
+                        "production",
+                        "staging"
+                      ]
+                    },
+                    "updatedBy": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                    },
+                    "values": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "varName": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "value": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "secretRef": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "varName",
+                          "value",
+                          "secretRef"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "key",
+                    "name",
+                    "target",
+                    "updatedBy",
+                    "updatedAt",
+                    "values"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "delete-env-profiles-key",
+        "summary": "Delete a profile no instance uses (FR-1.26).",
+        "tags": [
+          "catalog"
+        ],
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-policy-key": "profile.manage",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "deleted": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "key",
+                    "deleted"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/env-profiles/{key}/values": {
+      "put": {
+        "operationId": "put-env-profiles-key-values",
+        "summary": "Replace a profile’s variable values, subject to each override ceiling (FR-1.26, AC-51).",
+        "tags": [
+          "catalog"
+        ],
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "values": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "varName": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "value": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "secretRef": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "varName"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "values"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-policy-key": "profile.manage",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "target": {
+                      "type": "string",
+                      "enum": [
+                        "production",
+                        "staging"
+                      ]
+                    },
+                    "updatedBy": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                    },
+                    "values": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "varName": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "value": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "secretRef": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "varName",
+                          "value",
+                          "secretRef"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "key",
+                    "name",
+                    "target",
+                    "updatedBy",
+                    "updatedAt",
+                    "values"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/env-profiles/{key}/requests": {
+      "post": {
+        "operationId": "post-env-profiles-key-requests",
+        "summary": "Ask R1 for a profile change; the request lands in the governance queue (FR-1.26, §5.2).",
+        "tags": [
+          "catalog"
+        ],
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "justification": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "justification"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-policy-key": "profile.request",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "requester": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "name": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "name"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "entitlement",
+                        "membership",
+                        "instance_param"
+                      ]
+                    },
+                    "target": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "justification": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "open",
+                        "approved",
+                        "rejected",
+                        "expired"
+                      ]
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                    },
+                    "decidedBy": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "decidedAt": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "domain": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "requester",
+                    "kind",
+                    "target",
+                    "justification",
+                    "state",
+                    "createdAt",
+                    "decidedBy",
+                    "decidedAt",
+                    "domain"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/catalog/{key}/integration-metadata": {
@@ -4795,6 +6571,105 @@
                     "type": "integer",
                     "exclusiveMinimum": 0,
                     "maximum": 9007199254740991
+                  },
+                  "apiBaseUrl": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "authMethod": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "guaranteeClass": {
+                    "type": "string",
+                    "enum": [
+                      "native",
+                      "fa_header",
+                      "fa_delegated",
+                      "fa_gate"
+                    ]
+                  },
+                  "operationInventory": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "label": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "read",
+                            "write"
+                          ]
+                        },
+                        "description": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "path": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "method": {
+                          "type": "string",
+                          "enum": [
+                            "GET",
+                            "POST",
+                            "PUT",
+                            "PATCH",
+                            "DELETE"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "label",
+                        "mode",
+                        "description"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "eventModes": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "webhook",
+                            "schedule",
+                            "poll",
+                            "none"
+                          ]
+                        },
+                        "label": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "minimumIntervalMinutes": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "mode",
+                        "label"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "sloSupported": {
+                    "type": "boolean"
                   }
                 },
                 "additionalProperties": false
@@ -5122,6 +6997,40 @@
                         "sloSupported": {
                           "type": "boolean"
                         },
+                        "defaultProductRole": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "rolePush": {
+                          "type": "object",
+                          "properties": {
+                            "path": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "method": {
+                              "default": "POST",
+                              "type": "string",
+                              "const": "POST"
+                            },
+                            "roleField": {
+                              "default": "role",
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "secretName": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "path",
+                            "method",
+                            "roleField",
+                            "secretName"
+                          ],
+                          "additionalProperties": false
+                        },
                         "verifiedBy": {
                           "type": "string",
                           "minLength": 1
@@ -5164,6 +7073,10 @@
                         "team": {
                           "type": "string",
                           "minLength": 1
+                        },
+                        "email": {
+                          "type": "string",
+                          "minLength": 3
                         }
                       },
                       "required": [
@@ -9038,6 +10951,770 @@
         }
       }
     },
+    "/instances/{id}/observability": {
+      "get": {
+        "operationId": "get-instances-id-observability",
+        "summary": "Per-instance observability profile, scrape target and log availability (AC-45).",
+        "tags": [
+          "instances"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-policy-key": "instance.view_logs",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "instanceId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "entryKey": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "product": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "slug": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "profile": {
+                      "type": "object",
+                      "properties": {
+                        "dashboards": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "uid": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "title": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "panels": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "minLength": 1
+                                }
+                              }
+                            },
+                            "required": [
+                              "uid",
+                              "title",
+                              "panels"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "rules": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "name": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "expression": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "severity": {
+                                "type": "string",
+                                "enum": [
+                                  "info",
+                                  "warning",
+                                  "critical"
+                                ]
+                              },
+                              "for": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            },
+                            "required": [
+                              "name",
+                              "expression",
+                              "severity",
+                              "for"
+                            ],
+                            "additionalProperties": false
+                          }
+                        }
+                      },
+                      "required": [
+                        "dashboards",
+                        "rules"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "target": {
+                      "type": "object",
+                      "properties": {
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "published",
+                            "missing",
+                            "not_configured"
+                          ]
+                        },
+                        "metricsPath": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "address": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "labels": {
+                          "type": "object",
+                          "propertyNames": {
+                            "type": "string"
+                          },
+                          "additionalProperties": {
+                            "type": "string"
+                          }
+                        },
+                        "file": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "detail": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "generatedAt": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "state",
+                        "metricsPath",
+                        "address",
+                        "labels",
+                        "file",
+                        "detail",
+                        "generatedAt"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "logs": {
+                      "type": "object",
+                      "properties": {
+                        "available": {
+                          "type": "boolean"
+                        },
+                        "source": {
+                          "type": "string",
+                          "enum": [
+                            "loki",
+                            "none"
+                          ]
+                        },
+                        "retentionDays": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "detail": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "available",
+                        "source",
+                        "retentionDays",
+                        "detail"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "generatedAt": {
+                      "type": "string",
+                      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                    }
+                  },
+                  "required": [
+                    "instanceId",
+                    "entryKey",
+                    "product",
+                    "slug",
+                    "profile",
+                    "target",
+                    "logs",
+                    "generatedAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/instances/{id}/logs": {
+      "get": {
+        "operationId": "get-instances-id-logs",
+        "summary": "Queryable per-instance logs from the platform log store (FR-4.6).",
+        "tags": [
+          "instances"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "description": "Minutes of history to query; capped by the platform.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Newest N lines; capped by the platform.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "filter",
+            "in": "query",
+            "required": false,
+            "description": "Literal substring filter, applied as a line filter rather than a selector.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-policy-key": "instance.view_logs",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "instanceId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "source": {
+                      "type": "string",
+                      "enum": [
+                        "loki",
+                        "none"
+                      ]
+                    },
+                    "lines": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "ts": {
+                            "type": "string",
+                            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                          },
+                          "stream": {
+                            "type": "string",
+                            "enum": [
+                              "stdout",
+                              "stderr"
+                            ]
+                          },
+                          "line": {
+                            "type": "string"
+                          },
+                          "container": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "ts",
+                          "stream",
+                          "line",
+                          "container"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "retentionDays": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "truncated": {
+                      "type": "boolean"
+                    },
+                    "detail": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "instanceId",
+                    "source",
+                    "lines",
+                    "retentionDays",
+                    "truncated",
+                    "detail"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/instances/{id}/exports": {
+      "get": {
+        "operationId": "get-instances-id-exports",
+        "summary": "Portable data exports of this instance, with what each one actually contains.",
+        "tags": [
+          "instances"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-policy-key": "instance.lifecycle",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "exportId": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "exportedAt": {
+                        "type": "string",
+                        "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                      },
+                      "fileName": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "bytes": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "sha256": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "includes": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "database",
+                            "volumes",
+                            "definition",
+                            "environment"
+                          ]
+                        }
+                      },
+                      "excluded": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "item": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "reason": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "item",
+                            "reason"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "renderSetId": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "exportId",
+                      "exportedAt",
+                      "fileName",
+                      "bytes",
+                      "sha256",
+                      "includes",
+                      "excluded",
+                      "renderSetId"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/instances/{id}/exports/{exportId}/archive": {
+      "get": {
+        "operationId": "get-instances-id-exports-exportId-archive",
+        "summary": "Download one portable export archive (a plain .tar.gz the business can keep).",
+        "tags": [
+          "instances"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "exportId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-policy-key": "instance.lifecycle",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "headers": {
+              "Content-Disposition": {
+                "description": "Attachment filename the client saves the archive under.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/gzip": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/instances/{id}/backup-schedule": {
       "put": {
         "operationId": "put-instances-id-backup-schedule",
@@ -9519,6 +12196,98 @@
                       "artefact": {
                         "type": "string",
                         "minLength": 1
+                      },
+                      "scan": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "verdict": {
+                                "type": "string",
+                                "enum": [
+                                  "passed",
+                                  "blocked",
+                                  "error"
+                                ]
+                              },
+                              "scanner": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "scannerVersion": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "scannedAt": {
+                                "type": "string",
+                                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                              },
+                              "severityCounts": {
+                                "type": "object",
+                                "properties": {
+                                  "critical": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "high": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "medium": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "low": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "unknown": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 9007199254740991
+                                  }
+                                },
+                                "required": [
+                                  "critical",
+                                  "high",
+                                  "medium",
+                                  "low",
+                                  "unknown"
+                                ],
+                                "additionalProperties": false
+                              },
+                              "blockingSeverities": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "enum": [
+                                    "critical",
+                                    "high",
+                                    "medium",
+                                    "low",
+                                    "unknown"
+                                  ]
+                                }
+                              }
+                            },
+                            "required": [
+                              "verdict",
+                              "scanner",
+                              "scannerVersion",
+                              "scannedAt",
+                              "severityCounts",
+                              "blockingSeverities"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
                       }
                     },
                     "required": [
@@ -9530,6 +12299,284 @@
                     ],
                     "additionalProperties": false
                   }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/instances/{id}/image-scan": {
+      "get": {
+        "operationId": "get-instances-id-image-scan",
+        "summary": "Retained vulnerability scan report for one image digest (NFR-4.6).",
+        "tags": [
+          "instances"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "digest",
+            "in": "query",
+            "required": true,
+            "description": "The image digest the report belongs to (`sha256:…`).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-policy-key": "instance.view_logs",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "verdict": {
+                      "type": "string",
+                      "enum": [
+                        "passed",
+                        "blocked",
+                        "error"
+                      ]
+                    },
+                    "scanner": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "scannerVersion": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "scannedAt": {
+                      "type": "string",
+                      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                    },
+                    "severityCounts": {
+                      "type": "object",
+                      "properties": {
+                        "critical": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "high": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "medium": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "low": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "unknown": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "critical",
+                        "high",
+                        "medium",
+                        "low",
+                        "unknown"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "blockingSeverities": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "critical",
+                          "high",
+                          "medium",
+                          "low",
+                          "unknown"
+                        ]
+                      }
+                    },
+                    "instanceId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "imageRef": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "imageDigest": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "findings": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "package": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "installedVersion": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "fixedVersion": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "severity": {
+                            "type": "string",
+                            "enum": [
+                              "critical",
+                              "high",
+                              "medium",
+                              "low",
+                              "unknown"
+                            ]
+                          },
+                          "title": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "url": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "package",
+                          "installedVersion",
+                          "fixedVersion",
+                          "severity",
+                          "title",
+                          "url"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "reportKey": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "verdict",
+                    "scanner",
+                    "scannerVersion",
+                    "scannedAt",
+                    "severityCounts",
+                    "blockingSeverities",
+                    "instanceId",
+                    "imageRef",
+                    "imageDigest",
+                    "findings",
+                    "reportKey"
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -10076,8 +13123,72 @@
                       "enum": [
                         "allowed",
                         "blocked",
-                        "unsafe_approved"
+                        "unsafe_approved",
+                        "unknown"
                       ]
+                    },
+                    "policyEvaluatedAt": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "policySource": {
+                      "type": "string",
+                      "enum": [
+                        "local_evaluation",
+                        "source_resolution",
+                        "none"
+                      ]
+                    },
+                    "blockers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "code": {
+                            "type": "string",
+                            "enum": [
+                              "unknown_entry",
+                              "source_unresolved",
+                              "image_unpinned",
+                              "image_untrusted_registry",
+                              "env_invalid",
+                              "secret_unresolved",
+                              "capacity",
+                              "route_conflict",
+                              "policy_blocked",
+                              "policy_unknown",
+                              "scaffold_unapproved"
+                            ]
+                          },
+                          "field": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "message": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "blocking": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "code",
+                          "field",
+                          "message",
+                          "blocking"
+                        ],
+                        "additionalProperties": false
+                      }
                     },
                     "warnings": {
                       "type": "array",
@@ -10100,6 +13211,9 @@
                     "routeHost",
                     "slugAvailable",
                     "policyVerdict",
+                    "policyEvaluatedAt",
+                    "policySource",
+                    "blockers",
                     "warnings",
                     "evaluatedAt"
                   ],
@@ -10370,7 +13484,8 @@
                   }
                 },
                 "required": [
-                  "eventName"
+                  "eventName",
+                  "workflowId"
                 ],
                 "additionalProperties": false
               }
@@ -10605,6 +13720,169 @@
             }
           },
           "422": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/trigger/{token}": {
+      "post": {
+        "operationId": "post-trigger-token",
+        "summary": "Accept a signed product event, start the bound workflow once, and answer with a receipt (FR-5.4).",
+        "tags": [
+          "workflows"
+        ],
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
+              }
+            }
+          }
+        },
+        "x-consumer": "external",
+        "x-policy-key": "trigger.delivery",
+        "x-anonymous": true,
+        "x-rate-limit": {
+          "bucket": "trigger",
+          "limit": 120,
+          "windowSeconds": 60
+        },
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "accepted": {
+                      "type": "boolean"
+                    },
+                    "reason": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "workflowId": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "runId": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "accepted",
+                    "reason",
+                    "workflowId",
+                    "runId"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "429": {
             "description": "application/problem+json",
             "content": {
               "application/problem+json": {
@@ -10974,6 +14252,7 @@
                               "dsar",
                               "platform-backup",
                               "platform-restore",
+                              "platform-restore-products",
                               "synthetic"
                             ]
                           },
@@ -11281,6 +14560,7 @@
                         "dsar",
                         "platform-backup",
                         "platform-restore",
+                        "platform-restore-products",
                         "synthetic"
                       ]
                     },
@@ -11785,6 +15065,7 @@
                         "dsar",
                         "platform-backup",
                         "platform-restore",
+                        "platform-restore-products",
                         "synthetic"
                       ]
                     },
@@ -22687,6 +25968,13 @@
                       "type": "string",
                       "minLength": 1
                     },
+                    "anchorSignatureValid": {
+                      "default": null,
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    },
                     "path": {
                       "type": "array",
                       "items": {
@@ -22719,6 +26007,7 @@
                     "verifiedAt",
                     "anchoredDay",
                     "anchorSignature",
+                    "anchorSignatureValid",
                     "path"
                   ],
                   "additionalProperties": false
@@ -23263,11 +26552,44 @@
                           }
                         ]
                       },
+                      "reviewedByName": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
                       "reviewedAt": {
                         "anyOf": [
                           {
                             "type": "string",
                             "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "upstreamRef": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "reviewNote": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "minLength": 1
                           },
                           {
                             "type": "null"
@@ -23294,7 +26616,10 @@
                       "resaleRestricted",
                       "hostedServiceRestricted",
                       "reviewedBy",
+                      "reviewedByName",
                       "reviewedAt",
+                      "upstreamRef",
+                      "reviewNote",
                       "status",
                       "hostedService"
                     ],
@@ -23510,6 +26835,273 @@
         }
       }
     },
+    "/licenses/{instanceId}/review": {
+      "put": {
+        "operationId": "put-licenses-instanceId-review",
+        "summary": "Record the auditor review: obligations, restriction flags and evidence.",
+        "tags": [
+          "governance"
+        ],
+        "parameters": [
+          {
+            "name": "instanceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "licenseId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  },
+                  "obligations": {
+                    "maxItems": 20,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 300
+                    }
+                  },
+                  "resaleRestricted": {
+                    "type": "boolean"
+                  },
+                  "hostedServiceRestricted": {
+                    "type": "boolean"
+                  },
+                  "upstreamRef": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "note": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  },
+                  "acknowledgeUnknownLicence": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "confirmNoObligations": {
+                    "default": false,
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "licenseId",
+                  "obligations",
+                  "resaleRestricted",
+                  "hostedServiceRestricted",
+                  "upstreamRef",
+                  "acknowledgeUnknownLicence",
+                  "confirmNoObligations"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-policy-key": "license.review",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "instanceId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "entryKey": {
+                      "type": "string",
+                      "pattern": "^D(?:[1-9]\\d{0,2}|(?:0[1-9]|[1-9]\\d)-(?:0[1-9]|[1-9]\\d))$"
+                    },
+                    "product": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "licenseId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "obligations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "resaleRestricted": {
+                      "type": "boolean"
+                    },
+                    "hostedServiceRestricted": {
+                      "type": "boolean"
+                    },
+                    "reviewedBy": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "reviewedByName": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "reviewedAt": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "upstreamRef": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "reviewNote": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "cleared",
+                        "review_required"
+                      ]
+                    },
+                    "hostedService": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "instanceId",
+                    "entryKey",
+                    "product",
+                    "licenseId",
+                    "obligations",
+                    "resaleRestricted",
+                    "hostedServiceRestricted",
+                    "reviewedBy",
+                    "reviewedByName",
+                    "reviewedAt",
+                    "upstreamRef",
+                    "reviewNote",
+                    "status",
+                    "hostedService"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/patch-register": {
       "get": {
         "operationId": "get-patch-register",
@@ -23576,6 +27168,46 @@
                       "checkedAt": {
                         "type": "string",
                         "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                      },
+                      "advisory": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "releaseUrl": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "source": {
+                        "type": "string",
+                        "enum": [
+                          "observed",
+                          "catalog"
+                        ]
+                      },
+                      "lastObservedAt": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
                       }
                     },
                     "required": [
@@ -23591,6 +27223,135 @@
                     ],
                     "additionalProperties": false
                   }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/patch-register/observe": {
+      "post": {
+        "operationId": "post-patch-register-observe",
+        "summary": "Observe upstream releases and advisories now, then refresh the register (FR-2.12).",
+        "tags": [
+          "governance"
+        ],
+        "x-policy-key": "settings.manage",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "observedAt": {
+                      "type": "string",
+                      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                    },
+                    "entries": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "releases": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "advisories": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "skipped": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "failed": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "instancesUpdated": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "observedAt",
+                    "entries",
+                    "releases",
+                    "advisories",
+                    "skipped",
+                    "failed",
+                    "instancesUpdated"
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -23706,6 +27467,72 @@
                           "type": "integer",
                           "minimum": 0,
                           "maximum": 9007199254740991
+                        },
+                        "nativeFloor": {
+                          "type": "object",
+                          "properties": {
+                            "floor": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "baseline": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            "met": {
+                              "type": "boolean"
+                            },
+                            "shortfall": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            }
+                          },
+                          "required": [
+                            "floor",
+                            "baseline",
+                            "met",
+                            "shortfall"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "ownerDecision": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "floor": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 9007199254740991
+                                },
+                                "reason": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "recordedBy": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "recordedAt": {
+                                  "type": "string",
+                                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                                }
+                              },
+                              "required": [
+                                "floor",
+                                "reason",
+                                "recordedBy",
+                                "recordedAt"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -23920,6 +27747,144 @@
         }
       }
     },
+    "/posture/native-floor/decision": {
+      "post": {
+        "operationId": "post-posture-native-floor-decision",
+        "summary": "Record an owner decision that lowers the S-2 native floor.",
+        "tags": [
+          "governance"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "floor": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 20,
+                    "maxLength": 1000
+                  }
+                },
+                "required": [
+                  "floor",
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-policy-key": "settings.manage",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "floor": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "reason": {
+                      "type": "string",
+                      "minLength": 20,
+                      "maxLength": 1000
+                    },
+                    "recordedBy": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "recordedAt": {
+                      "type": "string",
+                      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                    }
+                  },
+                  "required": [
+                    "floor",
+                    "reason",
+                    "recordedBy",
+                    "recordedAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/break-glass-sessions": {
       "get": {
         "operationId": "get-break-glass-sessions",
@@ -23972,6 +27937,17 @@
                       "domainOwner": {
                         "type": "string",
                         "minLength": 1
+                      },
+                      "domainOwnerEmail": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
                       },
                       "accessMode": {
                         "type": "string",
@@ -24059,6 +28035,7 @@
                       "instanceId",
                       "product",
                       "domainOwner",
+                      "domainOwnerEmail",
                       "accessMode",
                       "justification",
                       "approver",
@@ -24223,6 +28200,17 @@
                       "type": "string",
                       "minLength": 1
                     },
+                    "domainOwnerEmail": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "accessMode": {
                       "type": "string",
                       "enum": [
@@ -24309,6 +28297,7 @@
                     "instanceId",
                     "product",
                     "domainOwner",
+                    "domainOwnerEmail",
                     "accessMode",
                     "justification",
                     "approver",
@@ -24576,6 +28565,17 @@
                       "type": "string",
                       "minLength": 1
                     },
+                    "domainOwnerEmail": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "accessMode": {
                       "type": "string",
                       "enum": [
@@ -24662,6 +28662,7 @@
                     "instanceId",
                     "product",
                     "domainOwner",
+                    "domainOwnerEmail",
                     "accessMode",
                     "justification",
                     "approver",
@@ -24854,6 +28855,32 @@
                       "type": "number",
                       "minimum": 0
                     },
+                    "thresholds": {
+                      "type": "object",
+                      "properties": {
+                        "cpuPercent": {
+                          "type": "number",
+                          "minimum": 1,
+                          "maximum": 100
+                        },
+                        "memoryPercent": {
+                          "type": "number",
+                          "minimum": 1,
+                          "maximum": 100
+                        },
+                        "diskPercent": {
+                          "type": "number",
+                          "minimum": 1,
+                          "maximum": 100
+                        }
+                      },
+                      "required": [
+                        "cpuPercent",
+                        "memoryPercent",
+                        "diskPercent"
+                      ],
+                      "additionalProperties": false
+                    },
                     "instanceUsage": {
                       "type": "array",
                       "items": {
@@ -24894,6 +28921,29 @@
                           "diskQuotaMb": {
                             "type": "number",
                             "minimum": 0
+                          },
+                          "cpuConsumedMilli": {
+                            "type": "number",
+                            "minimum": 0
+                          },
+                          "memoryConsumedMb": {
+                            "type": "number",
+                            "minimum": 0
+                          },
+                          "diskConsumedMb": {
+                            "type": "number",
+                            "minimum": 0
+                          },
+                          "measuredAt": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -25616,7 +29666,23 @@
                           },
                           "syncState": {
                             "type": "string",
-                            "minLength": 1
+                            "enum": [
+                              "applied",
+                              "pending",
+                              "edge_only",
+                              "unsupported"
+                            ]
+                          },
+                          "appliedAt": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
                           }
                         },
                         "required": [
@@ -25624,7 +29690,8 @@
                           "product",
                           "entryKey",
                           "productRole",
-                          "syncState"
+                          "syncState",
+                          "appliedAt"
                         ],
                         "additionalProperties": false
                       }
@@ -25922,6 +29989,10 @@
                                 "type": "string",
                                 "minLength": 1
                               },
+                              "productRole": {
+                                "type": "string",
+                                "minLength": 1
+                              },
                               "propagateToProduct": {
                                 "type": "boolean"
                               }
@@ -25931,6 +30002,7 @@
                               "scopeType",
                               "scopeId",
                               "scopeLabel",
+                              "productRole",
                               "propagateToProduct"
                             ],
                             "additionalProperties": false
@@ -26060,6 +30132,12 @@
                     "type": "string",
                     "minLength": 1
                   },
+                  "productRole": {
+                    "default": "member",
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
                   "propagate": {
                     "default": false,
                     "type": "boolean"
@@ -26069,6 +30147,7 @@
                   "role",
                   "scopeType",
                   "scopeLabel",
+                  "productRole",
                   "propagate"
                 ],
                 "additionalProperties": false
@@ -26141,6 +30220,10 @@
                               "type": "string",
                               "minLength": 1
                             },
+                            "productRole": {
+                              "type": "string",
+                              "minLength": 1
+                            },
                             "propagateToProduct": {
                               "type": "boolean"
                             }
@@ -26150,6 +30233,7 @@
                             "scopeType",
                             "scopeId",
                             "scopeLabel",
+                            "productRole",
                             "propagateToProduct"
                           ],
                           "additionalProperties": false
@@ -26292,6 +30376,23 @@
                         "minimum": 0,
                         "maximum": 9007199254740991
                       },
+                      "p95PropagationMs": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "propagationSamples": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
                       "errors": {
                         "type": "array",
                         "items": {
@@ -26315,6 +30416,8 @@
                       "groups",
                       "changes",
                       "p95LatencyMs",
+                      "p95PropagationMs",
+                      "propagationSamples",
                       "errors",
                       "state"
                     ],
@@ -26436,6 +30539,23 @@
                       "minimum": 0,
                       "maximum": 9007199254740991
                     },
+                    "p95PropagationMs": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "propagationSamples": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
                     "errors": {
                       "type": "array",
                       "items": {
@@ -26459,6 +30579,8 @@
                     "groups",
                     "changes",
                     "p95LatencyMs",
+                    "p95PropagationMs",
+                    "propagationSamples",
                     "errors",
                     "state"
                   ],
@@ -26587,8 +30709,23 @@
                     },
                     "auditRetentionDays": {
                       "type": "integer",
-                      "exclusiveMinimum": 0,
-                      "maximum": 9007199254740991
+                      "minimum": 365,
+                      "maximum": 3650
+                    },
+                    "capacityCpuAlertPercent": {
+                      "type": "integer",
+                      "minimum": 50,
+                      "maximum": 99
+                    },
+                    "capacityMemoryAlertPercent": {
+                      "type": "integer",
+                      "minimum": 50,
+                      "maximum": 99
+                    },
+                    "capacityDiskAlertPercent": {
+                      "type": "integer",
+                      "minimum": 50,
+                      "maximum": 99
                     },
                     "updatedAt": {
                       "type": "string",
@@ -26607,6 +30744,9 @@
                     "sessionAbsoluteHours",
                     "metadataReviewDays",
                     "auditRetentionDays",
+                    "capacityCpuAlertPercent",
+                    "capacityMemoryAlertPercent",
+                    "capacityDiskAlertPercent",
                     "updatedAt",
                     "updatedBy"
                   ],
@@ -26742,8 +30882,23 @@
                     },
                     "auditRetentionDays": {
                       "type": "integer",
-                      "exclusiveMinimum": 0,
-                      "maximum": 9007199254740991
+                      "minimum": 365,
+                      "maximum": 3650
+                    },
+                    "capacityCpuAlertPercent": {
+                      "type": "integer",
+                      "minimum": 50,
+                      "maximum": 99
+                    },
+                    "capacityMemoryAlertPercent": {
+                      "type": "integer",
+                      "minimum": 50,
+                      "maximum": 99
+                    },
+                    "capacityDiskAlertPercent": {
+                      "type": "integer",
+                      "minimum": 50,
+                      "maximum": 99
                     },
                     "updatedAt": {
                       "type": "string",
@@ -26762,6 +30917,9 @@
                     "sessionAbsoluteHours",
                     "metadataReviewDays",
                     "auditRetentionDays",
+                    "capacityCpuAlertPercent",
+                    "capacityMemoryAlertPercent",
+                    "capacityDiskAlertPercent",
                     "updatedAt",
                     "updatedBy"
                   ],
@@ -27229,6 +31387,398 @@
                     "ok",
                     "detail",
                     "deliveredAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/security/trusted-registries": {
+      "get": {
+        "operationId": "get-security-trusted-registries",
+        "summary": "Current trusted-registry allow-list revision and its history (NFR-4.16).",
+        "tags": [
+          "admin"
+        ],
+        "x-policy-key": "settings.view",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "current": {
+                      "type": "object",
+                      "properties": {
+                        "version": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "contentHash": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "entries": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 3,
+                            "maxLength": 253
+                          }
+                        },
+                        "note": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "createdBy": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                        }
+                      },
+                      "required": [
+                        "version",
+                        "contentHash",
+                        "entries",
+                        "note",
+                        "createdBy",
+                        "createdAt"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "history": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "version": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                          },
+                          "createdBy": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "note": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "entryCount": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "required": [
+                          "version",
+                          "createdAt",
+                          "createdBy",
+                          "note",
+                          "entryCount"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "current",
+                    "history"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "post-security-trusted-registries",
+        "summary": "Add or remove trusted registries/namespaces as a new audited revision.",
+        "tags": [
+          "admin"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "add": {
+                    "default": [],
+                    "maxItems": 64,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 3,
+                      "maxLength": 253
+                    }
+                  },
+                  "remove": {
+                    "default": [],
+                    "maxItems": 64,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 3,
+                      "maxLength": 253
+                    }
+                  },
+                  "note": {
+                    "type": "string",
+                    "minLength": 10,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "add",
+                  "remove",
+                  "note"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-policy-key": "settings.manage",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "current": {
+                      "type": "object",
+                      "properties": {
+                        "version": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "contentHash": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "entries": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 3,
+                            "maxLength": 253
+                          }
+                        },
+                        "note": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "createdBy": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                        }
+                      },
+                      "required": [
+                        "version",
+                        "contentHash",
+                        "entries",
+                        "note",
+                        "createdBy",
+                        "createdAt"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "history": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "version": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "createdAt": {
+                            "type": "string",
+                            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                          },
+                          "createdBy": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "note": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "entryCount": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "required": [
+                          "version",
+                          "createdAt",
+                          "createdBy",
+                          "note",
+                          "entryCount"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "current",
+                    "history"
                   ],
                   "additionalProperties": false
                 }
@@ -28533,6 +33083,191 @@
                     ],
                     "additionalProperties": false
                   }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "application/problem+json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetail"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "post-admin-policy-exceptions",
+        "summary": "File a time-boxed exception to one compose policy rule for one product (FR-1.20, NFR-4.15).",
+        "tags": [
+          "admin"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "entryKey": {
+                    "type": "string",
+                    "pattern": "^D(?:[1-9]\\d{0,2}|(?:0[1-9]|[1-9]\\d)-(?:0[1-9]|[1-9]\\d))$"
+                  },
+                  "rule": {
+                    "type": "string",
+                    "enum": [
+                      "network_mode_host",
+                      "privileged",
+                      "host_path_mount",
+                      "external_network",
+                      "unpinned_image"
+                    ]
+                  },
+                  "justification": {
+                    "type": "string",
+                    "minLength": 20
+                  },
+                  "expiresAt": {
+                    "type": "string",
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                  }
+                },
+                "required": [
+                  "entryKey",
+                  "rule",
+                  "justification",
+                  "expiresAt"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-policy-key": "exception.request",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "rule": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "scope": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "justification": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "requester": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "approver": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "requested",
+                        "approved",
+                        "rejected",
+                        "expired"
+                      ]
+                    },
+                    "requestedAt": {
+                      "type": "string",
+                      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                    },
+                    "expiresAt": {
+                      "type": "string",
+                      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                    },
+                    "patchDiff": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "rule",
+                    "scope",
+                    "justification",
+                    "requester",
+                    "approver",
+                    "state",
+                    "requestedAt",
+                    "expiresAt",
+                    "patchDiff"
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -30915,6 +35650,9 @@
                           "none"
                         ]
                       },
+                      "sloSupported": {
+                        "type": "boolean"
+                      },
                       "writeEligible": {
                         "type": "boolean"
                       },
@@ -30935,6 +35673,22 @@
                       },
                       "stale": {
                         "type": "boolean"
+                      },
+                      "verifiedFacts": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "apiBaseUrl",
+                            "authMethod",
+                            "guaranteeClass",
+                            "operations",
+                            "eventModes",
+                            "credentialGranularity",
+                            "sessionMaxMinutes",
+                            "sloSupported"
+                          ]
+                        }
                       }
                     },
                     "required": [
@@ -30950,12 +35704,14 @@
                       "operations",
                       "eventModes",
                       "credentialGranularity",
+                      "sloSupported",
                       "writeEligible",
                       "workflowEligible",
                       "owner",
                       "verifiedAt",
                       "nextReviewAt",
-                      "stale"
+                      "stale",
+                      "verifiedFacts"
                     ],
                     "additionalProperties": false
                   }
@@ -31182,6 +35938,9 @@
                         "none"
                       ]
                     },
+                    "sloSupported": {
+                      "type": "boolean"
+                    },
                     "writeEligible": {
                       "type": "boolean"
                     },
@@ -31202,6 +35961,22 @@
                     },
                     "stale": {
                       "type": "boolean"
+                    },
+                    "verifiedFacts": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "apiBaseUrl",
+                          "authMethod",
+                          "guaranteeClass",
+                          "operations",
+                          "eventModes",
+                          "credentialGranularity",
+                          "sessionMaxMinutes",
+                          "sloSupported"
+                        ]
+                      }
                     }
                   },
                   "required": [
@@ -31217,12 +35992,14 @@
                     "operations",
                     "eventModes",
                     "credentialGranularity",
+                    "sloSupported",
                     "writeEligible",
                     "workflowEligible",
                     "owner",
                     "verifiedAt",
                     "nextReviewAt",
-                    "stale"
+                    "stale",
+                    "verifiedFacts"
                   ],
                   "additionalProperties": false
                 }
@@ -31439,6 +36216,9 @@
                           "none"
                         ]
                       },
+                      "sloSupported": {
+                        "type": "boolean"
+                      },
                       "writeEligible": {
                         "type": "boolean"
                       },
@@ -31459,6 +36239,22 @@
                       },
                       "stale": {
                         "type": "boolean"
+                      },
+                      "verifiedFacts": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "apiBaseUrl",
+                            "authMethod",
+                            "guaranteeClass",
+                            "operations",
+                            "eventModes",
+                            "credentialGranularity",
+                            "sessionMaxMinutes",
+                            "sloSupported"
+                          ]
+                        }
                       }
                     },
                     "required": [
@@ -31474,12 +36270,14 @@
                       "operations",
                       "eventModes",
                       "credentialGranularity",
+                      "sloSupported",
                       "writeEligible",
                       "workflowEligible",
                       "owner",
                       "verifiedAt",
                       "nextReviewAt",
-                      "stale"
+                      "stale",
+                      "verifiedFacts"
                     ],
                     "additionalProperties": false
                   }

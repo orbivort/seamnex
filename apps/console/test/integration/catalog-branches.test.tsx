@@ -91,6 +91,73 @@ describe('catalog list filters', () => {
     );
   });
 
+  /**
+   * The filter set used to be component state only: a shared link carried the whole catalog, and a
+   * Back step from an entry returned to it. The URL is now the input on mount and the record of what
+   * was applied, so both directions are asserted.
+   */
+  it('opens a catalog that is already filtered by the query string', async () => {
+    openAs('R1', '/catalog');
+    const url = new URL(window.location.href);
+    url.searchParams.set('q', 'Mautic');
+    window.history.replaceState({}, '', url);
+
+    render(<App />);
+
+    expect(await screen.findByText('1 shown')).toBeDefined();
+    expect((screen.getByLabelText('Search catalog') as HTMLInputElement).value).toBe('Mautic');
+  });
+
+  it('writes the applied filters to the URL without dropping the session parameters', async () => {
+    openAs('R1', '/catalog');
+    render(<App />);
+    await screen.findByText('Domain catalog');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Compose' }));
+    fireEvent.change(screen.getByLabelText('Filter by domain cluster'), {
+      target: { value: 'Enabling Platform' },
+    });
+    fireEvent.change(screen.getByLabelText('Search catalog'), { target: { value: 'Metabase' } });
+
+    // The search half lands after the debounce, so the address is read once it settles.
+    await waitFor(() => expect(window.location.search).toContain('q=Metabase'));
+    const params = new URLSearchParams(window.location.search);
+    expect(params.get('packaging')).toBe('compose');
+    expect(params.get('cluster')).toBe('Enabling Platform');
+    // `SessionProvider` reads the same query string; the catalog must not strip `role`.
+    expect(params.get('role')).toBe('R1');
+  });
+
+  it('clears every filter from the empty state', async () => {
+    openAs('R1', '/catalog');
+    render(<App />);
+    await screen.findByText('Domain catalog');
+
+    fireEvent.change(screen.getByLabelText('Search catalog'), {
+      target: { value: 'nothing-matches' },
+    });
+    expect(
+      await screen.findByText(
+        'No entry matches this filter. Clear the filters to see the full catalog.',
+      ),
+    ).toBeDefined();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+
+    expect(await screen.findByText('13 shown')).toBeDefined();
+    expect((screen.getByLabelText('Search catalog') as HTMLInputElement).value).toBe('');
+  });
+
+  it('names each row action after the product it opens', async () => {
+    openAs('R1', '/catalog');
+    render(<App />);
+    await screen.findByText('Domain catalog');
+
+    // Six links announced as "Open" do not say where any of them goes.
+    const open = await screen.findByRole('link', { name: 'Open EspoCRM (D01-01)' });
+    expect(open.getAttribute('href')).toBe('/catalog/D01-01');
+  });
+
   it('reports a catalog that cannot be read and lists it when the operator retries', async () => {
     let attempts = 0;
     server.use(
@@ -214,6 +281,64 @@ describe('catalog reload receipt', () => {
     expect(within(receipt as HTMLElement).getByText('env')).toBeDefined();
   });
 
+  /**
+   * S-1 / S-2 — the coverage verdict on the receipt.
+   *
+   * A reload that leaves a declared product undeployable is not a success just because every file it
+   * read was well-formed: the receipt has to say how much of the catalogue is documented, which
+   * declarations were refused, and what the floor is measured against.
+   */
+  it('states coverage, the refused declarations and the floor beside the delta', async () => {
+    server.use(
+      http.post('/api/v1/catalog/reload', () =>
+        HttpResponse.json({
+          reloadedAt: '2026-10-21T09:00:00.000Z',
+          revision: 'f00dc0de',
+          entries: 6,
+          added: 3,
+          changed: 0,
+          removed: 0,
+          reconciled: [],
+          environment: { added: 0, changed: 0, removed: 0, refused: [], applied: [] },
+          invalid: [],
+          coverage: {
+            entries: 6,
+            deployments: 5,
+            declaredEnvironments: 3,
+            documentedEnvironments: 1,
+            refused: [{ key: 'D07-01', reason: 'no entry document for the declaration' }],
+            byClass: { native: 2, fa_header: 2, fa_delegated: 0, fa_gate: 1 },
+            nativeDeployments: 2,
+            floor: 6,
+            baseline: 12,
+            floorMet: false,
+            shortfall: 4,
+          },
+        }),
+      ),
+    );
+
+    openAs('R1', '/catalog');
+    render(<App />);
+    await screen.findByText('Domain catalog');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Reload from repository' }));
+
+    const receipt = (await screen.findByText(/Repository reloaded at revision f00dc0de/)).closest(
+      'div',
+    );
+    const scope = receipt as HTMLElement;
+    expect(within(scope).getByText('3 declared')).toBeDefined();
+    expect(within(scope).getByText('1 documented')).toBeDefined();
+    expect(within(scope).getByText('1 refused')).toBeDefined();
+    // The floor is stated against the entries, not hidden on another screen.
+    expect(within(scope).getByText('2 native of 6 required')).toBeDefined();
+    expect(within(scope).getByText(/5 deployments, shared instances counted once/)).toBeDefined();
+    // The refused declaration is named with its remedy rather than counted.
+    expect(within(scope).getByText('entry document missing')).toBeDefined();
+    expect(within(scope).getByText(/Refused: no entry document for the declaration/)).toBeDefined();
+  });
+
   it('says nothing moved when the projection already matched the revision', async () => {
     // An older API omits the environment half entirely; the receipt must still read as a success
     // rather than printing "Environment: undefined added".
@@ -292,17 +417,18 @@ describe('catalog entry actions', () => {
 
     await screen.findByRole('heading', { name: /EspoCRM/ });
 
-    // The pull consumes host bandwidth and disk, so a scoped reader is told who may run it.
+    // Preparing the images consumes host bandwidth, CPU and disk, so a scoped reader is told who
+    // may run it.
     const prefetch = await screen.findByRole('button', { name: /Prefetch images/ });
     expect(prefetch.hasAttribute('disabled')).toBe(true);
-    expect(prefetch.getAttribute('title')).toMatch(/R1 pre-pulls images/);
+    expect(prefetch.getAttribute('title')).toMatch(/R1 prepares images/);
 
     // No deploy link either: the badge states the rule instead of an action that would be refused.
     expect(screen.queryByRole('link', { name: /Deploy/ })).toBeNull();
     expect(screen.getByText('deploy: platform administrator')).toBeDefined();
   });
 
-  it('says the images are being pulled before the API answers', async () => {
+  it('says the images are being prepared before the API answers', async () => {
     let release: () => void = () => {};
     const gate = new Promise<void>((resolve) => {
       release = resolve;
@@ -330,7 +456,7 @@ describe('catalog entry actions', () => {
     expect(pending.hasAttribute('disabled')).toBe(true);
 
     release();
-    expect(await screen.findByText(/Pre-pulling the images for D01-01/)).toBeDefined();
+    expect(await screen.findByText(/Preparing the images for D01-01/)).toBeDefined();
   });
 
   it('reports a prefetch that the API refused', async () => {
@@ -354,7 +480,55 @@ describe('catalog entry actions', () => {
     expect(
       await screen.findByText('Pulling images needs the platform administrator'),
     ).toBeDefined();
-    expect(screen.queryByText(/Pre-pulling the images for D01-01/)).toBeNull();
+    expect(screen.queryByText(/Preparing the images for D01-01/)).toBeNull();
+  });
+
+  it('will not record a verification that changes nothing', async () => {
+    openAs('R1', '/catalog/D01-01');
+    render(<App />);
+    await screen.findByRole('heading', { name: /EspoCRM/ });
+
+    // FR-2.15: re-submitting the facts already on file would restart the review clock on nothing.
+    const submit = await screen.findByRole('button', { name: /Record verified review/ });
+    expect(submit.hasAttribute('disabled')).toBe(true);
+    expect(
+      screen.getByText('Change at least one fact before recording a verification.'),
+    ).toBeDefined();
+  });
+
+  it('records only the facts that changed', async () => {
+    openAs('R1', '/catalog/D01-01');
+    render(<App />);
+    await screen.findByRole('heading', { name: /EspoCRM/ });
+
+    fireEvent.change(screen.getByLabelText(/Session maximum/), { target: { value: '481' } });
+    fireEvent.click(await screen.findByRole('button', { name: /Record verified review/ }));
+
+    // The receipt names what was verified, so a review is auditable from the screen.
+    expect(await screen.findByText(/Verified: Session maximum/)).toBeDefined();
+  });
+
+  it('names the reviewer instead of showing their subject id in the receipt', async () => {
+    server.use(
+      http.patch('/api/v1/catalog/D01-01/integration-metadata', () => {
+        const entry = entryFor('D01-01');
+        // An older API stored the actor's subject id; the screen must not print a UUID as a person.
+        return HttpResponse.json({
+          ...entry,
+          integration: { ...entry.integration, verifiedBy: 'usr-sofia' },
+        });
+      }),
+    );
+
+    openAs('R1', '/catalog/D01-01');
+    render(<App />);
+    await screen.findByRole('heading', { name: /EspoCRM/ });
+
+    fireEvent.change(screen.getByLabelText(/Session maximum/), { target: { value: '481' } });
+    fireEvent.click(await screen.findByRole('button', { name: /Record verified review/ }));
+
+    expect(await screen.findByText(/Review recorded by Sofia Almeida/)).toBeDefined();
+    expect(screen.queryByText(/Review recorded by usr-sofia/)).toBeNull();
   });
 
   it('reports a review that the API refused', async () => {
@@ -372,6 +546,7 @@ describe('catalog entry actions', () => {
     render(<App />);
     await screen.findByRole('heading', { name: /EspoCRM/ });
 
+    fireEvent.change(screen.getByLabelText(/Session maximum/), { target: { value: '481' } });
     fireEvent.click(await screen.findByRole('button', { name: /Record verified review/ }));
 
     expect(await screen.findByText('Recording a review needs metadata.manage')).toBeDefined();
@@ -394,6 +569,7 @@ describe('catalog entry actions', () => {
     render(<App />);
     await screen.findByRole('heading', { name: /EspoCRM/ });
 
+    fireEvent.change(screen.getByLabelText(/Session maximum/), { target: { value: '481' } });
     fireEvent.click(await screen.findByRole('button', { name: /Record verified review/ }));
 
     const pending = await screen.findByRole('button', { name: 'Recording…' });
@@ -424,6 +600,7 @@ describe('catalog entry actions', () => {
 
     // Recording a review invalidates the entry, so the next read is the one that fails.
     rereadFails = true;
+    fireEvent.change(screen.getByLabelText(/Session maximum/), { target: { value: '481' } });
     fireEvent.click(await screen.findByRole('button', { name: /Record verified review/ }));
 
     expect(await screen.findByText('Showing the last data that loaded')).toBeDefined();
@@ -481,7 +658,7 @@ describe('catalog entry actions', () => {
     expect(screen.getByText('None')).toBeDefined();
     // A digest that is not a sha256 of 64 hex characters can never match a registry manifest.
     expect(screen.getByText(/Not a sha256:<64 hex> digest/)).toBeDefined();
-    expect(screen.queryByText(/This digest is what a deployment pins/)).toBeNull();
+    expect(screen.queryByText(/The tag is for humans/)).toBeNull();
   });
 
   it('confirms a digest that a deployment can actually pin', async () => {
@@ -498,7 +675,7 @@ describe('catalog entry actions', () => {
     render(<App />);
     await screen.findByRole('heading', { name: /EspoCRM/ });
 
-    expect(await screen.findByText(/This digest is what a deployment pins/)).toBeDefined();
+    expect(await screen.findByText(/The tag is for humans/)).toBeDefined();
     expect(screen.getByText(pinned)).toBeDefined();
   });
 
@@ -525,14 +702,17 @@ describe('catalog entry actions', () => {
     fireEvent.change(select, { target: { value: 'none' } });
 
     // The verdict, not the label: the operator sees the consequence before submitting.
-    expect(await screen.findByText('Write-ineligible')).toBeDefined();
-    expect(screen.getByText(/Unrecorded change/)).toBeDefined();
+    expect(await screen.findByText('What this granularity costs')).toBeDefined();
+    expect(screen.getAllByText('write-ineligible').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('workflow-ineligible').length).toBeGreaterThan(0);
+    // The receipt names the fact that would be written, so the button is not a blind action.
+    expect(screen.getByText(/Recording: Credential granularity/)).toBeDefined();
 
     // Back to the recorded value and the draft is no longer a pending change.
     fireEvent.change(select, { target: { value: 'scoped' } });
 
-    await waitFor(() => expect(screen.queryByText(/Unrecorded change/)).toBeNull());
-    expect(screen.queryByText('Write-ineligible')).toBeNull();
+    await waitFor(() => expect(screen.queryByText(/Recording: Credential granularity/)).toBeNull());
+    expect(screen.queryByText('What this granularity costs')).toBeNull();
   });
 });
 
@@ -862,5 +1042,79 @@ describe('scaffold draft tab', () => {
     fireEvent.click(within(panel).getByRole('button', { name: 'Retry' }));
 
     expect(await within(panel).findByText('Generated artefacts')).toBeDefined();
+  });
+});
+
+/**
+ * FR-1.9 — the per-volume quota is the number a deployment is refused against, so the two shapes an
+ * entry can take here are the two the screen has to keep apart: nothing declared at all, and a total
+ * that exceeds the disk reservation. The second used to be rendered as quietly as any other figure,
+ * which is how "declared 40 GB on a 20 GB shape" reached a pre-flight refusal with no warning.
+ */
+describe('entry detail and its volume declaration', () => {
+  it('says an entry declares no data volume instead of showing an empty list', async () => {
+    server.use(
+      http.get('/api/v1/catalog/D01-01', () => {
+        const entry = entryFor('D01-01');
+        return HttpResponse.json({ ...entry, volumes: [] });
+      }),
+    );
+
+    openAs('R1', '/catalog/D01-01');
+    render(<App />);
+    await screen.findByRole('heading', { name: /EspoCRM/ });
+
+    expect(
+      screen.getByText('This entry declares no data volume, so a backup holds the database only.'),
+    ).toBeDefined();
+    // A `0 B of 20 GB reserved` total would read as a shape with room to spare; nothing is claimed.
+    expect(screen.queryByText('Declared total')).toBeNull();
+  });
+
+  it('marks a declared volume total above the disk reservation as the refusal it is', async () => {
+    server.use(
+      http.get('/api/v1/catalog/D01-01', () => {
+        const entry = entryFor('D01-01');
+        return HttpResponse.json({
+          ...entry,
+          volumes: [{ name: 'app-data', mountPath: '/var/www/html/data', quotaMb: 40_960 }],
+        });
+      }),
+    );
+
+    openAs('R1', '/catalog/D01-01');
+    render(<App />);
+    await screen.findByRole('heading', { name: /EspoCRM/ });
+
+    const declared = screen.getByText('Declared total').closest('li');
+    const total = declared?.querySelector('span.font-mono');
+    // 40 GB declared against a 20 GB shape: the pre-flight refuses this, so the total carries the
+    // refusal colour rather than the muted grey of every other figure on the panel.
+    expect(total?.textContent).toBe('40.0 GB of 20.0 GB reserved');
+    expect(total?.className).toContain('text-danger');
+    // The colour is not the whole message: the panel states the refusal and what clears it, so the
+    // operator does not learn it from the deploy wizard.
+    expect(screen.getByText('Volumes exceed the disk reservation')).toBeDefined();
+    expect(screen.getByText(/A deployment is refused until a quota is reduced/)).toBeDefined();
+  });
+
+  it('offers a way back to the catalog from an entry that does not exist', async () => {
+    server.use(
+      http.get('/api/v1/catalog/D99-99', () =>
+        problemResponse(
+          404,
+          'The resource does not exist',
+          'No catalog entry D99-99.',
+          'NOT_FOUND',
+        ),
+      ),
+    );
+
+    openAs('R1', '/catalog/D99-99');
+    render(<App />);
+
+    // Retry on a key that does not exist is a dead end; the error branch keeps the way back.
+    const back = await screen.findByRole('link', { name: 'Back to catalog' });
+    expect(back.getAttribute('href')).toBe('/catalog');
   });
 });

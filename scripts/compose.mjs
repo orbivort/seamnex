@@ -2,12 +2,14 @@
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { ensureEdgeCertificate } from './lib/edge-cert.mjs';
 import {
   ensureKeycloakFiles,
   kcBootstrapDecision,
   stackDeclaresKeycloak,
   stackDeclaresService,
 } from './lib/kc-admin.mjs';
+import { pnpmCommandLine } from './lib/pnpm.mjs';
 import { ensureRootKey } from './lib/root-key.mjs';
 import { ensureRuntimeDirs } from './lib/runtime-dirs.mjs';
 
@@ -44,26 +46,6 @@ const REALM_IMPORT_SERVICE = 'keycloak-config-cli';
 // from the example exactly as `pnpm dev` does: `pnpm dev:stack` has to work on first run too.
 if (!existsSync(envPath)) copyFileSync(join(root, '.env.example'), envPath);
 
-// Every credential file the API container bind-mounts has to exist *before* `up`: Docker does not
-// treat a missing bind-mount source as an error, it creates a directory in its place, and the
-// container then dies in runc with "not a directory: Are you trying to mount a directory onto a
-// file". All three of these are mounted, and only the root key used to be created here — the two
-// Keycloak files were written by `pnpm kc:admin`, which the README says to run *after* the stack is
-// up, so a fresh clone could never start it.
-const log = (message) => process.stdout.write(`[compose] ${message}\n`);
-try {
-  ensureRootKey(root, log);
-  ensureKeycloakFiles(root, log);
-  // `pnpm dev:stack` starts the same API: without writable runtime directories the deploy job fails
-  // at "Resolve source" and 4A.8 refuses to commit instance definitions.
-  ensureRuntimeDirs(root, log);
-} catch (error) {
-  // A path that cannot be repaired is a `[compose]` line, not a stack trace: the message already
-  // says what to move aside, and reaching Docker would only bury it under a runc error.
-  process.stderr.write(`[compose] ${error instanceof Error ? error.message : String(error)}\n`);
-  process.exit(1);
-}
-
 const leading = [];
 const trailing = [];
 const forwarded = process.argv.slice(2);
@@ -78,6 +60,39 @@ for (let index = 0; index < forwarded.length; index += 1) {
   } else {
     trailing.push(arg);
   }
+}
+
+// Every credential file the API container bind-mounts has to exist *before* `up`: Docker does not
+// treat a missing bind-mount source as an error, it creates a directory in its place, and the
+// container then dies in runc with "not a directory: Are you trying to mount a directory onto a
+// file". All three of these are mounted, and only the root key used to be created here — the two
+// Keycloak files were written by `pnpm kc:admin`, which the README says to run *after* the stack is
+// up, so a fresh clone could never start it.
+const log = (message) => process.stdout.write(`[compose] ${message}\n`);
+try {
+  ensureRootKey(root, log);
+  ensureKeycloakFiles(root, log);
+  // `pnpm dev:stack` starts the same API: without writable runtime directories the deploy job fails
+  // at "Resolve source" and 4A.8 refuses to commit instance definitions.
+  ensureRuntimeDirs(root, log);
+  // The edge mounts `temp/certs` to terminate product TLS with the development leaf
+  // (`docker/traefik/dynamic/tls.yml`). Minting it here is what makes `pnpm dev:stack` on a fresh
+  // clone serve a trusted product URL before any dev server has run; a missing source would
+  // otherwise be created as an empty directory, which the mint then cannot replace.
+  // `--env-file` hands `.env` to Docker, not to this process, and the leaf carries
+  // `*.<SEAMNEX_INGRESS_DOMAIN>`: the mint has to see the same value the API will, or it mints a
+  // wildcard for a suffix nothing is served under.
+  const configuredDomain = readRootEnv().SEAMNEX_INGRESS_DOMAIN;
+  if (configuredDomain !== undefined && process.env.SEAMNEX_INGRESS_DOMAIN === undefined) {
+    process.env.SEAMNEX_INGRESS_DOMAIN = configuredDomain;
+  }
+  // A refusal is reported and the start continues — the stack is usable without it.
+  await ensureEdgeCertificate(root, log);
+} catch (error) {
+  // A path that cannot be repaired is a `[compose]` line, not a stack trace: the message already
+  // says what to move aside, and reaching Docker would only bury it under a runc error.
+  process.stderr.write(`[compose] ${error instanceof Error ? error.message : String(error)}\n`);
+  process.exit(1);
 }
 
 const args = ['compose', '--env-file', envPath, '-f', composeFile, ...leading, ...trailing];
@@ -141,11 +156,12 @@ function applySchema() {
     return false;
   }
 
-  // `pnpm` is a .cmd shim on Windows, so it needs a shell there; `docker` does not and keeps argv.
-  const migrated = spawnSync('pnpm', ['--filter', '@seamnex/db', 'migrate:up'], {
+  // `pnpm` is a .cmd shim on Windows, so it needs a shell there; the command line comes from
+  // `lib/pnpm.mjs` rather than an argv array beside `shell: true` (DEP0190). `docker` keeps argv.
+  const migrated = spawnSync(pnpmCommandLine(['--filter', '@seamnex/db', 'migrate:up']), {
     cwd: root,
     stdio: 'inherit',
-    shell: process.platform === 'win32',
+    shell: true,
     env: {
       ...process.env,
       DATABASE_URL: readEnvValue('DATABASE_URL') ?? process.env.DATABASE_URL ?? '',

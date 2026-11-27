@@ -1,4 +1,5 @@
 import type { ExecResult } from './exec';
+import { BUSYBOX_IMAGE } from '../docker/images.generated';
 
 /**
  * 4D.5 — can the *product* reach the identity provider?
@@ -19,7 +20,7 @@ import type { ExecResult } from './exec';
  * positional parameters, so a slug or an alias cannot become shell syntax.
  */
 
-const PROBE_IMAGE = 'busybox:1.36';
+const PROBE_IMAGE = BUSYBOX_IMAGE;
 
 const PROBE_SCRIPT = [
   'out=$(wget -S -T 5 -O /dev/null "http://$1:$2$3" 2>&1)',

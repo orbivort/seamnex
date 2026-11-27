@@ -1,7 +1,14 @@
 import { readFileSync, statfsSync } from 'node:fs';
 import { cpus, freemem, totalmem } from 'node:os';
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { admissionVerdict, type CapacitySnapshot, type ForecastPoint } from '@seamnex/domain';
+import {
+  admissionVerdict,
+  collectionScopeArrays,
+  type CapacitySnapshot,
+  type CapacityThresholds,
+  type CollectionScope,
+  type ForecastPoint,
+} from '@seamnex/domain';
 import { withTransaction } from '@seamnex/db';
 import type { Pool } from 'pg';
 import { PG_POOL } from '../../database/database.module';
@@ -12,6 +19,17 @@ import type { AdmissionDecision, CapacityService, ResourceRequest } from './capa
 
 const FORECAST_DAYS = 14;
 const MIB = 1024 * 1024;
+
+/**
+ * Last-resort thresholds when the `settings` rows are missing (FR-4.5). Same numbers the migration
+ * seeds and the access-control defaults declare; repeated here because a broken settings read must not
+ * make the alerting pass throw on a fresh database that has not been migrated to 0036 yet.
+ */
+const DEFAULT_THRESHOLDS: CapacityThresholds = {
+  cpuPercent: 75,
+  memoryPercent: 90,
+  diskPercent: 85,
+};
 
 type SnapshotRow = { ts: Date; host: Record<string, unknown>; per_instance: unknown };
 
@@ -51,17 +69,52 @@ export class PostgresCapacityService implements CapacityService {
    * the wizard's admission step and `admit()` all agree on a fresh install instead of the console
    * sitting on "Waiting for the capacity snapshot" forever.
    */
-  async snapshot(): Promise<CapacitySnapshot> {
+  async snapshot(scope?: CollectionScope): Promise<CapacitySnapshot> {
     const result = await this.pool.query<SnapshotRow>(
       `SELECT ts, host, per_instance FROM capacity_snapshot ORDER BY ts DESC LIMIT 1`,
     );
     const row = result.rows[0];
     if (row !== undefined)
-      return { ...(row.per_instance as CapacitySnapshot), ts: row.ts.toISOString() };
+      return this.applyScope(
+        { ...(row.per_instance as CapacitySnapshot), ts: row.ts.toISOString() },
+        scope,
+      );
 
     const recorded = await this.record();
     if (recorded === null) throw this.empty();
-    return recorded;
+    return this.applyScope(recorded, scope);
+  }
+
+  /**
+   * ADR-BE-44: the stored document is platform-wide on purpose — one sampler writes it, and every
+   * reader must see the same host figures. The scope is applied on the way out, to the per-instance
+   * table only, so the verdict and the totals still describe the machine the operator is asking
+   * about.
+   */
+  private async applyScope(
+    document: CapacitySnapshot,
+    scope: CollectionScope | undefined,
+  ): Promise<CapacitySnapshot> {
+    if (scope === undefined || scope.kind === 'platform') return document;
+    const visible = await this.visibleInstanceIds(scope);
+    return {
+      ...document,
+      instanceUsage: document.instanceUsage.filter((row) => visible.has(row.instanceId)),
+    };
+  }
+
+  private async visibleInstanceIds(scope: CollectionScope): Promise<Set<string>> {
+    if (scope.kind === 'platform') return new Set<string>();
+    const arrays = collectionScopeArrays(scope);
+    const result = await this.pool.query<{ id: string }>(
+      `SELECT i.id
+         FROM instance i
+         JOIN catalog_entry c ON c.key = i.entry_key
+        WHERE i.deleted_at IS NULL
+          AND (c.domain = ANY($1::text[]) OR i.id = ANY($2::uuid[]))`,
+      [arrays.domains, arrays.instanceIds],
+    );
+    return new Set(result.rows.map((row) => row.id));
   }
 
   /**
@@ -119,6 +172,9 @@ export class PostgresCapacityService implements CapacityService {
       diskPath: measured.diskPath,
       diskAvailableMb: measured.diskAvailableMb,
       memoryAvailableMb: measured.memoryAvailableMb,
+      // Echoed so the board can draw the same bands the alert pass enforces without needing
+      // `settings.view` — `capacity.view` and `settings.view` are different capabilities.
+      thresholds: settings.thresholds,
       instanceUsage: await this.instanceUsage(),
       verdict: {
         admissible: outcome.admissible,
@@ -145,10 +201,10 @@ export class PostgresCapacityService implements CapacityService {
    * the observed 14-day slope and adds 1 % per day of data growth. It is labelled as a placeholder
    * in the response rather than being presented as a model.
    */
-  async forecast(): Promise<ForecastPoint[]> {
+  async forecast(scope?: CollectionScope): Promise<ForecastPoint[]> {
     let snapshot: CapacitySnapshot;
     try {
-      snapshot = await this.snapshot();
+      snapshot = await this.snapshot(scope);
     } catch {
       const decision = await this.admit({ resources: { cpuMilli: 0, memoryMb: 0, diskMb: 0 } });
       const cpu = percent(decision.used.cpuMilli, decision.limits.cpuMilli);
@@ -381,16 +437,50 @@ export class PostgresCapacityService implements CapacityService {
     }
   }
 
-  private async settings(): Promise<{ oversubscriptionFactor: number }> {
-    const result = await this.pool.query<{ value: unknown }>(
-      `SELECT value FROM settings WHERE key = 'oversubscription_factor'`,
+  private async settings(): Promise<{
+    oversubscriptionFactor: number;
+    thresholds: CapacityThresholds;
+  }> {
+    const result = await this.pool.query<{ key: string; value: unknown }>(
+      `SELECT key, value FROM settings
+        WHERE key IN (
+          'oversubscription_factor',
+          'capacity_cpu_alert_percent',
+          'capacity_memory_alert_percent',
+          'capacity_disk_alert_percent'
+        )`,
     );
-    const raw = result.rows[0]?.value;
-    const factor = typeof raw === 'number' ? raw : Number(raw);
-    return { oversubscriptionFactor: Number.isFinite(factor) && factor >= 1 ? factor : 1.25 };
+    const read = new Map(result.rows.map((row) => [row.key, row.value]));
+    const number = (key: string, fallback: number): number => {
+      const raw = read.get(key);
+      const parsed = typeof raw === 'number' ? raw : Number(raw);
+      // A factor below 1 (or a percentage below 1) cannot be honoured: fall back rather than
+      // clamping to 1, which would silently turn a typo into a policy decision.
+      return Number.isFinite(parsed) && parsed >= 1 ? parsed : fallback;
+    };
+    // FR-4.5: the board and `notification.evaluate()` read these same three rows, which is what stops
+    // the screen from describing thresholds no alert enforces.
+    return {
+      oversubscriptionFactor: number('oversubscription_factor', 1.25),
+      thresholds: {
+        cpuPercent: number('capacity_cpu_alert_percent', DEFAULT_THRESHOLDS.cpuPercent),
+        memoryPercent: number('capacity_memory_alert_percent', DEFAULT_THRESHOLDS.memoryPercent),
+        diskPercent: number('capacity_disk_alert_percent', DEFAULT_THRESHOLDS.diskPercent),
+      },
+    };
   }
 
-  /** Per-instance allocation for the capacity board: the reservation, labelled with the product. */
+  /**
+   * FR-4.5 — per instance: what it was **given** and what it is **using**.
+   *
+   * Both halves are now real. The declared shape is the admission ledger; the consumed figures come
+   * from the newest `instance_usage_sample`, joined in one statement with a `LATERAL` read so the
+   * board is one query rather than a fan-out per instance.
+   *
+   * A sample older than two sampling intervals is treated as absent. The sampler can stop (role
+   * disabled, daemon gone), and a board that kept showing a two-hour-old 40 % as current would be
+   * making exactly the kind of claim this change removes. Absent, not zero: the UI renders a dash.
+   */
   private async instanceUsage(): Promise<CapacitySnapshot['instanceUsage']> {
     const result = await this.pool.query<{
       id: string;
@@ -399,25 +489,55 @@ export class PostgresCapacityService implements CapacityService {
       slug: string;
       state: string;
       resources: { cpu?: number; memoryMb?: number; diskMb?: number } | null;
+      sampled_at: Date | null;
+      cpu_milli: number | null;
+      memory_mb: number | null;
+      disk_mb: number | null;
+      containers: number | null;
     }>(
       `SELECT i.id, i.entry_key, coalesce(i.payload->>'product', e.product) AS product,
-              i.slug, i.state, i.payload->'resources' AS resources
+              i.slug, i.state, i.payload->'resources' AS resources,
+              s.sampled_at, s.cpu_milli, s.memory_mb, s.disk_mb, s.containers
          FROM instance i
          LEFT JOIN catalog_entry e ON e.key = i.entry_key
+         LEFT JOIN LATERAL (
+           SELECT u.sampled_at, u.cpu_milli, u.memory_mb, u.disk_mb, u.containers
+             FROM instance_usage_sample u
+            WHERE u.instance_id = i.id
+            ORDER BY u.sampled_at DESC
+            LIMIT 1
+         ) s ON true
         WHERE i.deleted_at IS NULL
         ORDER BY i.created_at`,
     );
-    return result.rows.map((row) => ({
-      instanceId: row.id,
-      entryKey: row.entry_key,
-      product: row.product ?? row.entry_key,
-      slug: row.slug,
-      state: row.state,
-      cpuCores: row.resources?.cpu ?? 0,
-      memoryMb: row.resources?.memoryMb ?? 0,
-      diskMb: row.resources?.diskMb ?? 0,
-      diskQuotaMb: row.resources?.diskMb ?? 0,
-    }));
+
+    const maxAgeMs = this.config.SEAMNEX_CAPACITY_SAMPLE_INTERVAL_MS * 2;
+    return result.rows.map((row) => {
+      const sampledAt = row.sampled_at ?? null;
+      const fresh =
+        sampledAt !== null &&
+        (row.containers ?? 0) > 0 &&
+        Date.now() - sampledAt.getTime() <= maxAgeMs;
+      return {
+        instanceId: row.id,
+        entryKey: row.entry_key,
+        product: row.product ?? row.entry_key,
+        slug: row.slug,
+        state: row.state,
+        cpuCores: row.resources?.cpu ?? 0,
+        memoryMb: row.resources?.memoryMb ?? 0,
+        diskMb: row.resources?.diskMb ?? 0,
+        diskQuotaMb: row.resources?.diskMb ?? 0,
+        ...(fresh
+          ? {
+              cpuConsumedMilli: row.cpu_milli ?? 0,
+              memoryConsumedMb: row.memory_mb ?? 0,
+              diskConsumedMb: row.disk_mb ?? 0,
+              measuredAt: sampledAt.toISOString(),
+            }
+          : { measuredAt: null }),
+      };
+    });
   }
 
   /**

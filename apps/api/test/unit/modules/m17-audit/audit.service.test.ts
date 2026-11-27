@@ -16,14 +16,27 @@ function metrics() {
   return { auditAppendSeconds: { labels: vi.fn(() => ({ observe })) }, observe };
 }
 
+/** The anchor signer is a seam here: the chain tests are about ordering, not cryptography. */
+function signer() {
+  return {
+    sign: vi.fn(async () => 'ed25519:test-key:c2ln'),
+    describe: vi.fn(async () => ({
+      algorithm: 'ed25519' as const,
+      keyId: 'test-key',
+      publicKey: 'pem',
+    })),
+  };
+}
+
 function setup(routes: Parameters<typeof fakeDb>[0] = []) {
   const db = fakeDb(routes);
   h.withTransaction.mockImplementation(async (_pool: unknown, fn: (tx: unknown) => unknown) =>
     fn(db.client),
   );
   const m = metrics();
-  const service = new PostgresAuditService(db.pool, m as never);
-  return { db, m, service };
+  const s = signer();
+  const service = new PostgresAuditService(db.pool, m as never, s as never);
+  return { db, m, service, signer: s };
 }
 
 const INPUT = {
@@ -121,7 +134,7 @@ describe('append', () => {
     h.withTransaction.mockImplementation(async (_pool: unknown, fn: (tx: unknown) => unknown) =>
       fn(db.client),
     );
-    const service = new PostgresAuditService(db.pool, metrics() as never);
+    const service = new PostgresAuditService(db.pool, metrics() as never, signer() as never);
 
     await expect(service.append(INPUT)).rejects.toMatchObject({
       code: 'AUDIT_UNAVAILABLE',
@@ -134,7 +147,7 @@ describe('append', () => {
     h.withTransaction.mockImplementation(async (_pool: unknown, fn: (tx: unknown) => unknown) =>
       fn(db.client),
     );
-    const service = new PostgresAuditService(db.pool, metrics() as never);
+    const service = new PostgresAuditService(db.pool, metrics() as never, signer() as never);
 
     await expect(service.append(INPUT)).rejects.toMatchObject({ code: 'AUDIT_UNAVAILABLE' });
   });
@@ -219,34 +232,179 @@ describe('verify', () => {
 });
 
 describe('anchor', () => {
-  it('writes the newest sequence before the given day', async () => {
-    const { db, service } = setup([
-      ['FROM audit_event WHERE ts <', [{ seq: '99', hash: 'h99' }]],
+  it('signs the last sequence inside the closed day and writes it once', async () => {
+    const {
+      db,
+      service,
+      signer: s,
+    } = setup([
+      ['WHERE ts >= $1 AND ts < $2', [{ seq: '99', hash: 'h99' }]],
       ['INSERT INTO audit_anchor', []],
+      [
+        'FROM audit_anchor WHERE day',
+        [
+          {
+            day: '2026-03-04',
+            last_seq: '99',
+            last_hash: 'h99',
+            signature: 'ed25519:test-key:c2ln',
+            stored_at: new Date('2026-03-05T00:01:00.000Z'),
+          },
+        ],
+      ],
     ]);
 
-    await service.anchor(new Date('2026-03-04T12:00:00Z'));
+    await expect(service.anchor(new Date('2026-03-04T12:00:00Z'))).resolves.toEqual({
+      day: '2026-03-04',
+      lastSeq: '99',
+      lastHash: 'h99',
+      signature: 'ed25519:test-key:c2ln',
+      storedAt: '2026-03-05T00:01:00.000Z',
+    });
+
+    // NFR-4.10: the signature covers the row's own fields, and it is computed before the insert.
+    expect(s.sign).toHaveBeenCalledWith({ day: '2026-03-04', lastSeq: '99', lastHash: 'h99' });
 
     const insert = db.calls.find((call) => call.sql.includes('INSERT INTO audit_anchor'));
-    expect(insert?.params).toEqual(['2026-03-04', '99', 'h99']);
-    expect(insert?.sql).toContain('WHERE audit_anchor.last_seq < EXCLUDED.last_seq');
+    expect(insert?.params).toEqual(['2026-03-04', '99', 'h99', 'ed25519:test-key:c2ln']);
+    /*
+     * Append-only: `0010_grants` revokes UPDATE on this table, so an upsert was only ever legal for
+     * the owner role — and an anchor that can be advanced is not an anchor.
+     */
+    expect(insert?.sql).toContain('ON CONFLICT (day) DO NOTHING');
+    expect(insert?.sql).not.toContain('DO UPDATE');
   });
 
-  it('does nothing when no event precedes the day', async () => {
-    const { db, service } = setup([['FROM audit_event WHERE ts <', []]]);
+  it('returns the row that already exists for the day rather than the one it computed', async () => {
+    const { service } = setup([
+      ['WHERE ts >= $1 AND ts < $2', [{ seq: '99', hash: 'h99' }]],
+      ['INSERT INTO audit_anchor', []],
+      [
+        'FROM audit_anchor WHERE day',
+        [
+          {
+            day: '2026-03-04',
+            last_seq: '50',
+            last_hash: 'h50',
+            signature: 'ed25519:older-key:cnlp',
+            stored_at: new Date('2026-03-04T00:01:00.000Z'),
+          },
+        ],
+      ],
+    ]);
 
-    await expect(service.anchor()).resolves.toBeUndefined();
+    await expect(service.anchor(new Date('2026-03-04T12:00:00Z'))).resolves.toMatchObject({
+      lastSeq: '50',
+      signature: 'ed25519:older-key:cnlp',
+    });
+  });
+
+  it('anchors nothing when the day holds no events', async () => {
+    const { db, service, signer: s } = setup([['WHERE ts >= $1 AND ts < $2', []]]);
+
+    await expect(service.anchor()).resolves.toBeNull();
+    expect(s.sign).not.toHaveBeenCalled();
     expect(db.calls.some((call) => call.sql.includes('INSERT INTO audit_anchor'))).toBe(false);
   });
 
-  it('defaults the day to today', async () => {
-    const { db, service } = setup([
-      ['FROM audit_event WHERE ts <', [{ seq: '1', hash: 'h' }]],
-      ['INSERT INTO audit_anchor', []],
+  it('bounds the day with an explicit half-open window', async () => {
+    const { db, service } = setup([['WHERE ts >= $1 AND ts < $2', []]]);
+
+    await service.anchor(new Date('2026-03-04T12:00:00Z'));
+
+    expect(db.calls[0]?.params).toEqual(['2026-03-04T00:00:00.000Z', '2026-03-05T00:00:00.000Z']);
+  });
+});
+
+/**
+ * FR-1.35 — the anchor export is what the platform recovery set carries. Its only obligations are
+ * to keep the day as a date string, to serialise both stored timestamps as ISO instants, and to
+ * report a chain with no events as an absent head rather than as an empty one.
+ */
+describe('exportAnchors', () => {
+  it('returns every anchor and the chain head with ISO timestamps', async () => {
+    const { service } = setup([
+      [
+        'FROM audit_anchor ORDER BY day',
+        [
+          {
+            day: '2026-11-14',
+            last_seq: '41',
+            last_hash: 'h41',
+            signature: 'sig-41',
+            stored_at: new Date('2026-11-14T00:05:00.000Z'),
+          },
+          {
+            day: '2026-11-15',
+            last_seq: '42',
+            last_hash: 'h42',
+            signature: null,
+            stored_at: new Date('2026-11-15T00:05:00.000Z'),
+          },
+        ],
+      ],
+      [
+        'FROM audit_event ORDER BY seq DESC',
+        [{ seq: '42', hash: 'h42', ts: new Date('2026-11-15T09:30:00.000Z') }],
+      ],
     ]);
 
-    await service.anchor();
+    await expect(service.exportAnchors()).resolves.toEqual({
+      anchors: [
+        {
+          day: '2026-11-14',
+          lastSeq: '41',
+          lastHash: 'h41',
+          signature: 'sig-41',
+          storedAt: '2026-11-14T00:05:00.000Z',
+        },
+        {
+          day: '2026-11-15',
+          lastSeq: '42',
+          lastHash: 'h42',
+          signature: null,
+          storedAt: '2026-11-15T00:05:00.000Z',
+        },
+      ],
+      // NFR-4.10: the public key travels with the anchors, so the export is verifiable on its own.
+      signing: { algorithm: 'ed25519', keyId: 'test-key', publicKey: 'pem' },
+      chainHead: { seq: '42', hash: 'h42', ts: '2026-11-15T09:30:00.000Z' },
+    });
+  });
 
-    expect(String(db.calls[0]?.params[0])).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  it('reports no chain head on a chain that has no events yet', async () => {
+    const { db, service } = setup([
+      ['FROM audit_anchor ORDER BY day', []],
+      ['FROM audit_event ORDER BY seq DESC', []],
+    ]);
+
+    await expect(service.exportAnchors()).resolves.toEqual({
+      anchors: [],
+      signing: { algorithm: 'ed25519', keyId: 'test-key', publicKey: 'pem' },
+      chainHead: null,
+    });
+    // The day is formatted in SQL so the export never reinterprets a date as a local instant.
+    expect(db.calls[0]?.sql).toContain("to_char(day, 'YYYY-MM-DD')");
+  });
+});
+
+/**
+ * FR-1.36 — the restore compares its own row at the exported head against the exported hash. The
+ * lookup stays in this module because `audit_event` is its table.
+ */
+describe('headHash', () => {
+  it('returns the hash recorded at the sequence', async () => {
+    const { db, service } = setup([['FROM audit_event WHERE seq = $1', [{ hash: 'h42' }]]]);
+
+    await expect(service.headHash('42')).resolves.toBe('h42');
+    // The parameter is cast: an untyped one resolves to text and never matches the bigint column.
+    expect(db.calls[0]?.sql).toContain('$1::bigint');
+    expect(db.calls[0]?.params).toEqual(['42']);
+  });
+
+  it('answers null for a sequence the restored chain does not contain', async () => {
+    const { service } = setup([['FROM audit_event WHERE seq = $1', []]]);
+
+    await expect(service.headHash('999')).resolves.toBeNull();
   });
 });

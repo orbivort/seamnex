@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ExecResult } from '../../../../src/common/exec/exec';
-import { describeProbe, probeProductHttp } from '../../../../src/common/exec/http-probe';
+import {
+  describeProbe,
+  installerTarget,
+  probeProductHttp,
+} from '../../../../src/common/exec/http-probe';
 
 /** The `docker` CLI runner the probe accepts, named so the mock carries a real signature. */
 type RunCli = (file: string, args: readonly string[], timeoutMs: number) => Promise<ExecResult>;
@@ -30,7 +34,7 @@ describe('probeProductHttp', () => {
     const runCli = runner({ code: 0, stdout: 'HTTP 200\n' });
     const result = await probeProductHttp({ ...INPUT, runCli });
 
-    expect(result).toEqual({ ok: true, statusLine: 'HTTP 200' });
+    expect(result).toEqual({ ok: true, statusLine: 'HTTP 200', installer: null });
 
     const [file, args, timeout] = runCli.mock.calls[0] as [string, string[], number];
     expect(file).toBe('docker');
@@ -39,7 +43,7 @@ describe('probeProductHttp', () => {
       '--rm',
       '--network',
       'seamnex-inst-crm',
-      'busybox:1.36',
+      'busybox:1.38.0@sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4',
       'sh',
     ]);
     expect(args.slice(-3)).toEqual(['seamnex-probe', 'crm', '8080']);
@@ -56,6 +60,7 @@ describe('probeProductHttp', () => {
     expect(await probeProductHttp({ ...INPUT, runCli })).toEqual({
       ok: false,
       statusLine: 'no HTTP answer',
+      installer: null,
     });
   });
 
@@ -67,21 +72,74 @@ describe('probeProductHttp', () => {
 
   it('treats a probe that cannot run as "did not answer", not a crash of the caller', async () => {
     const runCli = vi.fn().mockRejectedValue(new Error('Cannot connect to the Docker daemon'));
-    expect(await probeProductHttp({ ...INPUT, runCli })).toEqual({ ok: false, statusLine: '' });
+    expect(await probeProductHttp({ ...INPUT, runCli })).toEqual({
+      ok: false,
+      statusLine: '',
+      installer: null,
+    });
   });
 
   it('returns an empty status line when the tool printed nothing', async () => {
     const runCli = runner({ code: 0, stdout: '' });
-    expect(await probeProductHttp({ ...INPUT, runCli })).toEqual({ ok: true, statusLine: '' });
+    expect(await probeProductHttp({ ...INPUT, runCli })).toEqual({
+      ok: true,
+      statusLine: '',
+      installer: null,
+    });
+  });
+});
+
+describe('installerTarget', () => {
+  it('names a first-boot installer, whatever form the Location takes', () => {
+    // EspoCRM answers a bare relative `install/`; OrangeHRM a path with its wizard behind it; the
+    // absolute form is what a product behind a proxy sends.
+    expect(installerTarget('install/')).toBe('install/');
+    expect(installerTarget('/installer/index.php/welcome')).toBe('/installer/index.php/welcome');
+    expect(installerTarget('https://h/wp-admin/install.php')).toBe(
+      'https://h/wp-admin/install.php',
+    );
+    expect(installerTarget('/installation/index.php')).toBe('/installation/index.php');
+  });
+
+  it('leaves an ordinary redirect alone', () => {
+    for (const location of [
+      '/web/index.php/auth/login',
+      '/login',
+      '/setup',
+      '/sites/installed',
+      '',
+    ]) {
+      expect(installerTarget(location)).toBeNull();
+    }
+  });
+});
+
+describe('probeProductHttp, when the product answers with its installer', () => {
+  it('reports the target as a second line, so "answered" and "installed" stay two facts', async () => {
+    const runCli = runner({ code: 0, stdout: 'HTTP 302\nLOCATION /installer/index.php/welcome\n' });
+
+    expect(await probeProductHttp({ ...INPUT, runCli })).toEqual({
+      ok: true,
+      statusLine: 'HTTP 302',
+      installer: '/installer/index.php/welcome',
+    });
+  });
+
+  it('keeps the installer out of the status line', async () => {
+    const runCli = runner({ code: 0, stdout: 'HTTP 302\nLOCATION install/\n' });
+    const result = await probeProductHttp({ ...INPUT, runCli });
+
+    expect(describeProbe(result)).toBe('HTTP 302');
+    expect(result.installer).toBe('install/');
   });
 });
 
 describe('describeProbe', () => {
   it('names an empty answer instead of leaving a blank cell', () => {
-    expect(describeProbe({ ok: false, statusLine: '' })).toBe('no HTTP answer');
+    expect(describeProbe({ ok: false, statusLine: '', installer: null })).toBe('no HTTP answer');
   });
 
   it('uses the status line when there is one', () => {
-    expect(describeProbe({ ok: true, statusLine: 'HTTP 302' })).toBe('HTTP 302');
+    expect(describeProbe({ ok: true, statusLine: 'HTTP 302', installer: null })).toBe('HTTP 302');
   });
 });

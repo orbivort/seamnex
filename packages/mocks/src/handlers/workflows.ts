@@ -22,7 +22,17 @@ function targetInstanceIds(writeTargets: Workflow['writeTargets']): string[] {
     .map((instance) => instance.id);
 }
 
-/** FR-5.9: authority follows the write targets, not the workflow's existence. */
+/**
+ * FR-5.9: authority follows the write targets, not the workflow's existence.
+ *
+ * The API enforces the same rule through `@seamnex/domain`'s `workflowWriteAuthority`, on role
+ * bindings, catalog domains and live break-glass elevations. This mock keeps a role-and-entitlement
+ * approximation for two reasons: it has no domain vocabulary (an `instance` fixture carries entry
+ * keys, not a domain), and the console has no elevation picker, so an R1 there stands in for "R1
+ * holding an active elevation". A screen that renders the *refusal* should read the API's
+ * `WORKFLOW_WRITE_NOT_PERMITTED` detail, not this code's wording; the shape (403, per-target
+ * remediation) is deliberately the same.
+ */
 function workflowScopeProblem(role: PlatformRole, ids: string[]) {
   if (role === 'R1') return null;
   if (role === 'R3') {
@@ -180,6 +190,9 @@ export const workflowHandlers = [
               label: `Poll ${source.product}`,
               config: 'every 15 minutes',
               timezone: null,
+              // FR-5.4: the interval is stated, not implied by the summary string — the panel and
+              // the compiler both read this field, and a missing one blocks activation.
+              minimumIntervalMinutes: 15,
             }
           : triggerType === 'manual'
             ? {

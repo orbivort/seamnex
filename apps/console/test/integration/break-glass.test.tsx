@@ -136,6 +136,11 @@ describe('break-glass sessions', () => {
     expect(within(row).getByRole('button', { name: 'Approve' }).hasAttribute('disabled')).toBe(
       true,
     );
+    // Declining is not an escalation — the API allows an auditor to refuse a read-write request, so
+    // the console must not be the thing that hides it.
+    expect(within(row).getByRole('button', { name: 'Reject' }).hasAttribute('disabled')).toBe(
+      false,
+    );
   });
 
   it('reveals a credential once for an active elevation', async () => {

@@ -56,7 +56,13 @@ const LINES_BY_KIND: Record<string, string[]> = {
     'archive written to the backup target',
     'resources removed',
   ],
-  export: ['portable archive created', 'manifest written: export-%SLUG%.json'],
+  export: [
+    'database dump written: database/db.sql',
+    'volumes archived, applied render set copied',
+    'secrets named in instance/env.json, no values included',
+    'portable archive created: %SLUG%-export.tar.gz',
+    'manifest written with a SHA-256 per file',
+  ],
   prepull: ['pre-pulling layers for %IMAGE%', 'layers cached'],
   scaffold: [
     'generating compose.yaml',

@@ -58,3 +58,42 @@ export function workflowIneligibilityReason(granularity: CredentialGranularity):
   if (isWorkflowEligible(granularity)) return null;
   return 'The product exposes no API credential, so the platform cannot broker any workflow access to it.';
 }
+
+/** What a node is going to do with the credential, which decides which granularity is usable. */
+export type EgressMode = 'read' | 'write';
+
+/** One deployment of a product, ranked by the credential it can issue. */
+export type EgressCandidate = {
+  readonly instanceId: string;
+  /** `seamnex_effective_granularity` for that instance; null when nothing records one. */
+  readonly granularity: string | null;
+};
+
+function usable(granularity: string | null, mode: EgressMode): boolean {
+  const known: CredentialGranularity = isCredentialGranularity(granularity) ? granularity : 'none';
+  // A write needs an operation-scoped credential (C-11); a read needs any credential the platform
+  // can broker, because a product with `none` has nothing to authenticate with.
+  return mode === 'write' ? isWriteEligible(known) : isWorkflowEligible(known);
+}
+
+/**
+ * Which deployment of a product a node addresses; `undefined` when none can be used.
+ *
+ * The IR stores an entry key, not an instance id, and one entry can be deployed more than once. The
+ * scoped instance wins and the caller's order (`i.id`) breaks the tie, so two activations of one
+ * definition cannot mint against different tenants.
+ *
+ * It lives in the domain package because **two gates** must answer it identically: compilation
+ * ("which instance will this run write to") and authorization ("which instance is the caller
+ * authorised against", FR-5.9). Two implementations would let a caller be authorised against one
+ * product and read — or write — another.
+ */
+export function selectEgressInstance<T extends EgressCandidate>(
+  candidates: readonly T[],
+  mode: EgressMode,
+): T | undefined {
+  return (
+    candidates.find((candidate) => candidate.granularity === 'scoped' && usable('scoped', mode)) ??
+    candidates.find((candidate) => usable(candidate.granularity, mode))
+  );
+}

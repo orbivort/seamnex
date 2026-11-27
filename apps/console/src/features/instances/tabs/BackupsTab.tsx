@@ -266,7 +266,13 @@ export function BackupsTab({ instance }: { instance: InstanceDetail }) {
                   on-demand backup. …" */}
               <EmptyState
                 title="No backup set yet"
-                description="A scheduled and an on-demand backup are required. Take the first one now, or wait for the next scheduled run."
+                // "wait for the next scheduled run" is only true while the schedule is on; the
+                // posture now reports a disabled schedule, so the copy has to agree with it.
+                description={
+                  instance.backup.scheduleEnabled
+                    ? 'A scheduled and an on-demand backup are required. Take the first one now, or wait for the next scheduled run.'
+                    : 'A scheduled and an on-demand backup are required. The schedule is off, so take the first one now.'
+                }
                 action={
                   canBackup ? (
                     <Button

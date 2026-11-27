@@ -1,4 +1,4 @@
-import type { CapacitySnapshot, ForecastPoint } from '@seamnex/domain';
+import type { CapacitySnapshot, CollectionScope, ForecastPoint } from '@seamnex/domain';
 
 export const CAPACITY_SERVICE = Symbol('seamnex.m19.capacity');
 
@@ -29,14 +29,21 @@ export type AdmissionDecision = {
  * deployment refused in the wizard cannot slip through a stale browser tab.
  */
 export interface CapacityService {
-  /** The newest sample; measured, persisted and returned when the host has never been sampled. */
-  snapshot(): Promise<CapacitySnapshot>;
+  /**
+   * The newest sample; measured, persisted and returned when the host has never been sampled.
+   *
+   * `scope` confines `instanceUsage` to the rows the caller may see (ADR-BE-44). Host totals and
+   * the admission verdict stay platform-wide: they describe the machine, not a tenant, and a board
+   * whose numbers did not add up to the verdict would be worse than a narrower table.
+   */
+  snapshot(scope?: CollectionScope): Promise<CapacitySnapshot>;
   /**
    * Measures the host and persists one sample. `null` when the host cannot be measured — recording
    * zeros would make every later admission look refused.
    */
   record(): Promise<CapacitySnapshot | null>;
-  forecast(): Promise<ForecastPoint[]>;
+  /** The projection; derived from the same host figures, read through the caller's scope. */
+  forecast(scope?: CollectionScope): Promise<ForecastPoint[]>;
   admit(request: { instanceId?: string; resources: ResourceRequest }): Promise<AdmissionDecision>;
   /** Books the resources so two concurrent deployments cannot both fit in the same headroom. */
   reserve(input: { instanceId: string; resources: ResourceRequest }): Promise<void>;

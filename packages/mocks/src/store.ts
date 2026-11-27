@@ -5,13 +5,17 @@ import type {
   BreakGlassSession,
   CapacitySnapshot,
   CatalogEntry,
+  CatalogRepositoryView,
   ContainerStatus,
   DriftRecord,
   DsarRequest,
   EntitlementResponse,
+  EnvProfile,
   EnvValue,
   IdpGroup,
   IdpUser,
+  ImageScanReport,
+  ImageScanSummary,
   Instance,
   InstanceDetail,
   InstanceStatus,
@@ -36,6 +40,7 @@ import type {
   Scenario,
   StatusBanner,
   SyncRun,
+  TrustedRegistryState,
   Workflow,
   WorkflowRun,
 } from '@seamnex/domain';
@@ -43,6 +48,7 @@ import { clearScheduledTimers } from './timers';
 import { AUDIT_EVENTS, AUDIT_ZERO_HASH, auditHashFor, auditProof } from './fixtures/audit';
 import { BACKUPS, RESTORE_DRILLS, RESTORE_RUNS } from './fixtures/backups';
 import { CATALOG_BY_KEY, CATALOG_ENTRIES, SCAFFOLD_DRAFTS } from './fixtures/catalog';
+import { CATALOG_REPOSITORY } from './fixtures/catalog-repository';
 import { ENV_PROFILES } from './fixtures/env-schema';
 import { CAPACITY, buildCapacity } from './fixtures/capacity';
 import { at } from './fixtures/context';
@@ -81,16 +87,21 @@ import {
 import { PRIVACY_REQUESTS } from './fixtures/privacy';
 import { PLATFORM_RESTORE_RUNS, RECOVERY_GATE } from './fixtures/recovery';
 import { REGISTRY } from './fixtures/registry';
+import { IMAGE_SCANS, TRUSTED_REGISTRIES } from './fixtures/security';
 import { WORKFLOWS } from './fixtures/workflows';
 import { WORKFLOW_RUNS } from './fixtures/workflow-runs';
 
 export type MockState = {
   scenario: Scenario;
   catalog: CatalogEntry[];
+  /** ADR-BE-42: the checkout the console reports and the sync action rewrites. */
+  catalogRepository: CatalogRepositoryView;
   instances: Instance[];
   instanceDetails: Record<string, InstanceDetail>;
   containers: Record<string, ContainerStatus[]>;
   envValues: Record<string, EnvValue[]>;
+  /** FR-1.26: the lifecycle profiles the deploy wizard selects from; mutable so the admin screen works. */
+  profiles: EnvProfile[];
   drift: Record<string, DriftRecord[]>;
   statuses: Record<string, InstanceStatus>;
   jobs: Job[];
@@ -117,6 +128,10 @@ export type MockState = {
   settings: PlatformSettings;
   banners: StatusBanner[];
   registry: RegistryEntry[];
+  /** NFR-4.16: the allow-list revision; mutable so the audited update route is demonstrable. */
+  trustedRegistries: TrustedRegistryState;
+  /** NFR-4.6: retained scans, one per instance and digest. */
+  imageScans: ImageScanReport[];
   recovery: {
     backups: Backup[];
     runs: PlatformRestoreRun[];
@@ -143,10 +158,12 @@ function buildBase(): MockState {
   return {
     scenario: DEFAULT_SCENARIO,
     catalog: clone(CATALOG_ENTRIES),
+    catalogRepository: clone(CATALOG_REPOSITORY),
     instances: clone(INSTANCES),
     instanceDetails: clone(INSTANCE_DETAILS),
     containers: clone(CONTAINERS),
     envValues: clone(ENV_VALUES),
+    profiles: clone(ENV_PROFILES),
     drift: clone(DRIFT),
     statuses: clone(INSTANCE_STATUSES),
     jobs: clone(JOBS),
@@ -173,6 +190,8 @@ function buildBase(): MockState {
     settings: clone(PLATFORM_SETTINGS),
     banners: clone(STATUS_BANNERS),
     registry: clone(REGISTRY),
+    trustedRegistries: clone(TRUSTED_REGISTRIES),
+    imageScans: clone(IMAGE_SCANS),
     recovery: {
       backups: clone(BACKUPS.filter((backup) => backup.kind === 'platform')),
       runs: clone(PLATFORM_RESTORE_RUNS),
@@ -202,7 +221,11 @@ function setMaintenance(state: MockState, instanceId: string, windowId: string):
 
 /** Keeps the admission board in step with the live portfolio. */
 export function refreshCapacity(state: MockState): void {
-  state.capacity = buildCapacity(state.instances, state.settings.oversubscriptionFactor);
+  state.capacity = buildCapacity(state.instances, state.settings.oversubscriptionFactor, {
+    cpuPercent: state.settings.capacityCpuAlertPercent,
+    memoryPercent: state.settings.capacityMemoryAlertPercent,
+    diskPercent: state.settings.capacityDiskAlertPercent,
+  });
 }
 
 export function applyScenario(state: MockState, scenario: Scenario): MockState {
@@ -293,6 +316,7 @@ export function applyScenario(state: MockState, scenario: Scenario): MockState {
     state.workflows = [];
     state.workflowRuns = [];
     state.registry = [];
+    state.imageScans = [];
     state.recovery.runs = [];
     state.recovery.drills = [];
     state.privacy = [];
@@ -388,6 +412,35 @@ export function driftFor(instanceId: string): DriftRecord[] {
   return current.drift[instanceId] ?? [];
 }
 
+/** NFR-4.16: the revision an update route replaces, read through one accessor. */
+export function trustedRegistryState(): TrustedRegistryState {
+  return current.trustedRegistries;
+}
+
+/** NFR-4.6: the newest retained report per digest, keyed by digest for the image list. */
+export function imageScanSummaries(instanceId: string): Record<string, ImageScanSummary> {
+  const summaries: Record<string, ImageScanSummary> = {};
+  for (const report of current.imageScans) {
+    if (report.instanceId !== instanceId) continue;
+    summaries[report.imageDigest] = {
+      verdict: report.verdict,
+      scanner: report.scanner,
+      scannerVersion: report.scannerVersion,
+      scannedAt: report.scannedAt,
+      severityCounts: report.severityCounts,
+      blockingSeverities: report.blockingSeverities,
+    };
+  }
+  return summaries;
+}
+
+/** The retained report for one digest; `undefined` means "never scanned", not "clean". */
+export function imageScanReport(instanceId: string, digest: string): ImageScanReport | undefined {
+  return current.imageScans.find(
+    (report) => report.instanceId === instanceId && report.imageDigest === digest,
+  );
+}
+
 export function detailFor(instanceId: string): InstanceDetail | undefined {
   const detail = current.instanceDetails[instanceId];
   if (!detail) return undefined;
@@ -472,8 +525,9 @@ export function scaffoldFor(entryKey: string) {
   return SCAFFOLD_DRAFTS[entryKey];
 }
 
-export function envProfiles() {
-  return ENV_PROFILES;
+/** FR-1.26: the profiles are mutable state, so the admin screen's writes are visible to the wizard. */
+export function envProfiles(): EnvProfile[] {
+  return current.profiles;
 }
 
 export function instanceBySlug(slug: string): Instance | undefined {

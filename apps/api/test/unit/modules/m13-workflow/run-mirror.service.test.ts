@@ -10,9 +10,13 @@ const NODE_WRITE = '3e3f4a45-4444-4c2a-9a2a-000000000004';
 
 const POLL_MS = 10_000;
 const RETENTION_DAYS = 30;
+const RUN_RETENTION_DAYS = 90;
+const ALERT_THRESHOLD = 3;
 const CONFIG = {
   SEAMNEX_N8N_EXECUTION_POLL_MS: POLL_MS,
   SEAMNEX_WORKFLOW_SAMPLE_RETENTION_DAYS: RETENTION_DAYS,
+  SEAMNEX_WORKFLOW_RUN_RETENTION_DAYS: RUN_RETENTION_DAYS,
+  SEAMNEX_WORKFLOW_FAILURE_ALERT_THRESHOLD: ALERT_THRESHOLD,
 } as never;
 
 /** A run in flight, with the two-node IR its node rows were copied from. */
@@ -41,10 +45,32 @@ function harness(
     /** Overrides what the retention sweep answers, for its failure and no-row-count paths. */
     sweep?: unknown;
     auditFails?: boolean;
+    /** The trailing failed-run streak the alert pass reads. */
+    streak?: number;
+    /** Omitted means "this process hosts no notification delivery". */
+    notify?: 'queued' | 'suppressed' | 'rejects';
+    /** Overrides the owner lookup, for the workflow-deleted-mid-settle path. */
+    workflow?: unknown[];
+    /** Overrides the streak row, for the no-row-yet path. */
+    streakRows?: unknown[];
   } = {},
 ) {
   const db = fakeDb([
+    // The streak read selects from the run table too, so it is matched before the run listing.
+    ['count(*)::int AS streak', options.streakRows ?? [{ streak: options.streak ?? 0 }]],
     ['FROM workflow_run r', options.runs ?? [runningRun()]],
+    [
+      'FROM workflow w',
+      options.workflow ?? [
+        {
+          name: 'Invoice export',
+          owner_idp_id: 'idp-owner',
+          owner_username: 'owner',
+          owner_display_name: 'Owner Person',
+        },
+      ],
+    ],
+    ['DELETE FROM workflow_run', []],
     // The sweep is a statement on `workflow_run_node`, so it has to be matched before the
     // per-node write route or the two are indistinguishable.
     ['SET sample_item = NULL', options.sweep ?? []],
@@ -64,8 +90,26 @@ function harness(
       return undefined;
     }),
   };
-  const service = new RunMirrorService(db.pool, CONFIG, audit as never, n8n as never);
-  return { db, n8n, audit, service };
+  const notifications =
+    options.notify === undefined
+      ? undefined
+      : {
+          notify: vi.fn(async (_input: { severity: string; subject: string; body: string }) => {
+            if (options.notify === 'rejects') throw new Error('mail server down');
+            if (options.notify === 'suppressed') {
+              return { queued: false, suppressedBy: 'no channel configured' };
+            }
+            return { queued: true, suppressedBy: null };
+          }),
+        };
+  const service = new RunMirrorService(
+    db.pool,
+    CONFIG,
+    audit as never,
+    n8n as never,
+    notifications as never,
+  );
+  return { db, n8n, audit, notifications, service };
 }
 
 /** The run row's terminal write. The retention sweep shares the table prefix, so match its SET. */
@@ -450,5 +494,276 @@ describe('RunMirrorService', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+/** A failed execution whose first node was retried `tries` times before the run gave up. */
+function failedExecution(tries: number) {
+  return {
+    executions: [
+      { id: '21', finished: false, status: 'error', startedAt: '2026-11-09T15:00:00.100Z' },
+    ],
+    details: {
+      '21': {
+        status: 'error',
+        stoppedAt: '2026-11-09T15:00:00.900Z',
+        error: null,
+        nodes: [
+          {
+            name: 'Read employees',
+            state: 'failed',
+            durationMs: 40,
+            records: 0,
+            error: 'broker answered 502',
+            tries,
+          },
+        ],
+      },
+    },
+  };
+}
+
+describe('RunMirrorService attempts and failure alerts', () => {
+  /** FR-5.7: the attempt column is what n8n observed, not the constant it used to be. */
+  it('records how many attempts a step actually took', async () => {
+    const { db, service } = harness(failedExecution(3));
+
+    await expect(service.tick()).resolves.toBe(1);
+
+    expect(nodeStatements(db)[0]?.params?.[8]).toBe(3);
+  });
+
+  it('still says one attempt when the step succeeded first time', async () => {
+    const { db, service } = harness({
+      executions: [
+        { id: '22', finished: true, status: 'success', startedAt: '2026-11-09T15:00:00.100Z' },
+      ],
+      details: {
+        '22': {
+          status: 'success',
+          stoppedAt: null,
+          error: null,
+          nodes: [
+            { name: 'Read employees', state: 'succeeded', durationMs: 4, records: 1, error: null },
+          ],
+        },
+      },
+    });
+
+    await expect(service.tick()).resolves.toBe(1);
+    expect(nodeStatements(db)[0]?.params?.[8]).toBe(1);
+  });
+
+  /**
+   * FR-5.8 — "alerting to the workflow owner on repeated failure". The milestone is the threshold,
+   * and the alert names the workflow, the run and the step that failed.
+   */
+  it('alerts the owner when the failures reach the threshold', async () => {
+    const { service, notifications, audit } = harness({
+      ...failedExecution(3),
+      streak: 3,
+      notify: 'queued',
+    });
+
+    await expect(service.tick()).resolves.toBe(1);
+
+    expect(notifications?.notify).toHaveBeenCalledTimes(1);
+    expect(notifications?.notify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        severity: 'warning',
+        subject: 'Workflow "Invoice export" failed 3 runs in a row',
+        body: expect.stringContaining('Read employees'),
+      }),
+    );
+    expect(notifications?.notify).toHaveBeenCalledWith(
+      expect.objectContaining({ body: expect.stringContaining(RUN_ID) }),
+    );
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'workflow.run.alerted',
+        targetId: RUN_ID,
+        detail: expect.objectContaining({ streak: 3, threshold: ALERT_THRESHOLD }),
+      }),
+    );
+  });
+
+  it('keeps quiet below the threshold and between milestones', async () => {
+    const below = harness({ ...failedExecution(2), streak: 2, notify: 'queued' });
+    await expect(below.service.tick()).resolves.toBe(1);
+    expect(below.notifications?.notify).not.toHaveBeenCalled();
+
+    // Four failures with a threshold of three is the same streak as three: one alert, not two.
+    const between = harness({ ...failedExecution(2), streak: 4, notify: 'queued' });
+    await expect(between.service.tick()).resolves.toBe(1);
+    expect(between.notifications?.notify).not.toHaveBeenCalled();
+  });
+
+  it('escalates the severity once a streak passes its first milestone', async () => {
+    const { service, notifications } = harness({
+      ...failedExecution(3),
+      streak: 6,
+      notify: 'queued',
+    });
+
+    await expect(service.tick()).resolves.toBe(1);
+
+    expect(notifications?.notify).toHaveBeenCalledWith(
+      expect.objectContaining({ severity: 'critical' }),
+    );
+  });
+
+  /**
+   * The channel has none configured, or it suppressed the message: that is not an error, but the
+   * audit row must say so rather than record an alert that never left the platform.
+   */
+  it('records an alert the channel refused as a failure, not as delivered', async () => {
+    const { service, audit } = harness({
+      ...failedExecution(3),
+      streak: 3,
+      notify: 'suppressed',
+    });
+
+    await expect(service.tick()).resolves.toBe(1);
+
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'workflow.run.alerted',
+        outcome: 'failure',
+        detail: expect.objectContaining({ queued: false, suppressedBy: 'no channel configured' }),
+      }),
+    );
+  });
+
+  it('still alerts when the failed step cannot be named', async () => {
+    const { service, notifications } = harness({
+      streak: 3,
+      notify: 'queued',
+      executions: [
+        { id: '24', finished: false, status: 'error', startedAt: '2026-11-09T15:00:00.100Z' },
+      ],
+      // n8n reported an execution-level error with no per-node detail.
+      details: { '24': { status: 'error', stoppedAt: null, error: null, nodes: [] } },
+    });
+
+    await expect(service.tick()).resolves.toBe(1);
+
+    expect(notifications?.notify).toHaveBeenCalledWith(
+      expect.objectContaining({ body: expect.stringContaining('n8n reported a failure.') }),
+    );
+  });
+
+  it('keeps a long error to a readable length', async () => {
+    const long = 'x'.repeat(400);
+    const { service, notifications } = harness({
+      streak: 3,
+      notify: 'queued',
+      executions: [
+        { id: '25', finished: false, status: 'error', startedAt: '2026-11-09T15:00:00.100Z' },
+      ],
+      details: {
+        '25': {
+          status: 'error',
+          stoppedAt: null,
+          error: long,
+          nodes: [],
+        },
+      },
+    });
+
+    await expect(service.tick()).resolves.toBe(1);
+
+    const body = notifications?.notify.mock.calls[0]?.[0]?.body as string | undefined;
+    expect(body).toContain('…');
+    expect(body?.length).toBeLessThan(long.length);
+  });
+
+  /** A workflow deleted between settle and alert is not a failure: there is nobody to tell. */
+  /** An aggregate always answers one row; an empty answer means "not countable", not "alert". */
+  it('treats an uncountable streak as zero', async () => {
+    const { service, notifications } = harness({
+      ...failedExecution(3),
+      notify: 'queued',
+      streakRows: [],
+    });
+
+    await expect(service.tick()).resolves.toBe(1);
+    expect(notifications?.notify).not.toHaveBeenCalled();
+  });
+
+  it('says nothing when the workflow no longer exists', async () => {
+    const { service, notifications, audit } = harness({
+      ...failedExecution(3),
+      streak: 3,
+      notify: 'queued',
+      workflow: [],
+    });
+
+    await expect(service.tick()).resolves.toBe(1);
+
+    expect(notifications?.notify).not.toHaveBeenCalled();
+    expect(audit.append).not.toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'workflow.run.alerted' }),
+    );
+  });
+
+  it('never alerts about a run that succeeded', async () => {
+    const { service, notifications } = harness({
+      streak: 3,
+      notify: 'queued',
+      executions: [
+        { id: '23', finished: true, status: 'success', startedAt: '2026-11-09T15:00:00.100Z' },
+      ],
+      details: { '23': { status: 'success', stoppedAt: null, error: null, nodes: [] } },
+    });
+
+    await expect(service.tick()).resolves.toBe(1);
+    expect(notifications?.notify).not.toHaveBeenCalled();
+  });
+
+  it('settles the run even when the alert cannot be queued', async () => {
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const { db, service } = harness({ ...failedExecution(3), streak: 3, notify: 'rejects' });
+
+    await expect(service.tick()).resolves.toBe(1);
+    expect(runStatement(db)?.params?.[1]).toBe('failed');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('failure alert could not be queued'));
+    warn.mockRestore();
+  });
+
+  /** A process without M20 settles runs and raises no alert; it must not pay for the streak query. */
+  it('skips the alert entirely when notification delivery is not hosted here', async () => {
+    const { db, service } = harness(failedExecution(3));
+
+    await expect(service.tick()).resolves.toBe(1);
+    expect(db.calls.filter((call) => call.sql.includes('count(*)::int AS streak'))).toHaveLength(0);
+  });
+
+  /** FR-5.8 — runs are retained for the configured window, failures for twice as long. */
+  it('deletes run history on the two windows, and only for settled runs', async () => {
+    const { db, service } = harness();
+
+    await expect(service.sweepRuns()).resolves.toBe(0);
+
+    const deletes = db.calls.filter((call) => call.sql.includes('DELETE FROM workflow_run'));
+    expect(deletes.map((call) => call.params)).toEqual([
+      [RUN_RETENTION_DAYS],
+      [RUN_RETENTION_DAYS * 2],
+    ]);
+    expect(deletes[0]?.sql).toContain("state = 'succeeded'");
+    expect(deletes[1]?.sql).toContain("state = 'failed'");
+    // A run whose outcome was never mirrored is evidence, not history: retention must not erase it.
+    expect(
+      deletes.some((call) => call.sql.includes("'queued'") || call.sql.includes("'running'")),
+    ).toBe(false);
+  });
+
+  it('sweeps run history on the same hourly pass as the samples', async () => {
+    const { db, service } = harness({ executions: [] });
+
+    await expect(service.tick()).resolves.toBe(0);
+
+    expect(db.calls.filter((call) => call.sql.includes('DELETE FROM workflow_run'))).toHaveLength(
+      2,
+    );
   });
 });

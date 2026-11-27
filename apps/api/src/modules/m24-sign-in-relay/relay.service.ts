@@ -122,7 +122,7 @@ export class RelaySignInService implements SignInRelay {
 
     /*
      * The host arrives from the edge, which forwards the browser's `Host` verbatim — and a browser
-     * includes a non-default port (`openproject.localhost:8020`). `instance_route.host` never carries
+     * includes a non-default port (`openproject.localhost:8443`). `instance_route.host` never carries
      * one, so comparing the raw value made every launch skip as `not_gated`: the relay would have
      * done nothing at all on the dev stack, silently, which is indistinguishable from "no mapping".
      */

@@ -12,6 +12,7 @@ export const ignores = [
   '**/node_modules/**',
   '**/coverage/**',
   '**/temp/**',
+  '**/dev-reference/**',
   '**/.turbo/**',
   '**/public/mockServiceWorker.js',
   // Tooling metadata, not project source: the skills' own scripts are not part of the build and

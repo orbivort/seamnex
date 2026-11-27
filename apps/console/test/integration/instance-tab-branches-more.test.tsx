@@ -187,9 +187,10 @@ describe('integration health', () => {
 });
 
 describe('the overview facts', () => {
-  it('names the internal CA and omits an empty policy-note list', async () => {
+  it('names the internal certificate and omits an empty policy-note list', async () => {
     // Every deployment in the demo fleet is ACME-signed and carries at least one policy note, so
-    // the two fallbacks — an internal CA and no notes at all — are reached by re-resolving one.
+    // the two fallbacks — an internal certificate and no notes at all — are reached by re-resolving
+    // one.
     const instance = getState().instances.find((item) => item.id === 'inst-crm');
     expect(instance).toBeDefined();
     if (!instance) throw new Error('the inst-crm fixture is missing');
@@ -200,7 +201,7 @@ describe('the overview facts', () => {
     render(<App />);
     await screen.findByRole('heading', { name: 'EspoCRM' });
 
-    expect(await screen.findByText('Internal CA')).toBeDefined();
+    expect(await screen.findByText('Internal certificate')).toBeDefined();
     expect(screen.queryByText('No published ports; override normalises expose.')).toBeNull();
   });
 });

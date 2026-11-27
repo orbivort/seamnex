@@ -32,6 +32,8 @@
     "migrate:down": "tsx src/cli.ts down",
     "migrate:status": "tsx src/cli.ts status",
     "seed": "tsx src/seed/dev-seed.ts",
+    "catalog:restore": "tsx src/seed/restore-catalog-tree.ts",
+    "check:catalog": "tsx scripts/check-catalog-coverage.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint --max-warnings=0 .",
     "test": "vitest run",

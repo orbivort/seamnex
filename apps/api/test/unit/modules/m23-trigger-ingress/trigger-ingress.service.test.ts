@@ -98,20 +98,27 @@ describe('register', () => {
     );
   });
 
-  it('registers an endpoint that is not bound to a workflow', async () => {
+  it('stores the workflow the endpoint is bound to', async () => {
     const { db, service } = setup([
       ['INSERT INTO trigger_endpoint', [{ id: 't1', registered_at: new Date() }]],
     ]);
 
-    const endpoint = await service.register('inst-1', { eventName: 'ping' }, 'admin');
+    const endpoint = await service.register(
+      'inst-1',
+      { eventName: 'ping', workflowId: 'wf-9' },
+      'admin',
+    );
 
-    expect(endpoint.workflowId).toBeNull();
-    expect(db.calls[0]?.params[1]).toBeNull();
+    expect(endpoint.workflowId).toBe('wf-9');
+    // The binding is a column, not a default: a delivery reads it back to know what to start.
+    expect(db.calls[0]?.params[1]).toBe('wf-9');
   });
 
   it('fails when the row is not returned', async () => {
     const { service } = setup([['INSERT INTO trigger_endpoint', []]]);
-    await expect(service.register('inst-1', { eventName: 'ping' }, 'admin')).rejects.toMatchObject({
+    await expect(
+      service.register('inst-1', { eventName: 'ping', workflowId: 'wf-9' }, 'admin'),
+    ).rejects.toMatchObject({
       code: 'INTERNAL_ERROR',
     });
   });
@@ -142,6 +149,7 @@ describe('accept', () => {
     id: 't1',
     hmac_secret_ref: 'secret-ref-1',
     instance_id: 'inst-1',
+    workflow_id: 'wf-1',
     state: 'active',
   };
 
@@ -161,7 +169,7 @@ describe('accept', () => {
       ['INSERT INTO trigger_delivery', { rows: [{ id: 'd1' }], rowCount: 1 }],
     ]);
 
-    await expect(service.accept(acceptInput())).resolves.toEqual({
+    await expect(service.accept(acceptInput())).resolves.toMatchObject({
       accepted: true,
       reason: 'accepted',
     });
@@ -171,9 +179,25 @@ describe('accept', () => {
     expect(audit.append).toHaveBeenCalledWith(
       expect.objectContaining({
         action: 'trigger.delivery.accepted',
-        detail: { deliveryId: 'delivery-1' },
+        detail: expect.objectContaining({ deliveryId: 'delivery-1', workflowId: 'wf-1' }),
       }),
     );
+  });
+
+  it('answers with the facts the caller needs to start the run', async () => {
+    const { service } = setup([
+      ['FROM trigger_endpoint WHERE token_hash', [ENDPOINT]],
+      ['INSERT INTO trigger_delivery', { rows: [{ id: 'd1' }], rowCount: 1 }],
+    ]);
+
+    await expect(service.accept(acceptInput())).resolves.toEqual({
+      accepted: true,
+      reason: 'accepted',
+      endpointId: 't1',
+      instanceId: 'inst-1',
+      workflowId: 'wf-1',
+      deliveryId: 'delivery-1',
+    });
   });
 
   it('derives the delivery id from the body when the sender supplies none', async () => {
@@ -191,9 +215,10 @@ describe('accept', () => {
   it('refuses an unknown token without recording a delivery, but still audits', async () => {
     const { db, audit, service } = setup([['FROM trigger_endpoint WHERE token_hash', []]]);
 
-    await expect(service.accept(acceptInput())).resolves.toEqual({
+    await expect(service.accept(acceptInput())).resolves.toMatchObject({
       accepted: false,
       reason: 'unknown endpoint',
+      endpointId: null,
     });
 
     expect(db.calls.some((call) => call.sql.includes('INSERT INTO trigger_delivery'))).toBe(false);
@@ -218,7 +243,7 @@ describe('accept', () => {
   it('refuses a delivery with no signature and records it against the endpoint', async () => {
     const { db, service } = setup([['FROM trigger_endpoint WHERE token_hash', [ENDPOINT]]]);
 
-    await expect(service.accept(acceptInput({ signature: null }))).resolves.toEqual({
+    await expect(service.accept(acceptInput({ signature: null }))).resolves.toMatchObject({
       accepted: false,
       reason: 'missing signature',
     });
@@ -231,7 +256,7 @@ describe('accept', () => {
   it('refuses a signature mismatch', async () => {
     const { db, service } = setup([['FROM trigger_endpoint WHERE token_hash', [ENDPOINT]]]);
 
-    await expect(service.accept(acceptInput({ signature: 'wrong' }))).resolves.toEqual({
+    await expect(service.accept(acceptInput({ signature: 'wrong' }))).resolves.toMatchObject({
       accepted: false,
       reason: 'signature mismatch',
     });
@@ -240,13 +265,28 @@ describe('accept', () => {
     expect(db.calls.some((call) => call.sql.includes("'rejected'"))).toBe(true);
   });
 
+  it('refuses an endpoint whose binding a legacy registration left empty', async () => {
+    const { db, service } = setup([
+      ['FROM trigger_endpoint WHERE token_hash', [{ ...ENDPOINT, workflow_id: null }]],
+    ]);
+
+    await expect(service.accept(acceptInput())).resolves.toMatchObject({
+      accepted: false,
+      reason: 'unbound endpoint',
+      workflowId: null,
+    });
+
+    // Only a correctly signed caller can learn this, and no delivery row is created for it.
+    expect(db.calls.some((call) => call.sql.includes("VALUES ($1, $2, 'accepted')"))).toBe(false);
+  });
+
   it('records a duplicate delivery once and refuses the second attempt', async () => {
     const { db, service } = setup([
       ['FROM trigger_endpoint WHERE token_hash', [ENDPOINT]],
       ['INSERT INTO trigger_delivery', { rows: [], rowCount: 0 }],
     ]);
 
-    await expect(service.accept(acceptInput())).resolves.toEqual({
+    await expect(service.accept(acceptInput())).resolves.toMatchObject({
       accepted: false,
       reason: 'duplicate delivery',
     });
@@ -262,5 +302,54 @@ describe('accept', () => {
 
     const rejected = db.calls.find((call) => call.sql.includes("'rejected'"));
     expect(String(rejected?.params[1])).toContain('anonymous:');
+  });
+});
+
+describe('recordOutcome', () => {
+  it('moves an accepted delivery to forwarded and audits the measured latency', async () => {
+    const { db, audit, service } = setup([['UPDATE trigger_delivery', { rows: [], rowCount: 1 }]]);
+
+    await service.recordOutcome({
+      endpointId: 't1',
+      deliveryId: 'delivery-1',
+      state: 'forwarded',
+      runId: 'run-1',
+      latencyMs: 42,
+      detail: null,
+    });
+
+    const update = db.calls.find((call) => call.sql.includes('UPDATE trigger_delivery'));
+    // The predicate keeps a duplicate from overwriting a terminal state.
+    expect(update?.sql).toContain("state = 'accepted'");
+    expect(update?.params).toEqual(['t1', 'delivery-1', 'forwarded']);
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'trigger.delivery.forwarded',
+        outcome: 'success',
+        targetId: 't1',
+        detail: expect.objectContaining({ runId: 'run-1', latencyMs: 42 }),
+      }),
+    );
+  });
+
+  it('records a failure with its reason instead of a run', async () => {
+    const { audit, service } = setup([['UPDATE trigger_delivery', { rows: [], rowCount: 1 }]]);
+
+    await service.recordOutcome({
+      endpointId: 't1',
+      deliveryId: 'delivery-1',
+      state: 'failed',
+      runId: null,
+      latencyMs: 7,
+      detail: 'workflow is disabled',
+    });
+
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'trigger.delivery.failed',
+        outcome: 'failure',
+        detail: expect.objectContaining({ reason: 'workflow is disabled' }),
+      }),
+    );
   });
 });

@@ -14,6 +14,14 @@ export type TransportRequest = {
   body?: unknown;
   signal?: AbortSignal | null;
   headers?: Record<string, string>;
+  /**
+   * Overrides the transport default for this request.
+   *
+   * Exists for the export download (FR-1.13): the 15 s default is right for a JSON read and wrong
+   * for a job that has to resolve and start streaming gigabytes. It bounds the wait for the
+   * response head, not the body — the timer is cleared as soon as `fetch` resolves.
+   */
+  timeoutMs?: number;
 };
 
 export type Transport = (request: TransportRequest) => Promise<Response>;
@@ -37,11 +45,19 @@ export function createFetchTransport(options: FetchTransportOptions = {}): Trans
     headers,
   } = options;
 
-  return async ({ path, method, body, signal, headers: perRequest }) => {
+  return async ({
+    path,
+    method,
+    body,
+    signal,
+    headers: perRequest,
+    timeoutMs: requestedTimeoutMs,
+  }) => {
+    const limitMs = requestedTimeoutMs ?? timeoutMs;
     const controller = new AbortController();
     const timer = setTimeout(() => {
-      controller.abort(new DOMException(`Request timed out after ${timeoutMs} ms`, 'TimeoutError'));
-    }, timeoutMs);
+      controller.abort(new DOMException(`Request timed out after ${limitMs} ms`, 'TimeoutError'));
+    }, limitMs);
 
     const forwardAbort = () => controller.abort(signal?.reason);
     if (signal) {

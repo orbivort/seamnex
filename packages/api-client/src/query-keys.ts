@@ -6,6 +6,12 @@ export const queryKeys = {
   launchTarget: (instanceId: string) => ['portal', 'launch-target', instanceId] as const,
   requestable: ['portal', 'requestable'] as const,
   catalog: ['catalog'] as const,
+  /**
+   * ADR-BE-42: the checkout the platform is serving. Under `catalog` so a reload or a sync
+   * invalidates it with the projection it describes; an entry key can never be `repository`, because
+   * `EntryKeySchema` admits only `D…` forms.
+   */
+  catalogRepository: ['catalog', 'repository'] as const,
   catalogEntry: (key: string) => ['catalog', key] as const,
   envSchema: (key: string) => ['catalog', key, 'env-schema'] as const,
   envPlan: (key: string, profile: string, overrides: Record<string, string>) =>
@@ -17,20 +23,30 @@ export const queryKeys = {
   /**
    * The deploy wizard's admission verdict. Keyed on every input the answer depends on, so an
    * answer for a previous slug or size cannot be rendered as the current verdict.
+   *
+   * The environment overrides are part of the question: the pre-flight plans them, so an answer
+   * for the environment before a required secret was typed is not an answer about the one the
+   * operator is about to deploy. Leaving them out of the key served the first answer for ever,
+   * and its `required` blockers outlived every value that fixed them.
    */
   deployPreview: (
     entryKey: string,
     slug: string,
     profile: string,
     resources: { cpu: number; memoryMb: number; diskMb: number } | undefined,
-  ) => ['instances', 'preview', entryKey, slug, profile, resources ?? null] as const,
+    envOverrides: Record<string, string>,
+  ) => ['instances', 'preview', entryKey, slug, profile, resources ?? null, envOverrides] as const,
   instanceStatus: (id: string) => ['instances', id, 'status'] as const,
   containers: (id: string) => ['instances', id, 'containers'] as const,
   instanceEnv: (id: string) => ['instances', id, 'env'] as const,
   adminCredential: (id: string) => ['instances', id, 'admin-credential'] as const,
   drift: (id: string) => ['instances', id, 'drift'] as const,
   instanceBackups: (id: string) => ['instances', id, 'backups'] as const,
+  /** FR-1.13: the portable exports on disk, read from the catalogue the capture wrote. */
+  instanceExports: (id: string) => ['instances', id, 'exports'] as const,
   images: (id: string) => ['instances', id, 'images'] as const,
+  /** NFR-4.6: the retained report is keyed by digest, so a re-tag cannot show yesterday's findings. */
+  imageScan: (id: string, digest: string) => ['instances', id, 'image-scan', digest] as const,
   jobs: ['jobs'] as const,
   job: (id: string) => ['jobs', id] as const,
   jobLogs: (id: string) => ['jobs', id, 'logs'] as const,
@@ -62,6 +78,8 @@ export const queryKeys = {
   maintenance: ['admin', 'maintenance-windows'] as const,
   policyExceptions: ['admin', 'policy-exceptions'] as const,
   dsar: ['admin', 'dsar'] as const,
+  /** NFR-4.16: the allow-list revision the pull/build guard is reading. */
+  trustedRegistries: ['security', 'trusted-registries'] as const,
   recovery: ['recovery'] as const,
   restoreStatus: ['recovery', 'restore-status'] as const,
   privacy: ['privacy'] as const,

@@ -1,12 +1,30 @@
-import type { CatalogEntry, CatalogReloadResult, CredentialGranularity } from '@seamnex/domain';
+import type {
+  CatalogEntry,
+  CatalogReloadResult,
+  CredentialGranularity,
+  EventMode,
+  GuaranteeClass,
+  Operation,
+} from '@seamnex/domain';
 import type { CatalogWorkingTree } from '../m22-catalog-repository/catalog-repo.contract';
 
 export const CATALOG_SERVICE = Symbol('seamnex.m01.catalog');
 
-/** FR-2.14: the verified facts an operator may correct on the catalog screen. */
+/**
+ * FR-2.14: every fact onboarding has to verify, not just the two that were convenient to store.
+ *
+ * An omitted field means "leave the recorded fact alone". The route schema refuses an empty body,
+ * because a verification that verified nothing must not restart the review clock (FR-2.15).
+ */
 export type IntegrationMetadataPatch = {
   credentialGranularity?: CredentialGranularity;
   sessionMaxMinutes?: number;
+  apiBaseUrl?: string;
+  authMethod?: string;
+  guaranteeClass?: GuaranteeClass;
+  operationInventory?: Operation[];
+  eventModes?: EventMode[];
+  sloSupported?: boolean;
 };
 
 /** Owns catalog_entry, catalog_entry_revision, deployment_definition, integration_metadata. */

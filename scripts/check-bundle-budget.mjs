@@ -37,7 +37,7 @@ const app = flag('app', 'console');
  * other half is the rest of the entry's static graph (tailwind-merge via `cn()`, boot-path UI
  * primitives, the Radix dialog stack, the shell's sign-in surface). All of it is reachable from
  * the entry before first paint, so splitting it would add a modulepreload link and no saving —
- * see `docs/review/react-19-best-practices-review.md` §13.5 before raising this number.
+ * see §13.5 before raising this number.
  *
  * The budget is the ceiling, not a target: raising it is a deliberate decision that should come
  * with a note in the review.

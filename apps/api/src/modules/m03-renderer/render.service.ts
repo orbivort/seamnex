@@ -7,8 +7,10 @@ import { AppError } from '../../common/problem/app-error';
 import { ensureDir, safeJoin, sha256, writeFileAtomic } from '../../common/fs/files';
 import { isAbsolute, join } from 'node:path';
 import { stringifyCompose } from '../../common/compose/compose-policy';
+import { renderSetDirectory } from '../../common/compose/render-directory';
 import { parse as parseYaml } from 'yaml';
 import { instanceNetwork, projectName } from '../../common/docker/naming';
+import { mirroredEnvValues } from '../../common/identity/derived-env';
 import type { RenderInput, RenderedFile, RenderSet, RendererService } from './renderer.contract';
 
 type RenderRow = {
@@ -172,10 +174,10 @@ export class RenderSetService {
       imageRefs?: string[];
       publishedPorts?: number;
     };
-    const directory = join(
+    // Shared with the restore, which re-materialises a stored set on a host that never deployed it.
+    const directory = renderSetDirectory(
       this.config.SEAMNEX_INSTANCE_DATA_DIR,
       row.instance_id,
-      'render',
       row.id,
     );
     ensureDir(directory);
@@ -233,7 +235,15 @@ export class RenderSetService {
     for (const row of stored.rows) {
       env.set(row.var_name, row.value_enc === null ? '' : row.value_enc.toString('utf8'));
     }
-    return env;
+
+    /*
+     * Resolved here as well as on write (`updateInstanceEnv`), because the stored pair can be older
+     * than the declaration: an instance created before the entry declared the second variable has no
+     * row for it, and the next deployment is exactly when the product has to pick the address up. A
+     * product whose address is applied only by its installer keeps the one it was installed with and
+     * refuses every sign-in at the identity provider with `invalid_redirect_uri`.
+     */
+    return new Map(Object.entries(mirroredEnvValues(entryKey, Object.fromEntries(env))));
   }
 }
 
@@ -278,6 +288,32 @@ function buildDocuments(
       2,
     )}\n`,
   });
+
+  /*
+   * FR-1.20 / AC-33: "operates on a platform-owned copy with the patch recorded as a diff". The
+   * substitutions above are in `docker-compose.platform.yml`, but a diff nobody can read next to the
+   * document it describes is not a record — and the render set is immutable, backed up and
+   * re-materialised on a restore, so this is the copy that survives. Written only when the policy
+   * found something: an empty file on every clean deployment is noise that hides the ones that
+   * matter.
+   */
+  const policy = input.source.policy;
+  if (policy.patch.length > 0 || policy.violations.length > 0) {
+    documents.push({
+      path: 'policy-patch.json',
+      content: `${JSON.stringify(
+        {
+          version: 1,
+          verdict: policy.verdict,
+          waived: policy.waived,
+          violations: policy.violations,
+          patch: policy.patch,
+        },
+        null,
+        2,
+      )}\n`,
+    });
+  }
 
   return documents;
 }
@@ -455,6 +491,13 @@ function manifestOf(
     imageRefs: imageRefs(input),
     sourcePath: input.source.path,
     policyVerdict: input.source.policy.verdict,
+    /** The same record as `policy-patch.json`, so a manifest reader needs no second read. */
+    policy: {
+      verdict: input.source.policy.verdict,
+      waived: input.source.policy.waived,
+      violations: input.source.policy.violations,
+      patch: input.source.policy.patch,
+    },
     route: input.route,
     resources: input.resources,
     files: files.map((file) => ({ path: file.path, sha256: file.sha256 })),

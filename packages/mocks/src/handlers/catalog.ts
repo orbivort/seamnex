@@ -1,10 +1,19 @@
 import { http, HttpResponse } from 'msw';
-import { isCredentialGranularity, isWorkflowEligible, isWriteEligible } from '@seamnex/domain';
+import {
+  computeCatalogCoverage,
+  isCredentialGranularity,
+  isWorkflowEligible,
+  isWriteEligible,
+  type AccessRequest,
+  type CatalogEntry,
+  type EnvSchemaVar,
+} from '@seamnex/domain';
 import { at } from '../fixtures/context';
 import { ENV_SCHEMAS } from '../fixtures/catalog';
+import { CATALOG_SYNC_COMMIT, CATALOG_SYNC_TAGS } from '../fixtures/catalog-repository';
 import { resolveEnv } from '../fixtures/env-plan';
-import { ENV_PROFILES } from '../fixtures/env-schema';
-import { appendAudit, scaffoldFor, getState } from '../store';
+import { envSchemaFor } from '../fixtures/env-schema';
+import { appendAudit, envProfiles, meFor, scaffoldFor, getState } from '../store';
 import { actorFor, readBody, deny, problem, requireCapability, roleOf } from './utils';
 
 export const catalogHandlers = [
@@ -27,6 +36,100 @@ export const catalogHandlers = [
       return matchesQuery && matchesCluster && matchesPackaging;
     });
     return HttpResponse.json(items);
+  }),
+
+  /*
+   * ADR-BE-42 — registered **before** `/catalog/:key`, because MSW matches in registration order and
+   * `:key` would otherwise capture `repository` and answer with an entry-not-found problem. The
+   * console test would then pass against the wrong shape, which is worse than failing.
+   */
+  http.get('/api/v1/catalog/repository', ({ request }) => {
+    const guard = requireCapability(roleOf(request), 'catalog.browse');
+    if (guard) return guard;
+    return HttpResponse.json(getState().catalogRepository);
+  }),
+
+  /** ADR-BE-42 §10.3: fetch, swap and reconcile. The mock has one tag, so an unknown ref refuses. */
+  http.post('/api/v1/catalog/sync', async ({ request }) => {
+    const role = roleOf(request);
+    const guard = deny(role, ['R1'], 'catalog sync');
+    if (guard) return guard;
+    const state = getState();
+    if (!state.catalogRepository.source.configured) {
+      return problem(
+        503,
+        'SOURCE_NOT_CONFIGURED',
+        'No catalogue source is configured',
+        'Nothing to fetch: SEAMNEX_CATALOG_SOURCE_URL is unset.',
+        'Set the source URL, or place a catalogue tag in the working tree by hand and reload.',
+      );
+    }
+
+    const body = await readBody<{ ref?: string }>(request);
+    const ref = (body.ref ?? state.catalogRepository.source.ref ?? '').trim();
+    if (!(CATALOG_SYNC_TAGS as readonly string[]).includes(ref)) {
+      return problem(
+        404,
+        'SOURCE_REF_NOT_FOUND',
+        'The source has no such tag',
+        `The source has no tag "${ref}".`,
+        'Use catalog-2026.11.0, or name a tag that exists in the mirror.',
+      );
+    }
+
+    // A successful sync reconciles the tree, so any mixed state the mock was showing is repaired.
+    state.catalogRepository = {
+      revision: CATALOG_SYNC_COMMIT.sha,
+      source: { ...state.catalogRepository.source, ref },
+      commit: {
+        sha: CATALOG_SYNC_COMMIT.sha,
+        actor: actorFor(role).id,
+        message: `catalog sync ${ref} at ${CATALOG_SYNC_COMMIT.sha}`,
+        recordedAt: CATALOG_SYNC_COMMIT.recordedAt,
+      },
+      staged: null,
+    };
+
+    appendAudit({
+      action: 'catalog.source.synced',
+      targetType: 'catalog',
+      targetId: CATALOG_SYNC_COMMIT.sha,
+      targetLabel: `Catalogue source ${ref}`,
+      outcome: 'success',
+      detail: `Fetched ${state.catalogRepository.source.host ?? 'the configured source'} at ${ref} (${CATALOG_SYNC_COMMIT.sha}); ${String(state.catalog.length)} entries reconciled.`,
+      actor: actorFor(role),
+    });
+
+    return HttpResponse.json({
+      reloadedAt: at(0),
+      revision: CATALOG_SYNC_COMMIT.sha,
+      entries: state.catalog.length,
+      added: 0,
+      changed: 0,
+      removed: 0,
+      reconciled: state.catalog.map((entry) => ({
+        key: entry.key,
+        change: 'unchanged' as const,
+        detail: `${entry.key} matches repository revision`,
+      })),
+      environment: { added: 0, changed: 0, removed: 0, refused: [], applied: [] },
+      invalid: [],
+      coverage: computeCatalogCoverage({
+        entries: state.catalog.map((entry) => ({
+          key: entry.key,
+          guaranteeClass: entry.guaranteeClass,
+          primaryInstanceId: entry.primaryInstanceId,
+        })),
+        declaredEnvironments: state.catalog.length,
+        refused: [],
+      }),
+      source: {
+        url: state.catalogRepository.source.host ?? 'the configured source',
+        ref,
+        commit: CATALOG_SYNC_COMMIT.sha,
+      },
+      staged: { pending: [] },
+    });
   }),
 
   http.get('/api/v1/catalog/:key', ({ params, request }) => {
@@ -89,9 +192,277 @@ export const catalogHandlers = [
   }),
 
   http.get('/api/v1/env-profiles', ({ request }) => {
-    const guard = requireCapability(roleOf(request), 'instance.configure');
+    // The route's policy key is `catalog.browse` (a read); the guard used to ask for
+    // `instance.configure`, which is a different question and refused a role the API admits.
+    const guard = requireCapability(roleOf(request), 'catalog.browse');
     if (guard) return guard;
-    return HttpResponse.json(ENV_PROFILES);
+    return HttpResponse.json(envProfiles());
+  }),
+
+  /**
+   * FR-1.26 — a role that may read profiles but not write them files a change request instead.
+   *
+   * The request is an ordinary access request so the same governance queue and second-party rule
+   * apply; nothing about a profile bypasses the decision that a write needs.
+   */
+  http.post('/api/v1/env-profiles/:key/requests', async ({ params, request }) => {
+    const role = roleOf(request);
+    const guard = requireCapability(role, 'profile.request');
+    if (guard) return guard;
+    const key = String(params.key);
+    const body = await readBody<{ justification?: string }>(request);
+    const justification = (body.justification ?? '').trim();
+    const state = getState();
+    const profile = state.profiles.find((item) => item.key === key);
+    if (!profile) {
+      return problem(
+        404,
+        'NOT_FOUND',
+        'No such profile',
+        `No environment profile "${key}".`,
+        'Reload the list; a profile key cannot be renamed.',
+      );
+    }
+    if (justification.length < 10) {
+      return problem(
+        422,
+        'JUSTIFICATION_REQUIRED',
+        'A justification is required',
+        'The domain owner needs a reason to decide.',
+        'Name the variable and the value you need, in at least 10 characters.',
+        [{ field: 'justification', code: 'required', message: 'At least 10 characters.' }],
+      );
+    }
+    const me = meFor(role);
+    const created: AccessRequest = {
+      id: `ar-${3300 + state.accessRequests.length}`,
+      requester: { id: me.id, name: me.displayName },
+      // A profile value is an instance parameter: the same queue that decides a single-instance
+      // override decides a change to the set it inherits.
+      kind: 'instance_param',
+      target: `${profile.key} ${profile.name} — environment profile`,
+      justification,
+      state: 'open',
+      createdAt: at(0),
+      decidedBy: null,
+      decidedAt: null,
+      domain: 'Platform',
+    };
+    state.accessRequests = [created, ...state.accessRequests];
+    appendAudit({
+      action: 'profile.change_requested',
+      targetType: 'env_profile',
+      targetId: profile.key,
+      targetLabel: profile.name,
+      outcome: 'success',
+      detail: `${me.displayName} requested a change; ${created.id} is open for R1.`,
+      actor: actorFor(role),
+    });
+    return HttpResponse.json(created, { status: 201 });
+  }),
+
+  /**
+   * FR-1.26 / AC-51 — the four profile writes, with the same refusals the API issues.
+   *
+   * The demo data is a fixture, not a second implementation: each rejection below mirrors a
+   * server check (shape, unknown variable, `none`-only ceiling, secret source, profile in use), so a
+   * console test cannot pass against a rule the API does not have.
+   */
+  http.post('/api/v1/env-profiles', async ({ request }) => {
+    const guard = requireCapability(roleOf(request), 'profile.manage');
+    if (guard) return guard;
+    const body = (await readBody(request)) as {
+      key?: string;
+      name?: string;
+      target?: 'production' | 'staging';
+    };
+    const key = body.key ?? '';
+    if (!/^[a-z][a-z0-9_-]{1,31}$/.test(key)) {
+      return problem(
+        422,
+        'VALIDATION_FAILED',
+        'The profile key is not valid',
+        'Use 2–32 characters: a lowercase letter followed by lowercase letters, digits, "-" or "_".',
+        'Choose a key that follows the documented pattern; the key is what instances pin to.',
+      );
+    }
+    if (!body.name || body.name.trim() === '') {
+      return problem(
+        422,
+        'VALIDATION_FAILED',
+        'A profile needs a name',
+        'Enter a display name.',
+        'The name is what the wizard shows; it does not have to be unique.',
+      );
+    }
+    const state = getState();
+    if (state.profiles.some((profile) => profile.key === key)) {
+      return problem(
+        409,
+        'STATE_CONFLICT',
+        'That profile already exists',
+        `A profile with key "${key}" already exists.`,
+        'Choose another key, or edit the existing profile instead.',
+      );
+    }
+    const created = {
+      key,
+      name: body.name.trim(),
+      target: body.target ?? 'production',
+      updatedBy: actorFor(roleOf(request)).name,
+      updatedAt: at(0),
+      values: [],
+    };
+    state.profiles = [...state.profiles, created];
+    appendAudit({
+      action: 'profile.created',
+      targetType: 'env_profile',
+      targetId: key,
+      targetLabel: created.name,
+      outcome: 'success',
+      detail: `${created.name} · ${created.target}`,
+      actor: {
+        id: actorFor(roleOf(request)).id,
+        name: actorFor(roleOf(request)).name,
+        type: 'user',
+      },
+    });
+    return HttpResponse.json(created);
+  }),
+
+  http.patch('/api/v1/env-profiles/:key', async ({ params, request }) => {
+    const guard = requireCapability(roleOf(request), 'profile.manage');
+    if (guard) return guard;
+    const key = String(params.key);
+    const body = (await readBody(request)) as { name?: string; target?: 'production' | 'staging' };
+    if (body.name === undefined && body.target === undefined) {
+      return problem(
+        422,
+        'VALIDATION_FAILED',
+        'Nothing to change',
+        'Specify a name or a target.',
+        'Send at least one field; an empty patch would re-sign the row without a change.',
+      );
+    }
+    const state = getState();
+    const profile = state.profiles.find((item) => item.key === key);
+    if (!profile) {
+      return problem(
+        404,
+        'NOT_FOUND',
+        'No such profile',
+        `No environment profile "${key}".`,
+        'Reload the list; a profile key cannot be renamed.',
+      );
+    }
+    if (body.name !== undefined) profile.name = body.name;
+    if (body.target !== undefined) profile.target = body.target;
+    profile.updatedBy = actorFor(roleOf(request)).name;
+    profile.updatedAt = at(0);
+    return HttpResponse.json(profile);
+  }),
+
+  http.put('/api/v1/env-profiles/:key/values', async ({ params, request }) => {
+    const guard = requireCapability(roleOf(request), 'profile.manage');
+    if (guard) return guard;
+    const key = String(params.key);
+    const state = getState();
+    const profile = state.profiles.find((item) => item.key === key);
+    if (!profile) {
+      return problem(
+        404,
+        'NOT_FOUND',
+        'No such profile',
+        `No environment profile "${key}".`,
+        'Reload the list; a profile key cannot be renamed.',
+      );
+    }
+    const body = (await readBody(request)) as {
+      values?: { varName: string; value?: string | null; secretRef?: string | null }[];
+    };
+    const declarations = declaredVariables(state.catalog);
+    const fieldErrors: { field: string; code: string; message: string }[] = [];
+    for (const value of body.values ?? []) {
+      const declared = declarations.get(value.varName);
+      if (declared === undefined) {
+        fieldErrors.push({
+          field: value.varName,
+          code: 'unknown_variable',
+          message: 'No catalog entry declares this variable.',
+        });
+        continue;
+      }
+      if (declared.every((item) => item.ceiling === 'none')) {
+        fieldErrors.push({
+          field: value.varName,
+          code: 'ceiling',
+          message: 'Every entry that declares this variable caps it at "none".',
+        });
+        continue;
+      }
+      const hasSecret = typeof value.secretRef === 'string' && value.secretRef.length > 0;
+      const isSecret = declared.some((item) => item.secret);
+      if (isSecret !== hasSecret) {
+        fieldErrors.push({
+          field: value.varName,
+          code: isSecret ? 'secret_required' : 'value_required',
+          message: isSecret
+            ? 'This variable is a secret; reference a stored secret instead of a value.'
+            : 'This variable is not a secret; enter a value.',
+        });
+      }
+    }
+    if (fieldErrors.length > 0) {
+      return problem(
+        422,
+        'VALIDATION_FAILED',
+        'The profile values were refused',
+        'The profile values were refused; nothing was written.',
+        'Fix the named fields and save again.',
+        fieldErrors,
+      );
+    }
+    profile.values = (body.values ?? []).map((value) => ({
+      varName: value.varName,
+      value: value.secretRef ? null : (value.value ?? null),
+      secretRef: value.secretRef ?? null,
+    }));
+    profile.updatedBy = actorFor(roleOf(request)).name;
+    profile.updatedAt = at(0);
+    return HttpResponse.json(profile);
+  }),
+
+  http.delete('/api/v1/env-profiles/:key', ({ params, request }) => {
+    const guard = requireCapability(roleOf(request), 'profile.manage');
+    if (guard) return guard;
+    const key = String(params.key);
+    const state = getState();
+    const profile = state.profiles.find((item) => item.key === key);
+    if (!profile) {
+      return problem(
+        404,
+        'NOT_FOUND',
+        'No such profile',
+        `No environment profile "${key}".`,
+        'Reload the list; a profile key cannot be renamed.',
+      );
+    }
+    const used = state.instances.filter(
+      (instance) => instance.profileKey === key && instance.state !== 'deleted',
+    );
+    if (used.length > 0) {
+      return problem(
+        409,
+        'STATE_CONFLICT',
+        'The profile is in use',
+        `Instances still deploy with "${key}": ${used
+          .map((instance) => instance.slug)
+          .join(', ')}.`,
+        'Move those instances to another profile first; deleting it would leave them unresolvable.',
+      );
+    }
+    state.profiles = state.profiles.filter((item) => item.key !== key);
+    return HttpResponse.json({ key, deleted: true });
   }),
 
   http.patch('/api/v1/catalog/:key/integration-metadata', async ({ params, request }) => {
@@ -99,9 +470,16 @@ export const catalogHandlers = [
     const guard = deny(role, ['R1', 'R3'], 'metadata.manage');
     if (guard) return guard;
 
-    const body = await readBody<{ credentialGranularity?: string; sessionMaxMinutes?: number }>(
-      request,
-    );
+    const body = await readBody<{
+      credentialGranularity?: string;
+      sessionMaxMinutes?: number;
+      apiBaseUrl?: string;
+      authMethod?: string;
+      guaranteeClass?: CatalogEntry['guaranteeClass'];
+      operationInventory?: CatalogEntry['integration']['operationInventory'];
+      eventModes?: CatalogEntry['integration']['eventModes'];
+      sloSupported?: boolean;
+    }>(request);
     const state = getState();
     const entry = state.catalog.find((item) => item.key === String(params.key));
     if (!entry) {
@@ -134,6 +512,20 @@ export const catalogHandlers = [
         ],
       );
     }
+    /*
+     * FR-2.15: an empty body is refused. It would restart the review clock without anyone having
+     * verified anything, which is the defect the widened contract exists to close.
+     */
+    if (Object.values(body).every((value) => value === undefined)) {
+      return problem(
+        422,
+        'VALIDATION_FAILED',
+        'Verify at least one fact',
+        'An empty request would restart the review clock without evidence.',
+        'Change a fact before recording the review.',
+        [{ field: 'body', code: 'required', message: 'Send at least one verified fact.' }],
+      );
+    }
     const previousGranularity = entry.integration.credentialGranularity;
     if (body.credentialGranularity !== undefined) {
       entry.integration.credentialGranularity = body.credentialGranularity;
@@ -141,6 +533,19 @@ export const catalogHandlers = [
     if (typeof body.sessionMaxMinutes === 'number') {
       entry.integration.sessionMaxMinutes = body.sessionMaxMinutes;
     }
+    // Every other verified fact supersedes the catalogue assumption in place, so the entry screen
+    // and the registry projection read one record rather than two.
+    if (body.apiBaseUrl !== undefined) entry.integration.apiBaseUrl = body.apiBaseUrl;
+    if (body.authMethod !== undefined) entry.integration.authMethod = body.authMethod;
+    if (body.guaranteeClass !== undefined) {
+      entry.integration.guaranteeClassVerified = body.guaranteeClass;
+      entry.guaranteeClass = body.guaranteeClass;
+    }
+    if (body.operationInventory !== undefined) {
+      entry.integration.operationInventory = body.operationInventory;
+    }
+    if (body.eventModes !== undefined) entry.integration.eventModes = body.eventModes;
+    if (body.sloSupported !== undefined) entry.integration.sloSupported = body.sloSupported;
     entry.integration.verifiedBy = 'Sofia Almeida';
     entry.integration.verifiedAt = at(0);
     // The review clock restarts with the verification (13 weeks), exactly as the API does: leaving
@@ -154,6 +559,24 @@ export const catalogHandlers = [
       row.credentialGranularity = entry.integration.credentialGranularity;
       row.writeEligible = isWriteEligible(entry.integration.credentialGranularity);
       row.workflowEligible = isWorkflowEligible(entry.integration.credentialGranularity);
+      row.apiBaseUrl = entry.integration.apiBaseUrl;
+      row.authMethod = entry.integration.authMethod;
+      row.guaranteeClass = entry.guaranteeClass;
+      row.operations = entry.integration.operationInventory;
+      row.eventModes = entry.integration.eventModes;
+      row.sloSupported = entry.integration.sloSupported;
+      // AC-41: the facts this verification actually recorded now carry provenance. The defaults are
+      // left alone rather than relabelled — a screen may not claim more than the call did.
+      const recorded: (typeof row.verifiedFacts)[number][] = [];
+      if (body.apiBaseUrl !== undefined) recorded.push('apiBaseUrl');
+      if (body.authMethod !== undefined) recorded.push('authMethod');
+      if (body.guaranteeClass !== undefined) recorded.push('guaranteeClass');
+      if (body.credentialGranularity !== undefined) recorded.push('credentialGranularity');
+      if (body.sessionMaxMinutes !== undefined) recorded.push('sessionMaxMinutes');
+      if (body.operationInventory !== undefined) recorded.push('operations');
+      if (body.eventModes !== undefined) recorded.push('eventModes');
+      if (body.sloSupported !== undefined) recorded.push('sloSupported');
+      row.verifiedFacts = [...new Set([...row.verifiedFacts, ...recorded])];
       row.verifiedAt = entry.integration.verifiedAt;
       row.nextReviewAt = entry.integration.nextReviewAt;
       row.stale = false;
@@ -249,6 +672,20 @@ export const catalogHandlers = [
       // against the API.
       environment: { added: 0, changed: 0, removed: 0, refused: [], applied: [] },
       invalid: [],
+      /*
+       * S-1 / S-2 — the coverage strip on the receipt. Computed from the catalogue being served, not
+       * written as a literal: a fixed `floorMet: true` could never show the shortfall the strip
+       * exists to surface, and the console would look correct against a mock that lies.
+       */
+      coverage: computeCatalogCoverage({
+        entries: state.catalog.map((entry) => ({
+          key: entry.key,
+          guaranteeClass: entry.guaranteeClass,
+          primaryInstanceId: entry.primaryInstanceId,
+        })),
+        declaredEnvironments: state.catalog.length,
+        refused: [],
+      }),
     });
   }),
 
@@ -364,3 +801,32 @@ export const catalogHandlers = [
     });
   }),
 ];
+
+/**
+ * Every variable any shipped entry declares, with the entries and the ceiling each applies.
+ *
+ * The profile editor needs the same fact the server checks on write (AC-51): a variable is only
+ * writable if *some* entry allows it, and a secret-typed variable may only reference a stored
+ * secret. Building it from the fixture schemas keeps the console's explanation and the API's
+ * refusal in step.
+ */
+function declaredVariables(
+  entries: readonly CatalogEntry[],
+): Map<string, { entryKey: string; secret: boolean; ceiling: EnvSchemaVar['overrideCeiling'] }[]> {
+  const map = new Map<
+    string,
+    { entryKey: string; secret: boolean; ceiling: EnvSchemaVar['overrideCeiling'] }[]
+  >();
+  for (const entry of entries) {
+    for (const variable of envSchemaFor(entry)) {
+      const list = map.get(variable.name) ?? [];
+      list.push({
+        entryKey: entry.key,
+        secret: variable.secret,
+        ceiling: variable.overrideCeiling,
+      });
+      map.set(variable.name, list);
+    }
+  }
+  return map;
+}

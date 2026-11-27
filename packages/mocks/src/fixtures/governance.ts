@@ -8,15 +8,20 @@ import type {
   PolicyException,
   PostureSummary,
 } from '@seamnex/domain';
-import { licenseTerms } from '@seamnex/domain';
+import { licenseTerms, nativeFloorStatus } from '@seamnex/domain';
 import { at, daysAgo, hoursAgo } from './context';
 import { CATALOG_BY_KEY } from './catalog';
 import { INSTANCES } from './instances';
 
+/**
+ * One deployment is deliberately left unreviewed so the demo always shows the state the register
+ * exists to surface; the restricted n8n deployment is reviewed, so its refusal is the licensing
+ * one rather than the missing-review one.
+ */
+const REVIEW_PENDING_ENTRY = 'D09-01';
+
 export const LICENSES: LicenseRecord[] = INSTANCES.map((instance) => {
-  // A licence that restricts resale/hosted service is exactly the one still waiting for the legal
-  // review: reporting a reviewer and a date for it would make an unreviewed term look signed off.
-  const reviewed = !instance.licenseRestricted;
+  const reviewed = instance.entryKey !== REVIEW_PENDING_ENTRY;
   const terms = licenseTerms(instance.licenseId);
   const restricted =
     instance.licenseRestricted ||
@@ -33,17 +38,45 @@ export const LICENSES: LicenseRecord[] = INSTANCES.map((instance) => {
     ],
     resaleRestricted: restricted,
     hostedServiceRestricted: restricted,
-    reviewedBy: reviewed ? 'Ruth Adler' : null,
+    // The id traces the sign-off back to the audit trail; the register renders the name.
+    reviewedBy: reviewed ? 'usr-ruth-adler' : null,
+    reviewedByName: reviewed ? 'Ruth Adler' : null,
     reviewedAt: reviewed ? daysAgo(20) : null,
+    // ADR-BE-25: a cleared row always carries the artefact the auditor checked it against. The
+    // catalogue reference is text, not a URL, so the mock does not invent a link that 404s.
+    upstreamRef: reviewed ? `Catalogue ${instance.entryKey} · ${instance.licenseId}` : null,
+    reviewNote: reviewed ? 'Verified against the upstream LICENSE file before procurement.' : null,
     status: reviewed ? 'cleared' : 'review_required',
     hostedService: false,
   };
 });
 
+/**
+ * FR-2.12 — the register, with the provenance the observation pass produces.
+ *
+ * `NEVER_OBSERVED` stands for a deployment whose row still comes from the catalogue document: the
+ * screen has to be able to say "never observed" instead of printing two numbers and implying they
+ * were checked. It is one deployment rather than none so the state is visible in the demo.
+ */
+const NEVER_OBSERVED = 1;
+
+/**
+ * FR-2.12 — where an operator reads the release an observed version came from.
+ *
+ * Derived from the catalogue's `repoUrl` rather than written as a literal, so the register and the
+ * entry's own "Release notes" point at the same page. An entry with no repository gets `null`, which
+ * the screen renders as no link, instead of a URL that leads nowhere.
+ */
+export function releasesPageOf(entryKey: string): string | null {
+  const repoUrl = CATALOG_BY_KEY[entryKey]?.repoUrl;
+  return repoUrl === undefined ? null : `${repoUrl.replace(/\/+$/, '')}/releases`;
+}
+
 export const PATCHES: PatchRecord[] = INSTANCES.map((instance, index) => {
   const current = instance.currentVersion;
   const latest = instance.availableVersion ?? current;
   const behind = latest !== current;
+  const observed = index !== NEVER_OBSERVED;
   return {
     instanceId: instance.id,
     entryKey: instance.entryKey,
@@ -51,9 +84,24 @@ export const PATCHES: PatchRecord[] = INSTANCES.map((instance, index) => {
     currentVersion: current,
     latestVersion: latest,
     lastUpgradeAt: daysAgo(20 + index * 4),
-    oldestUnappliedSecurityDays: behind ? 12 + index * 2 : 0,
+    /*
+     * `null` is "nothing pending", and it is only correct for a row that was actually observed. The
+     * unobserved deployment keeps `null` too — but its `source` says `catalog`, which is the honest
+     * difference between "measured clean" and "never measured".
+     */
+    oldestUnappliedSecurityDays: behind ? 12 + index * 2 : null,
     severity: behind && index % 4 === 0 ? 'critical' : behind ? 'warning' : 'info',
     checkedAt: hoursAgo(3),
+    advisory: observed && behind && index % 4 === 0 ? `CVE-2026-3${1000 + index * 7}` : null,
+    /*
+     * The product's own releases page (`<repoUrl>/releases`), not a synthetic
+     * `github.com/releases/tag/…`: that path has no owner or repository, so it resolves to nothing.
+     * The tag page is deliberately not guessed either — several of these products tag without a `v`
+     * prefix, and a link that works for Nextcloud and 404s for EspoCRM is worse than the list page.
+     */
+    releaseUrl: observed && behind ? releasesPageOf(instance.entryKey) : null,
+    source: observed ? 'observed' : 'catalog',
+    lastObservedAt: observed ? hoursAgo(3) : null,
   };
 });
 
@@ -64,6 +112,7 @@ export const BREAK_GLASS: BreakGlassSession[] = [
     instanceId: 'inst-erp',
     product: 'D06-01 ERPNext',
     domainOwner: 'Helena Brandt',
+    domainOwnerEmail: 'helena.brandt@seamnex.local',
     accessMode: 'read_only',
     justification: 'Investigate why the 15.42.0 upgrade failed readiness before the vendor call.',
     approver: 'Helena Brandt',
@@ -82,6 +131,7 @@ export const BREAK_GLASS: BreakGlassSession[] = [
     instanceId: 'inst-people',
     product: 'D07-01 OrangeHRM',
     domainOwner: 'Anja Keller',
+    domainOwnerEmail: 'anja.keller@seamnex.local',
     accessMode: 'read_write',
     justification: 'Repair the leave-entitlement import that failed after the upgrade.',
     approver: null,
@@ -100,6 +150,7 @@ export const BREAK_GLASS: BreakGlassSession[] = [
     instanceId: 'inst-projects',
     product: 'D09-01 OpenProject',
     domainOwner: 'Diego Salas',
+    domainOwnerEmail: 'diego.salas@seamnex.local',
     accessMode: 'read_only',
     justification: 'Confirm baseline data before the quarterly steering meeting.',
     approver: 'Ruth Adler',
@@ -118,6 +169,7 @@ export const BREAK_GLASS: BreakGlassSession[] = [
     instanceId: 'inst-insights',
     product: 'D11-01 Metabase',
     domainOwner: 'Noah Fischer',
+    domainOwnerEmail: 'noah.fischer@seamnex.local',
     accessMode: 'read_only',
     justification: 'Verify the revenue dashboard definition after the schema change.',
     approver: 'Ruth Adler',
@@ -135,8 +187,10 @@ export const BREAK_GLASS: BreakGlassSession[] = [
 export const POLICY_EXCEPTIONS: PolicyException[] = [
   {
     id: 'pe-104',
-    rule: 'Host-path bind mount',
-    scope: 'D04-01 WooCommerce — inst-shop',
+    rule: 'host_path_mount',
+    // The scope is the catalog entry key (NFR-4.15): the waiver is resolved by comparing it with the
+    // product being deployed, so a human label here would waive nothing.
+    scope: 'D04-01',
     justification:
       'The wp-content directory must stay on the host for the agency staging sync until the migration closes.',
     requester: 'Priya Raman',
@@ -144,20 +198,22 @@ export const POLICY_EXCEPTIONS: PolicyException[] = [
     state: 'approved',
     requestedAt: daysAgo(40),
     expiresAt: at(39 * 24 * 60),
-    patchDiff: '- /var/www/html/wp-content\n+ bind: /srv/agency/woocommerce/wp-content',
+    patchDiff:
+      '= host_path_mount kept as declared (wordpress): service wordpress binds a host path (/srv/agency/woocommerce/wp-content).\n~ services.wordpress.ports: ["8080:80"] → ["80"]',
   },
   {
     id: 'pe-105',
-    rule: 'Published port',
-    scope: 'D04-01 WooCommerce — inst-shop',
+    rule: 'unpinned_image',
+    scope: 'D04-01',
     justification:
-      'The payment provider sandbox calls back on a fixed host port for the migration window; the platform has no exemption for published ports.',
+      'The payment plugin ships only a floating tag while its vendor finishes the digest-pinned release.',
     requester: 'Priya Raman',
     approver: null,
     state: 'requested',
     requestedAt: at(-260),
     expiresAt: at(14 * 24 * 60),
-    patchDiff: '+ ports: ["8080:80"]',
+    patchDiff:
+      '= unpinned_image kept as declared (wordpress): stage wordpress builds from woo:latest.',
   },
 ];
 
@@ -266,6 +322,12 @@ const forwardAuthDeployments = deployed.filter(
 ).length;
 // Unclassified cannot be claimed as SSO; it joins the proxy-gate bucket so the counts partition.
 const signInRequiredDeployments = deployed.length - nativeDeployments - forwardAuthDeployments;
+/** S-2: the same pure function the API serves, so the fixture cannot disagree with the platform. */
+const floorStatus = nativeFloorStatus({
+  native: nativeDeployments,
+  forwardAuth: forwardAuthDeployments,
+  signInRequired: signInRequiredDeployments,
+});
 const missingHealthChecks: PostureSummary['missingHealthChecks'] = [];
 
 export const POSTURE: PostureSummary = {
@@ -277,6 +339,18 @@ export const POSTURE: PostureSummary = {
     totalEntries: Object.keys(CATALOG_BY_KEY).length,
     // ADR-BE-22: no deployment holds a platform-managed product credential in the fixture.
     platformManagedCredentials: 0,
+    /*
+     * S-2 — the target travels with the counts. The screen used to hold `6` itself, so a floor that
+     * had been lowered by a recorded decision would still render as a shortfall.
+     */
+    nativeFloor: {
+      floor: floorStatus.floor,
+      baseline: floorStatus.baseline,
+      met: floorStatus.met,
+      shortfall: floorStatus.shortfall,
+    },
+    // The default floor applies here: no owner decision has been recorded in the fixture.
+    ownerDecision: null,
   },
   missingHealthChecks,
   unverifiedRestores: unverified.map((instance) => ({

@@ -46,6 +46,31 @@ describe('platform settings', () => {
     expect(getState().settings.breakGlassMaxMinutes).toBe(75);
   });
 
+  it('saves the memory and disk alert thresholds as part of the same draft', async () => {
+    openAs('R1', '/admin/settings');
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Settings' });
+
+    // The third threshold field (CPU) is covered with the capacity board; these two are the ones a
+    // single save has to carry alongside it, because `notification.evaluate()` reads all three.
+    fireEvent.change(await screen.findByLabelText('Memory'), { target: { value: '80' } });
+    fireEvent.change(screen.getByLabelText('Disk'), { target: { value: '70' } });
+
+    expect(
+      await screen.findByText(
+        /unsaved changes: .*capacityMemoryAlertPercent, .*capacityDiskAlertPercent/,
+      ),
+    ).toBeDefined();
+
+    const save = screen.getByRole('button', { name: 'Save changes' });
+    await waitFor(() => expect(save.hasAttribute('disabled')).toBe(false));
+    fireEvent.click(save);
+
+    expect(await screen.findByText('Settings saved')).toBeDefined();
+    await waitFor(() => expect(getState().settings.capacityMemoryAlertPercent).toBe(80));
+    expect(getState().settings.capacityDiskAlertPercent).toBe(70);
+  });
+
   it('surfaces a stale-form refusal instead of overwriting', async () => {
     server.use(
       http.put('/api/v1/admin/settings', () =>

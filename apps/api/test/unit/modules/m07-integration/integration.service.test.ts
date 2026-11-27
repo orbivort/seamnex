@@ -29,9 +29,14 @@ const CONFIG = {
   SEAMNEX_IDP_CONTAINER: 'seamnex-idp',
   SEAMNEX_IDP_INTERNAL_PORT: 8080,
   SEAMNEX_KEYCLOAK_REALM: 'seamnex',
+  // Presence of this path is what distinguishes "no IdP admin client on this host" (a deployment
+  // may proceed) from "the IdP refused" (a deployment must fail) — see `registerIdentity`.
+  SEAMNEX_KEYCLOAK_ADMIN_CLIENT_SECRET_FILE: '/run/seamnex/kc-admin-client-secret',
   SEAMNEX_SSO_EVIDENCE_TTL_MINUTES: 60,
   SEAMNEX_INGRESS_DOMAIN: 'seamnex.local',
   SEAMNEX_EDGE_CONTAINER: 'seamnex-edge',
+  // NFR-4.1 / ISSUE-07: the certificate mode the deployment's edge runs, projected onto each route.
+  SEAMNEX_EDGE_TLS_MODE: 'acme',
   // ADR-BE-22: one deployment-wide bootstrap origin; the relay role is a different value here.
   SEAMNEX_BOOTSTRAP_URL: 'http://auth-gateway:8090',
 };
@@ -78,13 +83,16 @@ function dockerFake(overrides: Record<string, unknown> = {}): {
 } {
   return Object.assign(
     {
-      // The product probe prints a status line; the IdP probe prints `ANSWER …`. One runner answers
-      // both, by the marker the platform passes as a positional argument.
-      runCli: vi.fn(async (_file: string, args: readonly string[]) =>
-        args.includes('seamnex-idp-probe')
-          ? { code: 0, stdout: 'ANSWER HTTP/1.1 200 OK\n', stderr: '', truncated: false }
-          : { code: 0, stdout: 'HTTP 200\n', stderr: '', truncated: false },
-      ),
+      // The product probe prints a status line, the IdP probe prints `ANSWER …` and the sign-in page
+      // probe prints `SIGNIN …`. One runner answers all three, by the marker the platform passes as a
+      // positional argument.
+      runCli: vi.fn(async (_file: string, args: readonly string[]) => {
+        if (args.includes('seamnex-signin-probe'))
+          return { code: 0, stdout: 'SIGNIN offered\n', stderr: '', truncated: false };
+        if (args.includes('seamnex-idp-probe'))
+          return { code: 0, stdout: 'ANSWER HTTP/1.1 200 OK\n', stderr: '', truncated: false };
+        return { code: 0, stdout: 'HTTP 200\n', stderr: '', truncated: false };
+      }),
       connectNetwork: vi.fn(async (): Promise<void> => undefined),
       containers: vi.fn(async (): Promise<unknown[]> => []),
       inspect: vi.fn(async (): Promise<unknown> => ({})),
@@ -98,6 +106,33 @@ function dockerFake(overrides: Record<string, unknown> = {}): {
     inspect: Mock;
     logs: Mock;
   };
+}
+
+/**
+ * M03 is where the client secret becomes real: the product reads it from `instance_env_value`, so
+ * `ensureIdentitySecret` writes through the renderer and `ssoLogin` reads the same row. Both entries
+ * that declare a secret variable are "applied" by default, so a test about something else is not
+ * accidentally a test about an unapplied credential.
+ */
+function rendererFake(overrides: Record<string, unknown> = {}): {
+  instanceEnv: Mock;
+  updateInstanceEnv: Mock;
+} {
+  return Object.assign(
+    {
+      instanceEnv: vi.fn(async (): Promise<unknown[]> => [
+        { name: 'ESPOCRM_CONFIG_OIDC_CLIENT_SECRET', source: 'secret', masked: true, value: null },
+        { name: 'ERPNEXT_SSO_CLIENT_SECRET', source: 'secret', masked: true, value: null },
+      ]),
+      updateInstanceEnv: vi.fn(async (): Promise<unknown> => ({
+        diff: [],
+        requiresRecreate: false,
+        applied: false,
+        note: 'Stored.',
+      })),
+    },
+    overrides,
+  ) as unknown as { instanceEnv: Mock; updateInstanceEnv: Mock };
 }
 
 function keycloakFake(overrides: Record<string, unknown> = {}): {
@@ -118,8 +153,8 @@ function keycloakFake(overrides: Record<string, unknown> = {}): {
   ) as unknown as { upsertClient: Mock; realmReachable: Mock; deleteClient: Mock };
 }
 
-function traefikFake(): { write: Mock; remove: Mock } {
-  return { write: vi.fn(), remove: vi.fn() };
+function traefikFake(): { write: Mock; remove: Mock; prune: Mock } {
+  return { write: vi.fn(), remove: vi.fn(), prune: vi.fn() };
 }
 
 function ssoProbeFake(overrides: Record<string, unknown> = {}): { verify: Mock } {
@@ -146,6 +181,7 @@ type BuildOptions = {
   docker?: Record<string, unknown> | undefined;
   keycloak?: Record<string, unknown> | undefined;
   ssoProbe?: Record<string, unknown> | undefined;
+  renderer?: Record<string, unknown> | undefined;
 };
 
 function build(options: BuildOptions = {}) {
@@ -156,6 +192,7 @@ function build(options: BuildOptions = {}) {
   const keycloak = keycloakFake(options.keycloak);
   const traefik = traefikFake();
   const ssoProbe = ssoProbeFake(options.ssoProbe);
+  const renderer = rendererFake(options.renderer);
   const service = new PostgresIntegrationService(
     db.pool,
     config(options.config),
@@ -165,8 +202,9 @@ function build(options: BuildOptions = {}) {
     keycloak as never,
     traefik as never,
     ssoProbe as never,
+    renderer as never,
   );
-  return { db, audit, secrets, docker, keycloak, traefik, ssoProbe, service };
+  return { db, audit, secrets, docker, keycloak, traefik, ssoProbe, renderer, service };
 }
 
 function statement(db: ReturnType<typeof fakeDb>, fragment: string) {
@@ -206,6 +244,10 @@ function clientRow(overrides: Record<string, unknown> = {}): Record<string, unkn
     client_id: 'seamnex-crm',
     client_secret_ref: 'secret-1',
     redirect_uris: ['http://crm.seamnex.local:8020/oauth-callback.php'],
+    protocol: 'oidc',
+    access_token_lifespan_seconds: 300,
+    offline_access_disabled: true,
+    backchannel_logout_url: 'http://crm.seamnex.local:8020/api/v1/Oidc/action/backchannelLogout',
     ...overrides,
   };
 }
@@ -218,6 +260,7 @@ function projectionRow(overrides: Record<string, unknown> = {}): Record<string, 
     published: true,
     gated: false,
     auth_mode: 'native',
+    tls_mode: 'acme',
     slug: 'crm',
     payload: { httpPort: 8080 },
     ...overrides,
@@ -411,6 +454,9 @@ describe('reading the recorded integration state', () => {
       operationInventory: [{ name: 'contact.read' }],
       eventModes: ['webhook'],
       sloSupported: true,
+      // FR-2.10/AC-41: the projection says which facts were verified, so a consumer can tell a
+      // measured value from a catalogue assumption without diffing two documents.
+      verifiedFacts: [],
       verifiedBy: ACTOR,
       verifiedAt: '2024-05-01T00:00:00.000Z',
       nextReviewAt: '2024-11-01T00:00:00.000Z',
@@ -445,6 +491,91 @@ describe('reading the recorded integration state', () => {
       verifiedAt: null,
       nextReviewAt: null,
     });
+  });
+});
+
+describe('applying the identity client secret', () => {
+  it('has nothing to apply for an entry that declares no secret variable', async () => {
+    const { renderer, service } = build({
+      routes: [['LEFT JOIN instance_route r', [instanceRow({ entry_key: 'D09-01' })]]],
+    });
+
+    await expect(service.ensureIdentitySecret(CRM, ACTOR)).resolves.toEqual({
+      variable: null,
+      status: 'not-declared',
+    });
+    expect(renderer.updateInstanceEnv).not.toHaveBeenCalled();
+  });
+
+  it('writes nothing for a variable the projected schema does not carry', async () => {
+    const { renderer, service } = build({
+      routes: [['LEFT JOIN instance_route r', [instanceRow({ entry_key: 'D06-01' })]]],
+      renderer: { instanceEnv: vi.fn(async () => []) },
+    });
+
+    await expect(service.ensureIdentitySecret(CRM, ACTOR)).resolves.toEqual({
+      variable: 'ERPNEXT_SSO_CLIENT_SECRET',
+      status: 'not-declared',
+    });
+    expect(renderer.updateInstanceEnv).not.toHaveBeenCalled();
+  });
+
+  it('leaves an applied secret alone, so a redeploy does not rotate it', async () => {
+    const { renderer, secrets, service } = build({
+      routes: [['LEFT JOIN instance_route r', [instanceRow({ entry_key: 'D06-01' })]]],
+    });
+
+    await expect(service.ensureIdentitySecret(CRM, ACTOR)).resolves.toEqual({
+      variable: 'ERPNEXT_SSO_CLIENT_SECRET',
+      status: 'applied',
+    });
+    expect(renderer.updateInstanceEnv).not.toHaveBeenCalled();
+    expect(secrets.put).not.toHaveBeenCalled();
+  });
+
+  it('mints a secret when the instance holds none and applies it through M03', async () => {
+    // The defect this closes: a value that only reaches M15 never reaches the container, because the
+    // renderer and the executor resolve `instance_env_value` and nothing else.
+    const { renderer, service } = build({
+      routes: [['LEFT JOIN instance_route r', [instanceRow({ entry_key: 'D06-01' })]]],
+      renderer: {
+        instanceEnv: vi.fn(async () => [{ name: 'ERPNEXT_SSO_CLIENT_SECRET', source: 'default' }]),
+      },
+    });
+
+    await expect(service.ensureIdentitySecret(CRM, ACTOR)).resolves.toEqual({
+      variable: 'ERPNEXT_SSO_CLIENT_SECRET',
+      status: 'minted',
+    });
+    expect(renderer.updateInstanceEnv).toHaveBeenCalledWith(
+      CRM,
+      { ERPNEXT_SSO_CLIENT_SECRET: expect.stringMatching(/^[0-9a-f]{64}$/) },
+      ACTOR,
+    );
+  });
+
+  it('links a secret M15 already holds instead of replacing the one the IdP was registered with', async () => {
+    const { renderer, secrets, service } = build({
+      routes: [['LEFT JOIN instance_route r', [instanceRow({ entry_key: 'D06-01' })]]],
+      renderer: {
+        instanceEnv: vi.fn(async () => [{ name: 'ERPNEXT_SSO_CLIENT_SECRET', source: 'default' }]),
+      },
+      secrets: {
+        find: vi.fn(async () => ({ id: 'secret-existing', name: 'ERPNEXT_SSO_CLIENT_SECRET' })),
+        open: vi.fn(async () => 'already-registered-value'),
+      },
+    });
+
+    await expect(service.ensureIdentitySecret(CRM, ACTOR)).resolves.toEqual({
+      variable: 'ERPNEXT_SSO_CLIENT_SECRET',
+      status: 'linked',
+    });
+    expect(secrets.open).toHaveBeenCalledWith('secret-existing', expect.stringContaining(CRM));
+    expect(renderer.updateInstanceEnv).toHaveBeenCalledWith(
+      CRM,
+      { ERPNEXT_SSO_CLIENT_SECRET: 'already-registered-value' },
+      ACTOR,
+    );
   });
 });
 
@@ -502,12 +633,15 @@ describe('registering the identity client', () => {
       backchannelLogoutUrl: 'http://crm.seamnex.local:8020/api/v1/Oidc/action/backchannelLogout',
       groupClaim: 'groups',
     });
+    // FR-3.8: the back-channel endpoint is recorded with the client, because sign-out can only
+    // claim a product was notified when the provider has somewhere to notify it.
     expect(statement(db, 'INSERT INTO idp_client')?.params).toEqual([
       CRM,
       'seamnex-crm',
       'secret-1',
       'oidc',
       ['http://crm.seamnex.local:8020/oauth-callback.php'],
+      'http://crm.seamnex.local:8020/api/v1/Oidc/action/backchannelLogout',
     ]);
     // Which value the client was registered with: the operator's own variable, not a generated one.
     expect(audit.append.mock.calls[0]?.[0]).toMatchObject({
@@ -629,6 +763,7 @@ describe('registering the identity client', () => {
   it('records a host with no admin client instead of failing the deployment', async () => {
     const { audit, db, service } = build({
       routes: [['LEFT JOIN instance_route r', [instanceRow()]]],
+      config: { SEAMNEX_KEYCLOAK_ADMIN_CLIENT_SECRET_FILE: '' },
       keycloak: {
         upsertClient: vi.fn(async () =>
           Promise.reject(
@@ -658,6 +793,33 @@ describe('registering the identity client', () => {
     });
     // Nothing was registered, so nothing is claimed in the table either.
     expect(statement(db, 'INSERT INTO idp_client')).toBeUndefined();
+  });
+
+  /**
+   * The exemption above is for a host that *cannot* provision a client, not for one whose provider
+   * said no. Every non-2xx from the Admin API is reduced to `ADAPTER_UNAVAILABLE`, so a refusal —
+   * a 403 after a permission change, a 500 — used to be recorded as "unsupported" and the
+   * deployment stayed green with a product whose sign-in was dead.
+   */
+  it('fails the deployment when the provider refuses a registration it is configured to make', async () => {
+    const { audit, service } = build({
+      routes: [['LEFT JOIN instance_route r', [instanceRow()]]],
+      keycloak: {
+        upsertClient: vi.fn(async () =>
+          Promise.reject(
+            new AppError({
+              code: 'ADAPTER_UNAVAILABLE',
+              detail: 'Keycloak POST /client-scopes answered 403.',
+            }),
+          ),
+        ),
+      },
+    });
+
+    await expect(service.registerIdentity(CRM, ACTOR)).rejects.toMatchObject({
+      code: 'ADAPTER_UNAVAILABLE',
+    });
+    expect(audit.append).not.toHaveBeenCalled();
   });
 
   it('lets a failure that is not an unavailable adapter through', async () => {
@@ -750,6 +912,7 @@ describe('materialising a route', () => {
       'crm.seamnex.local',
       null,
       'subdomain',
+      'acme',
       'native',
       true,
     ]);
@@ -765,6 +928,7 @@ describe('materialising a route', () => {
       'shop.example.test',
       '/app',
       'subpath',
+      'acme',
       'native',
       true,
     ]);
@@ -784,9 +948,35 @@ describe('materialising a route', () => {
       'crm.seamnex.local',
       '/app',
       'subdomain',
+      'acme',
       'native',
       false,
     ]);
+  });
+
+  /**
+   * NFR-4.1 / ISSUE-07: the route records the certificate the deployment's edge actually serves.
+   * The literal `'acme'` it used to write claimed a resolver nothing had configured, and the
+   * overview screen repeated the claim to the operator.
+   */
+  it('records the deployment’s edge certificate mode and re-writes it on conflict', async () => {
+    const { db, service } = materialise({
+      config: { SEAMNEX_EDGE_TLS_MODE: 'internal' },
+      routes: [
+        ['LEFT JOIN instance_route r', [instanceRow()]],
+        ['FROM catalog_entry WHERE key', [{ guarantee_class: 'native' }]],
+        ['INSERT INTO instance_route', []],
+        ['instance_route r JOIN instance i', [projectionRow({ tls_mode: 'internal' })]],
+        ['FROM instance_route WHERE instance_id', [routeRow({ tls_mode: 'internal' })]],
+      ],
+    });
+
+    await service.materialiseRoute(CRM, {}, ACTOR);
+
+    const insert = statement(db, 'INSERT INTO instance_route');
+    expect(insert?.params[4]).toBe('internal');
+    // A re-materialised route follows the deployment, so the update has to carry the column too.
+    expect(insert?.sql).toMatch(/tls_mode = EXCLUDED\.tls_mode/);
   });
 
   it('follows the catalog entry rather than the caller when no auth mode is named', async () => {
@@ -803,7 +993,7 @@ describe('materialising a route', () => {
     await expect(service.materialiseRoute(CRM, {}, ACTOR)).resolves.toMatchObject({
       authMode: 'fa_gate',
     });
-    expect(statement(db, 'INSERT INTO instance_route')?.params[4]).toBe('fa_gate');
+    expect(statement(db, 'INSERT INTO instance_route')?.params[5]).toBe('fa_gate');
   });
 
   it('refuses an auth mode that contradicts the catalog entry', async () => {
@@ -836,7 +1026,7 @@ describe('materialising a route', () => {
 
     await service.materialiseRoute(CRM, { authMode: 'fa_header' }, ACTOR);
 
-    expect(statement(db, 'INSERT INTO instance_route')?.params[4]).toBe('fa_header');
+    expect(statement(db, 'INSERT INTO instance_route')?.params[5]).toBe('fa_header');
   });
 
   it('defaults an entry with no catalog row to native', async () => {
@@ -852,7 +1042,7 @@ describe('materialising a route', () => {
 
     await service.materialiseRoute(CRM, {}, ACTOR);
 
-    expect(statement(db, 'INSERT INTO instance_route')?.params[4]).toBe('native');
+    expect(statement(db, 'INSERT INTO instance_route')?.params[5]).toBe('native');
   });
 
   it('reports an internal error when the route row cannot be read back', async () => {
@@ -878,19 +1068,27 @@ describe('the five deployment checks', () => {
     options: {
       route?: Record<string, unknown>[] | null;
       payload?: Record<string, unknown>;
+      entryKey?: string;
       schedule?: unknown;
       hooks?: unknown;
+      eventModes?: string[];
       verdict?: { ok: boolean }[];
       client?: Record<string, unknown>[];
       config?: Record<string, unknown>;
       docker?: Record<string, unknown>;
       sso?: Record<string, unknown>;
+      renderer?: Record<string, unknown>;
     } = {},
   ): BuildOptions {
     const routes: Route[] = [
       [
         'LEFT JOIN instance_route r',
-        [instanceRow({ payload: options.payload ?? { guaranteeClass: 'native', httpPort: 8080 } })],
+        [
+          instanceRow({
+            entry_key: options.entryKey ?? 'D01-01',
+            payload: options.payload ?? { guaranteeClass: 'native', httpPort: 8080 },
+          }),
+        ],
       ],
       [
         'FROM instance_route WHERE instance_id',
@@ -899,6 +1097,9 @@ describe('the five deployment checks', () => {
       ...ssoRoutes({ client: options.client, verdict: options.verdict }),
       ['FROM backup_schedule', options.schedule ?? [{ '?column?': 1 }]],
       ['FROM trigger_endpoint', options.hooks ?? [{ '?column?': 1 }]],
+      // What the product declares, as opposed to what it registered: a product with no declared
+      // events has nothing to register, and the check has to be able to say so.
+      ['FROM integration_metadata', [{ event_modes: options.eventModes ?? [] }]],
       ['INSERT INTO integration_check', []],
       [
         'DISTINCT ON (check_type)',
@@ -910,6 +1111,7 @@ describe('the five deployment checks', () => {
       docker: options.docker,
       ssoProbe: options.sso,
       config: options.config,
+      renderer: options.renderer,
     };
   }
 
@@ -997,6 +1199,67 @@ describe('the five deployment checks', () => {
     await expect(service.runChecks(CRM)).resolves.toMatchObject({ ready: true, blocking: [] });
   });
 
+  it('refuses to call it single sign-on when the product was never given the client secret', async () => {
+    /*
+     * The observed incident: a registered client, a successful code exchange, and an ERPNext site
+     * that had not received `ERPNEXT_SSO_CLIENT_SECRET` — so its bootstrap wrote no `Social Login Key`
+     * and the only way in was a password. The IdP-side probe passed because it used the platform's
+     * own copy of the secret.
+     */
+    const { db, service } = build(
+      runChecksOptions({
+        entryKey: 'D06-01',
+        renderer: {
+          instanceEnv: vi.fn(async () => [
+            { name: 'ERPNEXT_SSO_CLIENT_SECRET', source: 'default' },
+          ]),
+        },
+      }),
+    );
+
+    await service.runChecks(CRM);
+
+    expect(statements(db, 'INSERT INTO integration_check')[1]?.params[3]).toContain(
+      'ERPNEXT_SSO_CLIENT_SECRET is registered at the identity provider but was never applied',
+    );
+  });
+
+  it('reads the product’s own sign-in page for the provider entry point', async () => {
+    const { db, service } = build(
+      runChecksOptions({
+        entryKey: 'D06-01',
+        docker: {
+          runCli: vi.fn(async (_file: string, args: readonly string[]) => {
+            if (args.includes('seamnex-signin-probe'))
+              return { code: 1, stdout: 'SIGNIN absent\n', stderr: '', truncated: false };
+            if (args.includes('seamnex-idp-probe'))
+              return { code: 0, stdout: 'ANSWER HTTP/1.1 200 OK\n', stderr: '', truncated: false };
+            return { code: 0, stdout: 'HTTP 200\n', stderr: '', truncated: false };
+          }),
+        },
+      }),
+    );
+
+    await service.runChecks(CRM);
+
+    const detail = statements(db, 'INSERT INTO integration_check')[1]?.params[3];
+    expect(detail).toContain('stage 0.5 (sign-in page)');
+    expect(detail).toContain('does not offer the identity provider');
+  });
+
+  it('records what the product side established, not only what the realm answered', async () => {
+    // "stages 1–2 passed" was true of a deployment whose product had never been configured; the row
+    // an operator reads has to name the legs that make the claim true of this instance.
+    const { db, service } = build(runChecksOptions({ entryKey: 'D06-01' }));
+
+    await service.runChecks(CRM);
+
+    const detail = String(statements(db, 'INSERT INTO integration_check')[1]?.params[3]);
+    expect(detail).toContain('ERPNEXT_SSO_CLIENT_SECRET is applied');
+    expect(detail).toContain('/login offers the provider');
+    expect(detail).toContain('stages 1–2 passed');
+  });
+
   it('never blocks on a backup or webhook that is not registered yet', async () => {
     const { db, service } = build(
       runChecksOptions({
@@ -1008,7 +1271,55 @@ describe('the five deployment checks', () => {
     await expect(service.runChecks(CRM)).resolves.toMatchObject({ ready: true, blocking: [] });
     const details = statements(db, 'INSERT INTO integration_check').map((entry) => entry.params[3]);
     expect(details).toContain('no backup schedule registered');
-    expect(details).toContain('the product declares no triggers');
+    // Not a failure: the declaration is empty, so there is nothing to register. Reporting it red put
+    // a permanent failed row on every deployment of such a product, with a detail that already said
+    // it was not a fault.
+    expect(details).toContain('the product declares no triggers, so there is nothing to register');
+  });
+
+  it('still reports a missing trigger endpoint for a product that declares events', async () => {
+    const { db, service } = build(
+      runChecksOptions({
+        hooks: { rows: [], rowCount: null },
+        eventModes: ['ticket.created'],
+      }),
+    );
+
+    await service.runChecks(CRM);
+
+    const details = statements(db, 'INSERT INTO integration_check').map((entry) => entry.params[3]);
+    expect(details).toContain('the product declares events but no trigger endpoint is registered');
+  });
+
+  it('reports an installer page as reachable-but-uninstalled, not as a blocked deployment', async () => {
+    // The observed incident: D07-01 answered `302 -> /installer/index.php/welcome`, the check called
+    // that a pass, and the instance, the portal tile and the job all reported success. Failing the
+    // job instead would be no better — the route is the only way to finish the install in a browser.
+    const { db, service } = build(
+      runChecksOptions({
+        route: [{ auth_mode: 'fa_gate' }],
+        docker: {
+          runCli: vi.fn(async () => ({
+            code: 0,
+            stdout: 'HTTP 302\nLOCATION /installer/index.php/welcome\n',
+            stderr: '',
+            truncated: false,
+          })),
+        },
+        sso: { verify: vi.fn(async () => ({ ok: false, detail: 'account_failed' })) },
+      }),
+    );
+
+    const result = await service.runChecks(CRM);
+
+    expect(result.installPending).toBe('/installer/index.php/welcome');
+    expect(result.ready).toBe(true);
+    expect(result.blocking).toEqual([]);
+    const details = statements(db, 'INSERT INTO integration_check').map((entry) => entry.params[3]);
+    expect(details[0]).toBe(
+      "HTTP answered on :8080 (HTTP 302) with the product's installer at /installer/index.php/welcome",
+    );
+    expect(details[1]).toContain('not checked');
   });
 
   it('records a change of SSO verdict as the event worth auditing', async () => {
@@ -1207,6 +1518,65 @@ describe('the SSO check itself', () => {
     });
   });
 
+  /**
+   * Keycloak keeps a product's client in its own database: a Keycloak upgrade that migrates the
+   * realm, or a `compose up` on a fresh volume, leaves the product's next login failing at the
+   * authorization leg (`invalid_client`, the popup never closes) while the platform still has a row
+   * to read. The check re-applies the registration from what it already holds before it measures,
+   * so the repair does not wait for the next deployment of the instance.
+   */
+  it('re-applies the client registration before it probes the login', async () => {
+    const { keycloak, ssoProbe, service } = build({
+      routes: [
+        ['LEFT JOIN instance_route r', [instanceRow()]],
+        ['FROM instance_route WHERE instance_id', [routeRow()]],
+        ['FROM idp_client WHERE instance_id', [clientRow()]],
+        ['SELECT ok FROM integration_check', []],
+        ['INSERT INTO integration_check', []],
+      ],
+    });
+
+    await service.verifyIdentity(CRM);
+
+    expect(keycloak.upsertClient).toHaveBeenCalledWith(
+      expect.objectContaining({
+        clientId: 'seamnex-crm',
+        secret: 'operator-secret',
+        redirectUris: ['http://crm.seamnex.local:8020/oauth-callback.php'],
+        protocol: 'oidc',
+      }),
+    );
+    expect(ssoProbe.verify).toHaveBeenCalled();
+  });
+
+  it('reports a client the IdP refuses to re-apply instead of probing', async () => {
+    const { ssoProbe, service } = build({
+      routes: [
+        ['LEFT JOIN instance_route r', [instanceRow()]],
+        ['FROM instance_route WHERE instance_id', [routeRow()]],
+        ['FROM idp_client WHERE instance_id', [clientRow()]],
+        ['SELECT ok FROM integration_check', []],
+        ['INSERT INTO integration_check', []],
+      ],
+      keycloak: {
+        upsertClient: vi.fn(async () =>
+          Promise.reject(
+            new AppError({
+              code: 'ADAPTER_UNAVAILABLE',
+              detail: 'Keycloak PUT /clients/uuid-1 answered 403.',
+            }),
+          ),
+        ),
+      },
+    });
+
+    await expect(service.verifyIdentity(CRM)).resolves.toMatchObject({
+      ok: false,
+      detail: expect.stringContaining('stage 0.25 (client registration)'),
+    });
+    expect(ssoProbe.verify).not.toHaveBeenCalled();
+  });
+
   it('stops at stage 0 when the IdP is not on the instance network', async () => {
     const { service } = build({
       routes: [
@@ -1358,6 +1728,15 @@ describe('the SSO check itself', () => {
 
 describe('reconciling the identity networks', () => {
   const RECONCILE = 'JOIN idp_client c ON';
+  // The pass reads the client row and re-applies it: the registration is runtime state at the IdP,
+  // so it is part of what a repair pass repairs.
+  const row = (overrides: Record<string, unknown> = {}) => ({
+    id: CRM,
+    entry_key: 'D01-01',
+    last_checked: null as Date | null,
+    ...clientRow(),
+    ...overrides,
+  });
 
   it('does nothing at all when no IdP container is configured', async () => {
     const { db, docker, service } = build({ config: { SEAMNEX_IDP_CONTAINER: '' } });
@@ -1374,7 +1753,7 @@ describe('reconciling the identity networks', () => {
   it('re-applies the attachment and records one row per breakage', async () => {
     const { db, docker, service } = build({
       routes: [
-        [RECONCILE, [{ id: CRM, last_checked: null }]],
+        [RECONCILE, [row()]],
         ['LEFT JOIN instance_route r', [instanceRow()]],
         ['INSERT INTO integration_check', []],
       ],
@@ -1397,7 +1776,7 @@ describe('reconciling the identity networks', () => {
   it('leaves fresh evidence alone', async () => {
     const { docker, service } = build({
       routes: [
-        [RECONCILE, [{ id: CRM, last_checked: new Date() }]],
+        [RECONCILE, [row({ last_checked: new Date() })]],
         ['LEFT JOIN instance_route r', [instanceRow()]],
       ],
     });
@@ -1414,7 +1793,7 @@ describe('reconciling the identity networks', () => {
     const stale = new Date(Date.now() - 3_600_000);
     const { db, service } = build({
       routes: [
-        [RECONCILE, [{ id: CRM, last_checked: stale }]],
+        [RECONCILE, [row({ last_checked: stale })]],
         ['LEFT JOIN instance_route r', [instanceRow()]],
         ['FROM instance_route WHERE instance_id', [routeRow()]],
         ...ssoRoutes({ verdict: [{ ok: true }] }),
@@ -1433,7 +1812,7 @@ describe('reconciling the identity networks', () => {
   it('counts an instance whose never-checked login leg fails to re-verify', async () => {
     const { db, service } = build({
       routes: [
-        [RECONCILE, [{ id: CRM, last_checked: null }]],
+        [RECONCILE, [row()]],
         ['LEFT JOIN instance_route r', [instanceRow()]],
         ['FROM instance_route WHERE instance_id', [routeRow()]],
         ...ssoRoutes(),
@@ -1452,7 +1831,7 @@ describe('reconciling the identity networks', () => {
   it('quotes a non-Error failure to re-verify as the periodic check sentence', async () => {
     const { service } = build({
       routes: [
-        [RECONCILE, [{ id: CRM, last_checked: null }]],
+        [RECONCILE, [row()]],
         ['LEFT JOIN instance_route r', [instanceRow()]],
         ['FROM instance_route WHERE instance_id', [routeRow()]],
         ...ssoRoutes(),
@@ -1494,6 +1873,9 @@ describe('the route projection', () => {
 
     await expect(service.projectAll()).resolves.toBe(1);
     expect(traefik.write).toHaveBeenCalledOnce();
+    // The database is the only truth about which routes exist, so everything it did not just write
+    // is stale — including documents left on the pre-TLS `web` entrypoint (ISSUE-07).
+    expect(traefik.prune).toHaveBeenCalledWith(new Set(['crm']));
   });
 
   it('still boots when the projection fails', async () => {
@@ -1537,7 +1919,26 @@ describe('the route projection', () => {
       forwardAuthAddress: 'http://auth-gateway:8090/verify',
       bootstrapAddress: 'http://auth-gateway:8090',
       authMode: 'native',
+      tlsMode: 'acme',
     });
+  });
+
+  /**
+   * ISSUE-07: the column, not a constant, decides how the edge terminates TLS. A deployment whose
+   * edge serves its own certificate must project that, or the router asks ACME for a host it cannot
+   * validate.
+   */
+  it('projects the certificate mode recorded on the row', async () => {
+    const { traefik, service } = build({
+      routes: [
+        ['SELECT instance_id FROM instance_route', [{ instance_id: CRM }]],
+        ['instance_route r JOIN instance i', [projectionRow({ tls_mode: 'internal' })]],
+      ],
+    });
+
+    await service.projectAll();
+
+    expect(traefik.write.mock.calls[0]?.[0]).toMatchObject({ tlsMode: 'internal' });
   });
 
   it('falls back to port 80 and to the native auth mode for a row that declares neither', async () => {
@@ -1598,6 +1999,8 @@ describe('the route projection', () => {
     await service.projectAll();
 
     expect(traefik.write).not.toHaveBeenCalled();
+    // A row whose instance cannot be read projects nothing, so its document is stale too.
+    expect(traefik.prune).toHaveBeenCalledWith(new Set());
   });
 
   it('publishes a route even when the edge could not join the network', async () => {

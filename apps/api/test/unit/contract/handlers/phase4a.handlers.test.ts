@@ -15,7 +15,14 @@ function services() {
       lifecycle: vi.fn().mockResolvedValue({ jobId: 'job-life' }),
       prefetch: vi.fn().mockResolvedValue({ jobId: 'job-prefetch' }),
       abandonDeployment: vi.fn().mockResolvedValue(undefined),
+      exports: vi.fn().mockResolvedValue([]),
+      exportArchive: vi.fn().mockResolvedValue({
+        path: '/data/i1/exports/20261116T103100Z-1a2b3c4d.tar.gz',
+        fileName: '20261116T103100Z-1a2b3c4d.tar.gz',
+        bytes: 1024,
+      }),
     },
+    audit: { append: vi.fn().mockResolvedValue(undefined) },
     sources: {
       scaffold: vi.fn().mockResolvedValue({ draftId: 'd1' }),
       confirmScaffold: vi.fn().mockResolvedValue({ key: 'D01-01' }),
@@ -41,6 +48,7 @@ beforeEach(() => {
       s.params as never,
       s.jobs as never,
       s.portal as never,
+      s.audit as never,
       backups as never,
     ).handlers();
   handlers = withBackups(s.backups);
@@ -223,13 +231,16 @@ describe('POST /instances/:id/:action', () => {
     });
 
     expect(s.backups.createInstanceBackup).toHaveBeenCalledWith('i1', 'sub-1');
+    // FR-1.7/AC-06: the confirmed version travels as `targetVersion`. It used to be mis-mapped to
+    // `renderSetId`, which is a rollback selector, so the job never knew what the operator
+    // confirmed and the audit trail could not name it.
     expect(s.executor.lifecycle).toHaveBeenCalledWith({
       instanceId: 'i1',
       action: 'upgrade',
       actorId: 'sub-1',
       backupJobId: 'job-backup',
       dataRetention: 'keep',
-      renderSetId: '2.0.0',
+      targetVersion: '2.0.0',
     });
   });
 
@@ -246,6 +257,75 @@ describe('POST /instances/:id/:action', () => {
     await expect(
       call('POST /instances/:id/:action', { params: { id: 'i1' } }),
     ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+  });
+});
+
+describe('GET /instances/:id/exports', () => {
+  it('answers with the catalogue the capture wrote, and nothing else', async () => {
+    s.executor.exports.mockResolvedValue([
+      {
+        exportId: '20261116T103100Z-1a2b3c4d',
+        exportedAt: '2026-11-16T10:31:00.000Z',
+        fileName: '20261116T103100Z-1a2b3c4d.tar.gz',
+        bytes: 1024,
+        sha256: 'a'.repeat(64),
+        includes: ['database', 'volumes'],
+        excluded: [],
+        renderSetId: null,
+      },
+    ]);
+
+    const result = await call('GET /instances/:id/exports', { params: { id: 'i1' } });
+
+    expect(s.executor.exports).toHaveBeenCalledWith('i1');
+    expect(result).toEqual({
+      kind: 'body',
+      body: [expect.objectContaining({ exportId: '20261116T103100Z-1a2b3c4d', bytes: 1024 })],
+    });
+  });
+});
+
+describe('GET /instances/:id/exports/:exportId/archive', () => {
+  const params = { id: 'i1', exportId: '20261116T103100Z-1a2b3c4d' };
+
+  it('hands the resolved file to the dispatcher instead of reading it', async () => {
+    const result = await call('GET /instances/:id/exports/:exportId/archive', { params });
+
+    expect(s.executor.exportArchive).toHaveBeenCalledWith('i1', '20261116T103100Z-1a2b3c4d');
+    expect(result).toEqual({
+      kind: 'file',
+      path: '/data/i1/exports/20261116T103100Z-1a2b3c4d.tar.gz',
+      contentType: 'application/gzip',
+      fileName: '20261116T103100Z-1a2b3c4d.tar.gz',
+      bytes: 1024,
+    });
+  });
+
+  it('audits the download with the artefact, not just the fact that someone asked', async () => {
+    await call('GET /instances/:id/exports/:exportId/archive', { params });
+
+    expect(s.audit.append).toHaveBeenCalledWith({
+      action: 'instance.export.downloaded',
+      actorType: 'user',
+      actorId: 'sub-1',
+      targetType: 'instance',
+      targetId: 'i1',
+      outcome: 'success',
+      detail: {
+        exportId: '20261116T103100Z-1a2b3c4d',
+        fileName: '20261116T103100Z-1a2b3c4d.tar.gz',
+        bytes: 1024,
+      },
+    });
+  });
+
+  it('writes no audit row when the archive cannot be resolved', async () => {
+    s.executor.exportArchive.mockRejectedValue(new Error('gone'));
+
+    await expect(call('GET /instances/:id/exports/:exportId/archive', { params })).rejects.toThrow(
+      'gone',
+    );
+    expect(s.audit.append).not.toHaveBeenCalled();
   });
 });
 
@@ -278,9 +358,11 @@ describe('catalog actions', () => {
 });
 
 describe('phase 4a registry', () => {
-  it('implements the six 4A operations', () => {
+  it('implements every 4A operation, export reads included', () => {
     expect([...handlers.keys()].sort()).toEqual([
       'GET /catalog/:key/scaffold',
+      'GET /instances/:id/exports',
+      'GET /instances/:id/exports/:exportId/archive',
       'POST /catalog/:key/prefetch',
       'POST /catalog/:key/scaffold/:draftId/confirm',
       'POST /instances',

@@ -34,6 +34,9 @@ function instanceRow(overrides: Record<string, unknown> = {}): Record<string, un
     credential_granularity: 'scoped',
     operation_inventory: [{ name: 'contact.read' }],
     event_modes: ['webhook'],
+    // Which facts onboarding actually verified. Without it the projection has no standing to prefer
+    // the columns over the entry document — the JSONB defaults look like answers.
+    verified_facts: ['operations', 'eventModes'],
     document_operations: [{ name: 'document.read' }],
     document_event_modes: ['poll'],
     verified_at: new Date(),

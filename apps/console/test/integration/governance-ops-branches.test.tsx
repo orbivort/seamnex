@@ -217,6 +217,22 @@ describe('patch register with missing and stale evidence', () => {
     expect(screen.getByTitle(/so the ages below are stale/)).toBeDefined();
   });
 
+  it('links the available version to the product releases, never to a repository-less URL', async () => {
+    openAs('R1', '/governance/patches');
+    render(<App />);
+
+    const table = await screen.findByRole('table');
+    const row = within(table)
+      .getAllByRole('row')
+      .find((candidate) => candidate.textContent?.includes('Nextcloud Hub'));
+    if (row === undefined) throw new Error('the fixture has no Nextcloud Hub row');
+
+    // The link is derived from the entry's repository. `https://github.com/releases/tag/v31.0.4`
+    // has no owner and no repository and resolves to nothing, which is worse than no link at all.
+    const link = within(row).getByText('31.0.4').closest('a');
+    expect(link?.getAttribute('href')).toBe('https://github.com/nextcloud/server/releases');
+  });
+
   it('reports a fleet that is fully current without an alarm', async () => {
     server.use(
       http.get('/api/v1/patch-register', () =>
@@ -325,7 +341,8 @@ describe('security posture renewal and metadata backlog', () => {
     expect(await screen.findByText('SSO 0/0')).toBeDefined();
     expect(screen.getByText('Restores 0/0')).toBeDefined();
     expect(screen.getByText(/Every stateful deployment has a verified restore/)).toBeDefined();
-    expect(screen.getByText(/Native floor \(S-2\): 0 of 6 required/)).toBeDefined();
+    // S-2: an empty fleet is measured against the served floor, not exempt from it.
+    expect(screen.getByText('0 of 6 required')).toBeDefined();
   });
 
   it('credits a fleet that meets the native floor and has every restore verified', async () => {
@@ -348,7 +365,7 @@ describe('security posture renewal and metadata backlog', () => {
     expect(await screen.findByText('Restores 12/12')).toBeDefined();
     expect(screen.getByText('SSO 12/12')).toBeDefined();
     // Six native deployments is the S-2 floor, so the summary states a passed floor, not a debt.
-    expect(screen.getByText(/Native floor \(S-2\): 6 of 6 required/)).toBeDefined();
+    expect(screen.getByText('6 of 6 required')).toBeDefined();
     expect(screen.getByText(/Every stateful deployment has a verified restore/)).toBeDefined();
   });
 

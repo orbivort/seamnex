@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Link, useParams } from 'react-router';
 import { ArrowLeft, Download, Rocket } from 'lucide-react';
 import {
@@ -10,30 +10,19 @@ import {
   useScaffoldDraft,
   useVerifyIntegrationMetadata,
 } from '@seamnex/api-client';
-import {
-  CREDENTIAL_GRANULARITY_OPTIONS,
-  GUARANTEE_CLASS_LABELS,
-  PACKAGING_LABELS,
-  can,
-  canMutate,
-  isWriteEligible,
-  writeIneligibilityReason,
-  type CredentialGranularity,
-} from '@seamnex/domain';
+import { GUARANTEE_CLASS_LABELS, PACKAGING_LABELS, can, canMutate } from '@seamnex/domain';
 import {
   Alert,
   Badge,
   Button,
   Callout,
   DefinitionList,
-  Field,
   Grid,
   InlineNote,
   Page,
   PageHeader,
   Panel,
   PanelHeader,
-  Select,
   SkeletonLines,
   SplitLayout,
   StatusPill,
@@ -41,10 +30,32 @@ import {
   Tabs,
   buttonVariants,
 } from '@seamnex/ui';
-import { formatDate, formatDateTime } from '@seamnex/utils';
+import { formatBytes, formatDate, formatDateTime } from '@seamnex/utils';
 import { useSession } from '../../session';
 import { QueryError } from '@seamnex/shell';
 import { EnvTab, IntegrationTab, ScaffoldTab } from './EntryTabs';
+import { FACT_LABELS, VerificationForm } from './VerificationForm';
+import { useVerifierLabel } from './verifier';
+
+/** What the deploy path compares with the disk reservation (FR-1.9). */
+function volumeQuotaMb(volumes: readonly { quotaMb: number }[]): number {
+  return volumes.reduce((total, volume) => total + volume.quotaMb, 0);
+}
+
+/**
+ * The only way back from an entry that could not be read. Rendered inside the error branch too:
+ * a 404 replaced the whole screen, and Retry on a key that does not exist is a dead end.
+ */
+function BackToCatalog() {
+  return (
+    <Link
+      to="/catalog"
+      className="mb-3 inline-flex items-center gap-1.5 text-meta font-medium text-muted hover:text-link"
+    >
+      <ArrowLeft className="size-3.5" aria-hidden /> Back to catalog
+    </Link>
+  );
+}
 
 export function EntryDetailPage() {
   const { key = '' } = useParams();
@@ -52,15 +63,9 @@ export function EntryDetailPage() {
   const entry = useCatalogEntry(key);
   const envSchema = useEnvSchema(key);
   const [tab, setTab] = useState('overview');
-  const [granularityState, setGranularity] = useState<CredentialGranularity | null>(null);
   const verify = useVerifyIntegrationMetadata(key);
-  // The draft belongs to the pending review. Left in place after a successful save it kept showing
-  // an unsaved value after someone else verified the entry, or after the entry was reloaded from the
-  // repository — the select would then disagree with the record it claims to display.
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- the draft is derived from a mutation result, not a render input, and the hook exposes no per-call callback
-    if (verify.isSuccess) setGranularity(null);
-  }, [verify.isSuccess, verify.data]);
+  // Called before the screen gate below, because hooks cannot sit behind an early return.
+  const verifier = useVerifierLabel(verify.data?.integration.verifiedBy ?? '');
   // CL-18: NFR-2.4 measures apply, not download, so warming the image cache is an operator action
   // taken before a deployment window rather than part of the deploy itself.
   const prefetch = usePrefetchEntry(key);
@@ -81,22 +86,23 @@ export function EntryDetailPage() {
         <SkeletonLines lines={10} />
       </Panel>
     ) : (
-      <QueryError error={entry.error} onRetry={() => void entry.refetch()} />
+      <Page>
+        <BackToCatalog />
+        <QueryError error={entry.error} onRetry={() => void entry.refetch()} />
+      </Page>
     );
   }
 
   const data = entry.data;
   const guarantee = GUARANTEE_CLASS_LABELS[data.guaranteeClass];
-  const granularity = granularityState ?? data.integration.credentialGranularity;
+  const declaredVolumeMb = volumeQuotaMb(data.volumes);
+  // FR-1.9: a deployment is refused when the declared quotas exceed the disk reservation, so the
+  // entry says it before the wizard spends the operator's time on a refusal.
+  const overReserved = declaredVolumeMb > data.resources.diskMb;
 
   return (
     <Page>
-      <Link
-        to="/catalog"
-        className="mb-3 inline-flex items-center gap-1.5 text-meta font-medium text-muted hover:text-link"
-      >
-        <ArrowLeft className="size-3.5" aria-hidden /> Catalog
-      </Link>
+      <BackToCatalog />
 
       <PageHeader
         eyebrow={
@@ -124,8 +130,8 @@ export function EntryDetailPage() {
               disabled={!canMutate(session.role, 'metadata.manage') || prefetch.isPending}
               title={
                 canMutate(session.role, 'metadata.manage')
-                  ? 'Pre-pull the pinned images so the deployment window is not spent downloading'
-                  : 'R1 pre-pulls images; the pull consumes host bandwidth and disk'
+                  ? 'Prepare the pinned images so the deployment window is not spent downloading or building'
+                  : 'R1 prepares images; it consumes host bandwidth, CPU and disk'
               }
               onClick={() => prefetch.mutate()}
             >
@@ -176,11 +182,14 @@ export function EntryDetailPage() {
         </Alert>
       ) : null}
 
-      {verify.isError ? <QueryError error={verify.error} compact /> : null}
       {verify.data ? (
         <div className="mb-3">
           <Alert tone="positive" title={`${verify.data.key} metadata verified`}>
-            Review recorded by {verify.data.integration.verifiedBy}; the next review is due{' '}
+            Verified:{' '}
+            {Object.keys(verify.variables ?? {})
+              .map((fact) => FACT_LABELS[fact as keyof typeof FACT_LABELS] ?? fact)
+              .join(', ') || 'no fact'}
+            . Review recorded by {verifier}; the next review is due{' '}
             {formatDate(verify.data.integration.nextReviewAt)} and the change is in the audit trail.
           </Alert>
         </div>
@@ -193,13 +202,15 @@ export function EntryDetailPage() {
       ) : null}
       {prefetch.data ? (
         <div className="mb-3">
-          <Alert tone="info" title={`Pre-pulling the images for ${data.key}`}>
+          <Alert tone="info" title={`Preparing the images for ${data.key}`}>
             Job{' '}
             <Link to={`/jobs/${prefetch.data.jobId}`} className="font-mono underline">
               {prefetch.data.jobId}
             </Link>{' '}
-            pulls {data.imageRef} into the local cache. It does not create containers or touch the
-            published route, so it is safe to run against a live instance.
+            prepares {data.imageRef} on this host: a pulled entry is fetched into the local cache,
+            an entry whose definition declares a build is built from its vendored tree. It does not
+            create containers or touch the published route, so it is safe to run against a live
+            instance.
           </Alert>
         </div>
       ) : null}
@@ -223,7 +234,22 @@ export function EntryDetailPage() {
                 <DefinitionList
                   columns={2}
                   items={[
-                    { label: 'Upstream repository', value: data.repoUrl, mono: true },
+                    {
+                      label: 'Upstream repository',
+                      value:
+                        data.repoUrl === null ? (
+                          'None recorded'
+                        ) : (
+                          <a
+                            href={data.repoUrl}
+                            target="_blank"
+                            rel="noreferrer noopener"
+                            className="font-mono text-link hover:underline"
+                          >
+                            {data.repoUrl}
+                          </a>
+                        ),
+                    },
                     { label: 'Technology stack', value: data.stack },
                     { label: 'License', value: data.licenseId, hint: data.licenseNote },
                     { label: 'Packaging source', value: data.packagingSource },
@@ -249,9 +275,15 @@ export function EntryDetailPage() {
                       // never match a registry manifest.
                       // FR-1.5: the hint used to open with the id — "FR-1.5: this digest is what a
                       // deployment pins; the tag is for humans." Requirement ids stay in source.
+                      //
+                      // ADR-BE-40: identity has two shapes, and this screen cannot tell which one
+                      // applies — the entry document does not record whether the definition declares
+                      // `build:` — so the hint states both instead of claiming the registry one. A
+                      // locally built image has no repository digest at all; its pin is the id the
+                      // host built, recorded per instance.
                       hint: /^sha256:[0-9a-f]{64}$/.test(data.imageDigest)
-                        ? 'This digest is what a deployment pins; the tag is for humans.'
-                        : 'Not a sha256:<64 hex> digest: a deployment cannot pull this image by digest until the entry is reconciled with the registry.',
+                        ? 'The tag is for humans: a deployment checks this digest for a pulled image, or the image id this host built when the definition declares a build.'
+                        : 'Not a sha256:<64 hex> digest: a deployment that pulls this image cannot check it by digest until the entry is reconciled with the registry.',
                     },
                     { label: 'Dependencies', value: data.dependencies.join(', ') || 'None' },
                     { label: 'Owner', value: `${data.owner.name} · ${data.owner.team}` },
@@ -281,6 +313,11 @@ export function EntryDetailPage() {
                     </div>
                   ))}
                 </Grid>
+                {/*
+                  FR-1.9: the per-volume quota is the number a deployment is refused against
+                  (declared quotas may not exceed the disk reservation), so an entry that lists
+                  volumes without it hid the one fact the operator needed before deploying.
+                */}
                 <div className="border-t border-line px-4 py-2.5">
                   <p className="text-faint label-caps-sans">Volumes</p>
                   <ul className="mt-1 space-y-0.5">
@@ -290,12 +327,42 @@ export function EntryDetailPage() {
                         className="flex items-baseline justify-between gap-2 text-meta"
                       >
                         <span className="font-mono text-muted">{volume.name}</span>
-                        <span className="text-faint">{volume.mountPath}</span>
+                        <span className="flex items-baseline gap-2">
+                          <span className="text-faint">{volume.mountPath}</span>
+                          <span className="font-mono text-micro text-muted">
+                            {formatBytes(volume.quotaMb * 1024 ** 2)}
+                          </span>
+                        </span>
                       </li>
                     ))}
+                    {data.volumes.length === 0 ? (
+                      <li className="text-meta text-faint">
+                        This entry declares no data volume, so a backup holds the database only.
+                      </li>
+                    ) : (
+                      <li className="flex items-baseline justify-between gap-2 border-t border-line pt-1 text-micro">
+                        <span className="text-faint">Declared total</span>
+                        <span
+                          className={
+                            overReserved ? 'font-mono text-danger' : 'font-mono text-muted'
+                          }
+                        >
+                          {formatBytes(volumeQuotaMb(data.volumes) * 1024 ** 2)} of{' '}
+                          {formatBytes(data.resources.diskMb * 1024 ** 2)} reserved
+                        </span>
+                      </li>
+                    )}
                   </ul>
                 </div>
               </Panel>
+
+              {overReserved ? (
+                <Callout tone="danger" title="Volumes exceed the disk reservation">
+                  The declared volumes total {formatBytes(declaredVolumeMb * 1024 ** 2)} against a{' '}
+                  {formatBytes(data.resources.diskMb * 1024 ** 2)} disk reservation. A deployment is
+                  refused until a quota is reduced or the reservation is raised.
+                </Callout>
+              ) : null}
 
               {data.deviation ? (
                 <Callout tone="caution" title="Recorded deviation">
@@ -309,15 +376,14 @@ export function EntryDetailPage() {
           </SplitLayout>
 
           <Panel className="mt-3">
-            {/* FR-2.12 · FR-2.14 — requirement ids, developer-only; they used to be the panel
-                eyebrow. */}
+            {/* FR-2.12 — requirement id, developer-only; it used to be the panel eyebrow. */}
             <PanelHeader
-              title="Upstream release state and credential granularity"
-              description="Release and advisory state is tracked per entry. Credential granularity decides whether write workflows are allowed against this product."
+              title="Upstream release state"
+              description="Release and advisory state is tracked per entry, separately from the facts onboarding verified."
             />
-            <SplitLayout ratio="rail" className="gap-4 p-4">
+            <div className="p-4">
               <DefinitionList
-                columns={1}
+                columns={2}
                 items={[
                   { label: 'Current version', value: data.upstream.currentVersion, mono: true },
                   {
@@ -335,74 +401,45 @@ export function EntryDetailPage() {
                       ? {}
                       : { hint: 'Tracked in the patch register until it is remediated.' }),
                   },
-                  { label: 'Release notes', value: data.upstream.releaseUrl, mono: true },
-                  { label: 'Checked', value: formatDateTime(data.upstream.checkedAt) },
+                  {
+                    label: 'Release notes',
+                    value:
+                      data.upstream.releaseUrl === null ? (
+                        'None recorded'
+                      ) : (
+                        <a
+                          href={data.upstream.releaseUrl}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                          className="font-mono text-link hover:underline"
+                        >
+                          {data.upstream.releaseUrl}
+                        </a>
+                      ),
+                  },
+                  {
+                    /*
+                     * FR-2.12 — provenance, stated explicitly. This timestamp belongs to the entry
+                     * document ("a person verified this"), not to the platform's own observation,
+                     * which lives on the patch register. Showing one date under both headings is how
+                     * "tracked upstream" came to mean "edited by hand".
+                     */
+                    label: 'Catalogue document',
+                    value: `stated ${formatDateTime(data.upstream.checkedAt)}`,
+                    hint: 'When a person last wrote these versions into the entry document. The platform’s own observation of releases and advisories is on the patch register.',
+                  },
                 ]}
               />
-
-              <div className="space-y-2">
-                <Field
-                  label="Credential granularity"
-                  htmlFor="granularity"
-                  hint="A product that cannot issue scoped credentials is write-workflow-ineligible (C-11)."
-                >
-                  {/* FR-2.14 is a mutating administrator action, so the control follows `canMutate`:
-                      a `scoped` grant renders the field read-only rather than letting the operator
-                      submit a change the policy would refuse. The option list comes from the domain
-                      so the wording cannot drift from the rule it describes. */}
-                  <Select
-                    id="granularity"
-                    value={granularity}
-                    disabled={!canMutate(session.role, 'metadata.manage')}
-                    onChange={(event) =>
-                      setGranularity(event.target.value as CredentialGranularity)
-                    }
-                  >
-                    {CREDENTIAL_GRANULARITY_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </Select>
-                </Field>
-                {/* The verdict, not the label: an operator changing `scoped` to `account` needs to
-                    see that it makes the product write-ineligible *before* submitting. */}
-                {isWriteEligible(granularity) ? null : (
-                  <Callout
-                    tone={granularity === 'none' ? 'danger' : 'caution'}
-                    title="Write-ineligible"
-                  >
-                    {writeIneligibilityReason(granularity)}
-                  </Callout>
-                )}
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  disabled={!canMutate(session.role, 'metadata.manage') || verify.isPending}
-                  onClick={() =>
-                    verify.mutate({
-                      credentialGranularity: granularity,
-                      sessionMaxMinutes: data.integration.sessionMaxMinutes,
-                    })
-                  }
-                >
-                  {verify.isPending ? 'Recording…' : 'Record verified review'}
-                </Button>
-                {granularityState !== null &&
-                granularityState !== data.integration.credentialGranularity ? (
-                  <InlineNote>
-                    Unrecorded change: the catalog still holds{' '}
-                    <span className="font-mono">{data.integration.credentialGranularity}</span>.
-                  </InlineNote>
-                ) : null}
-                <InlineNote>
-                  Verification restarts the staleness clock and writes an audit record. Lowering the
-                  granularity below operation-scoped revokes the live write scopes it invalidates,
-                  in the same transaction.
-                </InlineNote>
-              </div>
-            </SplitLayout>
+            </div>
           </Panel>
+
+          <div className="mt-3">
+            <VerificationForm
+              entry={data}
+              verify={verify}
+              canVerify={canMutate(session.role, 'metadata.manage')}
+            />
+          </div>
         </TabPanel>
 
         <TabPanel value="integration" className="pt-3">

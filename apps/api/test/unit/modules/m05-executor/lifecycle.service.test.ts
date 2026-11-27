@@ -17,12 +17,33 @@ const NO_DERIVATION_ENTRY: Route = [
   [{ key: 'X9', packaging: 'compose', payload: {} }],
 ];
 
+/** FR-1.9: two volumes whose quotas add up to 3 072 MB against a 1 024 MB reservation. */
+const VOLUME_ENTRY: Route = [
+  'FROM catalog_entry WHERE key',
+  [
+    {
+      key: 'V1',
+      packaging: 'compose',
+      payload: {
+        resources: { memoryMb: 1_024, diskMb: 2_048 },
+        volumes: [
+          { name: 'a', mountPath: '/a', quotaMb: 1_024 },
+          { name: 'b', mountPath: '/b', quotaMb: 2_048 },
+        ],
+      },
+    },
+  ],
+];
+
 const DEFAULTS: readonly Route[] = [
   ['FROM catalog_entry WHERE key', [ENTRY]],
   ['SELECT entry_key, state, domain_route', []],
   ['INSERT INTO instance (entry_key', [{ id: 'inst-new' }]],
   ['DELETE FROM instance WHERE id', { rows: [], rowCount: 1 }],
-  ['SELECT id, slug, state FROM instance', [{ id: 'inst-1', slug: 'crm', state: 'ready' }]],
+  [
+    'FROM instance i',
+    [{ id: 'inst-1', slug: 'crm', state: 'ready', payload: {}, entry_payload: {} }],
+  ],
   ['scaffold_artefact', [{ present: false }]],
 ];
 
@@ -51,6 +72,25 @@ function decision(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function preflightResult(overrides: Record<string, unknown> = {}) {
+  return {
+    admissible: true,
+    blockers: [],
+    warnings: [],
+    headline: 'Ready to deploy',
+    detail:
+      'Capacity, route, variables, secrets and policy were checked. The policy verdict is allowed.',
+    shortfall: { cpuMilli: 0, memoryMb: 0, diskMb: 0 },
+    capacitySource: 'measured',
+    routeHost: 'crm.seamnex.local',
+    slugAvailable: true,
+    policyVerdict: 'allowed',
+    policyEvaluatedAt: '2026-02-01T10:00:00.000Z',
+    policySource: 'source_resolution',
+    ...overrides,
+  };
+}
+
 function setup(routes: readonly Route[] = []) {
   const db = fakeDb([...routes, ...DEFAULTS]);
   const renderer = {
@@ -68,10 +108,13 @@ function setup(routes: readonly Route[] = []) {
   const audit = { append: vi.fn(async () => ({ seq: '1', hash: 'h' })) };
   const jobs = { create: vi.fn(async () => ({ job: { id: 'job-1' }, created: true })) };
   const pipelines = { stepsFor: vi.fn(() => ['prepare', 'apply']) };
+  const preflight = { run: vi.fn(async () => preflightResult()) };
   const config = {
     SEAMNEX_INGRESS_DOMAIN: 'seamnex.local',
     SEAMNEX_PRODUCT_URL_SCHEME: 'https',
     SEAMNEX_PRODUCT_URL_PORT: '',
+    // The deploy-time snapshot records the certificate the edge actually serves (ISSUE-07).
+    SEAMNEX_EDGE_TLS_MODE: 'acme',
   } as unknown as AppConfig;
   const service = new InstanceLifecycleService(
     db.pool,
@@ -81,8 +124,9 @@ function setup(routes: readonly Route[] = []) {
     audit as never,
     jobs as never,
     pipelines as never,
+    preflight as never,
   );
-  return { db, renderer, capacity, audit, jobs, pipelines, service };
+  return { db, renderer, capacity, audit, jobs, pipelines, preflight, service };
 }
 
 function deployInput(overrides: Record<string, unknown> = {}) {
@@ -219,6 +263,44 @@ describe('deploy', () => {
     await expect(service.deploy(deployInput({ resources }))).resolves.toMatchObject({
       instanceId: 'inst-new',
     });
+  });
+
+  /**
+   * FR-1.9 — the per-volume limit is a configuration, and a configuration that cannot be honoured
+   * is refused before the row exists. The numbers below are the shipped shape: two volumes summing
+   * past the requested disk reservation.
+   */
+  it('refuses a request whose declared volume quotas exceed its disk reservation', async () => {
+    const { capacity, db, service } = setup([VOLUME_ENTRY]);
+
+    await expect(
+      service.deploy(
+        deployInput({ entryKey: 'V1', resources: { cpu: 1, memoryMb: 1_024, diskMb: 1_024 } }),
+      ),
+    ).rejects.toMatchObject({
+      code: 'VALIDATION_FAILED',
+      status: 422,
+      detail:
+        'V1 declares 3072 MB of volume quotas (a: 1024 MB, b: 2048 MB) but the deployment reserves 1024 MB of disk.',
+      fieldErrors: [
+        expect.objectContaining({
+          field: 'resources.diskMb',
+          message: 'At least 3072 MB is required to honour the declared volume quotas.',
+        }),
+      ],
+    });
+    expect(capacity.admit).not.toHaveBeenCalled();
+    expect(db.calls.some((call) => call.sql.includes('INSERT INTO instance'))).toBe(false);
+  });
+
+  it('admits a request that matches the declared volume quotas exactly', async () => {
+    const { service } = setup([VOLUME_ENTRY]);
+
+    await expect(
+      service.deploy(
+        deployInput({ entryKey: 'V1', resources: { cpu: 1, memoryMb: 1_024, diskMb: 3_072 } }),
+      ),
+    ).resolves.toMatchObject({ instanceId: 'inst-new' });
   });
 
   it('admits a request below no declared minimum, because none is declared', async () => {
@@ -524,7 +606,7 @@ describe('lifecycle', () => {
     expect(audit.append).toHaveBeenCalledWith(
       expect.objectContaining({
         action: 'instance.stop.requested',
-        detail: { jobId: 'job-1', dataRetention: null },
+        detail: { jobId: 'job-1', dataRetention: null, targetVersion: null },
       }),
     );
   });
@@ -553,6 +635,113 @@ describe('lifecycle', () => {
     );
   });
 
+  /**
+   * FR-1.7 / AC-06 — the confirmation is checked, not recorded.
+   *
+   * The dialog computed the delta from a catalogue read that may be minutes old. Carrying the version
+   * into the job and the audit row is what makes "the operator confirmed 9.2.1, and 9.2.1 is what
+   * ran" provable; a pin that moved in between is a conflict the operator must see.
+   */
+  it('carries the confirmed version into the job and the audit row', async () => {
+    const { audit, jobs, service } = setup([
+      [
+        'FROM instance i',
+        [
+          {
+            id: 'inst-1',
+            slug: 'crm',
+            state: 'ready',
+            payload: { currentVersion: '9.1.0' },
+            entry_payload: { upstream: { latestVersion: '9.2.1' } },
+          },
+        ],
+      ],
+    ]);
+
+    await service.lifecycle({
+      instanceId: 'inst-1',
+      action: 'upgrade',
+      actorId: 'alice',
+      backupJobId: 'job-backup',
+      targetVersion: '9.2.1',
+    } as never);
+
+    expect(jobs.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: { action: 'upgrade', backupJobId: 'job-backup', targetVersion: '9.2.1' },
+      }),
+    );
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'instance.upgrade.requested',
+        detail: { jobId: 'job-1', dataRetention: null, targetVersion: '9.2.1' },
+      }),
+    );
+  });
+
+  it('refuses a confirmation the catalogue pin has moved past', async () => {
+    const { jobs, service } = setup([
+      [
+        'FROM instance i',
+        [
+          {
+            id: 'inst-1',
+            slug: 'crm',
+            state: 'ready',
+            payload: { currentVersion: '9.1.0' },
+            entry_payload: { upstream: { latestVersion: '9.3.0' } },
+          },
+        ],
+      ],
+    ]);
+
+    await expect(
+      service.lifecycle({
+        instanceId: 'inst-1',
+        action: 'upgrade',
+        actorId: 'alice',
+        backupJobId: 'job-backup',
+        targetVersion: '9.2.1',
+      } as never),
+    ).rejects.toMatchObject({
+      code: 'STATE_CONFLICT',
+      detail: 'The catalogue now pins 9.3.0, not the confirmed 9.2.1.',
+      remediation: expect.stringContaining('Re-open the upgrade dialog'),
+    });
+    expect(jobs.create).not.toHaveBeenCalled();
+  });
+
+  it('refuses an upgrade to the version the instance already runs', async () => {
+    const { jobs, service } = setup([
+      [
+        'FROM instance i',
+        [
+          {
+            id: 'inst-1',
+            slug: 'crm',
+            state: 'ready',
+            payload: { currentVersion: '9.2.1' },
+            entry_payload: { upstream: { latestVersion: '9.2.1' } },
+          },
+        ],
+      ],
+    ]);
+
+    await expect(
+      service.lifecycle({
+        instanceId: 'inst-1',
+        action: 'upgrade',
+        actorId: 'alice',
+        backupJobId: 'job-backup',
+        targetVersion: '9.2.1',
+      } as never),
+    ).rejects.toMatchObject({
+      code: 'STATE_CONFLICT',
+      detail: 'The instance already runs 9.2.1; there is nothing to upgrade.',
+    });
+    expect(jobs.create).not.toHaveBeenCalled();
+  });
+
   it('refuses an action the domain does not define', async () => {
     const { jobs, service } = setup();
 
@@ -567,7 +756,7 @@ describe('lifecycle', () => {
   });
 
   it('answers 404 for an instance that is gone', async () => {
-    const { service } = setup([['SELECT id, slug, state FROM instance', []]]);
+    const { service } = setup([['FROM instance i', []]]);
 
     await expect(
       service.lifecycle({ instanceId: 'inst-1', action: 'stop', actorId: 'alice' } as never),
@@ -610,7 +799,9 @@ describe('lifecycle', () => {
       } as never),
     ).resolves.toEqual({ jobId: 'job-1', kind: 'delete' });
     expect(audit.append).toHaveBeenCalledWith(
-      expect.objectContaining({ detail: { jobId: 'job-1', dataRetention: 'delete' } }),
+      expect.objectContaining({
+        detail: { jobId: 'job-1', dataRetention: 'delete', targetVersion: null },
+      }),
     );
   });
 
@@ -628,94 +819,103 @@ describe('lifecycle', () => {
 });
 
 describe('preview', () => {
-  it('reports the admission verdict, the route and no warnings for a deployable entry', async () => {
-    const { renderer, capacity, service } = setup();
+  /**
+   * FR-1.11 — the preview *is* the pre-flight.
+   *
+   * The checks now live in `PreflightService`, whose own suite covers every blocker. What is asserted
+   * here is the wiring: every wizard input reaches the service, the verdict and the blockers come
+   * back unchanged, and the answer carries the moment it was evaluated.
+   */
+  it('delegates the whole pre-flight and stamps the evaluation time', async () => {
+    const { preflight, service } = setup();
+    const before = Date.now();
 
-    const result = await service.preview({ entryKey: 'D01-01', slug: 'crm' } as never);
+    const result = await service.preview({
+      entryKey: 'D01-01',
+      slug: 'crm',
+      profileKey: 'prod',
+      resources: { cpu: 2, memoryMb: 4_096, diskMb: 8_192 },
+      envOverrides: { A: '1' },
+    } as never);
 
+    expect(preflight.run).toHaveBeenCalledWith({
+      entryKey: 'D01-01',
+      slug: 'crm',
+      profileKey: 'prod',
+      resources: { cpu: 2, memoryMb: 4_096, diskMb: 8_192 },
+      envOverrides: { A: '1' },
+    });
     expect(result).toMatchObject({
       admissible: true,
-      headline: 'fits on this host',
-      detail: '12 vCPU free',
-      capacitySource: 'measured',
+      headline: 'Ready to deploy',
+      policyVerdict: 'allowed',
+      policyEvaluatedAt: '2026-02-01T10:00:00.000Z',
+      policySource: 'source_resolution',
       routeHost: 'crm.seamnex.local',
       slugAvailable: true,
-      policyVerdict: 'allowed',
+      blockers: [],
       warnings: [],
     });
-    expect(capacity.admit).toHaveBeenCalledWith({
-      resources: { cpuMilli: 1_000, memoryMb: 2_048, diskMb: 2_048 },
-    });
-    expect(renderer.plan).not.toHaveBeenCalled();
-    expect(typeof result.evaluatedAt).toBe('string');
+    expect(Date.parse(String(result.evaluatedAt))).toBeGreaterThanOrEqual(before);
   });
 
-  it('makes the slug conflict the headline and the warning when the route is taken', async () => {
-    const { service } = setup([
-      [
-        'SELECT entry_key, state, domain_route',
-        [
+  it('omits the inputs the wizard did not send', async () => {
+    const { preflight, service } = setup();
+
+    await service.preview({ entryKey: 'D01-01', slug: 'crm' } as never);
+
+    expect(preflight.run).toHaveBeenCalledWith({ entryKey: 'D01-01', slug: 'crm' });
+  });
+
+  it('reports a refused pre-flight with its blockers and an unknown verdict', async () => {
+    const { preflight, service } = setup();
+    preflight.run.mockResolvedValue(
+      preflightResult({
+        admissible: false,
+        headline: '1 blocker must be fixed first',
+        detail: 'The slug "crm" is already published by D01-01 (ready) at crm.seamnex.local.',
+        slugAvailable: false,
+        policyVerdict: 'unknown',
+        policySource: 'none',
+        policyEvaluatedAt: null,
+        blockers: [
           {
-            entry_key: 'D01-01',
-            state: 'ready',
-            domain_route: 'crm.seamnex.local',
-            deleted_at: null,
-            reserved_until: null,
+            code: 'route_conflict',
+            field: 'slug',
+            message: 'The slug "crm" is already published by D01-01 (ready) at crm.seamnex.local.',
+            blocking: true,
           },
         ],
-      ],
-    ]);
+        warnings: ['A live deployment owns this route.'],
+      }),
+    );
 
     const result = await service.preview({ entryKey: 'D01-01', slug: 'crm' } as never);
 
     expect(result.admissible).toBe(false);
-    expect(result.slugAvailable).toBe(false);
-    // The capacity verdict stays in `detail`; the refusal the operator reads is the route's.
-    expect(result.headline).toContain('already published by D01-01');
-    expect(result.warnings).toEqual([expect.stringContaining('A live deployment owns this route')]);
-  });
-
-  it('warns about a missing definition when the entry has no scaffold either', async () => {
-    const { service } = setup([
-      ['FROM catalog_entry WHERE key', [{ key: 'X9', packaging: 'none', payload: {} }]],
-      ['scaffold_artefact', [{ present: false }]],
+    expect(result.policyVerdict).toBe('unknown');
+    expect(result.blockers).toEqual([
+      expect.objectContaining({ code: 'route_conflict', field: 'slug', blocking: true }),
     ]);
-
-    const result = await service.preview({ entryKey: 'X9', slug: 'other' } as never);
-
-    expect(result.warnings).toEqual([expect.stringContaining('no Compose file or Dockerfile')]);
+    expect(result.warnings).toEqual(['A live deployment owns this route.']);
   });
 
-  it('stays quiet when the scaffold was approved', async () => {
-    const { service } = setup([
-      ['FROM catalog_entry WHERE key', [{ key: 'X9', packaging: 'none', payload: {} }]],
-      ['scaffold_artefact', [{ present: true }]],
-    ]);
+  it('copies the blockers it was handed instead of sharing the mutable array', async () => {
+    const { preflight, service } = setup();
+    const blocker = {
+      code: 'image_unpinned' as const,
+      field: 'entryKey',
+      message: 'floating tag',
+      blocking: true,
+    };
+    preflight.run.mockResolvedValue(
+      preflightResult({ admissible: false, blockers: [blocker], warnings: ['w'] }),
+    );
 
-    const result = await service.preview({ entryKey: 'X9', slug: 'other' } as never);
+    const result = await service.preview({ entryKey: 'D01-01', slug: 'crm' } as never);
 
-    expect(result.warnings).toEqual([]);
-  });
-
-  it('treats a scaffold query that returns no row as unapproved', async () => {
-    const { service } = setup([
-      ['FROM catalog_entry WHERE key', [{ key: 'X9', packaging: 'none', payload: {} }]],
-      ['scaffold_artefact', []],
-    ]);
-
-    const result = await service.preview({ entryKey: 'X9', slug: 'other' } as never);
-
-    expect(result.warnings).toHaveLength(1);
-  });
-
-  it('answers 404 for an entry that is not in the catalog', async () => {
-    const { service } = setup([['FROM catalog_entry WHERE key', []]]);
-
-    await expect(
-      service.preview({ entryKey: 'D01-01', slug: 'crm' } as never),
-    ).rejects.toMatchObject({
-      code: 'NOT_FOUND',
-    });
+    expect(result.blockers[0]).not.toBe(blocker);
+    expect(result.blockers[0]).toEqual(blocker);
   });
 });
 

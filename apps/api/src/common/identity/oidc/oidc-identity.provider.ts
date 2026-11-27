@@ -1,5 +1,6 @@
 import { MFA_REQUIRED_ROLES } from '@seamnex/domain';
 import type { AppConfig } from '../../../config/config';
+import { AppError } from '../../problem/app-error';
 import { mfaRequired, providerUnavailable, unauthorized } from '../identity-errors';
 import type {
   AuthProviderConfig,
@@ -7,6 +8,7 @@ import type {
   ExchangeCodeInput,
   IdentityClaims,
   IdentityProvider,
+  SessionEndResult,
 } from '../identity-provider.contract';
 import { assertPkce } from '../pkce';
 import { assertRedirectUri } from '../redirect-uri';
@@ -45,9 +47,13 @@ export type OidcIdentityProviderOptions = {
   readonly directory?: () => Promise<DirectorySnapshot>;
   /**
    * The Admin API write path, wired by the module. Absent makes `setUserEnabled` refuse rather than
-   * pretend: a disable that only touched the platform mirror is undone by the next sync.
+   * pretend: a disable that only touched the platform mirror is undone by the next sync. The same
+   * seam carries FR-3.8's session end, because both are writes only the provider can make.
    */
-  readonly admin?: { setUserEnabled(sub: string, enabled: boolean): Promise<void> };
+  readonly admin?: {
+    setUserEnabled(sub: string, enabled: boolean): Promise<void>;
+    endUserSessions(sub: string): Promise<void>;
+  };
   readonly fetch?: typeof globalThis.fetch;
 };
 
@@ -60,7 +66,11 @@ export class OidcIdentityProvider implements IdentityProvider {
   private readonly doFetch: typeof globalThis.fetch;
   private readonly directoryReader: (() => Promise<DirectorySnapshot>) | undefined;
   private readonly admin:
-    { setUserEnabled(sub: string, enabled: boolean): Promise<void> } | undefined;
+    | {
+        setUserEnabled(sub: string, enabled: boolean): Promise<void>;
+        endUserSessions(sub: string): Promise<void>;
+      }
+    | undefined;
 
   constructor(options: OidcIdentityProviderOptions) {
     this.config = options.config;
@@ -151,6 +161,36 @@ export class OidcIdentityProvider implements IdentityProvider {
       );
     }
     await this.admin.setUserEnabled(sub, enabled);
+  }
+
+  /**
+   * FR-3.8 / AC-35 — end the provider session so registered back-channel logouts fire.
+   *
+   * The failure is returned rather than thrown: sign-out has already been requested by a person who
+   * expects to be signed out of the platform, and a provider outage must not turn that into an
+   * error page with the session still alive. What it must not do is pretend the products were
+   * notified, which is why the reason travels back to the statement.
+   */
+  async endSessions(sub: string): Promise<SessionEndResult> {
+    if (this.admin === undefined) {
+      return {
+        ended: false,
+        reason:
+          'the identity provider is configured without an admin client, so its session cannot be ended',
+      };
+    }
+    try {
+      await this.admin.endUserSessions(sub);
+      return { ended: true };
+    } catch (error) {
+      return {
+        ended: false,
+        reason:
+          error instanceof AppError
+            ? error.detail
+            : `the identity provider did not answer the session-end request (${String(error)})`,
+      };
+    }
   }
 
   /** The base for RP-initiated logout; the SPA adds `client_id` and `post_logout_redirect_uri`. */

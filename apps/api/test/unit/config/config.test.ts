@@ -116,6 +116,71 @@ describe('configuration', () => {
     expect(config.SESSION_COOKIE_SECURE).toBe(false);
   });
 
+  /*
+   * NFR-4.1 / ISSUE-07. The column used to be written as a constant, so every route claimed an ACME
+   * certificate no committed asset configured. The value now comes from the deployment, and there is
+   * deliberately no "none": a plain-HTTP route is not a state the platform may describe.
+   */
+  it('records the edge certificate mode from the deployment and refuses an unknown one', () => {
+    expect(loadConfig({ ...BASE }).SEAMNEX_EDGE_TLS_MODE).toBe('acme');
+    expect(loadConfig({ ...BASE, SEAMNEX_EDGE_TLS_MODE: 'internal' }).SEAMNEX_EDGE_TLS_MODE).toBe(
+      'internal',
+    );
+    expect(() => loadConfig({ ...BASE, SEAMNEX_EDGE_TLS_MODE: 'none' })).toThrow(
+      /SEAMNEX_EDGE_TLS_MODE/,
+    );
+  });
+
+  it('accepts an empty ACME contact address and refuses a malformed one', () => {
+    // Empty is what the development stack uses: it never references the resolver, so no
+    // registration happens. A typo, on the other hand, would only surface as a CA error during a
+    // deployment, when the fix costs a certificate request.
+    expect(loadConfig({ ...BASE }).SEAMNEX_TRAEFIK_ACME_EMAIL).toBe('');
+    expect(
+      loadConfig({ ...BASE, SEAMNEX_TRAEFIK_ACME_EMAIL: 'ops@example.test' })
+        .SEAMNEX_TRAEFIK_ACME_EMAIL,
+    ).toBe('ops@example.test');
+    expect(() => loadConfig({ ...BASE, SEAMNEX_TRAEFIK_ACME_EMAIL: 'not-an-address' })).toThrow(
+      /SEAMNEX_TRAEFIK_ACME_EMAIL/,
+    );
+  });
+
+  /*
+   * NFR-4.1 / ADR-BE-39. The scheme is written into every launch link and into the OIDC redirect URI a
+   * product is registered with, so `http` in production advertises an address the edge does not serve —
+   * the review's finding, reached through configuration instead of a literal.
+   */
+  it('refuses a plain-HTTP product URL in production', () => {
+    expect(() => loadConfig({ ...PRODUCTION, SEAMNEX_PRODUCT_URL_SCHEME: 'http' })).toThrow(
+      /SEAMNEX_PRODUCT_URL_SCHEME/,
+    );
+    // Development is warned at boot rather than refused: a `.env` written before the edge served TLS
+    // has to be repairable by the developer running it, not a boot error in the middle of their work.
+    expect(
+      loadConfig({ ...BASE, SEAMNEX_PRODUCT_URL_SCHEME: 'http' }).SEAMNEX_PRODUCT_URL_SCHEME,
+    ).toBe('http');
+  });
+
+  it('states where a product opens and how the edge certifies it in the boot line', () => {
+    // The line is what an operator quotes in a bug report, and a stale `.env` (http + 8020) is
+    // otherwise only visible as a dead link.
+    const config = loadConfig({
+      ...BASE,
+      SEAMNEX_PRODUCT_URL_PORT: '8443',
+      SEAMNEX_EDGE_TLS_MODE: 'internal',
+    });
+    expect(describeConfig(config)).toMatchObject({
+      productUrl: 'https://<slug>.seamnex.localhost:8443',
+      edgeTlsMode: 'internal',
+      acmeContactConfigured: false,
+    });
+
+    const withEmail = loadConfig({ ...BASE, SEAMNEX_TRAEFIK_ACME_EMAIL: 'ops@example.test' });
+    expect(describeConfig(withEmail).acmeContactConfigured).toBe(true);
+    // Presence, not the address: the boot line is not a place to copy an operator's mailbox.
+    expect(JSON.stringify(describeConfig(withEmail))).not.toContain('ops@example.test');
+  });
+
   it('targets one composed catalogue key by default and parses a list for several products', () => {
     // The full key, because `catalog_entry.key` is a primary key: `D09-01` is OpenProject and no other
     // entry can hold it. The legacy `D9` is still accepted by the relay, but it is an alias.
@@ -269,5 +334,101 @@ describe('configuration', () => {
       expect(issues.length).toBeGreaterThan(1);
       expect(issues.every((issue) => issue.path.length > 0)).toBe(true);
     }
+  });
+
+  /*
+   * ADR-BE-42 §10.2 rule 1 — the catalogue source is configuration.
+   *
+   * These three settings are the whole SSRF surface of the fetch endpoint, so their defaults are the
+   * behaviour a deployment gets without writing anything: the shipped mirror, no default ref, and a
+   * one-minute cooldown.
+   */
+  describe('list-valued settings', () => {
+    it('keeps only the pull mirrors that can be a reference prefix', () => {
+      // A mirror is a prefix the daemon can concatenate: a host, optionally a port, and no path.
+      // `mirror.example.com/team` is a mistaken full reference, and truncating it would pull from a
+      // registry the operator did not name.
+      const config = loadConfig({
+        ...BASE,
+        SEAMNEX_PULL_MIRROR:
+          'https://mirror.example.com/ , mirror.example.com:5000, mirror.example.com/team, bad_host!, mirror.example.com:port',
+      });
+
+      expect(config.pullMirrors).toEqual(['mirror.example.com', 'mirror.example.com:5000']);
+    });
+
+    it('refuses a bootstrap URL that is not a bare origin', () => {
+      // The value is written verbatim as a Traefik server URL; a path makes the router invalid and
+      // the product disappears with nothing in the platform log.
+      expect(() => loadConfig({ ...BASE, SEAMNEX_BOOTSTRAP_URL: 'relay:8091/auth' })).toThrow(
+        ConfigError,
+      );
+      expect(() => loadConfig({ ...BASE, SEAMNEX_BOOTSTRAP_URL: 'https://user:pw@relay' })).toThrow(
+        ConfigError,
+      );
+    });
+
+    it('reads a trust-proxy list as addresses, not as "true"', () => {
+      expect(loadConfig({ ...BASE, TRUST_PROXY: '10.0.0.1, 10.0.0.2' }).trustProxy).toEqual([
+        '10.0.0.1',
+        '10.0.0.2',
+      ]);
+      expect(loadConfig({ ...BASE, TRUST_PROXY: 'on' }).trustProxy).toBe(true);
+    });
+  });
+
+  describe('catalogue source', () => {
+    it('defaults to the shipped mirror with no pinned ref and a one-minute cooldown', () => {
+      const config = loadConfig({ ...BASE });
+
+      expect(config.SEAMNEX_CATALOG_SOURCE_URL).toBe('https://github.com/orbivort/seamnex-catalog');
+      expect(config.SEAMNEX_CATALOG_SOURCE_REF).toBe('');
+      expect(config.SEAMNEX_CATALOG_SYNC_COOLDOWN_MS).toBe(60_000);
+      // `github.com` must stay allow-listed or the default source is refused before any fetch.
+      expect(config.sourceAllowedHosts).toContain('github.com');
+    });
+
+    it('keeps an empty URL empty, because that is the air-gapped install', () => {
+      // Empty is a supported state (the console action is disabled), not a value to be defaulted
+      // back: silently restoring the mirror would make an air-gapped host try to reach it.
+      const config = loadConfig({ ...BASE, SEAMNEX_CATALOG_SOURCE_URL: '' });
+
+      expect(config.SEAMNEX_CATALOG_SOURCE_URL).toBe('');
+    });
+
+    it('does not resolve the URL or the ref as filesystem paths', () => {
+      // `SEAMNEX_CATALOG_REPO_PATH` is resolved against the repository root; a URL that went through
+      // the same helper would become an absolute path and every fetch would be refused.
+      const config = loadConfig({
+        ...BASE,
+        SEAMNEX_CATALOG_SOURCE_URL: 'https://gitlab.example.test/team/catalogue.git',
+        SEAMNEX_CATALOG_SOURCE_REF: 'catalog-2027.01.0',
+      });
+
+      expect(config.SEAMNEX_CATALOG_SOURCE_URL).toBe(
+        'https://gitlab.example.test/team/catalogue.git',
+      );
+      expect(config.SEAMNEX_CATALOG_SOURCE_REF).toBe('catalog-2027.01.0');
+    });
+
+    it('accepts a cooldown from the environment and refuses one beyond the ceiling', () => {
+      expect(
+        loadConfig({ ...BASE, SEAMNEX_CATALOG_SYNC_COOLDOWN_MS: '0' })
+          .SEAMNEX_CATALOG_SYNC_COOLDOWN_MS,
+      ).toBe(0);
+      expect(() => loadConfig({ ...BASE, SEAMNEX_CATALOG_SYNC_COOLDOWN_MS: '999999999' })).toThrow(
+        ConfigError,
+      );
+    });
+
+    it('refuses a negative or non-numeric cooldown instead of coercing it to zero', () => {
+      // A typo must not silently disable the control: `-1` coerced to 0 would be "no cooldown".
+      expect(() => loadConfig({ ...BASE, SEAMNEX_CATALOG_SYNC_COOLDOWN_MS: '-1' })).toThrow(
+        ConfigError,
+      );
+      expect(() => loadConfig({ ...BASE, SEAMNEX_CATALOG_SYNC_COOLDOWN_MS: 'a minute' })).toThrow(
+        ConfigError,
+      );
+    });
   });
 });

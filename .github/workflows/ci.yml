@@ -32,12 +32,19 @@ env:
   # Unset on forks and on a repository without the secret; turbo then stays on the local cache.
   TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
   TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
+  # ADR-BE-42: the platform holds no catalogue content, so the coverage gate reads a checkout of the
+  # mirror instead of a directory in this repository. Both values are repository variables so a
+  # release candidate can be checked against its own tag without editing this file; the defaults are
+  # the shipped mirror and the tag this release was cut from.
+  CATALOG_MIRROR_REPOSITORY: ${{ vars.SEAMNEX_CATALOG_SOURCE_URL || 'https://github.com/orbivort/seamnex-catalog' }}
+  CATALOG_MIRROR_REF: ${{ vars.SEAMNEX_CATALOG_SOURCE_REF || 'catalog-2026.11.2' }}
 
 # Actions are referenced by major version only (`@v7`, not `@v7.0.1`): every publisher used here
 # maintains that tag as a moving pointer across its minor and patch releases, so a major-only ref
 # still receives the Node 24 and security fixes the runtime requires, without a pin that has to be
 # chased on every patch. `aquasecurity/trivy-action` is the single exception, explained at its step:
-# it is pre-1.0 and publishes no `v0` tag.
+# it is pre-1.0 and publishes no `v0` tag, and it carries a second pin — the `version` input — that
+# decides which Trivy binary scans.
 #
 # Least privilege: no job here writes to the repository, publishes a package or touches issues, so
 # the default (broad) token is unnecessary. A workflow that needs more must say so explicitly.
@@ -74,6 +81,24 @@ jobs:
         run: pnpm audit --dev --audit-level high
       - name: migration pairs and numbering
         run: pnpm check:migrations
+      # The catalogue is data, so no type checks it: an entry document and the environment
+      # declaration beside it are only consistent if something compares them. The gate needs no
+      # database — it reads `catalog/` and `catalog/env/` under a checkout, so the checkout comes
+      # first. Missing tag, unreachable mirror or an empty tree all fail the job on purpose: a
+      # release that cannot find its catalogue must not go out (AC-9).
+      - name: checkout the catalogue mirror
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/catalog-repo"
+          rm -rf "$root"
+          git init --quiet "$root"
+          git -C "$root" remote add origin "$CATALOG_MIRROR_REPOSITORY"
+          git -C "$root" fetch --quiet --depth 1 origin "refs/tags/$CATALOG_MIRROR_REF"
+          git -C "$root" checkout --quiet FETCH_HEAD
+      - name: catalogue coverage and the native floor
+        env:
+          SEAMNEX_CATALOG_REPO_PATH: ${{ runner.temp }}/catalog-repo
+        run: pnpm check:catalog
       # Full, not `--affected`: a change to eslint.config.mjs or packages/config is not a
       # change to any package, so an affected filter would quietly skip the packages it governs.
       - name: lint (module boundaries)
@@ -186,7 +211,9 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:18-alpine
+        # The dev stack's reference, digest included (docker/compose.dev.yml): the suites meet the
+        # engine developers run, not merely its major version.
+        image: postgres:18.7-alpine@sha256:0115267ab5a509022df9319c77be365cef335adb71556c75f60f5360ee247e71
         env:
           POSTGRES_USER: seamnex
           POSTGRES_PASSWORD: seamnex_ci_password
@@ -198,7 +225,9 @@ jobs:
           --health-timeout 5s
           --health-retries 20
       redis:
-        image: redis:7-alpine
+        # Same pin as docker/compose.dev.yml. 7.4 is a licence statement as much as a version one —
+        # a floating `7-alpine` would move the licence on a rebuild (THIRD-PARTY-NOTICES §5).
+        image: redis:7.4.12-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
         ports: ['6379:6379']
         options: >-
           --health-cmd "redis-cli ping"
@@ -307,9 +336,16 @@ jobs:
       # publish and maintain a moving major tag. `trivy-action` does not: it is a pre-1.0 project
       # with no `v0` tag, and its 0.x minors carry behaviour changes, so the ref stays a full
       # version. Pinning a ref the registry does not serve would fail the job at resolve time.
+      #
+      # `version` is the Trivy binary, pinned to the tag `docker/images.json` names. Without it the
+      # action installs whatever default its own release happens to carry, so this gate would clear
+      # an image with a different scanner than the one that blocks it at "Apply" (NFR-4.6). The
+      # parity is the release tag: the action installs a GitHub release asset, so only the image
+      # reference has a digest to pin — `docker/images.json` holds that one.
       - name: Trivy — fail on a critical vulnerability
         uses: aquasecurity/trivy-action@v0.36.0
         with:
+          version: v0.76.2
           image-ref: seamnex-api:sha-${{ github.sha }}
           format: table
           exit-code: '1'

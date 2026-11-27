@@ -193,7 +193,10 @@ describe('group mappings', () => {
 
     expect(await screen.findByRole('heading', { name: 'Groups and role mappings' })).toBeDefined();
     expect(await screen.findByText('/domain/revenue-owners')).toBeDefined();
-    expect(screen.getAllByText('propagates').length).toBeGreaterThan(0);
+    // FR-2.4: a propagating mapping now names the product role it applies, and a mapping that stays
+    // on the platform says so instead of leaving the chip off.
+    expect(screen.getAllByText(/in product$/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText('platform only').length).toBeGreaterThan(0);
     expect(screen.getAllByText('R3').length).toBeGreaterThan(0);
   });
 

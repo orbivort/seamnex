@@ -1,4 +1,8 @@
-import type { ReloadEnvironmentResult } from '@seamnex/domain';
+import {
+  computeCatalogCoverage,
+  type CatalogCoverage,
+  type ReloadEnvironmentResult,
+} from '@seamnex/domain';
 import type { CatalogWorkingTree } from '../modules/m22-catalog-repository/catalog-repo.contract';
 
 /**
@@ -70,8 +74,9 @@ export function decideProjection(input: {
           code: 1,
           lines: [
             `no catalogue working tree at ${root} while ${projectedEntries} catalog entries are projected`,
-            '  either the seed and this process resolved different roots, or the tree was removed while the projection stayed',
-            '  the seed only writes into an empty projection, so restoring it is a deliberate step, not a retry',
+            '  either the seed and this process resolved different roots, or the checkout was removed while the projection stayed',
+            '  restore the checkout at the tag it was serving: `pnpm catalog:sync --ref <tag>` (or a `git clone` on an air-gapped host),',
+            '  then run `pnpm catalog:project` again; re-seeding is not the fix, because the seed only writes into an empty projection',
           ],
         };
   }
@@ -88,9 +93,30 @@ export function decideProjection(input: {
       code: 1,
       lines: [
         `${tree.revision}: the tree declares ${tree.documents.length} entries but none are projected`,
-        '  project them first: `pnpm db:seed` does it for the default set when catalog_entry is empty,',
-        '  `POST /catalog/reload` does it for a full tree and needs the API up with an R1 session',
+        '  project them first: `pnpm db:seed` does it for a fresh database when catalog_entry is empty,',
+        '  `POST /catalog/reload` does it for a populated catalogue and needs the API up with an R1 session',
         '  declarations cannot be applied to an entry that is not projected',
+      ],
+    };
+  }
+
+  /*
+   * S-1 / AC-01 — a declaration with no entry document is refused, not skipped.
+   *
+   * The loader could apply the rest and print a note, which is exactly what the review found: an
+   * operator read a green run and a catalogue that advertised a product nobody could deploy. The
+   * whole run stops, because the tree is internally inconsistent and the entry document is the thing
+   * that is missing — not this projector's input.
+   */
+  const coverage = coverageOf(tree);
+  if (coverage.refused.length > 0) {
+    return {
+      apply: false,
+      code: 1,
+      lines: [
+        `${coverage.refused.length} declaration(s) in ${root} name no entry document; nothing was projected`,
+        ...coverage.refused.map((refused) => `  ${refused.key}: ${refused.reason}`),
+        '  a declaration without an entry document cannot be projected: add the entry document, or remove the declaration',
       ],
     };
   }
@@ -101,6 +127,7 @@ export function decideProjection(input: {
       code: 0,
       lines: [
         `${tree.revision}: ${tree.documents.length} entries, no environment declarations — nothing to project`,
+        ...coverageLines(coverage),
       ],
     };
   }
@@ -110,8 +137,43 @@ export function decideProjection(input: {
     code: 0,
     lines: [
       `${tree.revision}: ${tree.documents.length} entries, ${tree.envSchemas.length} environment declarations`,
+      ...coverageLines(coverage),
     ],
   };
+}
+
+/**
+ * S-1 / S-2 — coverage and the native floor, as the projection run reports them.
+ *
+ * The bootstrap step ran without ever stating either number, so "the catalogue covers what S-2
+ * requires" was checked by reading a document rather than by running the thing that projects it.
+ */
+function coverageOf(tree: CatalogWorkingTree): CatalogCoverage {
+  const documented = new Set(tree.documents.map((document) => document.key));
+  return computeCatalogCoverage({
+    entries: tree.documents.map((document) => ({
+      key: document.key,
+      guaranteeClass: document.guaranteeClass,
+      primaryInstanceId: document.primaryInstanceId,
+    })),
+    declaredEnvironments: tree.envSchemas.length,
+    refused: tree.envSchemas
+      .filter((file) => !documented.has(file.entryKey))
+      .map((file) => ({
+        key: file.entryKey,
+        reason: `catalog/env/${file.entryKey}.json has no catalog/${file.entryKey}.json in the working tree`,
+      })),
+  });
+}
+
+function coverageLines(coverage: CatalogCoverage): string[] {
+  const floor = coverage.floorMet
+    ? `floor ${coverage.floor} met`
+    : `floor ${coverage.floor} not met (${coverage.shortfall} short)`;
+  return [
+    `  coverage: ${coverage.nativeDeployments} native of ${coverage.deployments} deployments, ${floor}`,
+    `  environments: ${coverage.documentedEnvironments} of ${coverage.declaredEnvironments} declared and documented, ${coverage.refused.length} refused`,
+  ];
 }
 
 /** The `code` a Node system error carries (`ECONNREFUSED`), or `null` when it has none. */

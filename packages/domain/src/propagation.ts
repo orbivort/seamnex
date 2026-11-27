@@ -1,12 +1,15 @@
 import type { EntitlementSyncState, GuaranteeClass } from './enums';
 
 /**
- * FR-2.4 / design §12: how far an entitlement can propagate is a property of the product's
- * authentication guarantee class, not of the sync run. The sync worker records the class-derived
- * state so a screen can say "pending" or "edge only" instead of implying it applied everywhere.
+ * FR-2.4 / design §12: how far an entitlement *can* propagate is a property of the product's
+ * authentication guarantee class. Whether it *did* is a separate fact, and 0035 is what makes that
+ * fact expressible: a class sets the ceiling below, and the sync worker records `applied` only when
+ * the platform actually applied the grant (an identity client it configured, or a role push the
+ * entry declared and the adapter completed).
  *
- * - `native`      — the platform's grant is applied; the product keeps its own credential, which is
- *                   what the guarantee-class label (not the sync state) tells the user
+ * - `native`      — the product authenticates against the IdP; with an OIDC/SAML client the group
+ *                   claim carries the role, so `applied` is reachable. Without one, the grant exists
+ *                   only on the platform and the honest state is `pending`.
  * - `fa_header`   — forward-auth headers carry the identity per request → applied
  * - `fa_delegated`— the product delegates sign-in but keeps a local role record → pending until a cycle
  * - `fa_gate`     — the edge enforces access; the product itself never learns the grant → unsupported
@@ -28,6 +31,17 @@ export const SYNC_STATE_BY_GUARANTEE_CLASS = {
 
 export function syncStateForGuaranteeClass(guaranteeClass: GuaranteeClass): EntitlementSyncState {
   return SYNC_STATE_BY_GUARANTEE_CLASS[guaranteeClass];
+}
+
+/**
+ * Classes whose grant can be realised entirely on the platform side — and are therefore the only
+ * ones where `applied` may be recorded without a completed product push.
+ *
+ * `fa_gate` is excluded because invariant 12 forbids `applied` there, and `fa_delegated` because the
+ * product keeps its own role record: the platform's claim is not the product's state.
+ */
+export function canApplyWithoutProductPush(guaranteeClass: GuaranteeClass): boolean {
+  return guaranteeClass === 'native' || guaranteeClass === 'fa_header';
 }
 
 /** Classes whose grant is completely realised on the platform side. */

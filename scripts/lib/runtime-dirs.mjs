@@ -13,6 +13,8 @@ import { join } from 'node:path';
  *   - `instances` — render sets and source checkouts (`EACCES` in the deploy job at "Resolve
  *     source");
  *   - `backups`, `age` — backup archives and the age identity;
+ *   - `scans` — the image tar and Trivy report written at "Apply" (NFR-4.6). Without it the scan
+ *     could not create its work directory and the job failed with IMAGE_SCAN_BLOCKED;
  *   - `traefik/dynamic` — the route projection's file provider.
  *
  * Creating them here, on the host, means the mount arrives with the host's ACL and the container
@@ -29,8 +31,19 @@ export function ensureRuntimeDirs(root, log = () => {}) {
     join('temp', 'instances'),
     join('temp', 'backups'),
     join('temp', 'age'),
+    // NFR-4.6: the scan scratch tree. Docker would create the mount root as root, and the API's
+    // `node` user then cannot `mkdir` the per-scan directory inside it.
+    join('temp', 'scans'),
+    // NFR-4.6: the advisory cache the scanner reads offline. Created here for the same reason, and
+    // because `pnpm scan:db:update` writes into it as the host user: a mount root Docker created for
+    // a missing source belongs to root, so the seeding command could not write to it on Linux.
+    join('temp', 'trivy-cache'),
     join('temp', 'traefik', 'dynamic'),
     join('temp', 'catalog-repo', 'instances'),
+    // FR-2.6: the `file_sd` directory M21 writes and Prometheus watches. Created on the host for the
+    // same reason as the others — a Docker-created mount root is owned by root, so the API's `mkdir`
+    // would fail and no instance would ever be scraped.
+    join('temp', 'prometheus-targets'),
   ];
   const created = [];
   const empty = [];

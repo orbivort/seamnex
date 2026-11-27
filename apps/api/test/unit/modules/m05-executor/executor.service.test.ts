@@ -1,6 +1,14 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeDb, type Route } from '../../../support/fakes';
 import { PostgresExecutorService } from '../../../../src/modules/m05-executor/executor.service';
+import {
+  archivePath,
+  exportsDirectory,
+  writeExportRecord,
+  type ExportRecord,
+} from '../../../../src/modules/m05-executor/instance-exports';
 
 /**
  * The read model. Two properties are asserted over and over, because both were defects: every
@@ -30,7 +38,8 @@ function row(overrides: Record<string, unknown> = {}): Record<string, unknown> {
       owner: { id: 'u1', name: 'Team CRM' },
       licenseId: 'AGPL',
       currentVersion: '7.4.1',
-      availableVersion: '7.4.2',
+      // No `availableVersion`: nothing writes it, and the projection must not read it. The newer
+      // release comes from the catalogue pin asserted below.
     },
     updated_at: new Date('2026-01-02T00:00:00Z'),
     created_at: new Date('2026-01-01T00:00:00Z'),
@@ -46,6 +55,15 @@ function row(overrides: Record<string, unknown> = {}): Record<string, unknown> {
       guaranteeClass: 'fa_header',
       licenseId: 'BSD',
       repoUrl: 'https://example.test/crm.git',
+      // FR-1.7: the "is there something newer?" half of the delta is the entry's upstream pin, not a
+      // payload key nothing writes.
+      upstream: {
+        currentVersion: '7.4.1',
+        latestVersion: '7.4.2',
+        advisory: null,
+        releaseUrl: 'https://example.test/crm/releases/7.4.2',
+        checkedAt: '2026-01-04T00:00:00.000Z',
+      },
     },
     route_host: 'crm.seamnex.local',
     route_path_prefix: '/crm',
@@ -68,7 +86,7 @@ function row(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   };
 }
 
-function setup(routes: readonly Route[] = []) {
+function setup(routes: readonly Route[] = [], options: { readonly dataDir?: string } = {}) {
   const db = fakeDb(routes);
   const planner = { instancePlan: vi.fn(async () => ({ planId: 'plan-1' })) };
   const lifecycleService = {
@@ -79,13 +97,35 @@ function setup(routes: readonly Route[] = []) {
     prefetch: vi.fn(async () => ({ jobId: 'job-1' })),
   };
   const capacity = { record: vi.fn(async () => null) };
+  const audit = { append: vi.fn(async () => undefined) };
+  const docker = {
+    volumeUsageMb: vi.fn(async () => 0),
+    containers: vi.fn(async () => []),
+    stats: vi.fn(async () => ({ cpuMilli: 0, memoryMb: 0 })),
+  };
+  const config = {
+    SEAMNEX_INSTANCE_DATA_DIR: options.dataDir ?? './temp/instances',
+    SEAMNEX_USAGE_SAMPLE_RETENTION_DAYS: 30,
+    // The fallback for a route row written before `tls_mode` carried the truth (ISSUE-07).
+    SEAMNEX_EDGE_TLS_MODE: 'acme',
+  };
+  // NFR-4.6: the images route merges the retained scan; an empty list is "never scanned", which is
+  // exactly the state a fresh instance is in.
+  const scans = {
+    summaries: vi.fn(async () => new Map()),
+    scanForDeploy: vi.fn(async () => []),
+  };
   const service = new PostgresExecutorService(
     db.pool,
     planner as never,
     lifecycleService as never,
     capacity as never,
+    audit as never,
+    docker as never,
+    config as never,
+    scans as never,
   );
-  return { db, planner, lifecycleService, capacity, service };
+  return { db, planner, lifecycleService, capacity, audit, docker, service, scans };
 }
 
 /** The projection of one row, through the same `instances` query the fleet list uses. */
@@ -141,7 +181,8 @@ describe('instances', () => {
     const result = await service.instances({ q: 'CRM', state: 'ready', entryKey: 'D01-01' });
 
     expect(result).toHaveLength(1);
-    expect(db.calls[0]?.params).toEqual(['crm', 'ready', 'D01-01']);
+    // `$4` is the unrestricted answer; the two arrays are the scope predicate (ADR-BE-44).
+    expect(db.calls[0]?.params).toEqual(['crm', 'ready', 'D01-01', true, [], []]);
   });
 
   it('passes empty filters through as empty strings', async () => {
@@ -150,7 +191,38 @@ describe('instances', () => {
     await service.instances({});
 
     // `($1 = '' OR …)` is the shape that keeps one prepared statement for every filter combination.
-    expect(db.calls[0]?.params).toEqual(['', '', '']);
+    expect(db.calls[0]?.params).toEqual(['', '', '', true, [], []]);
+  });
+
+  it('confines a scoped list to the domains and instances the decision named', async () => {
+    const { db, service } = setup([['FROM instance i', []]]);
+
+    await service.instances(
+      {},
+      { kind: 'scoped', domains: ['CRM & Sales Pipeline'], instanceIds: ['inst-crm'] },
+    );
+
+    expect(db.calls[0]?.params).toEqual([
+      '',
+      '',
+      '',
+      false,
+      ['CRM & Sales Pipeline'],
+      ['inst-crm'],
+    ]);
+    expect(db.calls[0]?.sql).toContain('e.domain = ANY($5::text[]) OR i.id = ANY($6::uuid[])');
+  });
+
+  // The search box offered "product, domain, slug or key" while the query matched only the first
+  // three, so typing the key shown in the first column emptied the table.
+  it('matches the entry key and every key a composite entry serves', async () => {
+    const { db, service } = setup([['FROM instance i', []]]);
+
+    await service.instances({ q: 'd07-01' });
+
+    const sql = db.calls[0]?.sql ?? '';
+    expect(sql).toContain('lower(i.entry_key)');
+    expect(sql).toContain("i.payload->>'entryKeys'");
   });
 });
 
@@ -400,6 +472,46 @@ describe('the projection', () => {
     expect(instance.backup).toEqual(backup);
   });
 
+  /*
+   * The regression these two guard: `PUT /instances/:id/backup-schedule` wrote `backup_schedule`,
+   * answered 200, and the console went on showing "not scheduled · disabled" because the projection
+   * only ever read the document. The write was verified in the audit trail while the fleet list and
+   * the detail header disagreed with it.
+   */
+  it('reports the schedule a row actually has, not the document that predates it', async () => {
+    const instance = await project({
+      payload: { backup: { schedule: 'not scheduled', scheduleEnabled: false } },
+      backup_cadence: 'daily',
+      backup_timezone: 'Europe/Berlin',
+    });
+
+    expect(instance.backup).toEqual({
+      lastSuccessAt: null,
+      lastVerifiedRestoreAt: null,
+      schedule: 'daily',
+      scheduleTimezone: 'Europe/Berlin',
+      scheduleEnabled: true,
+      verified: false,
+    });
+  });
+
+  it('reports the newest succeeded backup set as the posture', async () => {
+    const instance = await project({
+      backup_cadence: 'off',
+      backup_finished_at: new Date('2026-01-06T03:00:00Z'),
+      backup_verified_at: new Date('2026-01-07T09:00:00Z'),
+    });
+
+    expect(instance.backup).toEqual({
+      lastSuccessAt: '2026-01-06T03:00:00.000Z',
+      lastVerifiedRestoreAt: '2026-01-07T09:00:00.000Z',
+      schedule: 'off',
+      scheduleTimezone: 'UTC',
+      scheduleEnabled: false,
+      verified: true,
+    });
+  });
+
   it('projects the event modes the catalog declares, dropping the ones it cannot read', async () => {
     const instance = await project({
       entry_payload: {
@@ -475,9 +587,9 @@ describe('instance detail', () => {
       [
         'FROM instance_volume WHERE instance_id',
         [
-          { name: 'data', mount_path: '/var/lib/app', quota_mb: 5_120 },
-          { name: 'none', mount_path: '/tmp', quota_mb: null },
-          { name: 'zero', mount_path: '/var/zero', quota_mb: 0 },
+          { name: 'data', mount_path: '/var/lib/app', quota_mb: 5_120, used_mb: 2_048 },
+          { name: 'none', mount_path: '/tmp', quota_mb: null, used_mb: 12 },
+          { name: 'zero', mount_path: '/var/zero', quota_mb: 0, used_mb: null },
         ],
       ],
     ]);
@@ -509,10 +621,18 @@ describe('instance detail', () => {
         name: 'data',
         mountPath: '/var/lib/app',
         quotaMb: 5_120,
+        // The measured figure, not a placeholder: this is what the storage panel renders.
+        usedMb: 2_048,
+      },
+      // No declared quota: the instance's own disk reservation is the honest bound, never 1 MB.
+      { id: `${INSTANCE_ID}:none`, name: 'none', mountPath: '/tmp', quotaMb: 4_096, usedMb: 12 },
+      {
+        id: `${INSTANCE_ID}:zero`,
+        name: 'zero',
+        mountPath: '/var/zero',
+        quotaMb: 4_096,
         usedMb: 0,
       },
-      { id: `${INSTANCE_ID}:none`, name: 'none', mountPath: '/tmp', quotaMb: 1, usedMb: 0 },
-      { id: `${INSTANCE_ID}:zero`, name: 'zero', mountPath: '/var/zero', quotaMb: 1, usedMb: 0 },
     ]);
     expect(detail.integrationChecks).toEqual([]);
     expect(db.calls[1]?.params).toEqual([INSTANCE_ID]);
@@ -535,17 +655,307 @@ describe('instance detail', () => {
   });
 });
 
+describe('volume usage', () => {
+  const volumes = (rows: Record<string, unknown>[]): Route => ['FROM instance_volume v', rows];
+  const write: Route = ['UPDATE instance_volume SET used_mb', []];
+
+  it('measures every live volume and stores the figure with its sample time', async () => {
+    const { db, docker, audit, service } = setup([
+      volumes([
+        { instance_id: 'inst-1', name: 'seamnex-crm_data', quota_mb: 5_120, used_mb: 100 },
+        { instance_id: 'inst-1', name: 'seamnex-crm_db', quota_mb: null, used_mb: 0 },
+      ]),
+      write,
+    ]);
+    docker.volumeUsageMb.mockResolvedValueOnce(1_024).mockResolvedValueOnce(12);
+
+    await service.recordVolumeUsage();
+
+    expect(docker.volumeUsageMb.mock.calls).toEqual([['seamnex-crm_data'], ['seamnex-crm_db']]);
+    expect(db.calls.filter((call) => call.sql.includes('UPDATE instance_volume'))).toEqual([
+      expect.objectContaining({ params: ['inst-1', 'seamnex-crm_data', 1_024] }),
+      expect.objectContaining({ params: ['inst-1', 'seamnex-crm_db', 12] }),
+    ]);
+    expect(audit.append).not.toHaveBeenCalled();
+  });
+
+  it('audits the moment a volume crosses its quota, and not again while it stays over', async () => {
+    const { audit, docker, service } = setup([
+      volumes([{ instance_id: 'inst-1', name: 'vol', quota_mb: 100, used_mb: 99 }]),
+      write,
+    ]);
+    docker.volumeUsageMb.mockResolvedValue(120);
+
+    await service.recordVolumeUsage();
+
+    expect(audit.append).toHaveBeenCalledOnce();
+    expect(audit.append).toHaveBeenCalledWith({
+      action: 'instance.volume.quota_exceeded',
+      actorType: 'service',
+      actorId: 'status-sampler',
+      targetType: 'instance',
+      targetId: 'inst-1',
+      outcome: 'failure',
+      detail: { volume: 'vol', usedMb: 120, quotaMb: 100 },
+    });
+
+    // Already over the limit before this sample: the crossing was recorded when it happened.
+    const second = setup([
+      volumes([{ instance_id: 'inst-1', name: 'vol', quota_mb: 100, used_mb: 130 }]),
+      write,
+    ]);
+    second.docker.volumeUsageMb.mockResolvedValue(140);
+    await second.service.recordVolumeUsage();
+    expect(second.audit.append).not.toHaveBeenCalled();
+  });
+
+  it('keeps the previous figure when a volume cannot be measured', async () => {
+    const { db, docker, service } = setup([
+      volumes([{ instance_id: 'inst-1', name: 'vol', quota_mb: 100, used_mb: 5 }]),
+    ]);
+    docker.volumeUsageMb.mockRejectedValueOnce(new Error('daemon unreachable'));
+
+    await expect(service.recordVolumeUsage()).resolves.toBeUndefined();
+
+    // Writing 0 would turn "unknown" into "empty" — the false claim this sampling exists to remove.
+    expect(db.calls.some((call) => call.sql.includes('UPDATE instance_volume'))).toBe(false);
+  });
+
+  it('reports a measurement failure that is not an Error', async () => {
+    const { db, docker, service } = setup([
+      volumes([{ instance_id: 'inst-1', name: 'vol', quota_mb: 100, used_mb: 5 }]),
+    ]);
+    docker.volumeUsageMb.mockRejectedValueOnce('daemon is gone');
+
+    await expect(service.recordVolumeUsage()).resolves.toBeUndefined();
+
+    expect(db.calls.some((call) => call.sql.includes('UPDATE instance_volume'))).toBe(false);
+  });
+});
+
+describe('instance usage', () => {
+  const containers = (
+    rows: { id: string; state: string; instance?: string }[],
+  ): { id: string; state: string; labels: Record<string, string> }[] =>
+    rows.map((row) => ({
+      id: row.id,
+      state: row.state,
+      labels: row.instance === undefined ? {} : { 'seamnex.instance': row.instance },
+    }));
+
+  it('sums one instance s containers and stores the measured figure with its disk', async () => {
+    const { db, docker, service } = setup([
+      ['FROM instance_volume', [{ instance_id: 'inst-1', used_mb: '3000' }]],
+      ['INSERT INTO instance_usage_sample', []],
+      ['DELETE FROM instance_usage_sample', []],
+    ]);
+    docker.containers.mockResolvedValue(
+      containers([
+        { id: 'c1', state: 'running', instance: 'inst-1' },
+        { id: 'c2', state: 'running', instance: 'inst-1' },
+      ]) as never,
+    );
+    docker.stats
+      .mockResolvedValueOnce({ cpuMilli: 480, memoryMb: 1_200 })
+      .mockResolvedValueOnce({ cpuMilli: 20, memoryMb: 300 });
+
+    await expect(service.recordInstanceUsage()).resolves.toEqual({ sampled: 1 });
+
+    const insert = db.calls.find((call) => call.sql.includes('INSERT INTO instance_usage_sample'));
+    expect(insert?.params).toEqual(['inst-1', 500, 1_500, 3_000, 2]);
+    // FR-4.5: samples are pruned by the same pass that writes them; there is no other writer.
+    expect(db.calls.some((call) => call.sql.includes('DELETE FROM instance_usage_sample'))).toBe(
+      true,
+    );
+  });
+
+  it('writes nothing when every stats read fails, rather than recording zero', async () => {
+    const { db, docker, service } = setup([
+      ['FROM instance_volume', [{ instance_id: 'inst-1', used_mb: '3000' }]],
+    ]);
+    docker.containers.mockResolvedValue(
+      containers([{ id: 'c1', state: 'running', instance: 'inst-1' }]) as never,
+    );
+    docker.stats.mockRejectedValue(new Error('daemon busy'));
+
+    await expect(service.recordInstanceUsage()).resolves.toEqual({ sampled: 0 });
+    expect(db.calls.some((call) => call.sql.includes('INSERT INTO instance_usage_sample'))).toBe(
+      false,
+    );
+  });
+
+  it('ignores stopped containers and containers with no instance label', async () => {
+    const { docker, service } = setup();
+    docker.containers.mockResolvedValue(
+      containers([
+        { id: 'c1', state: 'exited', instance: 'inst-1' },
+        { id: 'c2', state: 'running' },
+      ]) as never,
+    );
+
+    await expect(service.recordInstanceUsage()).resolves.toEqual({ sampled: 0 });
+    expect(docker.stats).not.toHaveBeenCalled();
+  });
+
+  it('survives a container list that fails, and samples nothing', async () => {
+    const { docker, service } = setup();
+    docker.containers.mockRejectedValue(new Error('daemon down'));
+
+    await expect(service.recordInstanceUsage()).resolves.toEqual({ sampled: 0 });
+  });
+});
+
+const EXPORT_ID = '20261116T103100Z-1a2b3c4d';
+const DATA_DIR = join('temp', 'm05-executor-service-exports');
+
+function exportRecord(exportId: string, bytes = 34): ExportRecord {
+  return {
+    version: 1,
+    exportId,
+    exportedAt: '2026-11-16T10:31:00.000Z',
+    instance: { id: INSTANCE_ID, slug: 'crm', entryKey: 'D01-01', state: 'ready' },
+    renderSet: { id: 'rs-000000000001', contentHash: 'hash-1', applied: true },
+    includes: ['database', 'environment'],
+    excluded: [],
+    files: [{ path: 'database/db.sql', sha256: 'b'.repeat(64), bytes: 12 }],
+    totalBytes: 12,
+    archive: { fileName: `${exportId}.tar.gz`, bytes, sha256: 'c'.repeat(64) },
+  };
+}
+
+describe('exports', () => {
+  const existingInstance: Route = ['SELECT id FROM instance', [{ id: INSTANCE_ID }]];
+
+  beforeEach(() => {
+    rmSync(DATA_DIR, { recursive: true, force: true });
+  });
+
+  afterEach(() => {
+    rmSync(DATA_DIR, { recursive: true, force: true });
+  });
+
+  it('lists the sidecars the capture wrote, newest first', async () => {
+    const directory = exportsDirectory(DATA_DIR, INSTANCE_ID);
+    writeExportRecord(directory, exportRecord('20261109T103100Z-1a2b3c4d'));
+    writeExportRecord(directory, exportRecord(EXPORT_ID));
+    const { service } = setup([existingInstance], { dataDir: DATA_DIR });
+
+    const list = await service.exports(INSTANCE_ID);
+
+    expect(list.map((entry) => entry.exportId)).toEqual([EXPORT_ID, '20261109T103100Z-1a2b3c4d']);
+    expect(list[0]).toMatchObject({
+      fileName: `${EXPORT_ID}.tar.gz`,
+      bytes: 34,
+      includes: ['database', 'environment'],
+      renderSetId: 'rs-000000000001',
+    });
+  });
+
+  it('skips a sidecar it cannot read rather than failing the list', async () => {
+    const directory = exportsDirectory(DATA_DIR, INSTANCE_ID);
+    writeExportRecord(directory, exportRecord(EXPORT_ID));
+    writeFileSync(join(directory, '20261110T103100Z-deadbeef.json'), '{"version":1,');
+    const { service } = setup([existingInstance], { dataDir: DATA_DIR });
+
+    await expect(service.exports(INSTANCE_ID)).resolves.toMatchObject([{ exportId: EXPORT_ID }]);
+  });
+
+  it('answers 404 for an instance that never existed', async () => {
+    const { service } = setup([['SELECT id FROM instance', []]], { dataDir: DATA_DIR });
+
+    await expect(service.exports(INSTANCE_ID)).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+      detail: `No instance ${INSTANCE_ID}.`,
+    });
+  });
+
+  it('answers 404 for an id that is not a UUID, without touching the database', async () => {
+    const { db, service } = setup();
+
+    await expect(service.exports('nope')).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    expect(db.calls).toHaveLength(0);
+  });
+});
+
+describe('export archive', () => {
+  const existingInstance: Route = ['SELECT id FROM instance', [{ id: INSTANCE_ID }]];
+
+  beforeEach(() => {
+    rmSync(DATA_DIR, { recursive: true, force: true });
+  });
+
+  afterEach(() => {
+    rmSync(DATA_DIR, { recursive: true, force: true });
+  });
+
+  function writeArchive(exportId: string, bytes: number, content: Buffer | string): void {
+    writeExportRecord(exportsDirectory(DATA_DIR, INSTANCE_ID), exportRecord(exportId, bytes));
+    writeFileSync(archivePath(DATA_DIR, INSTANCE_ID, exportId), content);
+  }
+
+  it('resolves the archive when its size matches the manifest', async () => {
+    const content = Buffer.from('tar-bytes');
+    writeArchive(EXPORT_ID, content.byteLength, content);
+    const { service } = setup([existingInstance], { dataDir: DATA_DIR });
+
+    await expect(service.exportArchive(INSTANCE_ID, EXPORT_ID)).resolves.toEqual({
+      path: archivePath(DATA_DIR, INSTANCE_ID, EXPORT_ID),
+      fileName: `${EXPORT_ID}.tar.gz`,
+      bytes: content.byteLength,
+    });
+  });
+
+  it('answers 404 for an export whose sidecar is gone', async () => {
+    const { service } = setup([existingInstance], { dataDir: DATA_DIR });
+
+    await expect(service.exportArchive(INSTANCE_ID, EXPORT_ID)).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+      detail: `No export ${EXPORT_ID} for this instance.`,
+    });
+  });
+
+  it('answers 404 for a sidecar whose archive is gone', async () => {
+    writeExportRecord(exportsDirectory(DATA_DIR, INSTANCE_ID), exportRecord(EXPORT_ID));
+    const { service } = setup([existingInstance], { dataDir: DATA_DIR });
+
+    await expect(service.exportArchive(INSTANCE_ID, EXPORT_ID)).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+    });
+  });
+
+  it('refuses an archive shorter than its manifest records, naming both numbers', async () => {
+    writeArchive(EXPORT_ID, 999, 'short');
+    const { service } = setup([existingInstance], { dataDir: DATA_DIR });
+
+    await expect(service.exportArchive(INSTANCE_ID, EXPORT_ID)).rejects.toMatchObject({
+      code: 'STATE_CONFLICT',
+      detail: `Export ${EXPORT_ID} is 5 bytes on disk but its manifest records 999.`,
+    });
+  });
+
+  it('answers 404 for a malformed id or one that addresses no row', async () => {
+    const { service } = setup([['SELECT id FROM instance', []]], { dataDir: DATA_DIR });
+
+    await expect(service.exportArchive('nope', EXPORT_ID)).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+    });
+    await expect(service.exportArchive(INSTANCE_ID, EXPORT_ID)).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+    });
+  });
+});
+
 describe('drift', () => {
-  it('projects a recorded drift with its declared and observed values', async () => {
+  it('projects an environment row with its declared and observed values', async () => {
     const { db, service } = setup([
       [
         'FROM drift_record',
         [
           {
             id: 'drift-1',
-            detail: { varName: 'DB_PASSWORD', declared: 'a', observed: 'b', kind: 'modified' },
-            expected_hash: 'h1',
-            observed_hash: 'h2',
+            detail: { varName: 'DB_PASSWORD', declared: 'a', observed: 'b', kind: 'mismatch' },
+            expected_hash: null,
+            observed_hash: null,
             detected_at: new Date('2026-01-05T00:00:00Z'),
             resolved_at: new Date('2026-01-06T00:00:00Z'),
           },
@@ -559,23 +969,26 @@ describe('drift', () => {
         varName: 'DB_PASSWORD',
         declared: 'a',
         observed: 'b',
-        kind: 'modified',
+        kind: 'mismatch',
         detectedAt: '2026-01-05T00:00:00.000Z',
         resolvedAt: '2026-01-06T00:00:00.000Z',
       },
     ]);
     expect(db.calls[0]?.params).toEqual([INSTANCE_ID]);
+    // FR-1.29 is an environment requirement; definition hashes are not environment variables and
+    // must not be relabelled as one.
+    expect(db.calls[0]?.sql).toContain(`scope = 'environment'`);
   });
 
-  it('falls back to the recorded hashes when the detail document is silent', async () => {
+  it('narrows a row whose kind is not part of the contract', async () => {
     const { service } = setup([
       [
         'FROM drift_record',
         [
           {
             id: 'drift-2',
-            detail: {},
-            expected_hash: 'h1',
+            detail: { varName: 'MAIL_HOST', kind: 'modified' },
+            expected_hash: null,
             observed_hash: null,
             detected_at: new Date('2026-01-05T00:00:00Z'),
             resolved_at: null,
@@ -587,8 +1000,38 @@ describe('drift', () => {
     await expect(service.drift(INSTANCE_ID)).resolves.toEqual([
       {
         id: 'drift-2',
-        varName: 'environment',
-        declared: 'h1',
+        varName: 'MAIL_HOST',
+        declared: null,
+        observed: null,
+        kind: 'mismatch',
+        detectedAt: '2026-01-05T00:00:00.000Z',
+        resolvedAt: null,
+      },
+    ]);
+  });
+
+  it('never invents a variable name when the row has none', async () => {
+    const { service } = setup([
+      [
+        'FROM drift_record',
+        [
+          {
+            id: 'drift-3',
+            detail: {},
+            expected_hash: null,
+            observed_hash: null,
+            detected_at: new Date('2026-01-05T00:00:00Z'),
+            resolved_at: null,
+          },
+        ],
+      ],
+    ]);
+
+    await expect(service.drift(INSTANCE_ID)).resolves.toEqual([
+      {
+        id: 'drift-3',
+        varName: 'unknown',
+        declared: null,
         observed: null,
         kind: 'mismatch',
         detectedAt: '2026-01-05T00:00:00.000Z',
@@ -633,6 +1076,8 @@ describe('images', () => {
         state: 'current',
         builtAt: '2026-01-05T00:00:00.000Z',
         artefact: 'k2',
+        // NFR-4.6: no retained report for this digest — `null`, not "clean".
+        scan: null,
       },
       {
         digest: 'sha256:old',
@@ -640,6 +1085,7 @@ describe('images', () => {
         state: 'previous',
         builtAt: '2026-01-01T00:00:00.000Z',
         artefact: 'k1',
+        scan: null,
       },
     ]);
     expect(db.calls[0]?.params).toEqual([INSTANCE_ID]);

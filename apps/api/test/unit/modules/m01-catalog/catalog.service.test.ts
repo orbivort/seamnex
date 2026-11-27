@@ -21,6 +21,11 @@ const CURRENT = 'AS content_hash';
 const MISSING = 'SELECT e.key FROM catalog_entry e';
 const PATCH_UPDATE = 'UPDATE catalog_entry SET payload = $2::jsonb';
 const METADATA = 'INSERT INTO integration_metadata';
+/** The per-instance record the patch reads before it writes, and the instances it fans out to. */
+const METADATA_READ = 'FROM integration_metadata WHERE entry_key = $1';
+const INSTANCES = 'SELECT id FROM instance WHERE entry_key = $1';
+/** FR-2.14: the reviewer is stored by name, resolved from the identity mirror. */
+const VERIFIER = 'FROM idp_user WHERE idp_id = $1';
 
 function document(overrides: Partial<CatalogEntry> = {}): CatalogEntry {
   return {
@@ -115,6 +120,10 @@ const WRITES: readonly Route[] = [
   ['DELETE FROM catalog_entry WHERE key', []],
   [PATCH_UPDATE, []],
   [METADATA, []],
+  [METADATA_READ, []],
+  [INSTANCES, []],
+  // No mirror row by default: a job or service actor keeps its id as the fallback.
+  [VERIFIER, []],
 ];
 
 function setup(routes: readonly Route[] = []) {
@@ -274,7 +283,7 @@ describe('entry', () => {
       code: 'INTERNAL_ERROR',
       detail: 'Catalog entry D01-01 is projected without the fields its contract requires.',
       remediation:
-        'Run POST /catalog/reload to re-read the catalog repository, or reseed the development database.',
+        'Run POST /catalog/reload to re-read the catalogue checkout. If no checkout is present, acquire one first (pnpm catalog:sync --ref <tag>) — reseeding projects existing documents and cannot produce a missing one.',
     });
   });
 });
@@ -526,7 +535,10 @@ describe('patchIntegrationMetadata', () => {
   });
 
   it('records a downgrade that revokes live write scopes and emits the registry rebuild', async () => {
-    const { db, audit, outbox, service } = setup([[FIND, [entryRow(document())]]]);
+    const { db, audit, outbox, service } = setup([
+      [FIND, [entryRow(document())]],
+      [INSTANCES, [{ id: 'inst-1' }]],
+    ]);
 
     const entry = await service.patchIntegrationMetadata(
       'D01-01',
@@ -553,12 +565,29 @@ describe('patchIntegrationMetadata', () => {
       integration: { credentialGranularity: 'none', verifiedBy: 'actor-1' },
     });
 
-    // The per-instance record the enforcement points read, not only the entry document.
+    /*
+     * The per-instance record the enforcement points read, not only the entry document.
+     *
+     * Every column is written now, and the ones the patch omitted are seeded from the row that was
+     * already there (here: none, so `null`), because an omitted field means "unchanged", never
+     * "clear".
+     */
     const metadata = db.calls.find((call) => call.sql.includes(METADATA));
     expect(metadata?.params).toEqual([
+      'inst-1',
       'D01-01',
+      null,
+      null,
+      null,
+      '[]',
+      '[]',
       'none',
-      60,
+      // The session maximum is not part of this patch and there is no earlier per-instance row, so
+      // the column stays empty rather than copying the entry document as if it had been verified
+      // per instance. The registry projection coalesces the document underneath it.
+      null,
+      null,
+      ['credentialGranularity'],
       'actor-1',
       new Date(entry.integration.verifiedAt),
       new Date(entry.integration.nextReviewAt),
@@ -566,14 +595,17 @@ describe('patchIntegrationMetadata', () => {
     expect(audit.append).toHaveBeenCalledWith(
       expect.objectContaining({
         action: 'catalog.integration_metadata.updated',
-        detail: {
+        detail: expect.objectContaining({
           credentialGranularity: 'none',
           previousGranularity: 'scoped',
           writeEligible: false,
           revokesLiveWriteScopes: true,
+          // AC-41: the per-field diff and the facts the review recorded ride in the same row.
+          verifiedFacts: ['credentialGranularity'],
+          changes: { credentialGranularity: { from: 'scoped', to: 'none' } },
           sessionMaxMinutes: 60,
           nextReviewAt: entry.integration.nextReviewAt,
-        },
+        }),
       }),
       db.client,
     );
@@ -583,6 +615,33 @@ describe('patchIntegrationMetadata', () => {
       eventType: 'registry.rebuild',
       payload: { reason: 'integration_metadata.updated', entryKey: 'D01-01' },
     });
+  });
+
+  it('names the reviewer instead of storing their subject id', async () => {
+    const subjectId = '8412fc5d-536e-4256-a3ef-ca78e3567330';
+    const { db, service } = setup([
+      [FIND, [entryRow(document())]],
+      [INSTANCES, [{ id: 'inst-1' }]],
+      [VERIFIER, [{ name: 'Platform Administrator' }]],
+    ]);
+
+    const entry = await service.patchIntegrationMetadata(
+      'D01-01',
+      { credentialGranularity: 'none' },
+      subjectId,
+    );
+
+    // The receipt and the entry screen read `verifiedBy`; a UUID there is unreadable to the
+    // operator while a catalogue document written by hand would show a person's name.
+    expect(entry.integration.verifiedBy).toBe('Platform Administrator');
+    const update = db.calls.find((call) => call.sql.includes(PATCH_UPDATE));
+    expect(JSON.parse(String(update?.params[1]))).toMatchObject({
+      integration: { verifiedBy: 'Platform Administrator' },
+    });
+    // The per-instance record the registry reads is named the same way.
+    expect(db.calls.find((call) => call.sql.includes(METADATA))?.params[11]).toBe(
+      'Platform Administrator',
+    );
   });
 
   it('records a granularity change that restores write eligibility as non-revoking', async () => {
@@ -617,19 +676,104 @@ describe('patchIntegrationMetadata', () => {
     );
   });
 
-  it('leaves the granularity and the session budget alone when the patch omits both', async () => {
+  it('refuses a verification that records no fact', async () => {
+    // FR-2.15: an empty patch would restart the review clock with nothing behind it. The route
+    // refuses it, and the service refuses it too — a job reaches this method without the route.
     const { db, audit, service } = setup([[FIND, [entryRow(document())]]]);
 
-    const entry = await service.patchIntegrationMetadata('D01-01', {}, 'actor-1');
+    await expect(service.patchIntegrationMetadata('D01-01', {}, 'actor-1')).rejects.toMatchObject({
+      code: 'VALIDATION_FAILED',
+      status: 422,
+      detail: 'A verification must record at least one fact.',
+      fieldErrors: [
+        { field: 'body', code: 'required', message: 'Send at least one verified fact.' },
+      ],
+    });
+    expect(db.calls.some((call) => call.sql.includes(PATCH_UPDATE))).toBe(false);
+    expect(audit.append).not.toHaveBeenCalled();
+  });
 
-    expect(entry.integration.credentialGranularity).toBe('scoped');
-    expect(entry.integration.sessionMaxMinutes).toBe(60);
-    expect(db.calls.find((call) => call.sql.includes(METADATA))?.params[2]).toBe(60);
+  /**
+   * FR-2.14 / AC-41 — a verification that records every fact.
+   *
+   * The per-field diff is what makes the audit row evidence rather than a receipt: a reviewer must
+   * be able to see which fact changed and for what, without diffing two documents. Arrays are
+   * summarised by size on purpose — an operation inventory is a document, and two of them in one
+   * audit row is unreadable.
+   */
+  it('records every verified fact, with the before and after of each', async () => {
+    const { audit, db, service } = setup([
+      [FIND, [entryRow(document())]],
+      [INSTANCES, [{ id: 'inst-1' }]],
+    ]);
+
+    const entry = await service.patchIntegrationMetadata(
+      'D01-01',
+      {
+        apiBaseUrl: 'https://crm.example.test/api/v2',
+        authMethod: 'saml',
+        guaranteeClass: 'fa_delegated',
+        operationInventory: [
+          { id: 'contacts.list', label: 'List contacts', mode: 'read', description: 'List' },
+          { id: 'contacts.create', label: 'Create contact', mode: 'write', description: 'Create' },
+        ],
+        eventModes: [{ mode: 'webhook', label: 'Webhooks' }],
+        credentialGranularity: 'scoped',
+        sessionMaxMinutes: 45,
+        sloSupported: false,
+      },
+      'actor-1',
+    );
+
+    expect(entry.integration).toMatchObject({
+      apiBaseUrl: 'https://crm.example.test/api/v2',
+      authMethod: 'saml',
+      guaranteeClassVerified: 'fa_delegated',
+      credentialGranularity: 'scoped',
+      sessionMaxMinutes: 45,
+      sloSupported: false,
+      stale: false,
+    });
+    expect(entry.integration.operationInventory).toHaveLength(2);
+
+    const metadata = db.calls.find((call) => call.sql.includes(METADATA));
+    expect(metadata?.params.slice(2, 5)).toEqual([
+      'https://crm.example.test/api/v2',
+      'saml',
+      'fa_delegated',
+    ]);
+    expect(JSON.parse(String(metadata?.params[5]))).toHaveLength(2);
+    expect(JSON.parse(String(metadata?.params[6]))).toEqual([
+      { mode: 'webhook', label: 'Webhooks' },
+    ]);
+    expect(metadata?.params.slice(7, 10)).toEqual(['scoped', 45, false]);
+
     expect(audit.append).toHaveBeenCalledWith(
       expect.objectContaining({
         detail: expect.objectContaining({
-          previousGranularity: 'scoped',
-          writeEligible: true,
+          verifiedFacts: [
+            'apiBaseUrl',
+            'authMethod',
+            'guaranteeClass',
+            'operations',
+            'eventModes',
+            'credentialGranularity',
+            'sessionMaxMinutes',
+            'sloSupported',
+          ],
+          changes: {
+            apiBaseUrl: {
+              from: 'https://crm.example.test/api',
+              to: 'https://crm.example.test/api/v2',
+            },
+            authMethod: { from: 'oidc', to: 'saml' },
+            guaranteeClass: { from: 'native', to: 'fa_delegated' },
+            operationInventory: { from: '0 items', to: '2 items' },
+            eventModes: { from: '0 items', to: '1 item' },
+            sessionMaxMinutes: { from: '60', to: '45' },
+            sloSupported: { from: 'true', to: 'false' },
+          },
+          // The granularity did not move, so no live write scope was revoked and the review is routine.
           revokesLiveWriteScopes: false,
         }),
       }),
@@ -638,7 +782,10 @@ describe('patchIntegrationMetadata', () => {
   });
 
   it('applies a session budget without touching the granularity', async () => {
-    const { db, service } = setup([[FIND, [entryRow(document())]]]);
+    const { db, service } = setup([
+      [FIND, [entryRow(document())]],
+      [INSTANCES, [{ id: 'inst-1' }]],
+    ]);
 
     const entry = await service.patchIntegrationMetadata(
       'D01-01',
@@ -648,9 +795,10 @@ describe('patchIntegrationMetadata', () => {
 
     expect(entry.integration.sessionMaxMinutes).toBe(15);
     expect(entry.integration.credentialGranularity).toBe('scoped');
-    expect(db.calls.find((call) => call.sql.includes(METADATA))?.params.slice(1, 3)).toEqual([
-      'scoped',
-      15,
-    ]);
+    const metadata = db.calls.find((call) => call.sql.includes(METADATA));
+    // instance id, entry key, granularity, session maximum
+    expect(metadata?.params.slice(0, 2)).toEqual(['inst-1', 'D01-01']);
+    expect(metadata?.params.slice(7, 9)).toEqual(['scoped', 15]);
+    expect(metadata?.params[10]).toEqual(['sessionMaxMinutes']);
   });
 });

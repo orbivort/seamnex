@@ -42,8 +42,9 @@ function setup(
     lockChain: vi.fn(),
     denied: vi.fn(),
   };
-  const service = new AuditQueryService(db.pool, audit as never);
-  return { db, audit, service };
+  const signer = { verify: vi.fn(async () => true) };
+  const service = new AuditQueryService(db.pool, audit as never, signer as never);
+  return { db, audit, signer, service };
 }
 
 describe('page', () => {

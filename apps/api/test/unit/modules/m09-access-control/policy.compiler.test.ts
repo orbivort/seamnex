@@ -1,4 +1,6 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { CAPABILITY_MATRIX, POLICY_KEYS, SERVICE_SCOPES } from '@seamnex/domain';
 import {
   compileHash,
   PolicyCompiler,
@@ -28,6 +30,25 @@ describe('compileHash', () => {
   it('is deterministic across calls, so a redeploy reuses the stored version', () => {
     expect(compileHash()).toBe(compileHash());
     expect(compileHash()).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  /**
+   * ADR-BE-44 widened the fingerprint. Scope resolution decides whether a request is allowed, so a
+   * version that covered only the matrix and the route keys could not distinguish two policies that
+   * resolve the same route differently. Dropping either input silently returns to that state.
+   */
+  it('covers the scope rules and the collection set, not just the matrix and route keys', () => {
+    const legacy = createHash('sha256')
+      .update(
+        JSON.stringify({
+          capabilityMatrix: CAPABILITY_MATRIX,
+          policyKeys: POLICY_KEYS,
+          serviceScopes: SERVICE_SCOPES,
+        }),
+      )
+      .digest('hex');
+
+    expect(compileHash()).not.toBe(legacy);
   });
 });
 

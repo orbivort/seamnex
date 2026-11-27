@@ -41,6 +41,15 @@ type Target = {
   readonly slug: string;
   readonly origin: string;
   readonly publicHost: string;
+  /**
+   * The scheme a browser uses (`SEAMNEX_PRODUCT_URL_SCHEME`).
+   *
+   * The edge terminates TLS, so this never appears on the wire by itself; it travels as
+   * `X-Forwarded-Proto` on every call. A product can derive its session cookie *name* from it
+   * (OrangeHRM: `orangehrm` over HTTPS, `_orangehrm` otherwise), and the session this broker holds
+   * was minted through the same view — a request that omits the header is answered as anonymous.
+   */
+  readonly forwardedProto: string;
   readonly operations: readonly OperationSpec[];
 };
 
@@ -205,6 +214,9 @@ export class BrokerEgressService implements WorkflowEgressService {
         redirect: 'manual',
         headers: {
           host: target.publicHost,
+          // The edge terminates TLS; the scheme only survives in this header, and a session
+          // credential minted under it is ignored when a later call omits it.
+          'x-forwarded-proto': target.forwardedProto,
           accept: input.accept ?? 'application/json',
           ...(input.contentType === null ? {} : { 'content-type': input.contentType }),
           ...auth,
@@ -226,6 +238,19 @@ export class BrokerEgressService implements WorkflowEgressService {
     response.headers.forEach((value, name) => {
       if (!HOP_HEADERS.has(name.toLowerCase())) headers[name] = value;
     });
+    /*
+     * The payload decides the label, not the product's header (FR-5.5).
+     *
+     * OpenProject answers `application/hal+json`, and n8n's HTTP node only auto-parses
+     * `application/json`: the compiled workflow received `{ data: "<json string>" }` instead of the
+     * collection, so every `$json.<path>` mapping resolved to nothing and the *target* product
+     * refused the empty body — a failure that reads as the target's fault. The bytes are untouched;
+     * only a label that a JSON-parsable body already deserves is corrected. Anything that does not
+     * parse keeps the product's own content type, so text and binary answers stay as they were.
+     */
+    if (body.length > 0 && isJsonBody(body) && !isJsonLabel(headers['content-type'])) {
+      headers['content-type'] = 'application/json; charset=utf-8';
+    }
 
     await this.record(
       input,
@@ -292,6 +317,7 @@ export class BrokerEgressService implements WorkflowEgressService {
         redirect: 'manual',
         headers: {
           host: target.publicHost,
+          'x-forwarded-proto': target.forwardedProto,
           accept: 'application/json',
           ...(adapter.method === 'POST' ? { 'content-type': 'application/json' } : {}),
           ...auth,
@@ -371,6 +397,7 @@ export class BrokerEgressService implements WorkflowEgressService {
       origin,
       publicHost:
         row.host === null ? row.slug : new URL(publicOriginFor(this.config, row.host)).host,
+      forwardedProto: this.config.SEAMNEX_PRODUCT_URL_SCHEME,
       operations: Array.isArray(row.operations) ? (row.operations as OperationSpec[]) : [],
     };
   }
@@ -544,4 +571,19 @@ function problem(
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Whether the product already called this body what n8n parses; a charset parameter is kept as sent. */
+function isJsonLabel(contentType: string | undefined): boolean {
+  return contentType?.split(';')[0]?.trim().toLowerCase() === 'application/json';
+}
+
+/** Whether these bytes are a JSON document — the only question the relay has to ask before relabelling. */
+function isJsonBody(body: Buffer): boolean {
+  try {
+    JSON.parse(body.toString('utf8'));
+    return true;
+  } catch {
+    return false;
+  }
 }

@@ -261,6 +261,13 @@ export class OrangeHrmApiClient implements ProductProvisioningAdapter {
         redirect: 'manual',
         headers: {
           host: new URL(target.publicOrigin).host,
+          /*
+           * The administrator's session was minted through the sign-in driver, which tells the
+           * product it was reached over TLS. OrangeHRM names the session cookie after that same
+           * view (`orangehrm` over HTTPS, `_orangehrm` otherwise), so this call has to present it
+           * too or the cookie is ignored and every API request answers `401`.
+           */
+          'x-forwarded-proto': new URL(target.publicOrigin).protocol.replace(':', ''),
           accept: 'application/json',
           cookie: session.cookie,
           ...(body === undefined ? {} : { 'content-type': 'application/json' }),

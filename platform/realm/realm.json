@@ -57,7 +57,7 @@
   "clientScopes": [
     {
       "name": "groups",
-      "description": "Group membership, sent as a full path so the platform can map it.",
+      "description": "Group membership, sent as a full path so the platform can map it. Declared here, not created at registration time: Keycloak 26.8.2 requires manage-realm for protocol-mapper writes on client scopes, and the platform admin client holds manage-clients only.",
       "protocol": "openid-connect",
       "attributes": { "include.in.token.scope": "true", "display.on.consent.screen": "false" },
       "protocolMappers": [
@@ -70,7 +70,8 @@
             "full.path": "true",
             "id.token.claim": "true",
             "access.token.claim": "true",
-            "userinfo.token.claim": "true"
+            "userinfo.token.claim": "true",
+            "jsonType.label": "String"
           }
         }
       ]
@@ -121,15 +122,23 @@
       "protocol": "openid-connect",
       "attributes": {
         "pkce.code.challenge.method": "S256",
-        "post.logout.redirect.uris": "http://localhost:5173/*##http://localhost:5174/*##http://localhost:8080/*",
+        "post.logout.redirect.uris": "https://localhost:5173/*##https://localhost:5174/*##http://localhost:5173/*##http://localhost:5174/*##http://localhost:8080/*",
         "require.pushed.authorization.requests": "false"
       },
       "redirectUris": [
+        "https://localhost:5173/sign-in",
+        "https://localhost:5174/sign-in",
         "http://localhost:5173/sign-in",
         "http://localhost:5174/sign-in",
         "http://localhost:8080/sign-in"
       ],
-      "webOrigins": ["http://localhost:5173", "http://localhost:5174", "http://localhost:8080"],
+      "webOrigins": [
+        "https://localhost:5173",
+        "https://localhost:5174",
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://localhost:8080"
+      ],
       "defaultClientScopes": [
         "profile",
         "email",
@@ -152,7 +161,16 @@
       "protocol": "openid-connect",
       "attributes": { "access.token.lifespan": "300" },
       "redirectUris": [],
-      "webOrigins": []
+      "webOrigins": [],
+      "defaultClientScopes": [
+        "profile",
+        "email",
+        "roles",
+        "web-origins",
+        "acr",
+        "basic",
+        "kc-admin-api"
+      ]
     }
   ],
   "authenticatorConfig": [

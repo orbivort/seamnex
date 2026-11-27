@@ -1,7 +1,8 @@
 import { http, HttpResponse } from 'msw';
-import type { AccessRequest, AlertChannel } from '@seamnex/domain';
+import type { AccessRequest, AlertChannel, PolicyException } from '@seamnex/domain';
+import { COMPOSE_RULES, syncStateForGuaranteeClass } from '@seamnex/domain';
 import { at } from '../fixtures/context';
-import { appendAudit, getState, meFor, refreshCapacity } from '../store';
+import { appendAudit, findEntry, getState, meFor, refreshCapacity } from '../store';
 import { actorFor, deny, etagFor, problem, readBody, requireCapability, roleOf } from './utils';
 
 export const adminHandlers = [
@@ -50,13 +51,21 @@ export const adminHandlers = [
     }
     const entitlements = getState()
       .instances.slice(0, user.entitlementCount)
-      .map((instance) => ({
-        instanceId: instance.id,
-        product: instance.product,
-        entryKey: instance.entryKey,
-        productRole: 'User',
-        syncState: 'applied',
-      }));
+      .map((instance) => {
+        const entry = findEntry(instance.entryKey);
+        // FR-2.4: the product role is the entry's declared baseline, not the literal `User` the
+        // handler used to stamp. The state follows the guarantee class, which is the ceiling the
+        // real worker applies; `appliedAt` is only set where the class can reach `applied`.
+        const syncState = syncStateForGuaranteeClass(entry?.guaranteeClass ?? 'native');
+        return {
+          instanceId: instance.id,
+          product: instance.product,
+          entryKey: instance.entryKey,
+          productRole: entry?.integration.defaultProductRole ?? 'member',
+          syncState,
+          appliedAt: syncState === 'applied' ? at(-1) : null,
+        };
+      });
     return HttpResponse.json({ userId: user.id, entitlements });
   }),
 
@@ -124,6 +133,7 @@ export const adminHandlers = [
       role?: string;
       scopeType?: string;
       scopeLabel?: string;
+      productRole?: string;
       propagate?: boolean;
     }>(request);
     group.mapping = {
@@ -131,6 +141,9 @@ export const adminHandlers = [
       scopeType: (body.scopeType as 'platform') ?? group.mapping?.scopeType ?? 'platform',
       scopeId: group.mapping?.scopeId ?? null,
       scopeLabel: body.scopeLabel ?? group.mapping?.scopeLabel ?? 'Platform',
+      // FR-2.4: the product role is what the product itself applies; it defaults to `member` and is
+      // never derived from the platform role.
+      productRole: body.productRole ?? group.mapping?.productRole ?? 'member',
       propagateToProduct: body.propagate ?? group.mapping?.propagateToProduct ?? false,
     };
     group.updatedAt = at(0);
@@ -140,7 +153,7 @@ export const adminHandlers = [
       targetId: group.id,
       targetLabel: group.path,
       outcome: 'success',
-      detail: `Mapped to ${group.mapping?.role ?? 'unmapped'} at ${group.mapping?.scopeLabel ?? 'no scope'}; propagation ${
+      detail: `Mapped to ${group.mapping?.role ?? 'unmapped'} at ${group.mapping?.scopeLabel ?? 'no scope'}; product role ${group.mapping?.productRole ?? 'member'}; propagation ${
         group.mapping?.propagateToProduct ? 'requested immediately' : 'follows the next sync cycle'
       }. Mapping changes are never written by the sync loop.`,
       actor: actorFor(role),
@@ -166,6 +179,10 @@ export const adminHandlers = [
       groups: getState().groups.length,
       changes: 1,
       p95LatencyMs: 82_000,
+      // One membership change moved, so one propagation sample exists — and the figure is the
+      // change → applied interval, not the mirror write.
+      p95PropagationMs: 38_000,
+      propagationSamples: 1,
       errors: [],
       state: 'succeeded' as const,
     };
@@ -176,7 +193,9 @@ export const adminHandlers = [
       targetId: run.id,
       targetLabel: 'Identity sync',
       outcome: 'success',
-      detail: `${run.users} users and ${run.groups} groups reconciled; p95 ${Math.round(run.p95LatencyMs / 1000)} s.`,
+      detail: `${run.users} users and ${run.groups} groups reconciled; mirror p95 ${Math.round(
+        run.p95LatencyMs / 1000,
+      )} s; propagation p95 ${Math.round((run.p95PropagationMs ?? 0) / 1000)} s over ${run.propagationSamples} change(s).`,
       actor: actorFor(role),
     });
     return HttpResponse.json(run, { status: 201 });
@@ -223,6 +242,17 @@ export const adminHandlers = [
     }
     if (typeof body.restoreConcurrency === 'number') {
       settings.restoreConcurrency = Math.min(12, Math.max(4, body.restoreConcurrency));
+    }
+    // FR-4.5: the thresholds the capacity board draws and the alert pass enforces are the same three
+    // numbers, so the mock clamps them the way the API schema does (50–99 %).
+    for (const field of [
+      'capacityCpuAlertPercent',
+      'capacityMemoryAlertPercent',
+      'capacityDiskAlertPercent',
+    ] as const) {
+      if (typeof body[field] === 'number') {
+        settings[field] = Math.min(99, Math.max(50, Math.round(body[field])));
+      }
     }
     settings.updatedAt = at(0);
     settings.updatedBy = 'Sofia Almeida';
@@ -415,6 +445,118 @@ export const adminHandlers = [
     const guard = requireCapability(roleOf(request), 'exception.decide');
     if (guard) return guard;
     return HttpResponse.json(getState().policyExceptions);
+  }),
+
+  /**
+   * FR-1.20 / NFR-4.15: filing an exception, the half that did not exist.
+   *
+   * The prototype mirrors the API's rules rather than accepting anything: R1 files, the product must
+   * be known, the justification has a floor, the expiry must be in the future and inside the quarter
+   * ceiling, and one live exception per product and rule. The diff is read from the platform's own
+   * record in a deployment; a prototype has no refused resolution, and saying so is more honest than
+   * inventing one.
+   */
+  http.post('/api/v1/admin/policy-exceptions', async ({ request }) => {
+    const role = roleOf(request);
+    const guard = requireCapability(role, 'exception.request');
+    if (guard) return guard;
+    const body = await readBody<{
+      entryKey?: unknown;
+      rule?: unknown;
+      justification?: unknown;
+      expiresAt?: unknown;
+    }>(request);
+
+    const entryKey = typeof body.entryKey === 'string' ? body.entryKey : '';
+    const rule = typeof body.rule === 'string' ? body.rule : '';
+    const justification = typeof body.justification === 'string' ? body.justification.trim() : '';
+    const expiresAt = typeof body.expiresAt === 'string' ? body.expiresAt : '';
+
+    const known =
+      getState().catalog.some((entry) => entry.key === entryKey) ||
+      getState().instances.some((instance) => instance.entryKey === entryKey);
+    if (!known) {
+      return problem(
+        422,
+        'POLICY_EXCEPTION_UNSCOPED',
+        'The exception names no known product',
+        `"${entryKey}" is not a catalog entry or a deployed instance.`,
+        'Choose the product the deviation belongs to; an exception is scoped to one.',
+        [{ field: 'entryKey', code: 'unknown', message: 'Product does not exist.' }],
+      );
+    }
+    if (!(COMPOSE_RULES as readonly string[]).includes(rule)) {
+      return problem(
+        422,
+        'POLICY_RULE_UNKNOWN',
+        'The rule is not part of the compose policy',
+        `"${rule}" is not one of ${COMPOSE_RULES.join(', ')}.`,
+        'Choose a rule the policy actually evaluates.',
+        [{ field: 'rule', code: 'unknown', message: 'Unknown policy rule.' }],
+      );
+    }
+    if (justification.length < 20) {
+      return problem(
+        422,
+        'VALIDATION_FAILED',
+        'A written justification is required',
+        'At least 20 characters. The approver decides on this text.',
+        'State what the product needs the deviation for and when it will be gone.',
+        [{ field: 'justification', code: 'minLength', message: 'At least 20 characters.' }],
+      );
+    }
+    const expiry = Date.parse(expiresAt);
+    if (!Number.isFinite(expiry) || expiry <= Date.now()) {
+      return problem(
+        422,
+        'VALIDATION_FAILED',
+        'The expiry must be in the future',
+        'An expired exception blocks the next deployment by design.',
+        'Pick a later date.',
+        [{ field: 'expiresAt', code: 'past', message: 'Must be a future instant.' }],
+      );
+    }
+    const state = getState();
+    const covering = state.policyExceptions.find(
+      (item) =>
+        item.scope === entryKey &&
+        item.rule === rule &&
+        item.state === 'approved' &&
+        Date.parse(item.expiresAt) > Date.now(),
+    );
+    if (covering !== undefined) {
+      return problem(
+        409,
+        'STATE_CONFLICT',
+        'An exception already covers this rule',
+        `Exception ${covering.id} is approved for ${entryKey} until ${covering.expiresAt}.`,
+        'Use the existing exception; a second request does not widen the waiver.',
+      );
+    }
+
+    const created: PolicyException = {
+      id: `pe-${state.policyExceptions.length + 200}`,
+      rule,
+      scope: entryKey,
+      justification,
+      requester: actorFor(role).name,
+      approver: null,
+      state: 'requested',
+      requestedAt: new Date().toISOString(),
+      expiresAt: new Date(expiry).toISOString(),
+      patchDiff: `= ${rule} waived for ${entryKey} — no refused resolution is recorded in this prototype, so there is no observed deviation to print.`,
+    };
+    state.policyExceptions.unshift(created);
+    appendAudit({
+      action: 'policy.exception.requested',
+      targetType: 'policy_exception',
+      targetId: created.id,
+      targetLabel: `${created.rule} · ${created.scope}`,
+      outcome: 'success',
+      detail: `${created.id} requested for ${created.scope} until ${created.expiresAt}; awaiting a second party.`,
+      actor: actorFor(role),
+    });
+    return HttpResponse.json(created);
   }),
 
   /** NFR-4.15: an exception is approved by a second party, never by the requester. */

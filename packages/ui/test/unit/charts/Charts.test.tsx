@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
-import { CapacityRuler, Meter, Sparkline } from '../../../src/charts/Charts';
+import { CapacityRuler, Meter, rulerBands, Sparkline } from '../../../src/charts/Charts';
 
 /**
  * Charts here are geometry, not a charting library: a sparkline draws whatever it is given and a
@@ -68,6 +68,19 @@ describe('Sparkline', () => {
     expect(muted?.querySelector('polyline')?.getAttribute('stroke')).toBe(
       'var(--color-neutral-fill)',
     );
+  });
+});
+
+describe('rulerBands', () => {
+  it('draws the configured threshold, then the ten-point step the alert pass escalates at', () => {
+    // FR-4.5: a bar that drew its own bands could show a warning the alert pass never raises.
+    expect(rulerBands(75)).toEqual([0.75, 0.85]);
+    expect(rulerBands(80)).toEqual([0.8, 0.9]);
+  });
+
+  it('clamps the escalation mark at a full ruler instead of drawing past its end', () => {
+    expect(rulerBands(95)).toEqual([0.95, 1]);
+    expect(rulerBands(100)).toEqual([1, 1]);
   });
 });
 

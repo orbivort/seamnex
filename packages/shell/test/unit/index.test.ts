@@ -26,6 +26,8 @@ describe('@seamnex/shell entry point', () => {
     expect(typeof shell.UnauthorizedNotice).toBe('function');
     expect(typeof shell.useDebouncedValue).toBe('function');
     expect(typeof shell.createSessionKit).toBe('function');
+    // ADR-FE-01: both apps build their capability gates from this one factory.
+    expect(typeof shell.createCapabilityGates).toBe('function');
     expect(typeof shell.isPlatformRole).toBe('function');
     expect(typeof shell.isScenario).toBe('function');
     expect(typeof shell.readSessionFromUrl).toBe('function');
@@ -42,6 +44,7 @@ describe('@seamnex/shell entry point', () => {
       'SignInPage',
       'SignOutDialog',
       'UnauthorizedNotice',
+      'createCapabilityGates',
       'createSessionKit',
       'isPlatformRole',
       'isScenario',

@@ -1,3 +1,4 @@
+import { createReadStream } from 'node:fs';
 import { Inject, Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { HttpAdapterHost } from '@nestjs/core';
 import {
@@ -19,6 +20,7 @@ import { deferredProblem } from './deferred-operations';
 import { OperationGuardChain } from './guards/operation-guard.chain';
 import type { OperationResult } from './operation-handler';
 import { OperationHandlers } from './operation-handlers';
+import { captureRawBody, rawBodyOf } from './raw-body';
 
 /**
  * Deliverable 2.1 — the route table is the contract.
@@ -65,6 +67,11 @@ export class RouteTableService implements OnModuleInit {
       server.route({
         method: operation.method,
         url: `/${API_PREFIX}${operation.path}`,
+        /*
+         * The hook is attached per route, and only where the contract says the handler needs the
+         * bytes: a global parser would change body handling for every JSON operation.
+         */
+        ...(operation.rawBody === true ? { preParsing: captureRawBody() } : {}),
         handler: (request, reply) => this.handle(operation, key, request, reply),
       });
       mounted += 1;
@@ -105,6 +112,7 @@ export class RouteTableService implements OnModuleInit {
           query: input.query,
           families: input.families,
           body: input.body,
+          rawBody: operation.rawBody === true ? rawBodyOf(request) : null,
           headers: request.headers,
           cookies,
           context,
@@ -161,6 +169,34 @@ export class RouteTableService implements OnModuleInit {
     const requestId = requestIdFor(request);
 
     if (result.kind === 'stream') return;
+
+    if (result.kind === 'file') {
+      /*
+       * `content-length` is the manifest's byte count, not a fresh stat: if the file on disk lost
+       * bytes the response must be visibly short rather than quietly fine. `no-store` keeps a
+       * business's data out of intermediate caches, and `nosniff` stops a browser from deciding a
+       * `.tar.gz` is something it can render.
+       */
+      const stream = createReadStream(result.path);
+      stream.on('error', (error: Error) => {
+        this.logger.error({ msg: 'export stream failed', path: result.path, error: error.message });
+        // The head is already on the wire: the only honest end is an aborted response, so the
+        // client sees a truncated transfer rather than a short file it believes is complete. The
+        // `typeof` guard keeps a failed teardown from becoming an uncaught exception *inside* an
+        // event handler, which is how a broken disk turns into a broken process.
+        if (typeof reply.raw.destroy === 'function') reply.raw.destroy();
+      });
+      void reply
+        .status(200)
+        .header('x-request-id', requestId)
+        .header('content-type', result.contentType)
+        .header('content-disposition', contentDisposition(result.fileName))
+        .header('content-length', String(result.bytes))
+        .header('x-content-type-options', 'nosniff')
+        .header('cache-control', 'no-store')
+        .send(stream);
+      return;
+    }
 
     if (result.kind === 'noContent') {
       void reply.status(204).header('x-request-id', requestId).send();
@@ -266,4 +302,15 @@ export class RouteTableService implements OnModuleInit {
       headers: problemHeadersFor(error),
     });
   }
+}
+
+/**
+ * The `attachment` form of `Content-Disposition`, restricted to the ASCII a filename needs.
+ *
+ * The name is derived from the instance slug and the export id, both of which the platform
+ * controls — but a header is a header: anything outside the safe set becomes `_`, so no combination
+ * of slug and id can inject a second header or break the quoted value.
+ */
+function contentDisposition(fileName: string): string {
+  return `attachment; filename="${fileName.replace(/[^A-Za-z0-9._-]+/g, '_')}"`;
 }

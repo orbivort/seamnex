@@ -17,6 +17,7 @@ export * from './job-stream';
 export * from './backups';
 export * from './workflows';
 export * from './governance';
+export * from './security';
 export * from './admin';
 export * from './recovery';
 export * from './privacy';

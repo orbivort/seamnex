@@ -42,7 +42,7 @@ export function SettingsPage() {
       <PageHeader
         eyebrow="Platform configuration"
         title="Settings"
-        description="Break-glass duration, restore concurrency, oversubscription and session limits. Every change is audited."
+        description="Break-glass duration, restore concurrency, oversubscription, session limits and the capacity alert thresholds. Every change is audited."
         actions={
           <Button
             variant="primary"
@@ -109,7 +109,7 @@ export function SettingsPage() {
                 <Field
                   label="Restore concurrency"
                   htmlFor="restore-conc"
-                  hint="Floor 4, ceiling 12. Parallel restores are authorised separately."
+                  hint="Floor 4, ceiling 12. Applies to the next restore; a running one keeps the value it started with. Parallel restores are authorised separately."
                 >
                   <Input
                     id="restore-conc"
@@ -145,6 +145,80 @@ export function SettingsPage() {
                     }
                   />
                 </Field>
+                {/*
+                  FR-4.5 — the thresholds the capacity board draws and `notification.evaluate()`
+                  enforces. They live here rather than in an environment variable because the
+                  requirement says "configurable", and one save must move the screen and the alert
+                  together.
+                */}
+                <fieldset className="space-y-3 rounded-sm border border-line p-3">
+                  <legend className="px-1 text-micro font-semibold text-muted">
+                    Capacity alert thresholds (%)
+                  </legend>
+                  <Field
+                    label="CPU"
+                    htmlFor="cap-cpu"
+                    hint="50–99. Share of the declared CPU at which an alert is raised."
+                  >
+                    <Input
+                      id="cap-cpu"
+                      type="number"
+                      min={50}
+                      max={99}
+                      value={value('capacityCpuAlertPercent', data.capacityCpuAlertPercent)}
+                      onChange={(event) =>
+                        setDraft((current) => ({
+                          ...current,
+                          capacityCpuAlertPercent: Number(event.target.value),
+                        }))
+                      }
+                    />
+                  </Field>
+                  <Field
+                    label="Memory"
+                    htmlFor="cap-memory"
+                    hint="50–99. Share of the declared memory limit."
+                  >
+                    <Input
+                      id="cap-memory"
+                      type="number"
+                      min={50}
+                      max={99}
+                      value={value('capacityMemoryAlertPercent', data.capacityMemoryAlertPercent)}
+                      onChange={(event) =>
+                        setDraft((current) => ({
+                          ...current,
+                          capacityMemoryAlertPercent: Number(event.target.value),
+                        }))
+                      }
+                    />
+                  </Field>
+                  <Field
+                    label="Disk"
+                    htmlFor="cap-disk"
+                    hint="50–99. Share of the volume quota, measured from the volume walk."
+                  >
+                    <Input
+                      id="cap-disk"
+                      type="number"
+                      min={50}
+                      max={99}
+                      value={value('capacityDiskAlertPercent', data.capacityDiskAlertPercent)}
+                      onChange={(event) =>
+                        setDraft((current) => ({
+                          ...current,
+                          capacityDiskAlertPercent: Number(event.target.value),
+                        }))
+                      }
+                    />
+                  </Field>
+                  <p className="text-micro leading-relaxed text-faint">
+                    Ten points past a threshold escalates the alert from warning to critical. A
+                    missing sample never alerts: the platform does not turn "not measured" into a
+                    breach.
+                  </p>
+                </fieldset>
+
                 <DefinitionList
                   columns={2}
                   items={[

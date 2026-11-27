@@ -1,5 +1,6 @@
 import { isAbsolute, resolve } from 'node:path';
 import { z } from 'zod';
+import { TRIVY_IMAGE } from '../common/docker/images.generated';
 
 /**
  * Configuration is parsed once, at boot, and a failure stops the process.
@@ -70,6 +71,14 @@ const DEVELOPMENT_CREDENTIAL_DEFAULTS = {
   S3_SECRET_KEY: 'seamnex_s3_dev_password',
 } as const;
 
+/**
+ * The scanner image the schema below defaults to (`NFR-4.6`), from `docker/images.json` through the
+ * generated module — the same entry `scripts/trivy-db.mjs` seeds the cache with, so the writer and
+ * the reader of that cache cannot be two different binaries. The tag lets `scannerVersionOf` name
+ * the release in a retained report; the digest is what a re-push of that tag cannot change.
+ */
+const DEFAULT_SCANNER_IMAGE = TRIVY_IMAGE;
+
 const EnvironmentSchema = z
   .object({
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -102,6 +111,15 @@ const EnvironmentSchema = z
      * a Docker Desktop bind mount reports mode 0777 for a file that is 0600 on disk.
      */
     SEAMNEX_ROOT_KEY_STRICT_MODE: booleanish.default(true),
+    /**
+     * FR-1.35 — where the operator escrowed the root key. The key itself never enters a backup: a
+     * set that carried its own secret root would turn one stolen archive into every product secret,
+     * and the age identity that opens the set lives on the same host anyway. The manifest records
+     * this reference plus the key's non-secret identifier, so a restore can prove the right key is
+     * present instead of guessing. Empty means "location not recorded", which the recovery screen
+     * reports as such.
+     */
+    SEAMNEX_ROOT_KEY_ESCROW_REF: z.string().default(''),
 
     /**
      * `stub` is the Phase 3 identity provider: a local authorization-code + PKCE exchange with no
@@ -121,7 +139,11 @@ const EnvironmentSchema = z
     APP_ORIGINS: z
       .string()
       .min(1)
-      .default('http://localhost:5173,http://localhost:5174,http://localhost:8080'),
+      // The two dev SPAs are served over TLS (ADR-BE-39), so their `https` origins are the ones a
+      // browser actually sends; the `http` pair stays for a tab opened before the switch.
+      .default(
+        'https://localhost:5173,https://localhost:5174,http://localhost:5173,http://localhost:5174,http://localhost:8080',
+      ),
     /**
      * 4D — the OIDC relying party.
      *
@@ -172,7 +194,13 @@ const EnvironmentSchema = z
      * cookie to `shop.localhost` — Chromium scopes such a cookie to the `localhost` host alone.
      */
     SESSION_COOKIE_DOMAIN: z.string().min(1).optional(),
-    /** Production is HTTPS-only; the development stack runs on plain localhost. */
+    /**
+     * Production is HTTPS-only and refuses to boot without this (see the `NODE_ENV` refinements).
+     *
+     * Development keeps it off by design, not by oversight: the API's own port is still published as
+     * plain HTTP for the SPAs' proxy and for `curl`, and a host without OpenSSL serves the SPAs over
+     * HTTP — where a `Secure` cookie is dropped and sign-in fails with no error a developer can read.
+     */
     SESSION_COOKIE_SECURE: booleanish.default(false),
     /**
      * How long a launch ticket stays redeemable. The portal mints one per open, so this only has to
@@ -182,11 +210,56 @@ const EnvironmentSchema = z
     /** Identity sync cadence and batch size (deliverable 3.6). */
     SEAMNEX_SYNC_INTERVAL_MS: z.coerce.number().int().min(1_000).max(3_600_000).default(300_000),
     SEAMNEX_SYNC_BATCH_SIZE: z.coerce.number().int().min(1).max(5_000).default(200),
+    /**
+     * FR-2.4 — whether the sync worker may push a mapped product role into a product's own admin API.
+     *
+     * Off by default, and it is a switch rather than a default because turning it on makes the
+     * platform a writer in a system it does not own: a wrong path or a stale token would edit real
+     * accounts. With it off, an entitlement whose product has no identity client stays `pending` and
+     * says why — which is the truthful state, not a degraded one.
+     */
+    SEAMNEX_IDENTITY_PUSH_ENABLED: booleanish.default(false),
+    /** Ceiling for one role push; a product that cannot answer in this window is reported, not retried. */
+    SEAMNEX_IDENTITY_PUSH_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(1_000)
+      .max(60_000)
+      .default(10_000),
     LOG_LEVEL: z
       .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'])
       .default('info'),
     SEAMNEX_JOB_STREAM_MAX: z.coerce.number().int().min(1).max(10_000).default(100),
     SEAMNEX_METRICS_ENABLED: booleanish.default(true),
+    /**
+     * FR-2.6 / AC-45 — per-instance observability.
+     *
+     * `SEAMNEX_PROMETHEUS_TARGETS_DIR` is the `file_sd` directory Prometheus watches. Empty is the
+     * honest default: no directory means the platform cannot publish a target, and the instance
+     * screen says so instead of showing a target nothing scrapes.
+     */
+    SEAMNEX_PROMETHEUS_TARGETS_DIR: z.string().default(''),
+    /** `host:port` Prometheus uses to reach this API. */
+    SEAMNEX_PROMETHEUS_SCRAPE_TARGET: z.string().min(1).default('seamnex-api:8080'),
+    SEAMNEX_PROMETHEUS_URL: z.string().default(''),
+    /** Loki's base URL. Empty means only the live container stream is available. */
+    SEAMNEX_LOKI_URL: z.string().default(''),
+    /**
+     * NFR-6.7 / AC-45: log history the platform promises to be queryable. Thirty days is the floor
+     * rather than a tuning default — a shorter promise is the one the review rejected.
+     */
+    SEAMNEX_OBSERVABILITY_RETENTION_DAYS: z.coerce.number().int().min(30).max(3_650).default(30),
+    /** Caps on a log query, so one caller cannot ask the control plane to page a month of history. */
+    SEAMNEX_LOG_QUERY_MAX_MINUTES: z.coerce.number().int().min(1).max(10_080).default(1_440),
+    SEAMNEX_LOG_QUERY_MAX_LINES: z.coerce.number().int().min(1).max(10_000).default(500),
+    /**
+     * Optional bearer token for the per-instance exposition. Anonymous like `/metrics` (a scraper
+     * has no session), but a deployment that exposes the API beyond the scrape network can require
+     * a shared secret instead of turning metrics off.
+     */
+    SEAMNEX_METRICS_TOKEN: z.string().default(''),
+    /** Days of `instance_usage_sample` kept for the capacity board's "measured" figures. */
+    SEAMNEX_USAGE_SAMPLE_RETENTION_DAYS: z.coerce.number().int().min(1).max(365).default(30),
     SEAMNEX_SCHEDULER_INTERVAL_MS: z.coerce
       .number()
       .int()
@@ -197,10 +270,56 @@ const EnvironmentSchema = z
     SEAMNEX_PARTITION_LOOKAHEAD_DAYS: z.coerce.number().int().min(1).max(180).default(9),
     SEAMNEX_JOB_LOG_RETENTION_DAYS: z.coerce.number().int().min(1).max(3_650).default(30),
     /**
+     * NFR-6.5 — how a transiently failed job is retried (ADR-BE-34).
+     *
+     * A retry is a new job, so the cap is per chain and the wait doubles from `BACKOFF_MS` up to
+     * `MAX_DELAY_MS`: an outage that lasts an hour must not become sixty attempts. `1` disables
+     * automatic retry, which is the honest setting for a host that would rather see every failure.
+     */
+    SEAMNEX_JOB_RETRY_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(3),
+    SEAMNEX_JOB_RETRY_BACKOFF_MS: z.coerce.number().int().min(1_000).max(3_600_000).default(60_000),
+    SEAMNEX_JOB_RETRY_MAX_DELAY_MS: z.coerce
+      .number()
+      .int()
+      .min(1_000)
+      .max(86_400_000)
+      .default(900_000),
+    /** How many candidates one pass examines, so a backlog cannot hold the scheduler pass open. */
+    SEAMNEX_JOB_RETRY_BATCH: z.coerce.number().int().min(1).max(200).default(25),
+    /**
+     * A `running` job with no log line, no running step and no transition for this long is settled
+     * `failed` with `JOB_ABANDONED`: the worker that held it is gone, and the lane would otherwise
+     * stay blocked for ever. It has to exceed the longest silent stage — a `pg_restore` writes
+     * nothing while it runs — so the floor is 15 minutes and the default an hour.
+     */
+    SEAMNEX_JOB_STALE_AFTER_MS: z.coerce
+      .number()
+      .int()
+      .min(900_000)
+      .max(21_600_000)
+      .default(3_600_000),
+    /**
      * ADR-BE-09 D5: the catalogue working tree. A development default keeps `pnpm dev` working
      * without cloning; production sets it explicitly (ADR-BE-08).
      */
     SEAMNEX_CATALOG_REPO_PATH: z.string().min(1).default('./temp/catalog-repo'),
+    /**
+     * ADR-BE-42 §10.2 rule 1 — the catalogue mirror, as configuration only.
+     *
+     * `POST /catalog/sync` takes a ref and never a URL, so there is no request-supplied host to
+     * validate: the SSRF surface is this setting, reviewed once, instead of a console that can reach
+     * any address the control plane can. Empty is a supported configuration, not an error — it is
+     * the air-gapped install, where the operator places a tag in `SEAMNEX_CATALOG_REPO_PATH` by hand
+     * and the console action is disabled with an explanation (§10.6).
+     */
+    SEAMNEX_CATALOG_SOURCE_URL: z.string().default('https://github.com/orbivort/seamnex-catalog'),
+    /** Default ref the console pre-fills; a caller may name another per run. A tag or commit. */
+    SEAMNEX_CATALOG_SOURCE_REF: z.string().default(''),
+    /**
+     * Per-actor cooldown beside the advisory lock (§10.2 rule 7): the lock serialises concurrent
+     * syncs, this stops one operator queueing 300-second clones one after another.
+     */
+    SEAMNEX_CATALOG_SYNC_COOLDOWN_MS: z.coerce.number().int().min(0).max(3_600_000).default(60_000),
 
     // ---- Phase 4 adapters (ADR-BE-12) -------------------------------------------------------
     /**
@@ -226,6 +345,57 @@ const EnvironmentSchema = z
     /** Docker Engine endpoint. In the stack this is the socket proxy, never the raw socket. */
     SEAMNEX_DOCKER_HOST: z.string().min(1).default('unix:///var/run/docker.sock'),
     SEAMNEX_DOCKER_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(600_000).default(30_000),
+    /**
+     * BuildKit endpoint builds are sent to (ADR-BE-40 §7).
+     *
+     * Empty keeps the default builder — the daemon's own BuildKit — which needs a direct connection
+     * to the Engine. Where the Engine is reached through the socket proxy this must name a BuildKit
+     * daemon instead: a build session is a hijacked connection (`Upgrade: tcp`) and the proxy's
+     * allow-list answers it `403`, so the CLI would fail before reading a single Dockerfile.
+     */
+    SEAMNEX_BUILDKIT_ADDR: z.string().default(''),
+    /**
+     * Package-manager mirrors the `build` stage forwards to every image it builds, as `--build-arg`.
+     *
+     * A Dockerfile the platform does not own fetches from whatever CDN it names, and on a filtered
+     * network that fetch is the long part of a build: `php:8.3-apache-bookworm` sat for minutes in a
+     * TLS handshake against `deb.debian.org` and then installed the same packages anyway. Compose has
+     * no global equivalent, so the only channel is an argument the Dockerfile declares — the platform
+     * forwards all three and a file that declares none simply ignores them.
+     *
+     * They are a property of the *build host*: read from `.env`, forwarded as build arguments, and
+     * never written into an image (a mirror must not follow the container into runtime). Empty keeps
+     * upstream, which is what CI does.
+     */
+    APK_MIRROR: z.string().default(''),
+    APT_MIRROR: z.string().default(''),
+    NPM_REGISTRY: z.string().default(''),
+    /**
+     * Registry mirrors the *Engine* pulls through, comma-separated, fastest first.
+     *
+     * `SEAMNEX_REGISTRY_MIRROR` in the stack reaches BuildKit only, because BuildKit reads its own
+     * config file; this one covers the other fetch path — `pull` through the Engine API and
+     * `compose up --quiet-pull` — which reads `daemon.json`, a host setting the platform cannot
+     * change without restarting the daemon. On a filtered network that gap is the whole cost of an
+     * `apply`: D06-01 spent hours on ~940 MB of `frappe/erpnext` at 50–100 KB/s while a mirror
+     * served the same blobs at ~470 KB/s.
+     *
+     * Each entry is a reference *prefix* (`<mirror>/<reference>`), and a successful pull is retagged
+     * onto the canonical name, so the digest pin, the compose file and the scan keep reading the
+     * registry reference. The pin remains the control: a mirror that serves different content
+     * produces a different digest and that attempt is refused. Empty keeps the registry the
+     * definition names, which is what CI does.
+     */
+    SEAMNEX_PULL_MIRROR: z.string().default(''),
+    /**
+     * The budget for one pull attempt before it is abandoned and the next mirror — or the registry
+     * itself — is tried.
+     *
+     * A budget against a *stalled* attempt, not a target: a 1 GB product image at ~450 KB/s needs
+     * ~35 min, so the default clears the slow-but-working case and still cuts a multi-hour crawl.
+     * `0` is refused: an unbounded pull is the defect this closes.
+     */
+    SEAMNEX_PULL_TIMEOUT_MS: z.coerce.number().int().min(60_000).max(7_200_000).default(3_600_000),
     /**
      * How long the `verify` stage waits for containers to run and answer HTTP. A first install
      * creates its database schema inside the container (EspoCRM: tens of seconds), so a 60 s window
@@ -264,13 +434,73 @@ const EnvironmentSchema = z
      * it: a route written for an edge that is not on the network would be a published 502.
      */
     SEAMNEX_EDGE_CONTAINER: z.string().default(''),
-    SEAMNEX_TRAEFIK_ACME_EMAIL: z.string().default(''),
+    /**
+     * NFR-4.1 / ISSUE-07 — the certificate the edge actually presents for a route, written onto
+     * `instance_route.tls_mode` and projected into the router's `tls` block.
+     *
+     * `acme` means Traefik's `seamnex` resolver issues and renews one certificate per product host;
+     * `internal` means the edge serves its own certificate. The column was previously written as
+     * the literal `'acme'`, so every route claimed a certificate resolver that no committed asset
+     * configured. The enum is exactly the column's constraint on purpose: there is no `none`,
+     * because NFR-4.1 does not permit a plain-HTTP route (ADR-BE-39).
+     */
+    SEAMNEX_EDGE_TLS_MODE: z.enum(['acme', 'internal']).default('acme'),
+    /**
+     * The ACME contact address Traefik is started with. It is not read by this process — the edge
+     * consumes it as a static CLI flag — but it is validated here because this is the only place
+     * that fails before a deployment instead of inside the edge's log. Empty is legitimate: a
+     * deployment whose routes never name the resolver (the development stack) requests nothing. A
+     * malformed address is not: Let's Encrypt would reject the registration, not the request.
+     */
+    SEAMNEX_TRAEFIK_ACME_EMAIL: z.union([z.literal(''), z.email()]).default(''),
+    /**
+     * FR-1.35 — where the operator's edge keeps the parts the platform does not own: the static
+     * Traefik configuration, the ACME store (`acme.json`) or an internal CA's material. Where TLS
+     * terminates at an operator-provided ingress, the platform cannot read the certificate store at
+     * all, so the review's own alternative applies: record the owner and the location instead of
+     * claiming an artefact that was never captured.
+     */
+    SEAMNEX_EDGE_CONFIG_REF: z.string().default(''),
 
     /** Keycloak Admin REST API; the client secret lives in M15, never in this file. */
     SEAMNEX_KEYCLOAK_ADMIN_URL: z.string().min(1).default('http://localhost:8082'),
     SEAMNEX_KEYCLOAK_REALM: z.string().min(1).default('seamnex'),
     SEAMNEX_KEYCLOAK_ADMIN_CLIENT_ID: z.string().min(1).default('seamnex-platform-admin'),
     SEAMNEX_KEYCLOAK_ADMIN_CLIENT_SECRET_FILE: z.string().default(''),
+    /**
+     * FR-1.35 — the identity provider's own database. Keycloak runs on a separate database with its
+     * own role, so this is stated explicitly instead of being derived from `DATABASE_URL`: a derived
+     * URL would silently dump the platform database and label it "identity provider". Empty means
+     * the IdP database cannot be captured, and a platform backup fails naming the setting rather
+     * than producing a set without it.
+     *
+     * The address has to be reachable from a helper container on the host network, exactly like
+     * `DATABASE_URL` (see the reachability guard in the backup runner).
+     */
+    SEAMNEX_KEYCLOAK_DB_URL: z.string().default(''),
+    /**
+     * FR-1.35 — the platform database as the *dump helper* reaches it.
+     *
+     * `DATABASE_URL` is written for this process, which on a compose network calls the server
+     * `postgres`; the dump runs in a helper container on the host network, where that name does not
+     * resolve. The two addresses are therefore not interchangeable. Empty means `DATABASE_URL` is
+     * already host-reachable, which is the case whenever the API runs natively on the host.
+     */
+    SEAMNEX_PLATFORM_DB_URL: z.string().default(''),
+    /**
+     * FR-1.36 / AC-30 — the platform database as an **owner** role, used only while a restore runs.
+     *
+     * `DATABASE_URL` and `SEAMNEX_PLATFORM_DB_URL` name the application role, which holds no DDL
+     * rights and cannot write `audit_event` (migration `0010_grants`), so `pg_restore --clean` cannot
+     * run as it. A restore is the one operation that legitimately needs the owner, and it is bounded:
+     * the gate is already closed, a second platform run is refused, and every phase is audited.
+     *
+     * Empty means "the operator will do it": `scripts/restore-platform-db.mjs` performs the same
+     * statement set with credentials the platform never holds, the run records the outstanding step,
+     * and it cannot end `complete` until the operator has done it. The value never reaches argv, a
+     * container environment or a log line — it is written to a 0600 `.pgpass` in the scratch tree.
+     */
+    SEAMNEX_PLATFORM_RESTORE_DB_URL: z.string().default(''),
     /**
      * 4D.5 — the identity the SSO check signs in as. A test account in the platform realm, never a
      * real user's. The password is a *file path*: the probe reads it per run, so rotating it does
@@ -300,6 +530,84 @@ const EnvironmentSchema = z
     S3_BUCKET: z.string().min(1).default('seamnex-backups'),
     S3_REGION: z.string().min(1).default('us-east-1'),
     SEAMNEX_BACKUP_TMP_DIR: z.string().min(1).default('./temp/backups'),
+    /**
+     * How a bind source handed to a helper container is spelled where the daemon resolves it.
+     *
+     * A dump or an archive runs through `docker run`, and the daemon reads the source on the *host*
+     * filesystem while this process only knows the path inside its own container. Wherever the two
+     * differ — the dev stack mounts `temp/backups` at `/var/lib/seamnex/backups` — the helper mounts
+     * an empty directory, the dump lands outside this container and the upload stage finds no file.
+     * Comma-separated `containerPath=hostPath` pairs, longest prefix first; empty means one path
+     * serves both, which is the case on a host that mounts the same tree at the same place.
+     */
+    SEAMNEX_DOCKER_PATH_MAP: z.string().default(''),
+
+    // ---- Image trust and scanning (NFR-4.6, NFR-4.16, S-10) -----------------------------------
+    /**
+     * NFR-4.16 — an override for the allow-list used before any `trusted_registry_revision` exists.
+     *
+     * Empty means "use the shipped document" (`packages/db/src/seed/trusted-registries.json`), which
+     * is the default an operator should edit through the audited route rather than here. A value
+     * replaces the shipped list entirely; the database revision is authoritative as soon as one is
+     * written, so this cannot widen a running platform.
+     */
+    SEAMNEX_TRUSTED_REGISTRIES: z.string().default(''),
+    /** NFR-4.6: scan every product image after pull/build and before containers start. */
+    SEAMNEX_SCAN_ENABLED: booleanish.default(true),
+    /**
+     * The scanner image itself. Pinned, and pulled through the same trusted-registry guard, which is
+     * why `docker.io/aquasec` is in the default allow-list above. `repository:tag@sha256:…` is the
+     * form to keep: the digest holds the tag still, and the tag keeps the version a report quotes.
+     */
+    SEAMNEX_SCANNER_IMAGE: z.string().min(1).default(DEFAULT_SCANNER_IMAGE),
+    /**
+     * Where the advisory database comes from.
+     *
+     * `cached` is the shipped posture: the scanner keeps no network at all and reads a database
+     * seeded on the host by `pnpm scan:db:update`. `online` lets Trivy fetch and refresh it through
+     * the scanner container's network, and `mirror` does the same against
+     * `SEAMNEX_SCAN_DB_REPOSITORY`. The networked modes widen the scanner's reach, so they are opt-in
+     * and are the only ones that need a route out.
+     */
+    SEAMNEX_SCAN_DB_MODE: z.enum(['cached', 'online', 'mirror']).default('cached'),
+    /** The Trivy cache the scanner reads in `cached` mode; mounted into it, so it must be host-visible. */
+    SEAMNEX_SCAN_CACHE_DIR: z.string().default('./temp/trivy-cache'),
+    /** OCI repository the database is taken from, and the one an internal mirror overrides. */
+    SEAMNEX_SCAN_DB_REPOSITORY: z.string().min(1).default('ghcr.io/aquasec/trivy-db'),
+    /**
+     * How old the cached database may be before a scan refuses to run. A week by default: advisories
+     * move daily, but blocking every deployment the morning a refresh was missed is not a control.
+     */
+    SEAMNEX_SCAN_DB_MAX_AGE_HOURS: z.coerce.number().int().min(1).max(8_760).default(168),
+    /** The scanner's network. Empty derives it: `none` for `cached`, `bridge` for the networked modes. */
+    SEAMNEX_SCAN_NETWORK: z.string().default(''),
+    /** Severities whose presence blocks the deployment; `CRITICAL` is NFR-4.6's block condition. */
+    SEAMNEX_SCAN_BLOCK_SEVERITIES: z.string().min(1).default('CRITICAL'),
+    SEAMNEX_SCAN_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(1_800_000).default(300_000),
+    /** Scratch tree the image tar and report live in; mounted into the scanner container by path map. */
+    SEAMNEX_SCAN_TMP_DIR: z.string().min(1).default('./temp/scans'),
+    /** Days a retained `image_scan_result` row is kept before the scheduler prunes it. */
+    SEAMNEX_SCAN_RETENTION_DAYS: z.coerce.number().int().min(1).max(3_650).default(90),
+    /**
+     * Fail-closed by default: a scanner that cannot run blocks the deployment. A scanner that
+     * silently skips is exactly the "scanned nothing, claimed compliant" defect S-10 records.
+     */
+    SEAMNEX_SCAN_FAIL_OPEN: booleanish.default(false),
+
+    // ---- Upstream release and advisory observation (FR-2.12, NFR-4.7) -------------------------
+    SEAMNEX_UPSTREAM_TRACKING_ENABLED: booleanish.default(true),
+    /** One pass per six hours by default: release feeds do not move faster, and the budget is shared. */
+    SEAMNEX_UPSTREAM_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .min(60_000)
+      .max(86_400_000)
+      .default(21_600_000),
+    SEAMNEX_UPSTREAM_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(60_000).default(10_000),
+    /** Egress allow-list for the observation client: only these hosts are ever contacted. */
+    SEAMNEX_UPSTREAM_ALLOWED_HOSTS: z.string().min(1).default('api.github.com,api.osv.dev'),
+    /** Entries examined per pass, so a large catalogue cannot hold the scheduler tick open. */
+    SEAMNEX_UPSTREAM_BATCH: z.coerce.number().int().min(1).max(200).default(25),
     /** `age` recipient used to encrypt every backup before it leaves the host. */
     SEAMNEX_AGE_RECIPIENT: z.string().default(''),
     SEAMNEX_AGE_IDENTITY_FILE: z.string().min(1).default('./temp/seamnex-age-identity'),
@@ -307,15 +615,19 @@ const EnvironmentSchema = z
 
     /** 4D.2: the zone product routes are published under when an instance does not name a host. */
     /**
-     * `localhost`, not a made-up zone: RFC 6761 reserves the name and every mainstream browser maps
-     * `<slug>.localhost` to loopback, so a product route resolves on a fresh machine with no hosts
-     * file. A real zone is still the production value — see `.env.example`.
+     * Two labels deep, not `<slug>.localhost`. The product certificate comes from the development CA
+     * and has to cover every slug with one name: `*.<domain>` is matched by OpenSSL and Chromium only
+     * when at least two labels follow the wildcard, so `*.localhost` is inert and `*.seamnex.localhost`
+     * is not. `seamnex.localhost` is still under the RFC 6761 name, so a browser resolves it to
+     * loopback with no hosts file; the operating system resolver does not, and `docker/dns` answers
+     * `*.<domain>` for it (`pnpm dev:dns`). A real zone is still the production value — see
+     * `.env.example`.
      */
-    SEAMNEX_INGRESS_DOMAIN: z.string().min(1).default('localhost'),
+    SEAMNEX_INGRESS_DOMAIN: z.string().min(1).default('seamnex.localhost'),
     /**
      * 4D.2: how a *browser* addresses a published product route. The platform publishes no host
      * port, so the edge owns the scheme and the port. `https` on 443 is the production default; the
-     * dev edge terminates plain HTTP on 127.0.0.1:8020 and sets `http` + `8020`. A hardcoded
+     * dev edge terminates TLS on 127.0.0.1:8443 and sets `https` + `8443`. A hardcoded
      * `https://<host>` made every launch link point at a port nothing was listening on.
      */
     SEAMNEX_PRODUCT_URL_SCHEME: z.enum(['http', 'https']).default('https'),
@@ -361,6 +673,20 @@ const EnvironmentSchema = z
 
     /** Restore fan-out: the design's floor is 4 and ceiling 12 (4C.4). */
     SEAMNEX_RESTORE_CONCURRENCY: z.coerce.number().int().min(4).max(12).default(4),
+    /**
+     * FR-1.36 — how long the `idp` phase waits for the restored identity provider to answer.
+     *
+     * A restore that cannot authenticate has to be reported `failed` (FR-1.36), so the wait needs a
+     * deadline: without one a Keycloak that never comes back holds a worker slot forever and the
+     * console shows a green "running" run that will never move. Keycloak answers within seconds once
+     * its database is back; the ceiling is generous because a first boot runs the schema migration.
+     */
+    SEAMNEX_RESTORE_IDP_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(30_000)
+      .max(1_800_000)
+      .default(180_000),
     /** Sampler cadence and per-probe timeout (4B.1). */
     SEAMNEX_SAMPLE_INTERVAL_MS: z.coerce.number().int().min(5_000).max(3_600_000).default(30_000),
     SEAMNEX_SAMPLE_CONCURRENCY: z.coerce.number().int().min(1).max(64).default(16),
@@ -440,6 +766,36 @@ const EnvironmentSchema = z
      */
     SEAMNEX_WORKFLOW_SAMPLE_RETENTION_DAYS: z.coerce.number().int().min(1).max(365).default(30),
     /**
+     * FR-5.7 — bounded retries per step. `1` disables retrying; the wait is n8n's fixed delay between
+     * attempts, the only backoff shape its node-level retry offers (ADR-BE-30).
+     */
+    SEAMNEX_WORKFLOW_RETRY_MAX_TRIES: z.coerce.number().int().min(1).max(10).default(3),
+    SEAMNEX_WORKFLOW_RETRY_WAIT_MS: z.coerce.number().int().min(1_000).max(60_000).default(5_000),
+    /**
+     * FR-5.8 — how many consecutive failed runs of one workflow reach the owner before an alert is
+     * queued, and how many days of run history are kept. The floor is 30 days because the requirement
+     * states a 30-day minimum; a failed run is kept for twice the window, since the failed-run queue
+     * is the artefact an operator inspects and replays.
+     */
+    SEAMNEX_WORKFLOW_FAILURE_ALERT_THRESHOLD: z.coerce.number().int().min(1).max(20).default(3),
+    SEAMNEX_WORKFLOW_RUN_RETENTION_DAYS: z.coerce.number().int().min(30).max(365).default(90),
+    /**
+     * NFR-4.14 — re-issue a workflow's credential this many days before it expires, and how often the
+     * pass looks. The lead must outlast an outage of the scheduler, so the floor is a day.
+     */
+    SEAMNEX_WORKFLOW_CREDENTIAL_ROTATE_BEFORE_DAYS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(30)
+      .default(7),
+    SEAMNEX_WORKFLOW_CREDENTIAL_SWEEP_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .min(60_000)
+      .max(24 * 60 * 60 * 1_000)
+      .default(60 * 60 * 1_000),
+    /**
      * The platform's own ceiling on a cached product session. The product has no TTL enabled today
      * (`session_ttl_enabled` is false), so without this the cached cookie would outlive the
      * entitlement that justified it. The ADR's prerequisite (`OPENPROJECT_SESSION__TTL__ENABLED`)
@@ -464,6 +820,27 @@ const EnvironmentSchema = z
       .min(10_000)
       .max(3_600_000)
       .default(300_000),
+    /**
+     * FR-1.29 / NFR-3.6 — how often the drift pass observes running instances.
+     *
+     * Five minutes is a real cost (one container list plus an inspect per container per instance),
+     * so the floor is 30 s and the ceiling an hour. It is not a backup or a restore: a longer
+     * interval only delays the report, and the pass never stops an instance.
+     */
+    SEAMNEX_DRIFT_INTERVAL_MS: z.coerce.number().int().min(30_000).max(3_600_000).default(300_000),
+    /**
+     * How long one instance is left alone after a drift repair was requested.
+     *
+     * A reconfigure takes minutes. Without a cooldown every pass would queue another repair for the
+     * same instance, turning one drifted variable into a loop of container recreations; the active
+     * job constraint is the second line of defence, not the first.
+     */
+    SEAMNEX_DRIFT_REPAIR_COOLDOWN_MS: z.coerce
+      .number()
+      .int()
+      .min(60_000)
+      .max(86_400_000)
+      .default(3_600_000),
     /**
      * An explicit container to join to an instance network before the first product call (the product
      * is only reachable as `http://<slug>:<port>` from that network).
@@ -511,6 +888,21 @@ const EnvironmentSchema = z
         code: 'custom',
         path: ['SESSION_COOKIE_SECURE'],
         message: 'SESSION_COOKIE_SECURE must be enabled when NODE_ENV=production',
+      });
+    }
+    /*
+     * NFR-4.1 / ISSUE-07: the platform writes this scheme into every launch link *and* into the OIDC
+     * redirect URI a product is registered with. A production boot with `http` therefore advertises
+     * a plain-HTTP product address that the edge does not serve — the exact claim the review found,
+     * arrived at through configuration rather than a hard-coded literal. Refuse it the way the other
+     * insecure production defaults are refused, instead of logging a warning nobody reads.
+     */
+    if (value.NODE_ENV === 'production' && value.SEAMNEX_PRODUCT_URL_SCHEME !== 'https') {
+      context.addIssue({
+        code: 'custom',
+        path: ['SEAMNEX_PRODUCT_URL_SCHEME'],
+        message:
+          'the edge terminates TLS on every route; production must set SEAMNEX_PRODUCT_URL_SCHEME=https (ADR-BE-39)',
       });
     }
     /*
@@ -625,6 +1017,18 @@ export type AppConfig = Readonly<
     readonly trustProxy: boolean | string[];
     /** Parsed `SEAMNEX_SOURCE_ALLOWED_HOSTS`, lower-cased. */
     readonly sourceAllowedHosts: readonly string[];
+    /** Parsed `SEAMNEX_TRUSTED_REGISTRIES`: `registry` or `registry/namespace`, lower-cased. */
+    readonly trustedRegistries: readonly string[];
+    /**
+     * Parsed `SEAMNEX_PULL_MIRROR`, in the operator's order, with any scheme removed: an image
+     * reference cannot carry one, so `https://mirror.example.com` and `mirror.example.com` name the
+     * same prefix and `.env` may reuse the value written for `SEAMNEX_REGISTRY_MIRROR`.
+     */
+    readonly pullMirrors: readonly string[];
+    /** Parsed `SEAMNEX_SCAN_BLOCK_SEVERITIES`, upper-cased (`CRITICAL`, `HIGH`). */
+    readonly scanBlockSeverities: readonly string[];
+    /** Parsed `SEAMNEX_UPSTREAM_ALLOWED_HOSTS`, lower-cased. */
+    readonly upstreamAllowedHosts: readonly string[];
     /**
      * The pool size this process must open, derived from `DATABASE_POOL_MAX` and the role. Never
      * read `DATABASE_POOL_MAX` directly for a pool: that applies the API ceiling to every worker.
@@ -676,7 +1080,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     SEAMNEX_SOURCE_MIRROR_DIR: resolveFromRepoRoot(parsed.data.SEAMNEX_SOURCE_MIRROR_DIR),
     SEAMNEX_INSTANCE_DATA_DIR: resolveFromRepoRoot(parsed.data.SEAMNEX_INSTANCE_DATA_DIR),
     SEAMNEX_TRAEFIK_DYNAMIC_DIR: resolveFromRepoRoot(parsed.data.SEAMNEX_TRAEFIK_DYNAMIC_DIR),
+    // Empty stays empty: resolving it would invent a directory the operator never configured, and
+    // the service treats "" as "not configured" on purpose.
+    SEAMNEX_PROMETHEUS_TARGETS_DIR:
+      parsed.data.SEAMNEX_PROMETHEUS_TARGETS_DIR.length === 0
+        ? ''
+        : resolveFromRepoRoot(parsed.data.SEAMNEX_PROMETHEUS_TARGETS_DIR),
     SEAMNEX_BACKUP_TMP_DIR: resolveFromRepoRoot(parsed.data.SEAMNEX_BACKUP_TMP_DIR),
+    SEAMNEX_SCAN_TMP_DIR: resolveFromRepoRoot(parsed.data.SEAMNEX_SCAN_TMP_DIR),
+    SEAMNEX_SCAN_CACHE_DIR: resolveFromRepoRoot(parsed.data.SEAMNEX_SCAN_CACHE_DIR),
     SEAMNEX_AGE_IDENTITY_FILE: resolveFromRepoRoot(parsed.data.SEAMNEX_AGE_IDENTITY_FILE),
     isProduction: parsed.data.NODE_ENV === 'production',
     isDevelopment: parsed.data.NODE_ENV !== 'production',
@@ -706,6 +1118,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     sourceAllowedHosts: parsed.data.SEAMNEX_SOURCE_ALLOWED_HOSTS.split(',')
       .map((host) => host.trim().toLowerCase())
       .filter((host) => host.length > 0),
+    trustedRegistries: parsed.data.SEAMNEX_TRUSTED_REGISTRIES.split(',')
+      .map((entry) => entry.trim().toLowerCase().replace(/\/+$/, ''))
+      .filter((entry) => entry.length > 0),
+    pullMirrors: parsed.data.SEAMNEX_PULL_MIRROR.split(',')
+      .map((entry) => normalisePullMirror(entry))
+      .filter((entry): entry is string => entry !== null),
+    scanBlockSeverities: parsed.data.SEAMNEX_SCAN_BLOCK_SEVERITIES.split(',')
+      .map((severity) => severity.trim().toUpperCase())
+      .filter((severity) => severity.length > 0),
+    upstreamAllowedHosts: parsed.data.SEAMNEX_UPSTREAM_ALLOWED_HOSTS.split(',')
+      .map((host) => host.trim().toLowerCase())
+      .filter((host) => host.length > 0),
     poolMax: poolMaxForRole(parsed.data.SEAMNEX_ROLE, parsed.data.DATABASE_POOL_MAX),
   });
 }
@@ -733,6 +1157,31 @@ function resolveFromRepoRoot(value: string): string {
  */
 function trimTrailingSlash(value: string): string {
   return value.trim().replace(/\/+$/, '');
+}
+
+/**
+ * One pull mirror as a reference prefix, or `null` when the entry cannot be one.
+ *
+ * The scheme is dropped rather than validated: `https://mirror.example.com` is the shape an
+ * operator already wrote for `SEAMNEX_REGISTRY_MIRROR`, and copying it here must not produce a
+ * reference the daemon cannot parse (`https://mirror/repo` is not an image). A value that keeps a
+ * path is refused instead of truncated — the operator meant something the prefix rule cannot honour,
+ * and a silent rewrite would pull from a host they did not name.
+ */
+function normalisePullMirror(value: string): string | null {
+  const trimmed = value
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/\/+$/, '');
+  if (trimmed.length === 0) return null;
+  // A registry host: a name, optionally a port, and no path — anything with a `/` is a mistaken
+  // full reference, not a mirror.
+  const [host, port, ...rest] = trimmed.split(':');
+  if (host === undefined || host.length === 0 || rest.length > 0) return null;
+  if (!/^[a-z0-9.-]+$/.test(host)) return null;
+  if (port !== undefined && !/^\d{1,5}$/.test(port)) return null;
+  return trimmed;
 }
 
 /**
@@ -812,6 +1261,21 @@ export function describeConfig(config: AppConfig): Record<string, unknown> {
     // The resolved tree, not the configured string: "the catalogue is absent" is the diagnosis an
     // operator has to make from this line, and a relative value cannot answer which directory was read.
     catalogRepoPath: config.SEAMNEX_CATALOG_REPO_PATH,
+    /*
+     * NFR-4.1 / ISSUE-07: where a product opens and how the edge certifies it. These two settings
+     * decide both the launch link and `instance_route.tls_mode`, and a `.env` copied before the edge
+     * served TLS (http + 8020) stays silently wrong until someone clicks a dead link. Publishing
+     * them at boot makes the drift visible in the first line of the log instead of in a browser.
+     */
+    productUrl: `${config.SEAMNEX_PRODUCT_URL_SCHEME}://<slug>.${config.SEAMNEX_INGRESS_DOMAIN}${
+      config.SEAMNEX_PRODUCT_URL_PORT === '' ? '' : `:${config.SEAMNEX_PRODUCT_URL_PORT}`
+    }`,
+    edgeTlsMode: config.SEAMNEX_EDGE_TLS_MODE,
+    // Presence only: the address is the operator's, and the boot line is not a place to copy it.
+    acmeContactConfigured: config.SEAMNEX_TRAEFIK_ACME_EMAIL !== '',
+    // The pull path is where a filtered network shows up, and a setting nothing reports is
+    // indistinguishable from one that was never read: a deployment then looks merely slow.
+    pullMirrors: config.pullMirrors,
   };
 }
 

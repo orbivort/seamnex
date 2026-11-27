@@ -77,15 +77,25 @@ export function resolveEnv(
     // validated exactly like any other value without its text ever reaching the plan or an error.
     const candidate = value;
 
+    /*
+     * AC-51: a `none` ceiling rejects a profile value too.
+     *
+     * The real renderer had this check on the instance branch and not on the profile branch, so a
+     * variable nobody may override was populated from `env_profile_value` in silence. The demo data
+     * models the same rule, or the console would promise a resolution the API refuses.
+     */
+    const profileSupplies = Boolean(profileValue?.secretRef) || !blanks(profileValue?.value);
+    if (!error && locked && profileSupplies) {
+      error = `${variable.name} is not overridable; remove it from the ${profileKey} profile.`;
+      fieldErrors.push({ field: variable.name, code: 'ceiling', message: error });
+    }
+
     if (!error) {
       if (variable.secret) {
         source = 'secret';
         masked = true;
         value = '••••••••';
-      } else if (
-        source !== 'instance' &&
-        (profileValue?.secretRef || !blanks(profileValue?.value))
-      ) {
+      } else if (source !== 'instance' && profileSupplies) {
         if (profileValue?.secretRef) {
           source = 'secret';
           masked = true;
@@ -135,12 +145,21 @@ export function resolveEnv(
     };
   });
 
-  // Conditional rules ("required when X is set") need the resolved presence of the other variable.
+  /*
+   * Conditional rules ("required when X is set") need the resolved presence of the other variable.
+   *
+   * A secret is skipped on both sides. Whether the secret store holds a value is not a fact this
+   * plan can see — it masks every secret as resolved and defers the question to the pre-flight's
+   * `secret_unresolved` blocker. Evaluating it here refused an environment the store could satisfy,
+   * which is how a profile value used to be doing the work of a secret reference.
+   */
   for (const variable of vars) {
+    if (variable.secret) continue;
     const match = variable.conditional?.match(CONDITIONAL_RULE);
     if (!match?.[1]) continue;
     const trigger = match[1];
-    const triggerSet = present.get(trigger) ?? false;
+    const triggerIsSecret = vars.some((item) => item.name === trigger && item.secret);
+    const triggerSet = triggerIsSecret ? true : (present.get(trigger) ?? false);
     const target = values.find((item) => item.name === variable.name);
     if (!target || target.error) continue;
     if (triggerSet && !(present.get(variable.name) ?? false)) {

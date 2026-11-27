@@ -4,36 +4,74 @@ import { Lock } from 'lucide-react';
 import type { Capability } from '@seamnex/domain';
 import { ROLE_LABELS, scopedReason } from '@seamnex/domain';
 import { EmptyState, Panel, PanelHeader, buttonVariants } from '@seamnex/ui';
-import { useCapabilities } from '../use-capabilities';
+import { capabilityGates as gates } from '../use-capabilities';
 import { useSession } from '../session';
 
+/**
+ * The console's refusal panel.
+ *
+ * `capability` is optional because a gate can refuse an entry that declared no capability at all —
+ * a wiring defect the navigation test catches, but not a reason to render a sentence about a
+ * capability nobody asked for.
+ */
 export function Forbidden({
   capability,
   title = 'This section is not permitted for your role',
 }: {
-  capability: Capability;
+  // Explicit `| undefined`: `exactOptionalPropertyTypes` distinguishes "absent" from "present and
+  // undefined", and a gate refuses with the latter when an entry declared no capability.
+  capability?: Capability | undefined;
   title?: string;
 }) {
   const { session } = useSession();
   return (
     <Panel className="mx-auto mt-6 max-w-2xl">
-      <PanelHeader eyebrow="403 · deny by default" title={title} />
+      {/*
+        `headingLevel={1}`: this panel *is* the screen. At the default level two, a refused route
+        left the document with no level-one heading at all, so the outline started at h2 and
+        nothing named the page. The portal's 404 and 403 surfaces already pass it.
+      */}
+      <PanelHeader headingLevel={1} eyebrow="403 · deny by default" title={title} />
       <div className="p-6">
         <EmptyState
           icon={<Lock className="size-5" />}
           title={`${session.role} · ${ROLE_LABELS[session.role].name}`}
-          description={scopedReason(session.role, capability)}
+          description={
+            capability === undefined
+              ? 'This console section declares no capability, so it cannot be admitted for any role.'
+              : scopedReason(session.role, capability)
+          }
           action={
             <Link to="/" className={buttonVariants({ variant: 'secondary' })}>
               Back to overview
             </Link>
           }
         />
-        <p className="mt-2 text-center font-mono text-micro text-faint">capability: {capability}</p>
+        {capability === undefined ? null : (
+          <p className="mt-2 text-center font-mono text-micro text-faint">
+            capability: {capability}
+          </p>
+        )}
       </div>
     </Panel>
   );
 }
+
+/**
+ * The console gates, bound to its own refusal panel (ADR-FE-01).
+ *
+ * Named components rather than one with a mode: the route table reads as prose
+ * (`RequireAnyCapability` at the maintenance screen says what it means). The decision itself is the
+ * shared one from `@seamnex/shell`; these are presentation bindings around it.
+ *
+ * The aliases exist so each gate is mounted as an element rather than called as a function: a gate
+ * that runs inside its caller's hook scope is legal only while the caller never branches, and a
+ * route table is exactly the place where a future branch would look innocuous.
+ */
+const AnyCapability = gates.RequireCapability;
+const FullCapability = gates.RequireFullCapability;
+const AnyOfCapabilities = gates.RequireAnyCapability;
+const AnyOfFullCapabilities = gates.RequireAnyFullCapability;
 
 export function RequireCapability({
   capability,
@@ -44,13 +82,14 @@ export function RequireCapability({
   children: ReactNode;
   title?: string;
 }) {
-  // The capability set is derived once per role, so this gate is a membership test rather than a
-  // matrix lookup on every render of the route it wraps.
-  const { held } = useCapabilities();
-  if (!held.has(capability)) {
-    return <Forbidden capability={capability} {...(title ? { title } : {})} />;
-  }
-  return <>{children}</>;
+  return (
+    <AnyCapability
+      capability={capability}
+      fallback={(denied) => <Forbidden capability={denied} {...(title ? { title } : {})} />}
+    >
+      {children}
+    </AnyCapability>
+  );
 }
 
 export function RequireFullCapability({
@@ -60,13 +99,14 @@ export function RequireFullCapability({
   capability: Capability;
   children: ReactNode;
 }) {
-  // `mutable`, not `held`: an admin surface is only enterable on an outright grant, exactly what
-  // `canMutate` answered before.
-  const { mutable } = useCapabilities();
-  if (!mutable.has(capability)) {
-    return <Forbidden capability={capability} />;
-  }
-  return <>{children}</>;
+  return (
+    <FullCapability
+      capability={capability}
+      fallback={(denied) => <Forbidden capability={denied} />}
+    >
+      {children}
+    </FullCapability>
+  );
 }
 
 export function RequireAnyCapability({
@@ -76,11 +116,31 @@ export function RequireAnyCapability({
   capabilities: Capability[];
   children: ReactNode;
 }) {
-  const { held } = useCapabilities();
-  if (!capabilities.some((capability) => held.has(capability))) {
-    return <Forbidden capability={capabilities[0] ?? 'portal.sign_in'} />;
-  }
-  return <>{children}</>;
+  return (
+    <AnyOfCapabilities
+      capabilities={capabilities}
+      fallback={(denied) => <Forbidden capability={denied} />}
+    >
+      {children}
+    </AnyOfCapabilities>
+  );
+}
+
+export function RequireAnyFullCapability({
+  capabilities,
+  children,
+}: {
+  capabilities: Capability[];
+  children: ReactNode;
+}) {
+  return (
+    <AnyOfFullCapabilities
+      capabilities={capabilities}
+      fallback={(denied) => <Forbidden capability={denied} />}
+    >
+      {children}
+    </AnyOfFullCapabilities>
+  );
 }
 
 export function ForbiddenRoles() {
@@ -90,10 +150,12 @@ export function ForbiddenRoles() {
   const portalBase =
     typeof configuredPortal === 'string' && configuredPortal.length > 0
       ? configuredPortal.replace(/\/+$/, '')
-      : 'http://localhost:5173';
+      : // The dev servers speak TLS (ADR-BE-39); a bare `http` default would link to a closed port.
+        'https://localhost:5173';
   return (
     <Panel className="mx-auto mt-6 max-w-2xl">
       <PanelHeader
+        headingLevel={1}
         eyebrow="Not an operator surface"
         title="The console is for platform and domain operators"
       />

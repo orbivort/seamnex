@@ -34,6 +34,17 @@ describe('workflow inventory', () => {
     expect(await screen.findByText('Workflow inventory')).toBeDefined();
   });
 
+  it('offers an auditor no authoring action', async () => {
+    // `workflow.author` is `none` for R2 while `workflow.view_runs` is full: the auditor reads every
+    // definition and may author none, so the two authoring buttons must not be rendered at all.
+    openAs('R2', '/workflows');
+    render(<App />);
+    await screen.findByText('Workflow inventory');
+
+    expect(screen.queryByRole('button', { name: 'New workflow' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Import' })).toBeNull();
+  });
+
   it('surfaces the failed run queue without opening the workspace', async () => {
     openAs('R1', '/workflows');
     render(<App />);
@@ -92,12 +103,16 @@ describe('workflow inventory', () => {
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByText('Import a workflow')).toBeDefined();
 
-    fireEvent.change(within(dialog).getByLabelText(/Export document/), {
+    const field = within(dialog).getByLabelText(/Export document/);
+    fireEvent.change(field, {
       target: { value: 'not json' },
     });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Import draft' }));
 
-    expect(await within(dialog).findByText('The document could not be read')).toBeDefined();
+    // The error belongs to the field: the control is marked invalid and describes the message.
+    expect(await within(dialog).findByText(/not valid JSON/)).toBeDefined();
+    expect(field.getAttribute('aria-invalid')).toBe('true');
+    expect(field.getAttribute('aria-describedby')).toBe('workflow-import-error');
   });
 
   it('refuses an import document from another contract version', async () => {
@@ -179,8 +194,10 @@ describe('workflow workspace', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Run now' }));
 
+    // The banner names where the outcome is, never the outcome: it outlives the run, so a state
+    // frozen into it ("Run running") was still on screen after the run had failed.
     expect(
-      await screen.findByText(/Run .*\. Per-node outcomes appear in the Runs tab\./),
+      await screen.findByText('Run requested. The Runs tab follows it to its outcome.'),
     ).toBeDefined();
     const panel = await screen.findByRole('tabpanel');
     expect(await within(panel).findByText(/Idempotency keys are preserved/)).toBeDefined();
@@ -218,9 +235,13 @@ describe('workflow workspace', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Duplicate' }));
 
+    // The banner names the copy and links to it: the list was a second screen to search.
     expect(
-      await screen.findByText('A draft copy was created. It appears in the workflow list.'),
+      await screen.findByText(
+        'A draft copy was created: Won opportunity → project kickoff (copy).',
+      ),
     ).toBeDefined();
+    expect(await screen.findByRole('link', { name: 'Open the copy' })).toBeDefined();
   });
 
   it('disables an active workflow after confirmation of the consequence', async () => {

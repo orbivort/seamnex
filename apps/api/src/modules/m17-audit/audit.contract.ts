@@ -50,6 +50,40 @@ export type AuditVerification = {
   readonly firstBrokenSeq: string | null;
 };
 
+/** FR-1.35 — one day's anchor as the platform recovery set exports it. */
+export type AuditAnchorRecord = {
+  readonly day: string;
+  readonly lastSeq: string;
+  readonly lastHash: string;
+  /**
+   * NFR-4.10 — `ed25519:<keyId>:<base64url>` over the canonical `{day,lastSeq,lastHash}`.
+   * `null` on a row written before signing existed; those remain anchors, just weaker evidence.
+   */
+  readonly signature: string | null;
+  readonly storedAt: string;
+};
+
+/** The public half of the anchor key, published so an auditor needs no secret to verify. */
+export type AuditAnchorSigning = {
+  readonly algorithm: 'ed25519';
+  readonly keyId: string;
+  readonly publicKey: string;
+};
+
+export type AuditChainHead = {
+  readonly seq: string;
+  readonly hash: string;
+  readonly ts: string;
+};
+
+export type AuditAnchorExport = {
+  readonly anchors: readonly AuditAnchorRecord[];
+  /** Null when this deployment has never signed an anchor, which is also when no key exists. */
+  readonly signing: AuditAnchorSigning | null;
+  /** Null on a chain that has no events yet. */
+  readonly chainHead: AuditChainHead | null;
+};
+
 export interface AuditService {
   /**
    * Takes the chain-tip row lock for the current transaction. Callers that also lock business rows
@@ -74,6 +108,34 @@ export interface AuditService {
   /** Recomputes the chain over a range and reports the first broken sequence. */
   verify(fromSeq: string, toSeq: string): Promise<AuditVerification>;
 
-  /** Daily anchor row (design §7.2 `audit_anchor`). Idempotent per day. */
-  anchor(day?: Date): Promise<void>;
+  /**
+   * Daily anchor row (design §7.2 `audit_anchor`), signed, written once per closed day.
+   *
+   * Returns the stored row, or `null` when the day holds no events — an anchor over nothing would
+   * record a sequence that no event backs. Re-anchoring a day that already has a row is a no-op:
+   * the first writer wins, because a second signature over a later sequence would let the platform
+   * move an anchor after the fact, which is the one property the control exists to deny.
+   */
+  anchor(day?: Date): Promise<AuditAnchorRecord | null>;
+
+  /**
+   * FR-1.35 — the anchors plus the chain head, for the platform recovery set.
+   *
+   * The anchors alone prove the chain up to the last anchored day; the head is what lets a restore
+   * tell "the tail is intact" from "events after the anchor are missing". The query stays here
+   * because `audit_event` and `audit_anchor` are this module's tables: a backup that copied the SQL
+   * would become a second owner of the chain's shape. Read-only, and deliberately no audit row of
+   * its own — a backup reading the chain is not an event the chain needs to hold.
+   */
+  exportAnchors(): Promise<AuditAnchorExport>;
+
+  /**
+   * The hash recorded at one sequence, and null when the chain has no row there.
+   *
+   * A restore recomputes the chain over the restored range and compares its own row at the exported
+   * head against the exported hash: that comparison is what ties the recomputation to *this* set
+   * instead of to whatever chain happens to be in the database. The query stays here because
+   * `audit_event` is this module's table.
+   */
+  headHash(seq: string): Promise<string | null>;
 }

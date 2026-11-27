@@ -1,10 +1,18 @@
 import { useMemo } from 'react';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
-import { usePatchRegister } from '@seamnex/api-client';
-import { SEVERITIES, type PatchRecord, type Severity, type Tone } from '@seamnex/domain';
+import { ArrowUpRight, RefreshCw } from 'lucide-react';
+import { useObservePatchRegister, usePatchRegister } from '@seamnex/api-client';
+import {
+  compareVersions,
+  updateAvailable,
+  type PatchRecord,
+  type Severity,
+  type Tone,
+} from '@seamnex/domain';
 import {
   Badge,
+  Button,
   DataTable,
   EmptyState,
   Page,
@@ -17,6 +25,7 @@ import {
 } from '@seamnex/ui';
 import { formatDateTime, formatRelative } from '@seamnex/utils';
 import { AsyncPanel } from '@seamnex/shell';
+import { useCapabilities } from '../../use-capabilities';
 
 /**
  * NFR-4.7 is the clock this register exists to track: a critical vulnerability is remediated within
@@ -35,10 +44,33 @@ type VersionPosture = 'current' | 'behind' | 'unknown';
  * `unknown` is the value the API substitutes when neither the patch record nor the catalog knows a
  * version for an instance. That is missing evidence, not a clean bill of health, so it never
  * renders as "current" and is never counted as current.
+ *
+ * A `catalog` row is the same kind of missing evidence for a different reason: the observation pass
+ * has never written it, so the two numbers are the entry document's projection and nothing has
+ * compared them with upstream. Counting such a row as "current" is what the provenance line exists
+ * to prevent.
+ *
+ * Otherwise the question is version *precedence*, not text equality. Upstream's newest release can
+ * be older than what the instance runs — a maintenance release published on the previous branch
+ * after the current one shipped — and `17.8.3` is not "behind" `17.9.6`. `updateAvailable` is the
+ * one comparator the platform uses for this (prefixes, build metadata and pre-releases included).
  */
 function postureOf(row: PatchRecord): VersionPosture {
+  if (row.source === 'catalog') return 'unknown';
   if (row.currentVersion === 'unknown' || row.latestVersion === 'unknown') return 'unknown';
-  return row.latestVersion === row.currentVersion ? 'current' : 'behind';
+  return updateAvailable(row.currentVersion, row.latestVersion) ? 'behind' : 'current';
+}
+
+/**
+ * Worst first, and it must agree with the pill the row renders. The API's `severity` is derived
+ * before provenance is considered, so sorting on it alone floated a "not checked" row into the
+ * section an operator reads as "patch now".
+ */
+function rankOf(row: PatchRecord): number {
+  const posture = postureOf(row);
+  if (posture === 'unknown') return 3;
+  if (posture === 'current') return 2;
+  return row.severity === 'critical' ? 0 : 1;
 }
 
 function slaWindowDays(severity: Severity): number | null {
@@ -51,12 +83,39 @@ function pastSla(row: PatchRecord): boolean {
   return postureOf(row) === 'behind' && row.oldestUnappliedSecurityDays > window;
 }
 
-/** Severity is an enum; what the operator reads is the posture it describes. */
+/**
+ * Severity is an enum; what the operator reads is the posture it describes.
+ *
+ * The posture leads, not `row.severity`: the API derives a warning for any drift it can see, so a
+ * row whose upstream release is older than the running version came back `warning` while the
+ * version pair on the same row said "current" — and the pill told the operator to patch a
+ * deployment that had nothing to patch. Only a row that is actually behind may read "behind".
+ */
 function severityView(row: PatchRecord): { tone: Tone; label: string } {
-  if (postureOf(row) === 'unknown') return { tone: 'neutral', label: 'not checked' };
-  if (row.severity === 'critical') return { tone: 'danger', label: 'critical' };
-  if (row.severity === 'warning') return { tone: 'caution', label: 'behind' };
-  return { tone: 'positive', label: 'current' };
+  const posture = postureOf(row);
+  if (posture === 'unknown') return { tone: 'neutral', label: 'not checked' };
+  if (posture === 'current') return { tone: 'positive', label: 'current' };
+  return row.severity === 'critical'
+    ? { tone: 'danger', label: 'critical' }
+    : { tone: 'caution', label: 'behind' };
+}
+
+/**
+ * FR-2.12 — where the two version numbers came from.
+ *
+ * Before the observation pass the register printed `catalog_entry.payload.upstream` as if it had been
+ * measured. `catalog` is exactly that fallback, so the row says "never observed" instead of letting
+ * an unread document pass for a check.
+ */
+function provenance(row: PatchRecord): { text: string; observed: boolean } {
+  if (
+    row.source !== 'observed' ||
+    row.lastObservedAt === null ||
+    row.lastObservedAt === undefined
+  ) {
+    return { text: 'never observed upstream', observed: false };
+  }
+  return { text: `observed ${formatRelative(row.lastObservedAt)}`, observed: true };
 }
 
 const rowKey = (row: PatchRecord): string => row.instanceId;
@@ -92,7 +151,28 @@ const columns = defineColumns<PatchRecord>([
     header: 'Product',
     primary: true,
     // `renderPatchLink` supplies the link's type styles; the cell contributes the text only.
-    cell: (row) => row.product,
+    cell: (row) => {
+      const source = provenance(row);
+      return (
+        <span className="flex min-w-0 flex-col gap-0.5">
+          <span className="truncate">{row.product}</span>
+          <span
+            className={
+              source.observed
+                ? 'text-micro text-faint'
+                : 'text-micro font-medium text-warning-strong'
+            }
+            title={
+              source.observed
+                ? 'The platform read this from the upstream release feed.'
+                : 'These versions come from the catalogue document, which nothing has verified against upstream.'
+            }
+          >
+            {source.text}
+          </span>
+        </span>
+      );
+    },
   },
   {
     id: 'current',
@@ -114,18 +194,39 @@ const columns = defineColumns<PatchRecord>([
     mono: true,
     hideBelow: 'md',
     cell: (row) => {
-      if (postureOf(row) === 'unknown')
-        return <span className="text-micro text-faint">unknown</span>;
+      const posture = postureOf(row);
+      if (posture === 'unknown') return <span className="text-micro text-faint">unknown</span>;
+      const tone =
+        posture === 'current' ? 'text-micro text-faint' : 'text-micro text-warning-strong';
+      /*
+       * The arrow is the "move up to this" affordance, so it belongs only to a row that is actually
+       * behind. Upstream's newest tag can be older than the running version (a maintenance release
+       * published on the previous branch); arrowing that number told the operator to downgrade.
+       */
+      const superseded =
+        posture === 'current' && compareVersions(row.latestVersion, row.currentVersion) === -1
+          ? "Upstream's newest release is older than the version this instance runs."
+          : undefined;
+      // FR-2.12 "release notes links": the version an operator is told to move to is one click from
+      // the change it contains, and the link is the observed release rather than a constructed URL.
+      if (row.releaseUrl === null || row.releaseUrl === undefined) {
+        return (
+          <span className={tone} title={superseded}>
+            {row.latestVersion}
+          </span>
+        );
+      }
       return (
-        <span
-          className={
-            postureOf(row) === 'current'
-              ? 'text-micro text-faint'
-              : 'text-micro text-warning-strong'
-          }
+        <a
+          href={row.releaseUrl}
+          target="_blank"
+          rel="noreferrer noopener"
+          className={`${tone} inline-flex items-center gap-1 hover:underline`}
+          title={superseded}
         >
           {row.latestVersion}
-        </span>
+          {posture === 'behind' ? <ArrowUpRight className="size-3 shrink-0" aria-hidden /> : null}
+        </a>
       );
     },
   },
@@ -182,6 +283,30 @@ const columns = defineColumns<PatchRecord>([
     },
   },
   {
+    /*
+     * FR-2.12 — the advisory the last observation found. "none open" is only printed for a row that
+     * was observed: an unobserved row has no advisory answer at all, and a dash says that without
+     * claiming there is nothing open.
+     */
+    id: 'advisory',
+    header: 'Advisory',
+    hideBelow: 'xl',
+    cell: (row) => {
+      if (row.advisory === null || row.advisory === undefined) {
+        return (
+          <span className="text-micro text-faint">
+            {provenance(row).observed ? 'none open' : '—'}
+          </span>
+        );
+      }
+      return (
+        <Badge tone={row.severity === 'critical' ? 'danger' : 'caution'} size="sm">
+          {row.advisory}
+        </Badge>
+      );
+    },
+  },
+  {
     id: 'severity',
     header: 'Severity',
     hideBelow: 'xl',
@@ -204,13 +329,18 @@ const columns = defineColumns<PatchRecord>([
 
 export function PatchesPage() {
   const patches = usePatchRegister();
+  const observe = useObservePatchRegister();
+  const { mutable } = useCapabilities();
+  // FR-2.12: running the pass writes the register and prompts outbound calls, which is R1's
+  // `settings.manage` — the same capability the route checks, so the button is never a tease.
+  const canObserve = mutable.has('settings.manage');
 
   const rows = useMemo(() => {
     // Worst first: the register is read to decide what to patch now, so a critical record must not
     // sit below a dozen current ones because the API sorts by product name.
     return [...(patches.data ?? [])].sort(
       (a, b) =>
-        SEVERITIES.indexOf(b.severity) - SEVERITIES.indexOf(a.severity) ||
+        rankOf(a) - rankOf(b) ||
         (b.oldestUnappliedSecurityDays ?? -1) - (a.oldestUnappliedSecurityDays ?? -1) ||
         a.product.localeCompare(b.product),
     );
@@ -232,9 +362,19 @@ export function PatchesPage() {
     return total;
   }, [rows]);
 
-  /** The oldest check in the register is the honest age of everything on the screen. */
+  /**
+   * The oldest check in the register is the honest age of everything on the screen.
+   *
+   * A `catalog` row has not been checked: its `checkedAt` is the entry document's edit time (or the
+   * instance's), and reading it as "Checked 9 h ago" claimed a measurement nobody made — the same
+   * substitution the provenance line exists to prevent. A row with no `source` is a record written
+   * before the field existed and is left in, rather than silently dropped from the age.
+   */
   const oldestCheck = useMemo(() => {
-    const times = rows.map((row) => Date.parse(row.checkedAt)).filter(Number.isFinite);
+    const times = rows
+      .filter((row) => row.source !== 'catalog')
+      .map((row) => Date.parse(row.checkedAt))
+      .filter(Number.isFinite);
     return times.length === 0 ? null : new Date(Math.min(...times));
   }, [rows]);
 
@@ -291,21 +431,39 @@ export function PatchesPage() {
           title="Version posture"
           description="Upgrades always take a verified pre-upgrade backup and offer a one-step rollback."
           actions={
-            oldestCheck === null ? null : (
-              <span
-                className={
-                  stale ? 'text-micro font-semibold text-warning-strong' : 'text-micro text-faint'
-                }
-                title={
-                  stale
-                    ? `The oldest version check in this register is ${formatDateTime(oldestCheck)}, so the ages below are stale.`
-                    : `Oldest version check: ${formatDateTime(oldestCheck)}.`
-                }
-              >
-                Checked {formatRelative(oldestCheck)}
-                {stale ? '· stale' : ''}
-              </span>
-            )
+            <div className="flex items-center gap-3">
+              {oldestCheck === null ? null : (
+                <span
+                  className={
+                    stale ? 'text-micro font-semibold text-warning-strong' : 'text-micro text-faint'
+                  }
+                  title={
+                    stale
+                      ? `The oldest version check in this register is ${formatDateTime(oldestCheck)}, so the ages below are stale.`
+                      : `Oldest version check: ${formatDateTime(oldestCheck)}.`
+                  }
+                >
+                  Checked {formatRelative(oldestCheck)}
+                  {stale ? '· stale' : ''}
+                </span>
+              )}
+              {canObserve ? (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => observe.mutate()}
+                  disabled={observe.isPending}
+                  icon={
+                    <RefreshCw
+                      className={observe.isPending ? 'animate-spin' : undefined}
+                      aria-hidden
+                    />
+                  }
+                >
+                  {observe.isPending ? 'Observing…' : 'Observe now'}
+                </Button>
+              ) : null}
+            </div>
           }
         />
         {/*
@@ -314,6 +472,23 @@ export function PatchesPage() {
           a blank panel (ERR-04). A first failure still replaces the panel, because there is no
           posture to stand behind.
         */}
+        {/*
+          FR-2.12: the pass reports what it reached, not a bare success. "0 releases, 6 skipped" is a
+          different answer from "6 entries observed", and an operator who pressed the button needs to
+          tell them apart without reading the scheduler log.
+        */}
+        {observe.data ? (
+          <p className="border-b border-line px-4 py-2 text-meta text-muted">
+            Observed {observe.data.entries} entries: {observe.data.releases} with a newer release,{' '}
+            {observe.data.advisories} with an open advisory, {observe.data.skipped} with no feed
+            {observe.data.failed > 0 ? `, ${observe.data.failed} unreachable` : ''}.
+          </p>
+        ) : null}
+        {observe.error ? (
+          <p role="alert" className="border-b border-line px-4 py-2 text-meta text-danger">
+            The observation could not run; the register keeps its previous values.
+          </p>
+        ) : null}
         <AsyncPanel
           query={patches}
           loading={
@@ -332,13 +507,13 @@ export function PatchesPage() {
               rowKey={rowKey}
               dense
               renderRowLink={renderPatchLink}
+              // The wash is a "look here" signal, so it follows the same posture as the pill: a row
+              // whose upstream release is older than what runs is not behind and must not be washed
+              // in the warning colour.
               rowTone={(row) => {
-                if (postureOf(row) === 'unknown') return 'default';
-                return row.severity === 'critical'
-                  ? 'danger'
-                  : row.severity === 'warning'
-                    ? 'caution'
-                    : 'default';
+                const posture = postureOf(row);
+                if (posture !== 'behind') return 'default';
+                return row.severity === 'critical' ? 'danger' : 'caution';
               }}
               // NFR-4.7: the caption used to read "… NFR-4.7 windows: critical 7 days, high
               // 30 days."

@@ -45,7 +45,15 @@ export class PolicyGuard implements OperationGuard {
             declaredKey: operation.policyKey,
           });
 
-    if (decision.allowed) return;
+    if (decision.allowed) {
+      /*
+       * A collection read carries the rows it may see (ADR-BE-44). Published before the handler
+       * runs and on the same object the handler receives, so the allow and its predicate cannot
+       * be separated. Every other decision leaves the field untouched.
+       */
+      if (decision.scope !== undefined) context.policyScope = decision.scope;
+      return;
+    }
 
     /*
      * A step-up refusal is not a permission problem: the role holds the capability and a second

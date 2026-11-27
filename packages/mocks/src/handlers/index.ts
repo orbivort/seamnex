@@ -5,11 +5,13 @@ import { catalogHandlers } from './catalog';
 import { governanceHandlers } from './governance';
 import { instanceHandlers } from './instances';
 import { jobHandlers } from './jobs';
+import { observabilityHandlers } from './observability';
 import { phase4Handlers } from './phase4';
 import { portalHandlers } from './portal';
 import { privacyHandlers } from './privacy';
 import { recoveryHandlers } from './recovery';
 import { registryHandlers } from './registry';
+import { securityHandlers } from './security';
 import { workflowHandlers } from './workflows';
 import { problem } from './utils';
 
@@ -22,8 +24,12 @@ export const handlers = [
    */
   ...phase4Handlers,
   ...portalHandlers,
+  // `/instances/:id/image-scan` is a static suffix under `:id`, so it is registered before the
+  // broader instance handlers for the same reason the phase-4 group is.
+  ...securityHandlers,
   ...catalogHandlers,
   ...instanceHandlers,
+  ...observabilityHandlers,
   ...jobHandlers,
   ...workflowHandlers,
   ...governanceHandlers,

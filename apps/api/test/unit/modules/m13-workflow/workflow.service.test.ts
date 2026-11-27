@@ -29,6 +29,9 @@ vi.mock('@seamnex/db', () => ({ withTransaction: h.withTransaction }));
 
 type Query = { sql: string; params: unknown[] };
 
+/** The caller whose list this is; FR-5.9 makes the visible set scope-dependent. */
+const ACTOR_ID = 'dev-admin';
+
 class FakePool {
   readonly queries: Query[] = [];
 
@@ -95,6 +98,12 @@ function serviceWith(pool: FakePool): PostgresWorkflowService {
       append: () => Promise.resolve(),
     } as never,
     { remove: () => Promise.resolve(false) } as never,
+    // FR-5.9's own rule is covered in `workflow-authority.service.test.ts`; here the read surface is
+    // under test, so this actor sees everything and the SQL keeps its usual shape.
+    {
+      assertPermitted: () => Promise.resolve({ elevations: [] }),
+      listScope: () => Promise.resolve({ unrestricted: true as const }),
+    },
   );
 }
 
@@ -159,7 +168,7 @@ describe('GET /workflows', () => {
       ],
     });
 
-    const result = await serviceWith(pool).list({});
+    const result = await serviceWith(pool).list({ actorId: ACTOR_ID });
     const workflow = result.items[0] as Workflow;
 
     expect(result.total).toBe(1);
@@ -185,14 +194,14 @@ describe('GET /workflows', () => {
 
   it('keeps an absent description absent instead of inventing one', async () => {
     const pool = poolFor({ rows: [row({ description: null })] });
-    const workflow = (await serviceWith(pool).list({})).items[0] as Workflow;
+    const workflow = (await serviceWith(pool).list({ actorId: ACTOR_ID })).items[0] as Workflow;
     expect(workflow.description).toBeNull();
     expect(() => WorkflowSchema.parse(workflow)).not.toThrow();
   });
 
   it('normalises a legacy empty-string description to null', async () => {
     const pool = poolFor({ rows: [row({ description: '   ' })] });
-    const workflow = (await serviceWith(pool).list({})).items[0] as Workflow;
+    const workflow = (await serviceWith(pool).list({ actorId: ACTOR_ID })).items[0] as Workflow;
     expect(workflow.description).toBeNull();
     expect(() => WorkflowSchema.parse(workflow)).not.toThrow();
   });
@@ -209,7 +218,7 @@ describe('GET /workflows', () => {
         }),
       ],
     });
-    const workflow = (await serviceWith(pool).list({})).items[0] as Workflow;
+    const workflow = (await serviceWith(pool).list({ actorId: ACTOR_ID })).items[0] as Workflow;
     expect(workflow.validation.valid).toBe(false);
     expect(workflow.validation.checkedAt).toBeNull();
     expect(workflow.owner.name).toBe(OWNER_ID);
@@ -226,7 +235,7 @@ describe('GET /workflows', () => {
     const pool = poolFor({
       rows: [row({ state: 'disabled', validated_at: null, validation_issues: [] })],
     });
-    const workflow = (await serviceWith(pool).list({})).items[0] as Workflow;
+    const workflow = (await serviceWith(pool).list({ actorId: ACTOR_ID })).items[0] as Workflow;
 
     expect(workflow.state).toBe('disabled');
     expect(workflow.validation).toEqual({ valid: false, checkedAt: null, issues: [] });
@@ -245,7 +254,7 @@ describe('GET /workflows', () => {
       },
     ];
     const pool = poolFor({ rows: [row({ state: 'active', validation_issues: issues })] });
-    const workflow = (await serviceWith(pool).list({})).items[0] as Workflow;
+    const workflow = (await serviceWith(pool).list({ actorId: ACTOR_ID })).items[0] as Workflow;
 
     // An error-severity issue blocks activation even while the row is active, so a workflow that
     // lost its scope is visible before the next run rather than after it.
@@ -257,7 +266,7 @@ describe('GET /workflows', () => {
 
   it('treats a non-array issue column as no recorded issues instead of failing the page', async () => {
     const pool = poolFor({ rows: [row({ validation_issues: { broken: true } })] });
-    const workflow = (await serviceWith(pool).list({})).items[0] as Workflow;
+    const workflow = (await serviceWith(pool).list({ actorId: ACTOR_ID })).items[0] as Workflow;
 
     expect(workflow.validation.issues).toEqual([]);
     expect(() => WorkflowSchema.parse(workflow)).not.toThrow();
@@ -265,39 +274,50 @@ describe('GET /workflows', () => {
 
   it('passes the declared filters to SQL and escapes the LIKE metacharacters', async () => {
     const pool = poolFor({ rows: [] });
-    await serviceWith(pool).list({ state: 'active', q: '50%_off', limit: 20, offset: 40 });
+    await serviceWith(pool).list({
+      actorId: ACTOR_ID,
+      state: 'active',
+      q: '50%_off',
+      limit: 20,
+      offset: 40,
+    });
     const [listQuery] = pool.queries;
-    expect(listQuery?.params).toEqual(['active', '%50\\%\\_off%', 20, 40]);
+    // FR-5.9 adds the scope to the same statement: an unrestricted actor passes `true` and empty
+    // sets, so the predicate costs nothing and `x-total-count` still counts the visible rows.
+    expect(listQuery?.params).toEqual(['active', '%50\\%\\_off%', 20, 40, true, [], [], ACTOR_ID]);
     expect(listQuery?.sql).toContain("ESCAPE '\\'");
+    expect(listQuery?.sql).toContain('w.owner_idp_id = $8');
   });
 
   it('returns the whole match set size, not the page size', async () => {
     const pool = poolFor({ rows: [row({ total_count: '340' })] });
-    const result = await serviceWith(pool).list({ limit: 1 });
+    const result = await serviceWith(pool).list({ actorId: ACTOR_ID, limit: 1 });
     expect(result.items).toHaveLength(1);
     expect(result.total).toBe(340);
   });
 
   it('issues a fixed number of queries regardless of row count', async () => {
     const pool = poolFor({ rows: [row(), row({ id: 'b' }), row({ id: 'c' })] });
-    await serviceWith(pool).list({});
+    await serviceWith(pool).list({ actorId: ACTOR_ID });
     expect(pool.queries).toHaveLength(3);
   });
 
   it('does not query for related records when the page is empty', async () => {
     const pool = poolFor({ rows: [] });
-    const result = await serviceWith(pool).list({});
+    const result = await serviceWith(pool).list({ actorId: ACTOR_ID });
     expect(result).toEqual({ items: [], total: 0 });
     expect(pool.queries).toHaveLength(1);
   });
 
   it.each([0, 201, 1.5])('refuses limit %s with a field error', async (limit) => {
     const pool = poolFor({ rows: [] });
-    await expect(serviceWith(pool).list({ limit })).rejects.toBeInstanceOf(AppError);
+    await expect(serviceWith(pool).list({ actorId: ACTOR_ID, limit })).rejects.toBeInstanceOf(
+      AppError,
+    );
     expect(pool.queries).toHaveLength(0);
 
     await serviceWith(pool)
-      .list({ limit })
+      .list({ actorId: ACTOR_ID, limit })
       .catch((error: AppError) => {
         expect(error.code).toBe('VALIDATION_FAILED');
         expect(error.status).toBe(422);
@@ -308,7 +328,9 @@ describe('GET /workflows', () => {
   });
 
   it('refuses a negative offset', async () => {
-    await expect(serviceWith(poolFor({ rows: [] })).list({ offset: -1 })).rejects.toMatchObject({
+    await expect(
+      serviceWith(poolFor({ rows: [] })).list({ actorId: ACTOR_ID, offset: -1 }),
+    ).rejects.toMatchObject({
       code: 'VALIDATION_FAILED',
       status: 422,
     });
@@ -453,7 +475,10 @@ function writer(handler: (sql: string, params: unknown[]) => Answer) {
     pool,
     audit,
     n8n,
-    service: new PostgresWorkflowService(pool as unknown as Pool, audit as never, n8n as never),
+    service: new PostgresWorkflowService(pool as unknown as Pool, audit as never, n8n as never, {
+      assertPermitted: vi.fn(() => Promise.resolve({ elevations: [] })),
+      listScope: vi.fn(() => Promise.resolve({ unrestricted: true as const })),
+    }),
   };
 }
 
@@ -571,7 +596,7 @@ describe('PATCH /workflows/:id', () => {
 describe('DELETE /workflows/:id', () => {
   it('releases the compiled workflow, then deletes and audits in one transaction', async () => {
     const { audit, n8n, service } = writer((sql) => {
-      if (sql.includes('SELECT w.state, v.compiled_n8n_id'))
+      if (sql.includes('SELECT w.state'))
         return { rows: [{ state: 'disabled', compiled_n8n_id: 'wf-1' }], rowCount: 1 };
       if (sql.includes('DELETE FROM workflow')) return { rows: [], rowCount: 1 };
       return { rows: [], rowCount: 0 };
@@ -605,7 +630,7 @@ describe('DELETE /workflows/:id', () => {
 
   it('deletes anyway when n8n cannot be reached, and records that it could not', async () => {
     const { audit, n8n, service } = writer((sql) => {
-      if (sql.includes('SELECT w.state, v.compiled_n8n_id'))
+      if (sql.includes('SELECT w.state'))
         return { rows: [{ state: 'disabled', compiled_n8n_id: 'wf-1' }], rowCount: 1 };
       if (sql.includes('DELETE FROM workflow')) return { rows: [], rowCount: 1 };
       return { rows: [], rowCount: 0 };
@@ -623,7 +648,7 @@ describe('DELETE /workflows/:id', () => {
 
   it('records that there was nothing to release when n8n never had the definition', async () => {
     const { audit, n8n, service } = writer((sql) => {
-      if (sql.includes('SELECT w.state, v.compiled_n8n_id'))
+      if (sql.includes('SELECT w.state'))
         return { rows: [{ state: 'draft', compiled_n8n_id: null }], rowCount: 1 };
       if (sql.includes('DELETE FROM workflow')) return { rows: [], rowCount: 1 };
       return { rows: [], rowCount: 0 };
@@ -659,7 +684,7 @@ describe('list paging', () => {
   it.each([0, -1, 201, 12.5])('refuses limit %s', async (limit) => {
     const { pool, service } = writer(() => ({ rows: [], rowCount: 0 }));
 
-    await expect(service.list({ limit })).rejects.toMatchObject({
+    await expect(service.list({ actorId: ACTOR_ID, limit })).rejects.toMatchObject({
       code: 'VALIDATION_FAILED',
       fieldErrors: [expect.objectContaining({ field: 'limit' })],
     });
@@ -669,24 +694,33 @@ describe('list paging', () => {
   it('passes the maximum page size through', async () => {
     const { pool, service } = writer(() => ({ rows: [], rowCount: 0 }));
 
-    await service.list({ limit: 200 });
+    await service.list({ actorId: ACTOR_ID, limit: 200 });
 
-    expect(pool.queries[0]?.params).toEqual([null, null, 200, 0]);
+    expect(pool.queries[0]?.params).toEqual([null, null, 200, 0, true, [], [], ACTOR_ID]);
   });
 
   it('defaults the offset and escapes LIKE metacharacters in the search term', async () => {
     const { pool, service } = writer(() => ({ rows: [], rowCount: 0 }));
 
-    await service.list({ q: ' a_b%c\\d ' });
+    await service.list({ actorId: ACTOR_ID, q: ' a_b%c\\d ' });
 
     // `_`, `%` and `\` are escaped so a search for them matches the characters, not the pattern.
-    expect(pool.queries[0]?.params).toEqual([null, '%a\\_b\\%c\\\\d%', null, 0]);
+    expect(pool.queries[0]?.params).toEqual([
+      null,
+      '%a\\_b\\%c\\\\d%',
+      null,
+      0,
+      true,
+      [],
+      [],
+      ACTOR_ID,
+    ]);
   });
 
   it('treats a blank search as no search', async () => {
     const { pool, service } = writer(() => ({ rows: [], rowCount: 0 }));
 
-    await service.list({ q: '   ' });
+    await service.list({ actorId: ACTOR_ID, q: '   ' });
 
     expect(pool.queries[0]?.params[1]).toBeNull();
   });
@@ -726,7 +760,7 @@ describe('rows the platform cannot fully represent', () => {
     });
 
     // The id query is answered first; the list uses the same rows for both queries.
-    await expect(service.list({})).resolves.toMatchObject({ total: 2 });
+    await expect(service.list({ actorId: ACTOR_ID })).resolves.toMatchObject({ total: 2 });
   });
 
   it('answers no runs for a workflow that exists but has never run', async () => {

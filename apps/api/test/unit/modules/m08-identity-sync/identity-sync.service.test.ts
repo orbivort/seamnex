@@ -257,6 +257,8 @@ describe('userEntitlements', () => {
           entryKey: 'espocrm',
           productRole: 'member',
           syncState: 'applied',
+          // A legacy row has no applied time: the screen must say "never recorded", not "just now".
+          appliedAt: null,
         },
       ],
     });
@@ -452,14 +454,20 @@ describe('mapGroup', () => {
 
     const group = await service.mapGroup(
       'g-1',
-      { role: 'R2', scopeType: 'platform', scopeLabel: 'Platform', propagate: true },
+      {
+        role: 'R2',
+        scopeType: 'platform',
+        scopeLabel: 'Platform',
+        productRole: 'member',
+        propagate: true,
+      },
       'admin-1',
     );
 
     expect(group.mapping).toMatchObject({ role: 'R2', scopeId: null, propagateToProduct: true });
     const insert = db.calls.find((call) => call.sql.includes('INSERT INTO group_mapping'));
     // A platform grant stores no scope id; the label is presentation, not state.
-    expect(insert?.params).toEqual(['g-1', 'R2', 'platform', null, true, 'admin-1']);
+    expect(insert?.params).toEqual(['g-1', 'R2', 'platform', null, 'member', true, 'admin-1']);
     // The chain lock is taken before the row lock, so every audited transaction agrees on order.
     expect(audit.lockChain).toHaveBeenCalledTimes(1);
     expect(audit.append).toHaveBeenCalledWith(
@@ -493,12 +501,19 @@ describe('mapGroup', () => {
 
     await service.mapGroup(
       'g-1',
-      { role: 'R4', scopeType: 'domain', scopeLabel: 'dom-1', propagate: false },
+      {
+        role: 'R4',
+        scopeType: 'domain',
+        scopeLabel: 'dom-1',
+        productRole: 'member',
+        propagate: false,
+      },
       'admin-1',
     );
 
     const insert = db.calls.find((call) => call.sql.includes('INSERT INTO group_mapping'));
-    expect(insert?.params).toEqual(['g-1', 'R4', 'domain', 'dom-1', false, 'admin-1']);
+    // FR-2.4: the mapping carries the role the product applies, so the entitlement can record it.
+    expect(insert?.params).toEqual(['g-1', 'R4', 'domain', 'dom-1', 'member', false, 'admin-1']);
     // A first mapping withdrew nothing.
     expect(audit.append).toHaveBeenCalledWith(
       expect.objectContaining({ detail: expect.objectContaining({ replaced: null }) }),
@@ -514,7 +529,13 @@ describe('mapGroup', () => {
     await expect(
       service.mapGroup(
         'gone',
-        { role: 'R2', scopeType: 'platform', scopeLabel: 'Platform', propagate: false },
+        {
+          role: 'R2',
+          scopeType: 'platform',
+          scopeLabel: 'Platform',
+          productRole: 'member',
+          propagate: false,
+        },
         'admin-1',
       ),
     ).rejects.toMatchObject({ code: 'NOT_FOUND', detail: 'No directory object gone.' });
@@ -534,7 +555,13 @@ describe('mapGroup', () => {
     await expect(
       service.mapGroup(
         'g-1',
-        { role: 'R2', scopeType: 'platform', scopeLabel: 'Platform', propagate: false },
+        {
+          role: 'R2',
+          scopeType: 'platform',
+          scopeLabel: 'Platform',
+          productRole: 'member',
+          propagate: false,
+        },
         'admin-1',
       ),
     ).rejects.toMatchObject({ code: 'NOT_FOUND' });

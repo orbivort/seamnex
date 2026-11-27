@@ -4,6 +4,7 @@ import { ConfigModule } from './config/config.module';
 import { IdentityModule } from './common/identity/identity.module';
 import { MetricsModule } from './common/metrics/metrics.module';
 import { DatabaseModule } from './database/database.module';
+import { SecurityModule } from './common/security/security.module';
 import { RedisModule } from './redis/redis.module';
 import { HealthModule } from './health/health.module';
 import { ContractModule } from './contract/contract.module';
@@ -39,6 +40,7 @@ import { CatalogRepositoryModule } from './modules/m22-catalog-repository/catalo
 import { SourceResolverModule } from './modules/m02-source-resolver/source-resolver.module';
 import { RendererModule } from './modules/m03-renderer/renderer.module';
 import { ExecutorModule } from './modules/m05-executor/executor.module';
+import { ImageScanModule } from './modules/m05-executor/image-scan.module';
 import { StatusHealthModule } from './modules/m06-status-health/status-health.module';
 import { IntegrationModule } from './modules/m07-integration/integration.module';
 import { ForwardAuthModule } from './modules/m11-forward-auth/forward-auth.module';
@@ -46,6 +48,7 @@ import { CredentialBrokerModule } from './modules/m14-credential-broker/credenti
 import { TriggerIngressModule } from './modules/m23-trigger-ingress/trigger-ingress.module';
 import { Phase4EHandlers } from './contract/handlers/phase4e.handlers';
 import { Phase4FHandlers } from './contract/handlers/phase4f.handlers';
+import { Phase4GHandlers } from './contract/handlers/phase4g.handlers';
 import { IdentitySyncModule } from './modules/m08-identity-sync/identity-sync.module';
 import { AccessControlModule } from './modules/m09-access-control/access-control.module';
 import { PortalBffModule } from './modules/m10-portal-bff/portal-bff.module';
@@ -57,6 +60,7 @@ import { NotificationModule } from './modules/m20-notification/notification.modu
 import { BackupRestoreModule } from './modules/m16-backup-restore/backup-restore.module';
 import { RelayModule } from './modules/m24-sign-in-relay/relay.module';
 import { WorkflowEgressModule } from './modules/m25-workflow-egress/workflow-egress.module';
+import { ObservabilityModule } from './modules/m21-observability/observability.module';
 
 /**
  * The single composition root (ADR-BE-03). This is the only file allowed to see more than one
@@ -72,6 +76,8 @@ import { WorkflowEgressModule } from './modules/m25-workflow-egress/workflow-egr
     IdentityModule,
     MetricsModule,
     DatabaseModule,
+    // NFR-4.16: global so every role that can pull or build sees one allow-list.
+    SecurityModule,
     RedisModule,
     HealthModule,
     ContractModule,
@@ -83,6 +89,9 @@ import { WorkflowEgressModule } from './modules/m25-workflow-egress/workflow-egr
     SourceResolverModule,
     RendererModule,
     ExecutorModule,
+    // NFR-4.6: global because the retention sweep runs in the scheduler, which cannot import the
+    // executor without a cycle.
+    ImageScanModule,
     StatusHealthModule,
     IntegrationModule,
     ForwardAuthModule,
@@ -99,6 +108,7 @@ import { WorkflowEgressModule } from './modules/m25-workflow-egress/workflow-egr
     BackupRestoreModule,
     RelayModule,
     WorkflowEgressModule,
+    ObservabilityModule,
   ],
   providers: [
     RouteTableService,
@@ -133,6 +143,7 @@ import { WorkflowEgressModule } from './modules/m25-workflow-egress/workflow-egr
     Phase4DHandlers,
     Phase4EHandlers,
     Phase4FHandlers,
+    Phase4GHandlers,
     JobHandlers,
     {
       provide: OPERATION_GROUPS,
@@ -146,6 +157,7 @@ import { WorkflowEgressModule } from './modules/m25-workflow-egress/workflow-egr
         Phase4DHandlers,
         Phase4EHandlers,
         Phase4FHandlers,
+        Phase4GHandlers,
         JobHandlers,
       ],
       useFactory: (...groups: OperationGroup[]): readonly OperationGroup[] => groups,

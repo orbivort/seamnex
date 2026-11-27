@@ -8,8 +8,11 @@ import {
   BreakGlassSessionSchema,
   CapacitySnapshotSchema,
   LicenseGateSchema,
+  LicenseRecordSchema,
+  NativeFloorDecisionSchema,
   OperationsResponseSchema,
   PostureSummarySchema,
+  UpstreamObservationResultSchema,
 } from '@seamnex/domain';
 import type * as Http from '../../../src/http';
 import { queryKeys } from '../../../src/query-keys';
@@ -273,6 +276,49 @@ describe('useLicenses', () => {
   });
 });
 
+describe('useRecordLicenseReview', () => {
+  it('puts the review and returns the row the server derived from it', async () => {
+    const reviewed = { instanceId: 'inst-crm', status: 'cleared' };
+    recorder.request.mockResolvedValueOnce(reviewed);
+    governance.useRecordLicenseReview('inst-crm');
+    const mutation = lastMutation();
+    const body = {
+      licenseId: 'MIT',
+      obligations: ['Keep the copyright notice'],
+      resaleRestricted: false,
+      hostedServiceRestricted: false,
+      upstreamRef: 'https://example.test/crm/LICENSE',
+      acknowledgeUnknownLicence: false,
+      confirmNoObligations: false,
+    };
+
+    const result = await mutation.mutationFn?.(body);
+
+    // The instance is the address and the licence id is the subject; neither stands for the other.
+    expect(lastRequest()).toEqual({
+      path: '/licenses/inst-crm/review',
+      options: expect.objectContaining({ method: 'PUT', body, schema: LicenseRecordSchema }),
+    });
+    // ADR-BE-25: the dialog closes on the server's verdict rather than an optimistic guess.
+    expect(result).toBe(reviewed);
+  });
+
+  it('refreshes the register, the instance, the score and the chain the review lands in', () => {
+    governance.useRecordLicenseReview('inst-crm');
+    const mutation = lastMutation();
+
+    mutation.onSuccess?.({}, {});
+
+    // A verdict moves the ledger, the instance badge, the posture score and the audit chain.
+    expect(invalidatedKeys()).toEqual([
+      queryKeys.licenses,
+      queryKeys.instances,
+      queryKeys.posture,
+      queryKeys.audit,
+    ]);
+  });
+});
+
 describe('useSetHostedService', () => {
   it('flips the gate with a PUT and invalidates every view that shows it', async () => {
     governance.useSetHostedService('inst-crm');
@@ -516,6 +562,64 @@ describe('useRevealBreakGlass', () => {
     // shown once, for seconds — the leak the endpoint is shaped to avoid.
     expect(mutation.onSuccess).toBeUndefined();
     expect(recorder.invalidations).toEqual([]);
+  });
+});
+
+/**
+ * FR-2.12 / FR-4.7 — the on-demand observation pass.
+ *
+ * The screen offers `Observe now` because the scheduler's cadence is the platform's choice, not the
+ * operator's; the mutation is the same pass, so the answer it returns is the pass's own summary and
+ * the register it invalidates is the one the table reads.
+ */
+describe('useObservePatchRegister', () => {
+  it('runs the pass as a POST and refreshes the register and the trail', async () => {
+    governance.useObservePatchRegister();
+    const mutation = lastMutation();
+
+    await mutation.mutationFn?.(undefined);
+
+    expect(lastRequest()).toEqual({
+      path: '/patch-register/observe',
+      options: expect.objectContaining({
+        method: 'POST',
+        schema: UpstreamObservationResultSchema,
+      }),
+    });
+
+    mutation.onSuccess?.({}, undefined);
+    expect(invalidatedKeys()).toEqual([queryKeys.patches, queryKeys.audit]);
+  });
+});
+
+/**
+ * S-2 — the recorded decision that lowers the floor.
+ *
+ * The floor is served by `GET /posture`, so a success has to invalidate that read rather than patch
+ * a number into the cache: the payload also carries the shortfall and the decision's author.
+ */
+describe('useRecordNativeFloorDecision', () => {
+  it('posts the floor and its reason, then refreshes the posture read', async () => {
+    governance.useRecordNativeFloorDecision();
+    const mutation = lastMutation();
+    const body = {
+      floor: 4,
+      reason: 'Accepting four native deployments while the ERPNext migration runs.',
+    };
+
+    await mutation.mutationFn?.(body);
+
+    expect(lastRequest()).toEqual({
+      path: '/posture/native-floor/decision',
+      options: expect.objectContaining({
+        method: 'POST',
+        body,
+        schema: NativeFloorDecisionSchema,
+      }),
+    });
+
+    mutation.onSuccess?.({}, body);
+    expect(invalidatedKeys()).toEqual([queryKeys.posture, queryKeys.audit]);
   });
 });
 

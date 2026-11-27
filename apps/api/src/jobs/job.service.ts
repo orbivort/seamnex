@@ -38,6 +38,12 @@ export type CreateJobResult = {
 
 export const JOB_LOG_CHANNEL_PREFIX = 'seamnex:job:';
 
+/** The job graph a platform restore has to carry across the database it is restoring. */
+export type LiveControlRows = {
+  readonly job: Record<string, unknown>;
+  readonly steps: readonly Record<string, unknown>[];
+};
+
 /**
  * Job model (design §6.3, deliverable 1.4).
  *
@@ -384,6 +390,72 @@ export class JobService implements OnApplicationShutdown {
     return result.rowCount ?? 0;
   }
 
+  /**
+   * FR-1.36 — the running job's own rows, read *before* the platform database is replaced.
+   *
+   * A platform restore runs `pg_restore` over the database this job is recorded in, so the row the
+   * worker reads between stages disappears with it. `jsonb` rather than a typed shape on purpose: the
+   * snapshot is written back with `jsonb_populate_record`, so a column added by a later migration is
+   * carried without this file knowing its name — the alternative is a hand-written column list that
+   * silently drops data the first time the table changes.
+   */
+  async readLiveControlRows(jobId: string): Promise<LiveControlRows> {
+    const job = await this.pool.query<{ row: Record<string, unknown> }>(
+      'SELECT to_jsonb(j) AS row FROM deployment_job j WHERE j.id = $1',
+      [jobId],
+    );
+    const row = job.rows[0]?.row;
+    if (row === undefined)
+      throw new AppError({ code: 'NOT_FOUND', status: 404, detail: 'No such job.' });
+
+    const steps = await this.pool.query<{ row: Record<string, unknown> }>(
+      'SELECT to_jsonb(s) AS row FROM job_step s WHERE s.job_id = $1 ORDER BY s.seq',
+      [jobId],
+    );
+    return { job: row, steps: steps.rows.map((entry) => entry.row) };
+  }
+
+  /**
+   * FR-1.36 — put the running job back after the platform database was restored.
+   *
+   * Two things have to happen, and only the first is obvious:
+   *
+   *   1. the job and its steps are re-inserted, because the worker calls `get()` after every stage
+   *      and an absent row fails the very job performing the restore;
+   *   2. every job the *dump* left in a non-terminal state is settled as failed first. Those jobs
+   *      were active when the backup was taken, so they cannot be running now, and they would
+   *      otherwise hold the one-active-per-lane indexes forever — which makes `deployment_job_one_active_platform`
+   *      reject the job reinstated below. A restore that leaves every lane blocked is a platform
+   *      that cannot take another backup.
+   *
+   * Deliberately not audited per row: the restore's own `platform.restore.*` records are the trail,
+   * and this method runs inside the stage that writes them.
+   */
+  async reinstateAfterRestore(rows: LiveControlRows): Promise<void> {
+    await withTransaction(this.pool, async (tx) => {
+      await tx.query(
+        `UPDATE deployment_job
+            SET state = 'failed', finished_at = now(), error_code = 'RESTORE_REPLACED',
+                error_detail = 'The platform database was restored from a backup taken while this job was active; the job cannot continue.'
+          WHERE state IN ('queued', 'running')`,
+      );
+      await tx.query(
+        `INSERT INTO deployment_job
+         SELECT * FROM jsonb_populate_record(NULL::deployment_job, $1::jsonb)
+         ON CONFLICT (id) DO NOTHING`,
+        [JSON.stringify(rows.job)],
+      );
+      for (const step of rows.steps) {
+        await tx.query(
+          `INSERT INTO job_step
+           SELECT * FROM jsonb_populate_record(NULL::job_step, $1::jsonb)
+           ON CONFLICT (id) DO NOTHING`,
+          [JSON.stringify(step)],
+        );
+      }
+    });
+  }
+
   /** Idempotent: the scheduler and the Nest lifecycle hook both stop the queue. */
   async close(): Promise<void> {
     if (this.queueClosed) return;
@@ -413,6 +485,9 @@ export class JobService implements OnApplicationShutdown {
         },
         {
           jobId: queueJobId(job.lane, job.id),
+          // One attempt, on purpose: a BullMQ retry re-enters `process()` from the first stage, and a
+          // pipeline that failed at `apply` must never be replayed that way. Retries are a platform
+          // object instead — a new job referencing this one, classified and bounded (ADR-BE-34).
           attempts: 1,
           removeOnComplete: 500,
           removeOnFail: 1_000,

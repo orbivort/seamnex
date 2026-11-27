@@ -139,7 +139,12 @@ describe('settings', () => {
     const { settings } = await service.settings();
 
     expect(settings.restoreConcurrency).toBe(8);
-    expect(settings.auditRetentionDays).toBe(210);
+    /*
+     * NFR-4.10: the legacy months key converts 7 months to 210 days, which is below the twelve-month
+     * floor. Reading it as 210 would delete evidence the requirement says must exist, and rejecting
+     * the row would make the whole settings document unreadable — so it is read as the floor.
+     */
+    expect(settings.auditRetentionDays).toBe(365);
     expect(settings.sessionIdleMinutes).toBe(30);
     expect(settings.updatedAt).toBe('2026-02-01T00:00:00.000Z');
     expect(settings.updatedBy).toBe('bob');

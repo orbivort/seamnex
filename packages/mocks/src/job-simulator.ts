@@ -48,7 +48,13 @@ const LOG_TEMPLATES: Record<JobKind, string[]> = {
     'extracting volumes',
     'running smoke test',
   ],
-  export: ['building portable archive', 'writing manifest'],
+  // The pipeline's real order: dump, volumes, definition + manifest, then one tar.
+  export: [
+    'dumping database',
+    'archiving volumes',
+    'packing the portable archive',
+    'writing manifest',
+  ],
   prepull: ['pre-pulling image layers', 'layers cached'],
   scaffold: ['generating compose artefacts', 'validating compose policy', 'committing draft'],
   verify: ['restoring into a scratch stack', 'running the smoke test', 'recording evidence'],
@@ -62,6 +68,12 @@ const LOG_TEMPLATES: Record<JobKind, string[]> = {
     'restoring identity provider',
     'restoring control plane',
     'holding the gate for login verification',
+  ],
+  // The second tier of a platform restore: one instance at a time, after the operator's login.
+  'platform-restore-products': [
+    'queueing the product tier',
+    'restoring each instance from its newest backup',
+    'checking every deployment is running',
   ],
   synthetic: ['resolving the check', 'certifying the target'],
 };
@@ -110,6 +122,19 @@ function finishJob(job: Job, failed: boolean): void {
         delete state.statuses[instance.id];
       }
     } else {
+      /**
+       * FR-1.7: a successful upgrade applies the catalogue pin, so the instance afterwards reports
+       * that version as the one running and has nothing newer to offer. Leaving the old version in
+       * place made the demo contradict the job it had just reported as succeeded.
+       */
+      if (job.kind === 'upgrade') {
+        const pinned = state.catalog.find((item) => item.key === instance.entryKey)?.upstream
+          .latestVersion;
+        if (pinned !== undefined) {
+          instance.currentVersion = pinned;
+          instance.availableVersion = null;
+        }
+      }
       instance.state = 'ready';
       instance.ready = true;
       instance.stateReason = null;

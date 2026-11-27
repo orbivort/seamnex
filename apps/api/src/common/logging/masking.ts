@@ -20,14 +20,25 @@ const SENSITIVE_VALUE =
 
 /**
  * Free text is a second leak path: a job log line such as `client_secret=abc` has no key to match,
- * so the assignment is redacted in place. Both `key=value` and `"key": "value"` shapes are covered,
- * because that is how a container and a JSON payload respectively print a credential.
+ * so the assignment is redacted in place.
+ *
+ * Two shapes, because one colon rule masked prose: a key is followed by a value when it assigns one
+ * (`KEY=value` anywhere) or when it opens a line (an env file, a YAML or JSON dump). Matching any
+ * `…PASSWORD:` turned a diagnostic into nonsense — Compose's "required variable
+ * ORANGEHRM_DATABASE_ROOT_PASSWORD is missing a value" reached the job log as
+ * "MARIADB_ROOT_PASSWORD: ******** variable …", which reads as though a credential had been
+ * printed there and hides the word the operator needs.
  */
-const INLINE_ASSIGNMENT =
-  /([\w.-]*(?:secret|password|passwd|token|credential|authorization|api[-_]?key|private[-_]?key|hmac)[\w.-]*\s*(?:=|:)\s*)(?:"[^"]*"|'[^']*'|[^\s,;&]+)/gi;
+const CREDENTIAL_KEY_SOURCE = String.raw`[\w.-]*(?:secret|password|passwd|token|credential|authorization|api[-_]?key|private[-_]?key|hmac)[\w.-]*`;
+const VALUE_SOURCE = String.raw`(?:"[^"]*"|'[^']*'|[^\s,;&]+)`;
+const LINE_ASSIGNMENT = new RegExp(
+  `(^[ \\t]*${CREDENTIAL_KEY_SOURCE}[ \\t]*:[ \\t]*)${VALUE_SOURCE}`,
+  'gim',
+);
+const KEY_ASSIGNMENT = new RegExp(`(${CREDENTIAL_KEY_SOURCE}\\s*=\\s*)${VALUE_SOURCE}`, 'gi');
 
 export function maskText(value: string): string {
-  return value.replace(INLINE_ASSIGNMENT, `$1${MASK}`);
+  return value.replace(LINE_ASSIGNMENT, `$1${MASK}`).replace(KEY_ASSIGNMENT, `$1${MASK}`);
 }
 
 export function maskValue(value: string): string {

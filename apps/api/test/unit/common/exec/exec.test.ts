@@ -108,7 +108,9 @@ describe('spawnProcess', () => {
     child.emit('close', 0);
 
     const result = await done;
-    expect(result.stdout).toBe('abcde');
+    // The tail, not the head: a command's reason for failing is its last lines, and a window that
+    // kept the head reported a build's opening progress frame as the cause and discarded the error.
+    expect(result.stdout).toBe('fghij');
     expect(result.truncated).toBe(true);
   });
 
@@ -223,11 +225,50 @@ describe('runOrThrow', () => {
     expect((error as Error).message).toContain('ERROR: failed to solve: not found');
   });
 
-  it('falls back to the first stderr line, then the last stdout line, then no output', async () => {
-    const first = runOrThrow('a', []);
-    child.stderr.emit('data', Buffer.from('first line\nsecond line\n'));
+  it('reports the failing step, not the separator BuildKit prints last', async () => {
+    // The transcript a real `docker compose build --progress=plain` leaves behind: the reason is
+    // prefixed by its step number and the output ends with a rule.
+    const promise = runOrThrow('docker', ['compose', 'build', '--progress=plain']);
+    child.stderr.emit(
+      'data',
+      Buffer.from(
+        [
+          '#1 [internal] load build definition from Dockerfile',
+          '#12 [4/5] RUN apt-get update',
+          '------',
+          ' > exporting to image:',
+          '------',
+        ].join('\n') + '\n',
+      ),
+    );
+    child.stdout.emit(
+      'data',
+      Buffer.from(
+        '#12 ERROR: process "/bin/sh -c apt-get update" did not complete successfully: exit code: 100\n------\n',
+      ),
+    );
     child.emit('close', 1);
-    await expect(first).rejects.toThrow(/first line/);
+
+    await expect(promise).rejects.toThrow(/apt-get update/);
+  });
+
+  it('never reports a separator as the reason', async () => {
+    const promise = runOrThrow('docker', ['build']);
+    child.stdout.emit('data', Buffer.from('#5 done\n------\n'));
+    child.emit('close', 1);
+
+    await expect(promise).rejects.toThrow(/docker exited with 1: #5 done/);
+  });
+
+  it('falls back to the conclusion of a stream, then no output', async () => {
+    const first = runOrThrow('a', []);
+    // BuildKit opens stderr with a progress frame; the last line is the nearer thing to a reason.
+    child.stderr.emit(
+      'data',
+      Buffer.from('Image seamnex/x Building\n#7 [3/4] RUN apt-get update\n'),
+    );
+    child.emit('close', 1);
+    await expect(first).rejects.toThrow(/RUN apt-get update/);
 
     const second = runOrThrow('b', []);
     child.stdout.emit('data', Buffer.from('progress\nconclusion\n'));
@@ -245,7 +286,7 @@ describe('runOrThrow', () => {
     child.stdout.emit('data', Buffer.from('efgh'));
     child.emit('close', 0);
 
-    await expect(promise).resolves.toMatchObject({ truncated: true, stdout: 'abcd' });
+    await expect(promise).resolves.toMatchObject({ truncated: true, stdout: 'efgh' });
   });
 });
 

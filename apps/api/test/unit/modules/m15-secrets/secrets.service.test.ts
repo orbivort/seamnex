@@ -50,7 +50,7 @@ function setup(routes: Parameters<typeof fakeDb>[0] = []) {
     SEAMNEX_ROLE: 'api',
   } as unknown as AppConfig;
   const service = new EnvelopeSecretsService(db.pool, config, audit as never, metrics as never);
-  return { db, audit, metrics, service, rootKey };
+  return { db, audit, metrics, service, rootKey, path };
 }
 
 /** A row shaped like `secret_version`, sealed under the setup's root key. */
@@ -507,5 +507,50 @@ describe('describe and find', () => {
   it('returns null for a secret that does not exist', async () => {
     const { service } = setup([['FROM secret s', []]]);
     await expect(service.find('instance', 'i1', 'k')).resolves.toBeNull();
+  });
+});
+
+/**
+ * FR-1.35 — the backup manifest records which root key sealed the dump, and a restore that needs a
+ * key refuses for want of the key rather than for want of a backup. That only works if the id is the
+ * key's *identifier*, and if a role that never holds a secret can still be backed up: a missing or
+ * malformed key file is an absence in the manifest, not a failed backup.
+ */
+describe('rootKeyId', () => {
+  it('names the key the store seals under, without handing out the key', () => {
+    const { service, rootKey } = setup();
+
+    expect(service.rootKeyId()).toBe(rootKey.id);
+    expect(service.rootKeyId()).toMatch(/^[0-9a-f]{16}$/);
+    // The id is derived from the key; the manifest is an artefact operators copy around.
+    expect(service.rootKeyId()).not.toBe(rootKey.key.toString('base64'));
+  });
+
+  it('reports no key id when the role has no root key file, so its backup is still valid', () => {
+    const { service, path } = setup();
+    rmSync(path, { force: true });
+
+    expect(service.rootKeyId()).toBeNull();
+  });
+
+  it('reports no key id for a file that does not hold a key', () => {
+    const { service, path } = setup();
+    writeFileSync(path, 'not-a-key', 'utf8');
+
+    expect(service.rootKeyId()).toBeNull();
+  });
+
+  /*
+   * The key is loaded lazily and kept, so every version written by one process is sealed under one
+   * key: re-reading the file per call would let a mid-flight rotation split a process's writes
+   * between two keys, and only half of them would open afterwards.
+   */
+  it('loads the key once and keeps it for the life of the process', () => {
+    const { service, path, rootKey } = setup();
+
+    expect(service.rootKeyId()).toBe(rootKey.id);
+
+    rmSync(path, { force: true });
+    expect(service.rootKeyId()).toBe(rootKey.id);
   });
 });

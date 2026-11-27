@@ -37,7 +37,11 @@ describe('append', () => {
       ['INSERT INTO audit_event', []],
     ]);
     const m = metrics();
-    const service = new PostgresAuditService(db.pool, m as never);
+    const service = new PostgresAuditService(
+      db.pool,
+      m as never,
+      { sign: vi.fn(), describe: vi.fn() } as never,
+    );
 
     const thrown = await service.append(INPUT, db.client).catch((error: unknown) => error);
 

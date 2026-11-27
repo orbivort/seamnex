@@ -15,10 +15,12 @@ export {
   isAbortError,
   lastKnownStatusAt,
   onUnauthorized,
+  openDownload,
   openEventStream,
   request,
   resetTransport,
   toProblem,
+  type DownloadHandle,
   type RequestOptions,
 } from './http';
 export {
@@ -69,6 +71,7 @@ export * from './hooks/job-stream';
 export * from './hooks/backups';
 export * from './hooks/workflows';
 export * from './hooks/governance';
+export * from './hooks/security';
 export * from './hooks/admin';
 export * from './hooks/recovery';
 export * from './hooks/privacy';

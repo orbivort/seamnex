@@ -30,7 +30,13 @@ export function OverviewTab({ instance }: { instance: InstanceDetail }) {
                 { label: 'Publish model', value: instance.route.publishModel },
                 {
                   label: 'TLS',
-                  value: instance.route.tlsMode === 'acme' ? 'ACME wildcard' : 'Internal CA',
+                  /*
+                   * The edge issues one certificate per product host (HTTP-01), not a wildcard: say
+                   * what the configuration does, so the operator is not sent looking for a wildcard
+                   * record that no resolver asked for (ISSUE-07, ADR-BE-39).
+                   */
+                  value:
+                    instance.route.tlsMode === 'acme' ? 'ACME certificate' : 'Internal certificate',
                 },
                 { label: 'Profile', value: instance.profileKey },
                 { label: 'Owner', value: instance.owner.name },

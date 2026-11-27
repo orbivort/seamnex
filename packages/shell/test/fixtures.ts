@@ -82,6 +82,7 @@ export function logoutResponse(overrides: Partial<LogoutResponse> = {}): LogoutR
   return {
     signedOutAt: '2026-01-01T09:30:00.000Z',
     residualSessions: [],
+    singleLogout: { identityProviderEnded: true, products: [] },
     statement: 'Your platform session has ended.',
     ...overrides,
   };

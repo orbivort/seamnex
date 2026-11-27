@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { CAPABILITY_MATRIX, type PlatformRole } from '@seamnex/domain';
 import type {
   Backup,
@@ -11,16 +11,22 @@ import type {
 import type { Pool } from 'pg';
 import { withTransaction } from '@seamnex/db';
 import { PG_POOL } from '../../database/database.module';
+import { APP_CONFIG } from '../../config/config.module';
+import type { AppConfig } from '../../config/config';
 import { AppError } from '../../common/problem/app-error';
-import { DockerEngineClient } from '../../common/docker/docker.client';
 import { AUDIT_SERVICE, type AuditService } from '../m17-audit/audit.contract';
 import {
   INTEGRATION_SERVICE,
   type IntegrationService,
 } from '../m07-integration/integration.contract';
 import { OUTBOX_SERVICE, type Outbox } from '../m17-audit/audit.contract';
+import {
+  ACCESS_CONTROL_SERVICE,
+  type AccessControlService,
+} from '../m09-access-control/access-control.contract';
 import { JobService } from '../../jobs/job.service';
 import { PipelineRegistry } from '../../jobs/pipeline-registry';
+import { describeArtefact, readPlatformManifest } from './platform-manifest';
 import type { BackupRestoreService, ScheduleInput } from './backup-restore.contract';
 
 type BackupRow = {
@@ -77,12 +83,16 @@ const PLATFORM_PHASE_LABELS: Record<PlatformPhase, string> = {
 };
 
 const PLATFORM_PHASE_DETAIL: Record<PlatformPhase, string> = {
-  preparing: 'Scratch stack prepared on the clean host; nothing is published yet.',
+  preparing:
+    'Every artefact in the set is loaded, decrypted and checked against its recorded digest.',
   idp: 'Realm, database and configuration restored first; no product route is reachable.',
-  control_plane: 'Entitlements, audit, job history, workflow definitions and keys restored.',
+  control_plane:
+    'Platform database, edge routes, catalogue fallback and the audit chain, verified against the exported anchor.',
   login_verified: 'An administrative login succeeded; only now may product routes be republished.',
-  products: 'Product instances restored in parallel at the configured concurrency.',
-  verify: 'Smoke tests per deployment: admin login and record count within tolerance.',
+  products:
+    'Each instance restored from its newest backup in parallel at the configured concurrency.',
+  verify:
+    'Every restored deployment is running, the identity provider answers, and the run is complete.',
   complete: 'Gate released; routes republished with their previous publication state.',
 };
 
@@ -100,6 +110,12 @@ function platformTimeline(run: RestoreRow): RestorePhaseStatus[] {
     : ((run.phase as PlatformPhase | null) ?? 'preparing');
   const currentIndex = Math.max(0, PLATFORM_PHASE_ORDER.indexOf(currentPhase));
   const failedReason = typeof run.detail.failedReason === 'string' ? run.detail.failedReason : null;
+  // The control-plane stage can legitimately leave the platform database to an operator. That is a
+  // fact about this run, not about the phase, so it replaces nothing and is appended: a cell that
+  // said "restored" beside an outstanding step was the lie this change removes.
+  const operatorSteps = Array.isArray(run.detail.operatorStepRequired)
+    ? run.detail.operatorStepRequired.filter((step): step is string => typeof step === 'string')
+    : [];
 
   return PLATFORM_PHASE_ORDER.map((phase, index) => {
     const state: RestorePhaseStatus['state'] = failed
@@ -116,6 +132,12 @@ function platformTimeline(run: RestoreRow): RestorePhaseStatus[] {
             : 'running'
           : 'pending';
 
+    const operatorNote =
+      phase === 'control_plane' && operatorSteps.includes('platform_database')
+        ? 'The platform database was not restored by this run: an operator must run pnpm restore:platform-db with owner credentials, and the run cannot complete until they have.'
+        : null;
+    const failureNote = state === 'failed' ? failedReason : null;
+
     return {
       phase,
       label: PLATFORM_PHASE_LABELS[phase],
@@ -125,12 +147,33 @@ function platformTimeline(run: RestoreRow): RestorePhaseStatus[] {
         state === 'succeeded' && phase === 'complete'
           ? (run.finished_at?.toISOString() ?? null)
           : null,
-      detail:
-        state === 'failed' && failedReason !== null
-          ? `${PLATFORM_PHASE_DETAIL[phase]} ${failedReason}`
-          : PLATFORM_PHASE_DETAIL[phase],
+      detail: [PLATFORM_PHASE_DETAIL[phase], operatorNote, failureNote]
+        .filter((part): part is string => typeof part === 'string' && part.length > 0)
+        .join(' '),
     };
   });
+}
+
+/**
+ * FR-1.35 — what the newest *finished* platform set actually holds.
+ *
+ * The screen used to render five literal entries marked `included: true`; nothing connected them to
+ * the artefacts the runner uploaded. The list now comes from the manifest of the newest successful
+ * platform backup, and an entry is `included` only when that manifest carries an object key for it.
+ * No finished set means no claims: the list is empty and the screen says so.
+ */
+function recoveryContents(newest: BackupRow | undefined): RecoveryOverview['contents'] {
+  if (newest === undefined) return [];
+  const manifest = readPlatformManifest(newest.manifest);
+  if (manifest === null) return [];
+  return manifest.artefacts.map((artefact) => ({
+    label: artefact.label,
+    // The key id is not a secret and is what an operator needs to fetch the right key from escrow.
+    detail: describeArtefact(artefact, { rootKeyId: manifest.rootKeyId }),
+    // The manifest already refuses to set this without an object key; checked again so a projection
+    // can never be the thing that turns an unproven artefact into an `in`.
+    included: artefact.included && (artefact.objectKey ?? '').length > 0,
+  }));
 }
 
 /**
@@ -149,8 +192,19 @@ export class PostgresBackupRestoreService implements BackupRestoreService {
     @Inject(OUTBOX_SERVICE) private readonly outbox: Outbox,
     @Inject(JobService) private readonly jobs: JobService,
     @Inject(PipelineRegistry) private readonly pipelines: PipelineRegistry,
-    /** Used only to bring back the product containers a restore had to stop. */
-    @Inject(DockerEngineClient) private readonly docker: DockerEngineClient,
+    /**
+     * The fan-out is recorded on the run and the product tier reads the row, not the environment.
+     *
+     * NFR-3.9 / DD-15: the operator's setting is the authority, because the console offers it and an
+     * operator who raises it expects the next restore to use it. `SEAMNEX_RESTORE_CONCURRENCY` is
+     * the fallback for a host whose settings row cannot be read — never a silent default that
+     * contradicts what the settings screen shows.
+     */
+    @Inject(APP_CONFIG) private readonly config: AppConfig,
+    /** M09 owns `settings`; optional so a graph without the module still takes the environment value. */
+    @Optional()
+    @Inject(ACCESS_CONTROL_SERVICE)
+    private readonly access?: AccessControlService,
   ) {}
 
   async backups(instanceId: string): Promise<Backup[]> {
@@ -238,10 +292,12 @@ export class PostgresBackupRestoreService implements BackupRestoreService {
         remediation: 'Use the platform restore endpoint for a platform-tier backup.',
       });
     }
+    const fanOut = await this.restoreConcurrency();
     const run = await this.pool.query<{ id: string }>(
-      `INSERT INTO restore_run (backup_id, phase, state, justification, concurrency)
-       VALUES ($1, 'preparing', 'running', $2, $3) RETURNING id`,
-      [backupId, justification, 4],
+      `INSERT INTO restore_run (backup_id, phase, state, justification, concurrency, detail)
+       VALUES ($1, 'preparing', 'running', $2, $3, jsonb_build_object('concurrencySource', $4::text))
+       RETURNING id`,
+      [backupId, justification, fanOut.value, fanOut.source],
     );
     const restoreId = run.rows[0]?.id;
     if (restoreId === undefined) throw internal('The restore run was not created.');
@@ -250,6 +306,34 @@ export class PostgresBackupRestoreService implements BackupRestoreService {
       restoreId,
     });
     return { restoreId, jobId: job };
+  }
+
+  /**
+   * NFR-3.9 / DD-15 — the fan-out a new run gets, and where it came from.
+   *
+   * The stored setting wins, because that is the number the operator changed in the console; the
+   * environment value is the fallback for a host whose settings cannot be read. Recording the source
+   * on the run is what makes "the setting was honoured" checkable after the fact instead of assumed.
+   */
+  private async restoreConcurrency(): Promise<{
+    value: number;
+    source: 'settings' | 'environment';
+  }> {
+    if (this.access !== undefined) {
+      try {
+        const { settings } = await this.access.settings();
+        return { value: clampRestoreConcurrency(settings.restoreConcurrency), source: 'settings' };
+      } catch (error) {
+        this.logger.warn(
+          { err: error instanceof Error ? error.message : String(error) },
+          'restore concurrency: settings are unreadable, so the environment value is used',
+        );
+      }
+    }
+    return {
+      value: clampRestoreConcurrency(this.config.SEAMNEX_RESTORE_CONCURRENCY),
+      source: 'environment',
+    };
   }
 
   async restoreDrill(instanceId: string, actorId: string): Promise<RestoreDrill> {
@@ -352,6 +436,9 @@ export class PostgresBackupRestoreService implements BackupRestoreService {
       });
     }
 
+    // Read before the gate closes: the settings document is M09's, and the transaction below holds
+    // the audit chain and the route gate — a settings read has no business inside it.
+    const fanOut = await this.restoreConcurrency();
     let restoreId: string | null = null;
     try {
       restoreId = await withTransaction(this.pool, async (tx) => {
@@ -367,9 +454,10 @@ export class PostgresBackupRestoreService implements BackupRestoreService {
           payload: { reason: 'platform-restore', gated: true },
         });
         const run = await tx.query<{ id: string }>(
-          `INSERT INTO restore_run (backup_id, phase, state, justification, concurrency)
-           VALUES ($1, 'preparing', 'running', $2, 4) RETURNING id`,
-          [backupId, justification],
+          `INSERT INTO restore_run (backup_id, phase, state, justification, concurrency, detail)
+           VALUES ($1, 'preparing', 'running', $2, $3, jsonb_build_object('concurrencySource', $4::text))
+           RETURNING id`,
+          [backupId, justification, fanOut.value, fanOut.source],
         );
         return run.rows[0]?.id ?? null;
       });
@@ -412,8 +500,14 @@ export class PostgresBackupRestoreService implements BackupRestoreService {
   }
 
   async recoveryOverview(): Promise<RecoveryOverview> {
-    const [backups, drills, runs] = await Promise.all([
-      this.pool.query<BackupRow>(`SELECT * FROM backup ORDER BY started_at DESC LIMIT 25`),
+    const [backups, drills, runs, platformSet] = await Promise.all([
+      // The register is the platform recovery domain. Listing every `backup` row put product
+      // captures under "Platform-state backups": an operator could pick one in the restore dialog
+      // (which `platformRestore()` then refuses with a 422), and a product capture whose job failed
+      // sat there as `running · 0 B` forever, because that screen cannot settle a product row.
+      this.pool.query<BackupRow>(
+        `SELECT * FROM backup WHERE kind = 'platform' ORDER BY started_at DESC LIMIT 25`,
+      ),
       this.pool.query<{
         id: string;
         instance_id: string | null;
@@ -425,6 +519,12 @@ export class PostgresBackupRestoreService implements BackupRestoreService {
         `SELECT id, instance_id, performed_at, smoke_test, passed, evidence_url FROM restore_drill ORDER BY performed_at DESC LIMIT 25`,
       ),
       this.platformRuns(10),
+      // The newest finished platform set, asked separately rather than found in the register window:
+      // `lastBackupAt` and the "what the backup contains" panel must describe a platform set even
+      // when 25 captures have pushed it out of the list.
+      this.pool.query<BackupRow>(
+        `SELECT * FROM backup WHERE kind = 'platform' AND state = 'succeeded' ORDER BY started_at DESC LIMIT 1`,
+      ),
     ]);
     const gate = await this.platformRestoreStatus();
     // "Last verified restore" means a restore whose administrative login was proven — not a backup
@@ -448,23 +548,10 @@ export class PostgresBackupRestoreService implements BackupRestoreService {
         evidenceUrl: row.evidence_url ?? '',
       })),
       gate: gate.gate,
-      contents: [
-        { label: 'Platform database', detail: 'pg_dump --format=custom', included: true },
-        {
-          label: 'Identity provider',
-          detail: 'Keycloak database dump plus realm export',
-          included: true,
-        },
-        {
-          label: 'Edge configuration',
-          detail: 'Traefik dynamic configuration and acme.json',
-          included: true,
-        },
-        { label: 'Audit anchor', detail: 'audit_anchor rows', included: true },
-        { label: 'Catalogue repository', detail: 'bare clone of the working tree', included: true },
-      ],
-      lastBackupAt:
-        backups.rows.find((row) => row.state === 'succeeded')?.finished_at?.toISOString() ?? null,
+      contents: recoveryContents(platformSet.rows[0]),
+      // The newest *platform* set, not the newest row in the window: a product capture finishing a
+      // minute ago is not "last backup" on a screen about platform state.
+      lastBackupAt: platformSet.rows[0]?.finished_at?.toISOString() ?? null,
       lastVerifiedRestoreAt: lastVerified?.finishedAt ?? null,
     };
   }
@@ -473,6 +560,11 @@ export class PostgresBackupRestoreService implements BackupRestoreService {
    * The gate opens on evidence, not on a timer: an authenticated platform operator polling the
    * restore status after the IdP came back is the proof FR-1.36 asks for. A restore whose gate never
    * opens stays `failed` and visible, which is the correct outcome for a broken identity provider.
+   *
+   * This used to write `succeeded` here. It no longer can, and that is the point of the change: the
+   * products have not been restored yet at this moment, so the run moves to the product tier and only
+   * the `verify` stage of *that* job may complete it. The login proves the identity provider; it
+   * proves nothing about the eleven deployments still waiting to be brought back.
    */
   async openGateAfterLogin(
     actorId: string,
@@ -481,22 +573,19 @@ export class PostgresBackupRestoreService implements BackupRestoreService {
     const allowed = CAPABILITY_MATRIX['recovery.manage'][role as PlatformRole] !== 'none';
     if (!allowed) return { opened: false, reason: 'the caller cannot manage recovery' };
 
-    const pending = await this.pool.query<{ id: string }>(
-      `SELECT id FROM restore_run
+    const pending = await this.pool.query<{ id: string; backup_id: string }>(
+      `SELECT id, backup_id FROM restore_run
         WHERE state = 'running' AND phase = 'login_verified' AND login_verified_at IS NULL
         ORDER BY started_at DESC LIMIT 1`,
     );
-    const runId = pending.rows[0]?.id;
-    if (runId === undefined) return { opened: false, reason: 'no restore is waiting for a login' };
+    const run = pending.rows[0];
+    if (run === undefined) return { opened: false, reason: 'no restore is waiting for a login' };
 
-    const stopped = await withTransaction(this.pool, async (tx) => {
+    await withTransaction(this.pool, async (tx) => {
       await this.audit.lockChain(tx);
-      const run = await tx.query<{ detail: Record<string, unknown> }>(
-        `UPDATE restore_run
-            SET login_verified_at = now(), state = 'succeeded', phase = 'complete', finished_at = now()
-          WHERE id = $1
-          RETURNING detail`,
-        [runId],
+      await tx.query(
+        `UPDATE restore_run SET login_verified_at = now(), phase = 'products' WHERE id = $1`,
+        [run.id],
       );
       // `published` is the operator's decision, not the restore's. Republishing everything here
       // overrode a route that was deliberately unpublished before the restore; only the gate moves.
@@ -513,47 +602,68 @@ export class PostgresBackupRestoreService implements BackupRestoreService {
           actorType: 'user',
           actorId,
           targetType: 'restore_run',
-          targetId: runId,
+          targetId: run.id,
           outcome: 'success',
-          detail: { role },
+          detail: { role, resume: 'platform-restore-products' },
         },
         tx,
       );
-      const detail = run.rows[0]?.detail ?? {};
-      return Array.isArray(detail.stoppedContainers)
-        ? detail.stoppedContainers.filter((id): id is string => typeof id === 'string')
-        : [];
     });
 
-    // The control-plane phase has to stop every product. A restore that publishes the routes and
-    // leaves those containers down is a complete outage reported as a success.
-    let restarted = 0;
-    for (const containerId of stopped) {
-      await this.docker
-        .start(containerId)
-        .then(() => {
-          restarted += 1;
-        })
-        .catch(() => undefined);
+    // The product tier is a second job because the login sits between the tiers and no stage can wait
+    // for a human (FR-1.36). Queueing it here is what makes `products` and `verify` real phases
+    // rather than labels.
+    try {
+      const jobId = await this.createJob('platform-restore-products', null, actorId, {
+        backupId: run.backup_id,
+        restoreId: run.id,
+        label: `Platform restore ${run.id} — products`,
+        summary:
+          'Restore each instance from its newest backup in parallel, then verify every deployment.',
+      });
+      return {
+        opened: true,
+        reason: `restore ${run.id} verified by an administrative login; the product tier is queued as job ${jobId}`,
+      };
+    } catch (error) {
+      // The gate is open and the login is recorded, so this is not a failure of the identity
+      // provider — but the run cannot reach `complete` without the product tier, and saying the
+      // restore succeeded would be the defect this whole path exists to remove.
+      const message =
+        error instanceof Error ? error.message : 'the product tier could not be queued';
+      /*
+       * The run is settled `failed`, not left `running`.
+       *
+       * It was left running on the reasoning that the tier could still be queued by hand. Nothing
+       * can move it: the only writer of `products -> verify` is the job that was never created, the
+       * console has no "abandon run" control, and a `running` platform run makes `platformRestore()`
+       * refuse every later restore — so one bad queue turned a recovery into a dead end. FR-1.36 is
+       * explicit that a restore which cannot restore the parts it promised is reported failed with
+       * the instruction the operator needs, and a retry is that instruction.
+       */
+      await this.pool.query(
+        `UPDATE restore_run
+            SET state = 'failed', phase = 'failed', finished_at = now(),
+                detail = detail || jsonb_build_object('productTierError', $2::text)
+                              || jsonb_build_object('failedReason', $2::text)
+                              || jsonb_build_object('failedPhase', 'products')
+          WHERE id = $1 AND state = 'running'`,
+        [run.id, message],
+      );
+      await this.audit.append({
+        action: 'platform.restore.failed',
+        actorType: 'service',
+        actorId: 'backup-restore',
+        targetType: 'restore_run',
+        targetId: run.id,
+        outcome: 'failure',
+        detail: { message, phase: 'products', queue: 'platform-restore-products' },
+      });
+      return {
+        opened: true,
+        reason: `restore ${run.id} verified by an administrative login, but the product tier could not be queued: ${message}. The run is failed; start the restore again once the queue accepts the tier.`,
+      };
     }
-    if (stopped.length > 0) {
-      await this.audit
-        .append({
-          action: 'platform.restore.products_started',
-          actorType: 'service',
-          actorId: 'backup-runner',
-          targetType: 'restore_run',
-          targetId: runId,
-          outcome: restarted === stopped.length ? 'success' : 'failure',
-          detail: { restarted, stopped: stopped.length },
-        })
-        .catch(() => undefined);
-    }
-
-    return {
-      opened: true,
-      reason: `restore ${runId} verified by an administrative login; ${restarted}/${stopped.length} product container(s) restarted`,
-    };
   }
 
   async tickSchedules(): Promise<number> {
@@ -786,6 +896,23 @@ function internal(detail: string): AppError {
     detail,
     remediation: 'Retry; nothing was applied.',
   });
+}
+
+/**
+ * DD-15 — the design's floor and ceiling for a portfolio restore.
+ *
+ * The database trigger bounds the setting and the config schema bounds the environment, so this is
+ * a third guard rather than the first: a value that reached here from a restored dump written before
+ * either bound existed must not be able to make the run serial or over-subscribe the host.
+ */
+const RESTORE_CONCURRENCY_FLOOR = 4;
+const RESTORE_CONCURRENCY_CEILING = 12;
+
+function clampRestoreConcurrency(value: number): number {
+  return Math.min(
+    RESTORE_CONCURRENCY_CEILING,
+    Math.max(RESTORE_CONCURRENCY_FLOOR, Math.trunc(value)),
+  );
 }
 
 function cadenceOf(schedule: string): 'off' | 'daily' | 'weekly' | 'monthly' {

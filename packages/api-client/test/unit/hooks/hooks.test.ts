@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AdminCredentialSchema,
+  InstanceLogsSchema,
   NodeFieldsSchema,
   NodeSampleSchema,
+  ObservabilityReportSchema,
   RelayProvisionReportSchema,
 } from '@seamnex/domain';
 import { queryKeys } from '../../../src/query-keys';
@@ -24,6 +26,7 @@ const recorded = vi.hoisted(() => ({
     queryFn?: (ctx: { signal?: AbortSignal | undefined; pageParam?: unknown }) => unknown;
     enabled?: boolean;
     retry?: boolean;
+    refetchOnWindowFocus?: boolean;
     refetchInterval?: number | false | ((query: { state: { data: unknown } }) => number | false);
   }[],
   mutations: [] as {
@@ -66,6 +69,12 @@ vi.mock('@tanstack/react-query', () => ({
   useMutation: (options: (typeof recorded.mutations)[number]) => {
     recorded.mutations.push(options);
     return {};
+  },
+  // `useQueries` is a fan-out: each declared query is recorded like a `useQuery` one, so a test can
+  // assert the per-entry key and the gate the hook applied to it.
+  useQueries: (options: { queries: (typeof recorded.queries)[number][] }) => {
+    recorded.queries.push(...options.queries);
+    return [];
   },
   // The real helper is an identity marker consumed by TanStack; the hooks only pass it through.
   keepPreviousData: (previous: unknown) => previous,
@@ -276,6 +285,7 @@ describe('console hooks', () => {
       ['useAuditProof', [1, false]],
       ['useExportAudit', []],
       ['useLicenses', []],
+      ['useRecordLicenseReview', ['inst-crm']],
       ['useSetHostedService', ['inst-crm']],
       ['usePatchRegister', []],
       ['usePosture', []],
@@ -299,6 +309,9 @@ describe('console hooks', () => {
       ['useInstanceEnv', ['inst-crm']],
       ['useDrift', ['inst-crm']],
       ['useInstanceBackups', ['inst-crm']],
+      ['useInstanceExports', ['inst-crm']],
+      ['useInstanceExports', ['inst-crm', { enabled: false }]],
+      ['useInstanceExports', ['']],
       ['useInstancePlan', ['inst-crm', 'deploy']],
       ['useInstancePlan', ['inst-crm', null]],
       ['useContainerLogs', ['inst-crm', 'abc']],
@@ -445,6 +458,139 @@ describe('console hooks', () => {
   });
 });
 
+describe('environment profile hooks', () => {
+  it('lists profiles under their own key and runs the declared read', async () => {
+    hooks['useEnvProfiles']?.();
+
+    const list = recorded.queries[0];
+    expect(list?.queryKey).toEqual(queryKeys.envProfiles);
+    await list?.queryFn?.({ signal: undefined });
+
+    expect(recorded.request).toHaveBeenCalledWith('/env-profiles', {
+      schema: expect.anything(),
+      signal: undefined,
+    });
+  });
+
+  it('creates, renames, re-values and deletes a profile, refreshing every plan that reads it', async () => {
+    hooks['useCreateEnvProfile']?.();
+    hooks['usePatchEnvProfile']?.();
+    hooks['useReplaceEnvProfileValues']?.();
+    hooks['useDeleteEnvProfile']?.();
+
+    const [create, patch, values, remove] = recorded.mutations;
+
+    await create?.mutationFn?.({
+      key: 'production-eu',
+      name: 'Production EU',
+      target: 'production',
+    });
+    expect(recorded.request).toHaveBeenLastCalledWith('/env-profiles', {
+      schema: expect.anything(),
+      method: 'POST',
+      body: { key: 'production-eu', name: 'Production EU', target: 'production' },
+    });
+
+    // An omitted field is "leave it alone", never a reset: only the edited fact is sent.
+    await patch?.mutationFn?.({ key: 'production-eu', name: 'Production (EU)' });
+    expect(recorded.request).toHaveBeenLastCalledWith('/env-profiles/production-eu', {
+      schema: expect.anything(),
+      method: 'PATCH',
+      body: { name: 'Production (EU)' },
+    });
+    await patch?.mutationFn?.({ key: 'production-eu', target: 'staging' });
+    expect(recorded.request).toHaveBeenLastCalledWith('/env-profiles/production-eu', {
+      schema: expect.anything(),
+      method: 'PATCH',
+      body: { target: 'staging' },
+    });
+    // Nothing to change is an empty patch, not a value write.
+    await patch?.mutationFn?.({ key: 'production-eu' });
+    expect(recorded.request).toHaveBeenLastCalledWith('/env-profiles/production-eu', {
+      schema: expect.anything(),
+      method: 'PATCH',
+      body: {},
+    });
+
+    await values?.mutationFn?.({
+      key: 'production-eu',
+      values: [
+        { varName: 'ADMIN_EMAIL', value: 'ops@example.test' },
+        { varName: 'DB_PASSWORD', secretRef: 'prod-db-password' },
+        { varName: 'LEGACY_FLAG', value: null },
+      ],
+    });
+    expect(recorded.request).toHaveBeenLastCalledWith('/env-profiles/production-eu/values', {
+      schema: expect.anything(),
+      method: 'PUT',
+      body: {
+        values: [
+          { varName: 'ADMIN_EMAIL', value: 'ops@example.test' },
+          { varName: 'DB_PASSWORD', secretRef: 'prod-db-password' },
+          { varName: 'LEGACY_FLAG', value: null },
+        ],
+      },
+    });
+
+    await remove?.mutationFn?.('production-eu');
+    expect(recorded.request).toHaveBeenLastCalledWith('/env-profiles/production-eu', {
+      schema: expect.anything(),
+      method: 'DELETE',
+    });
+
+    create?.onSuccess?.({}, undefined);
+    // A saved value changes the resolved plan, the audit trail and the instance list that pins the
+    // profile; refreshing only the profile list would leave a stale plan on screen.
+    expect(recorded.invalidations).toEqual([
+      { queryKey: queryKeys.envProfiles },
+      { queryKey: queryKeys.catalog },
+      { queryKey: queryKeys.audit },
+      { queryKey: queryKeys.instances },
+    ]);
+  });
+
+  it('files a change request instead of pretending a read-only role can save', async () => {
+    hooks['useRequestProfileChange']?.();
+
+    const mutation = recorded.mutations[0];
+    await mutation?.mutationFn?.({
+      key: 'production-eu',
+      justification: 'the staging DSN must point at the staging database',
+    });
+
+    expect(recorded.request).toHaveBeenCalledWith('/env-profiles/production-eu/requests', {
+      schema: expect.anything(),
+      method: 'POST',
+      body: { justification: 'the staging DSN must point at the staging database' },
+    });
+
+    mutation?.onSuccess?.({}, undefined);
+    expect(recorded.invalidations).toEqual([
+      { queryKey: queryKeys.accessRequests },
+      { queryKey: queryKeys.audit },
+    ]);
+  });
+
+  it('fans the declared variable schemas out over the catalog under the entry key', async () => {
+    hooks['useEnvSchemas']?.(['D01-01', '', 'D02-01']);
+
+    expect(recorded.queries.map((query) => JSON.stringify(query.queryKey))).toEqual([
+      JSON.stringify(queryKeys.envSchema('D01-01')),
+      JSON.stringify(queryKeys.envSchema('')),
+      JSON.stringify(queryKeys.envSchema('D02-01')),
+    ]);
+    // An entry with no key is not a catalog read; the screen shows the declaration as unavailable.
+    expect(recorded.queries.map((query) => query.enabled)).toEqual([true, false, true]);
+    // A failed declaration is reported, not retried into a permanent spinner.
+    expect(recorded.queries.map((query) => query.retry)).toEqual([false, false, false]);
+
+    await recorded.queries[0]?.queryFn?.({ signal: undefined });
+    expect(recorded.request).toHaveBeenCalledWith('/catalog/D01-01/env-schema', {
+      schema: expect.anything(),
+    });
+  });
+});
+
 describe('deploy preview gating', () => {
   it('waits for an entry and a usable slug before asking for a verdict', () => {
     hooks['useDeployPreview']?.({ entryKey: 'D01-01', slug: 'c' });
@@ -455,7 +601,7 @@ describe('deploy preview gating', () => {
     expect(recorded.queries.map((query) => query.enabled)).toEqual([false, false, true]);
     // The profile is part of the key, so a staging verdict cannot be rendered as production's.
     expect(recorded.queries[2]?.queryKey).toEqual(
-      queryKeys.deployPreview('D01-01', 'crm', 'production', undefined),
+      queryKeys.deployPreview('D01-01', 'crm', 'production', undefined, {}),
     );
   });
 });
@@ -517,6 +663,21 @@ describe('instance administration hooks', () => {
     expect(recorded.invalidations).toEqual([{ queryKey: queryKeys.audit }]);
   });
 
+  it('reads the export list only for a role that may ask for it', async () => {
+    hooks['useInstanceExports']?.('inst-crm');
+    hooks['useInstanceExports']?.('inst-crm', { enabled: false });
+    hooks['useInstanceExports']?.('');
+
+    // `instance.lifecycle` is R1-only: a domain owner's tab must not fire a guaranteed 403.
+    expect(recorded.queries.map((query) => query.enabled)).toEqual([true, false, false]);
+
+    await recorded.queries[0]?.queryFn?.({ signal: undefined });
+    expect(recorded.request).toHaveBeenCalledWith('/instances/inst-crm/exports', {
+      schema: expect.anything(),
+      signal: undefined,
+    });
+  });
+
   it('refreshes the evidence list when an identity-sync cycle is refused', () => {
     hooks['useRunSync']?.();
     const mutation = recorded.mutations[0];
@@ -528,6 +689,71 @@ describe('instance administration hooks', () => {
       { queryKey: queryKeys.identitySync },
       { queryKey: queryKeys.audit },
     ]);
+  });
+});
+
+describe('instance observability and logs', () => {
+  it('reads the whole observability tab as one answer, and re-reads it on a tab switch', async () => {
+    hooks['useInstanceObservability']?.('inst-crm');
+    hooks['useInstanceObservability']?.('');
+
+    // Profile, target state and log availability are one server answer; splitting the key would let
+    // the tab show a target beside a log panel that claims the store is missing.
+    expect(recorded.queries.map((query) => query.queryKey)).toEqual([
+      [...queryKeys.instance('inst-crm'), 'observability'],
+      [...queryKeys.instance(''), 'observability'],
+    ]);
+    expect(recorded.queries.map((query) => query.enabled)).toEqual([true, false]);
+    // The scheduler republishes targets every minute; the tab is how an operator watches one appear.
+    expect(recorded.queries.map((query) => query.refetchOnWindowFocus)).toEqual([true, true]);
+
+    await recorded.queries[0]?.queryFn?.({ signal: undefined });
+
+    expect(recorded.request).toHaveBeenCalledWith('/instances/inst-crm/observability', {
+      schema: ObservabilityReportSchema,
+      signal: undefined,
+    });
+  });
+
+  it('sends the applied log filter only, and gates the read on the role and the instance', async () => {
+    const applied = { since: 900, limit: 200, filter: '' };
+
+    hooks['useInstanceLogs']?.('inst-crm', { since: 900, limit: 200, filter: '  error  ' });
+    hooks['useInstanceLogs']?.('inst-crm', applied);
+    hooks['useInstanceLogs']?.('inst-crm', applied, { enabled: false });
+    hooks['useInstanceLogs']?.('inst-crm', applied, { enabled: true });
+    hooks['useInstanceLogs']?.('', applied);
+
+    // The key carries the whole filter, so a superseded query can never be served as the current
+    // one; the typing itself is not in the key, which is what makes the search a round trip per
+    // applied filter rather than per keystroke.
+    expect(recorded.queries[0]?.queryKey).toEqual([
+      ...queryKeys.instance('inst-crm'),
+      'logs',
+      { since: 900, limit: 200, filter: '  error  ' },
+    ]);
+    // A role that may not read logs, or a deployment with no log store, must not fire the query.
+    expect(recorded.queries.map((query) => query.enabled)).toEqual([
+      true,
+      true,
+      false,
+      true,
+      false,
+    ]);
+
+    await recorded.queries[0]?.queryFn?.({ signal: undefined });
+    // The surrounding whitespace of a typed term is not part of the pattern the store searches for.
+    expect(recorded.request).toHaveBeenLastCalledWith(
+      '/instances/inst-crm/logs?since=900&limit=200&filter=error',
+      { schema: InstanceLogsSchema, signal: undefined },
+    );
+
+    await recorded.queries[1]?.queryFn?.({ signal: undefined });
+    // An empty filter is the absence of a parameter, not `filter=`.
+    expect(recorded.request).toHaveBeenLastCalledWith(
+      '/instances/inst-crm/logs?since=900&limit=200',
+      { schema: InstanceLogsSchema, signal: undefined },
+    );
   });
 });
 

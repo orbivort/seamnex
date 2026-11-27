@@ -9,9 +9,11 @@ import type { OperationGuard, OperationGuardContext } from './operation-guard';
  * The contract-declared throttle: the bucket, limit and window come from the operation itself, so
  * a route cannot be rate-limited by accident or left unlimited by omission.
  *
- * Fail closed. The only limited operation is `POST /auth/session`, and an unthrottled sign-in
- * endpoint is a credential-stuffing oracle. Redis also holds every session, so during such an
- * outage nobody could sign in anyway — the honest answer is 503, not "go on".
+ * Fail closed. Two operations declare it: `POST /auth/session`, where an unthrottled endpoint is a
+ * credential-stuffing oracle, and `POST /trigger/:token`, the anonymous delivery ingress, where the
+ * limiter is the only protection a sender has to get through — a product that is refused is told to
+ * retry, which is exactly what a webhook sender already does. Redis also holds every session, so
+ * during such an outage nobody could sign in anyway — the honest answer is 503, not "go on".
  */
 @Injectable()
 export class RateLimitGuard implements OperationGuard {
@@ -47,7 +49,7 @@ export class RateLimitGuard implements OperationGuard {
       // "too many attempts", which would send the user to wait for nothing.
       throw new AppError({
         code: 'UNAVAILABLE',
-        detail: 'The sign-in attempt limiter cannot be reached, so no attempt is accepted.',
+        detail: `The limiter for ${operation.path} cannot be reached, so no request is accepted.`,
         remediation: 'Retry shortly. Readiness reports the failing dependency.',
       });
     }

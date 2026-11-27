@@ -2,6 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { resolveKey } from '@seamnex/domain';
 import { ProductApiClient } from './product-api.client';
 import { OrangeHrmApiClient } from './adapters/orangehrm-api';
+import { MauticApiClient } from './adapters/mautic-api';
 import type { ProductProvisioningAdapter } from './provisioning-adapter';
 
 /**
@@ -22,10 +23,12 @@ export class ProductApiAdapters {
   constructor(
     @Inject(ProductApiClient) openproject: ProductApiClient,
     @Inject(OrangeHrmApiClient) orangehrm: OrangeHrmApiClient,
+    @Inject(MauticApiClient) mautic: MauticApiClient,
   ) {
     this.byEntry = new Map<string, ProductProvisioningAdapter>([
       ['D09-01', openproject],
       ['D07-01', orangehrm],
+      ['D02-01', mautic],
     ]);
   }
 

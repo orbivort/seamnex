@@ -202,6 +202,20 @@ export type InstanceParamRow = {
   read_at: Date;
 };
 
+/** One substitution the platform made to the platform-owned copy (FR-1.19, design §11.5). */
+export type SourcePatchEntry = {
+  path: string;
+  from: unknown;
+  to: unknown;
+};
+
+/** One policy rule the source tripped, waived or not (NFR-4.15). */
+export type SourcePolicyViolation = {
+  rule: string;
+  service: string | null;
+  detail: string;
+};
+
 export type SourceResolutionRow = {
   id: string;
   instance_id: string;
@@ -211,6 +225,9 @@ export type SourceResolutionRow = {
   resolved_image_ref: string | null;
   resolved_image_digest: string | null;
   policy_verdict: 'allowed' | 'blocked' | 'unsafe_approved' | null;
+  /** Recorded even for a blocked attempt, so a refusal leaves evidence (0034). */
+  patch_diff: SourcePatchEntry[];
+  policy_violations: SourcePolicyViolation[];
   created_at: Date;
 };
 
@@ -286,6 +303,33 @@ export type ImageArtefactRow = {
   created_at: Date;
 };
 
+/** 0039 / NFR-4.16: one append-only revision of the trusted-registry allow-list. */
+export type TrustedRegistryRevisionRow = {
+  id: string;
+  version: number;
+  content_hash: string;
+  entries: string[];
+  note: string | null;
+  created_by: string;
+  created_at: Date;
+};
+
+/** 0040 / NFR-4.6: a retained product-image scan, one row per instance/digest/scanner. */
+export type ImageScanResultRow = {
+  id: string;
+  instance_id: string;
+  image_ref: string;
+  image_digest: string;
+  scanner: string;
+  scanner_version: string;
+  verdict: 'passed' | 'blocked' | 'error';
+  blocking_severities: string[];
+  severity_counts: Record<string, number>;
+  findings: unknown[];
+  report_key: string | null;
+  scanned_at: Date;
+};
+
 export type EntitlementRow = {
   id: string;
   subject_idp_id: string;
@@ -294,6 +338,8 @@ export type EntitlementRow = {
   source: 'group' | 'direct';
   sync_state: 'applied' | 'pending' | 'edge_only' | 'unsupported';
   synced_at: Date;
+  /** 0035: when the platform finished applying the grant; NULL means never applied. */
+  applied_at: Date | null;
 };
 
 /**
@@ -358,6 +404,8 @@ export type IntegrationMetadataRow = {
   credential_granularity: 'scoped' | 'account' | 'none';
   session_max_minutes: number | null;
   slo_supported: boolean | null;
+  /** 0035: facts onboarding actually verified; an absent name is still a catalogue assumption. */
+  verified_facts: string[];
   verified_by: string | null;
   verified_at: Date | null;
   next_review_at: Date | null;
@@ -395,6 +443,8 @@ export type GroupMappingRow = {
   scope_type: 'platform' | 'domain' | 'instance';
   scope_id: string | null;
   propagate_to_product: boolean;
+  /** 0035: the role the *product* applies for a subject in this group (FR-2.4). */
+  product_role: string;
   created_by: string;
   created_at: Date;
 };
@@ -410,12 +460,38 @@ export type RoleBindingRow = {
   expires_at: Date | null;
 };
 
+/**
+ * 0035 — one membership change whose entitlement state changed in a cycle.
+ *
+ * `detected_at` is when the mirror observed the membership; `applied_at` is when the platform
+ * finished applying the grant. `latency_ms` is the difference, and a pending change has neither an
+ * applied time nor a latency (AC-11, AC-48).
+ */
+export type PropagationSampleRow = {
+  id: string;
+  sync_run_id: string;
+  subject_idp_id: string;
+  instance_id: string;
+  product_role: string;
+  guarantee_class: string;
+  detected_at: Date;
+  applied_at: Date | null;
+  latency_ms: number | null;
+  outcome: 'applied' | 'pending' | 'unsupported';
+  reason: string | null;
+  created_at: Date;
+};
+
 export type SyncRunRow = {
   id: string;
   started_at: Date;
   finished_at: Date | null;
   changes: number;
   p95_latency_ms: number | null;
+  /** 0035: p95 over propagation changes only; mirror writes stay in `p95_latency_ms`. */
+  p95_propagation_ms: number | null;
+  /** 0035: how many changes the propagation p95 covers. */
+  propagation_samples: number;
   errors: number;
   detail: Record<string, unknown>;
 };
@@ -520,6 +596,10 @@ export type LicenseRecordRow = {
   hosted_service_enabled: boolean;
   reviewed_by: string | null;
   reviewed_at: Date | null;
+  /** ADR-BE-25: the LICENSE URL or contract id the review was checked against. */
+  upstream_ref: string | null;
+  /** Reviewer note; the audit trail records its length, not its text. */
+  review_note: string | null;
 };
 
 export type PatchRecordRow = {
@@ -528,6 +608,37 @@ export type PatchRecordRow = {
   latest_version: string | null;
   oldest_unapplied_security_days: number | null;
   checked_at: Date;
+  /** 0041: the advisory the last observation found, when one is open. */
+  advisory_id: string | null;
+  advisory_severity: 'critical' | 'high' | 'medium' | 'low' | 'unknown' | null;
+  advisory_url: string | null;
+  release_url: string | null;
+  /** 0041: `observed` when the scheduler wrote this row, `catalog` for the document fallback. */
+  source: 'observed' | 'catalog';
+  last_observed_at: Date | null;
+};
+
+/** 0041 / FR-2.12: an upstream advisory, open until a later observation stops seeing it. */
+export type PatchAdvisoryRow = {
+  id: string;
+  entry_key: string;
+  advisory_id: string;
+  severity: 'critical' | 'high' | 'medium' | 'low' | 'unknown';
+  summary: string;
+  url: string | null;
+  fixed_version: string | null;
+  published_at: Date | null;
+  observed_at: Date;
+  closed_at: Date | null;
+};
+
+/** 0042 / S-2: a recorded decision that lowered the native floor. */
+export type NativeFloorDecisionRow = {
+  id: string;
+  floor: number;
+  reason: string;
+  recorded_by: string;
+  recorded_at: Date;
 };
 
 export type BreakGlassSessionRow = {

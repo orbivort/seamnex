@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '../../../../src/config/config';
 import { run, runOrThrow, spawnProcess } from '../../../../src/common/exec/exec';
@@ -6,6 +9,7 @@ import {
   DockerEngineClient,
   type ComposeProject,
 } from '../../../../src/common/docker/docker.client';
+import type { ImageTrustGuard } from '../../../../src/common/security/trusted-registries';
 
 /**
  * `DockerEngineClient` is the only path from the control plane to the host kernel, and most of its
@@ -29,15 +33,17 @@ const h = vi.hoisted(() => {
     stop: vi.fn(),
     restart: vi.fn(),
     remove: vi.fn(),
+    stats: vi.fn(),
   });
   return {
     options,
     network: network(),
     container: container(),
-    volume: { remove: vi.fn() },
+    volume: { inspect: vi.fn(), remove: vi.fn() },
     ping: vi.fn(),
     createNetwork: vi.fn(),
     createVolume: vi.fn(),
+    listVolumes: vi.fn(),
     listContainers: vi.fn(),
     getNetwork: vi.fn(),
     getContainer: vi.fn(),
@@ -60,6 +66,7 @@ vi.mock('dockerode', () => ({
     ping = () => h.ping();
     createNetwork = (...args: unknown[]) => h.createNetwork(...args);
     createVolume = (...args: unknown[]) => h.createVolume(...args);
+    listVolumes = (...args: unknown[]) => h.listVolumes(...args);
     listContainers = (...args: unknown[]) => h.listContainers(...args);
     getNetwork = (...args: unknown[]) => h.getNetwork(...args);
     getContainer = (...args: unknown[]) => h.getContainer(...args);
@@ -88,8 +95,23 @@ function makeConfig(overrides: Record<string, unknown> = {}): AppConfig {
   } as unknown as AppConfig;
 }
 
-function makeClient(overrides: Record<string, unknown> = {}): DockerEngineClient {
-  return new DockerEngineClient(makeConfig(overrides));
+/**
+ * NFR-4.16 — the guard the client refuses to work without.
+ *
+ * A permissive stub is enough for the pull/build/compose cases, which are about argv and error
+ * mapping. The refusal itself has its own case (`refuses a pull the guard rejects`).
+ */
+function makeGuard(
+  assertTrusted: (reference: string, operation: string) => Promise<void> = async () => undefined,
+): ImageTrustGuard {
+  return { assertTrusted: vi.fn(assertTrusted) };
+}
+
+function makeClient(
+  overrides: Record<string, unknown> = {},
+  guard: ImageTrustGuard = makeGuard(),
+): DockerEngineClient {
+  return new DockerEngineClient(makeConfig(overrides), guard);
 }
 
 /** A daemon error in the shape dockerode rejects with. */
@@ -97,15 +119,32 @@ function statusError(statusCode: number): Error & { statusCode: number } {
   return Object.assign(new Error(`engine said ${statusCode}`), { statusCode });
 }
 
+/**
+ * The project has to exist on disk: `composeUp` re-reads every `image:` before starting anything
+ * (NFR-4.16), so a fixture with imaginary paths would test the guard's failure path instead of the
+ * argv it is meant to assert.
+ */
+const PROJECT_DIR = mkdtempSync(join(tmpdir(), 'seamnex-compose-'));
+writeFileSync(
+  join(PROJECT_DIR, 'compose.yaml'),
+  'services:\n  app:\n    image: shop:1.2\n',
+  'utf8',
+);
+writeFileSync(join(PROJECT_DIR, 'override.yaml'), 'services: {}\n', 'utf8');
+writeFileSync(join(PROJECT_DIR, '.env'), 'APP_ENV=production\n', 'utf8');
+
 const PROJECT: ComposeProject = {
   project: 'seamnex-shop',
-  directory: '/srv/seamnex/instances/shop',
-  files: ['/srv/seamnex/instances/shop/compose.yaml', '/srv/seamnex/instances/shop/override.yaml'],
-  envFiles: ['/srv/seamnex/instances/shop/.env'],
+  directory: PROJECT_DIR,
+  files: [join(PROJECT_DIR, 'compose.yaml'), join(PROJECT_DIR, 'override.yaml')],
+  envFiles: [join(PROJECT_DIR, '.env')],
 };
 
 beforeEach(() => {
   h.options.length = 0;
+  // The build-endpoint cases assert on the *absence* of a `buildx` call, so history cannot leak in
+  // from the case before it.
+  runMock.mockReset();
   h.getNetwork.mockReturnValue(h.network);
   h.getContainer.mockReturnValue(h.container);
   h.getImage.mockReturnValue(h.image);
@@ -118,9 +157,11 @@ beforeEach(() => {
   h.network.connect.mockResolvedValue(undefined);
   h.network.disconnect.mockResolvedValue(undefined);
   h.network.remove.mockResolvedValue(undefined);
+  h.volume.inspect.mockResolvedValue({ Name: 'v' });
   h.volume.remove.mockResolvedValue(undefined);
   h.createNetwork.mockResolvedValue(undefined);
   h.createVolume.mockResolvedValue(undefined);
+  h.listVolumes.mockResolvedValue({ Volumes: [] });
   h.listContainers.mockResolvedValue([]);
   runOrThrowMock.mockResolvedValue({ code: 0, stdout: '', stderr: '', truncated: false });
 });
@@ -348,6 +389,82 @@ describe('volumes', () => {
     h.volume.remove.mockRejectedValueOnce(statusError(500));
     await expect(client.removeVolume('v')).rejects.toThrow('engine said 500');
   });
+
+  it('lists the volumes of one project by its compose labels', async () => {
+    h.listVolumes.mockResolvedValueOnce({
+      Volumes: [
+        {
+          Name: 'seamnex-orangehrm_orangehrm-db',
+          Mountpoint: '/var/lib/docker/volumes/seamnex-orangehrm_orangehrm-db/_data',
+          Labels: {
+            'com.docker.compose.project': 'seamnex-orangehrm',
+            'com.docker.compose.volume': 'orangehrm-db',
+          },
+        },
+        { Name: 'anonymous', Mountpoint: undefined },
+      ],
+    });
+
+    await expect(
+      makeClient().volumes(['com.docker.compose.project=seamnex-orangehrm']),
+    ).resolves.toEqual([
+      {
+        name: 'seamnex-orangehrm_orangehrm-db',
+        mountpoint: '/var/lib/docker/volumes/seamnex-orangehrm_orangehrm-db/_data',
+        labels: {
+          'com.docker.compose.project': 'seamnex-orangehrm',
+          'com.docker.compose.volume': 'orangehrm-db',
+        },
+      },
+      // A volume without labels or a mountpoint is still a volume: the caller decides what to do.
+      { name: 'anonymous', mountpoint: '', labels: {} },
+    ]);
+    expect(h.listVolumes).toHaveBeenCalledWith({
+      filters: { label: ['com.docker.compose.project=seamnex-orangehrm'] },
+    });
+  });
+
+  it('answers whether a volume still exists, and only a 404 means no', async () => {
+    const client = makeClient();
+
+    await expect(client.volumeExists('v')).resolves.toBe(true);
+
+    h.volume.inspect.mockRejectedValueOnce(statusError(404));
+    await expect(client.volumeExists('v')).resolves.toBe(false);
+
+    // A transport failure must not be read as "no volume": that is a backup claiming an empty set.
+    h.volume.inspect.mockRejectedValueOnce(statusError(500));
+    await expect(client.volumeExists('v')).rejects.toThrow('engine said 500');
+  });
+
+  it('measures a volume through a read-only du helper', async () => {
+    runOrThrowMock.mockResolvedValueOnce({
+      code: 0,
+      stdout: '2048\t/src\n',
+      stderr: '',
+      truncated: false,
+    });
+
+    await expect(makeClient().volumeUsageMb('seamnex-shop_data')).resolves.toBe(2_048);
+    expect(runOrThrowMock).toHaveBeenCalledWith(
+      'docker',
+      [
+        'run',
+        '--rm',
+        '-v',
+        'seamnex-shop_data:/src:ro',
+        'alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf',
+        'du',
+        '-sm',
+        '/src',
+      ],
+      expect.objectContaining({ timeoutMs: 300_000 }),
+    );
+  });
+
+  it('reports an unreadable du line as zero rather than NaN', async () => {
+    await expect(makeClient().volumeUsageMb('v')).resolves.toBe(0);
+  });
 });
 
 describe('containers', () => {
@@ -507,6 +624,151 @@ describe('images', () => {
     expect(identity).toEqual({ ref: 'shop:1.2', digest: 'sha256:abc', id: 'sha256:1' });
   });
 
+  /**
+   * A filtered network is a transport problem, not a product one: `SEAMNEX_REGISTRY_MIRROR` reaches
+   * BuildKit only, so the Engine's own pull had no mirror at all and a deployment sat in the digest
+   * check for hours. These cases fix the three properties that make the prefix approach safe — the
+   * guard still judges the canonical reference, the pin still decides, and a dead mirror costs one
+   * attempt rather than the deployment.
+   */
+  it('pulls through a configured mirror and retags onto the canonical reference', async () => {
+    const guard = makeGuard();
+    h.pull.mockImplementation((_ref: string, callback: (error: null, stream: unknown) => void) => {
+      callback(null, {});
+    });
+    h.followProgress.mockImplementation((_stream, done: (error: Error | null) => void) => {
+      done(null);
+    });
+    h.image.inspect.mockResolvedValue({
+      Id: 'sha256:1',
+      RepoDigests: ['mirror.test/shop@sha256:abc'],
+    });
+    runMock.mockResolvedValue({ code: 0, stdout: '', stderr: '', truncated: false });
+    runOrThrowMock.mockClear();
+
+    const identity = await makeClient(
+      { pullMirrors: ['mirror.test'], SEAMNEX_PULL_TIMEOUT_MS: 5_000 },
+      guard,
+    ).pull('shop:1.2');
+
+    expect(h.pull).toHaveBeenCalledWith('mirror.test/shop:1.2', expect.any(Function));
+    expect(runOrThrowMock).toHaveBeenCalledWith(
+      'docker',
+      ['tag', 'mirror.test/shop:1.2', 'shop:1.2'],
+      expect.anything(),
+    );
+    // The mirror name is transport, not identity: `docker images` should show what will be started.
+    expect(runMock).toHaveBeenCalledWith(
+      'docker',
+      ['rmi', 'mirror.test/shop:1.2'],
+      expect.anything(),
+    );
+    expect(identity).toEqual({ ref: 'shop:1.2', digest: 'sha256:abc', id: 'sha256:1' });
+    // NFR-4.16 is about content, not transport: the allow-list saw the reference, never the prefix.
+    expect(guard.assertTrusted).toHaveBeenCalledWith('shop:1.2', 'pull');
+  });
+
+  it('tries the next mirror, then the registry, and says so in the job log', async () => {
+    const lines: string[] = [];
+    h.pull
+      .mockImplementationOnce((_ref: string, callback: (error: Error) => void) => {
+        callback(new Error('mirror a refused'));
+      })
+      .mockImplementationOnce((_ref: string, callback: (error: null, stream: unknown) => void) => {
+        callback(null, {});
+      });
+    h.followProgress.mockImplementation((_stream, done: (error: Error | null) => void) => {
+      done(null);
+    });
+    h.image.inspect.mockResolvedValue({ Id: 'sha256:1', RepoDigests: ['shop@sha256:abc'] });
+
+    await makeClient({ pullMirrors: ['a.test', 'b.test'], SEAMNEX_PULL_TIMEOUT_MS: 5_000 }).pull(
+      'shop:1.2',
+      async (line) => {
+        lines.push(line);
+      },
+    );
+
+    expect(h.pull.mock.calls.map((call) => String(call[0]))).toEqual([
+      'a.test/shop:1.2',
+      'b.test/shop:1.2',
+    ]);
+    expect(lines.some((line) => line.includes('a.test/shop:1.2 did not complete'))).toBe(true);
+  });
+
+  it('refuses a mirror that serves a different digest and falls through to the registry', async () => {
+    const pinned = `sha256:${'0'.repeat(64)}`;
+    const other = `sha256:${'1'.repeat(64)}`;
+    h.pull.mockImplementation((_ref: string, callback: (error: null, stream: unknown) => void) => {
+      callback(null, {});
+    });
+    h.followProgress.mockImplementation((_stream, done: (error: Error | null) => void) => {
+      done(null);
+    });
+    // identity + repoDigest per attempt: the mirror answers with other content, the registry with the pin.
+    h.image.inspect
+      .mockResolvedValueOnce({ Id: 'sha256:mirror', RepoDigests: [`mirror.test/shop@${other}`] })
+      .mockResolvedValueOnce({ Id: 'sha256:mirror', RepoDigests: [`mirror.test/shop@${other}`] })
+      .mockResolvedValue({ Id: 'sha256:1', RepoDigests: [`shop@${pinned}`] });
+    runMock.mockResolvedValue({ code: 0, stdout: '', stderr: '', truncated: false });
+
+    const identity = await makeClient({
+      pullMirrors: ['mirror.test'],
+      SEAMNEX_PULL_TIMEOUT_MS: 5_000,
+    }).pull('shop:1.2', undefined, { expectedDigest: pinned });
+
+    expect(h.pull.mock.calls.map((call) => String(call[0]))).toEqual([
+      'mirror.test/shop:1.2',
+      'shop:1.2',
+    ]);
+    expect(identity.digest).toBe(pinned);
+  });
+
+  it('fails the pin when the registry itself serves something else', async () => {
+    h.pull.mockImplementation((_ref: string, callback: (error: null, stream: unknown) => void) => {
+      callback(null, {});
+    });
+    h.followProgress.mockImplementation((_stream, done: (error: Error | null) => void) => {
+      done(null);
+    });
+    h.image.inspect.mockResolvedValue({
+      Id: 'sha256:1',
+      RepoDigests: [`shop@sha256:${'1'.repeat(64)}`],
+    });
+
+    await expect(
+      makeClient({ SEAMNEX_PULL_TIMEOUT_MS: 5_000 }).pull('shop:1.2', undefined, {
+        expectedDigest: `sha256:${'0'.repeat(64)}`,
+      }),
+    ).rejects.toMatchObject({ code: 'IMAGE_DIGEST_MISMATCH' });
+  });
+
+  it('abandons an attempt that outlives SEAMNEX_PULL_TIMEOUT_MS instead of waiting', async () => {
+    // Never answers — the shape of the D06-01 pull, where the daemon kept emitting progress lines.
+    h.pull.mockImplementation(() => undefined);
+
+    await expect(makeClient({ SEAMNEX_PULL_TIMEOUT_MS: 25 }).pull('shop:1.2')).rejects.toThrow(
+      /did not finish within/,
+    );
+  });
+
+  it('does not prefix a digest reference, which cannot be retagged', async () => {
+    const digest = `sha256:${'0'.repeat(64)}`;
+    h.pull.mockImplementation((_ref: string, callback: (error: null, stream: unknown) => void) => {
+      callback(null, {});
+    });
+    h.followProgress.mockImplementation((_stream, done: (error: Error | null) => void) => {
+      done(null);
+    });
+    h.image.inspect.mockResolvedValue({ Id: 'sha256:1', RepoDigests: [`shop@${digest}`] });
+
+    await makeClient({ pullMirrors: ['mirror.test'], SEAMNEX_PULL_TIMEOUT_MS: 5_000 }).pull(
+      `shop@${digest}`,
+    );
+
+    expect(h.pull.mock.calls.map((call) => String(call[0]))).toEqual([`shop@${digest}`]);
+  });
+
   it('forwards progress without waiting for the sink', async () => {
     const onProgress = vi.fn(async () => {
       throw new Error('sink failed');
@@ -536,6 +798,28 @@ describe('images', () => {
     await expect(makeClient().pull('missing:1')).rejects.toThrow('no such image');
   });
 
+  /**
+   * NFR-4.16 — the hard guard. Pre-flight can be bypassed by anything that queues a job, so the pull
+   * itself refuses a reference the allow-list does not carry, before the daemon is asked.
+   */
+  it('refuses a pull the allow-list rejects, without reaching the daemon', async () => {
+    const guard = makeGuard(async () => {
+      throw new Error('docker.io/bitnami is not a trusted registry namespace');
+    });
+
+    await expect(makeClient({}, guard).pull('bitnami/postgresql:16.4')).rejects.toThrow(
+      'not a trusted registry namespace',
+    );
+    expect(h.pull).not.toHaveBeenCalled();
+  });
+
+  it('refuses to pull when no guard is wired, rather than running unguarded', async () => {
+    const unguarded = new DockerEngineClient(makeConfig());
+
+    await expect(unguarded.pull('shop:1.2')).rejects.toThrow('trusted-registry guard is not wired');
+    expect(h.pull).not.toHaveBeenCalled();
+  });
+
   it('rejects when the progress stream reports an error', async () => {
     h.pull.mockImplementation((_ref: string, callback: (error: null, stream: unknown) => void) => {
       callback(null, {});
@@ -562,6 +846,25 @@ describe('images', () => {
     await expect(makeClient().imageIdentity('shop:1')).resolves.toMatchObject({
       digest: 'sha256:9',
     });
+  });
+
+  it('reports no repository digest instead of the image id, so a pin cannot pass on a local build', async () => {
+    h.image.inspect.mockResolvedValue({ Id: 'sha256:9', RepoDigests: ['shop@sha256:other'] });
+    await expect(makeClient().repoDigest('shop:1')).resolves.toBe('sha256:other');
+
+    h.image.inspect.mockResolvedValue({ Id: 'sha256:9', RepoDigests: [] });
+    await expect(makeClient().repoDigest('shop:1')).resolves.toBeNull();
+
+    h.image.inspect.mockResolvedValue({ Id: 'sha256:9' });
+    await expect(makeClient().repoDigest('shop:1')).resolves.toBeNull();
+  });
+
+  it('reports the config id a local build has, and null when the tag is gone', async () => {
+    h.image.inspect.mockResolvedValue({ Id: 'sha256:9', RepoDigests: [] });
+    await expect(makeClient().imageId('shop:1')).resolves.toBe('sha256:9');
+
+    h.image.inspect.mockRejectedValue(new Error('no such image'));
+    await expect(makeClient().imageId('shop:1')).resolves.toBeNull();
   });
 
   it('reports whether an image is present, swallowing the same failure that disables it', async () => {
@@ -597,13 +900,13 @@ describe('compose CLI', () => {
         '--project-name',
         'seamnex-shop',
         '--project-directory',
-        '/srv/seamnex/instances/shop',
+        PROJECT.directory,
         '-f',
-        '/srv/seamnex/instances/shop/compose.yaml',
+        PROJECT.files[0],
         '-f',
-        '/srv/seamnex/instances/shop/override.yaml',
+        PROJECT.files[1],
         '--env-file',
-        '/srv/seamnex/instances/shop/.env',
+        PROJECT.envFiles[0],
         'up',
         '-d',
         '--remove-orphans',
@@ -633,6 +936,164 @@ describe('compose CLI', () => {
       expect.objectContaining({ timeoutMs: 900_000 }),
     );
     expect(onLine).toHaveBeenCalledWith('built');
+  });
+
+  /**
+   * `.env` → `--build-arg` for both build shapes.
+   *
+   * A product Dockerfile the platform does not own fetches from whatever archive it names, and on a
+   * filtered host that fetch *is* the stage: the first D07-01 build spent its budget in `apt-get`
+   * against `deb.debian.org`. The mirrors travel as arguments the Dockerfile declares, so both shapes
+   * must carry them; nothing configured must add nothing, because a stray argument in CI is noise.
+   */
+  describe('package mirrors', () => {
+    const MIRRORS = {
+      APK_MIRROR: 'https://mirror.example.com/alpine',
+      APT_MIRROR: 'https://mirror.example.com/debian',
+      NPM_REGISTRY: 'https://registry.example.com',
+    };
+    const EXPECTED = [
+      '--build-arg',
+      'APK_MIRROR=https://mirror.example.com/alpine',
+      '--build-arg',
+      'APT_MIRROR=https://mirror.example.com/debian',
+      '--build-arg',
+      'NPM_REGISTRY=https://registry.example.com',
+    ];
+
+    /** The argv of the last CLI call, which is the one the mirror arguments have to be on. */
+    function lastArgs(): string[] {
+      return runOrThrowMock.mock.calls.at(-1)?.[1] as string[];
+    }
+
+    it('forwards every configured mirror to a compose build', async () => {
+      runOrThrowMock.mockResolvedValue({ code: 0, stdout: '', stderr: '', truncated: false });
+
+      await makeClient(MIRRORS).composeBuild(PROJECT);
+
+      const args = lastArgs();
+      expect(args).toEqual(expect.arrayContaining(EXPECTED));
+      // After the subcommand: Compose reads an argument before `build` as a global flag and exits 1.
+      expect(args.indexOf('--build-arg')).toBeGreaterThan(args.indexOf('build'));
+    });
+
+    it('forwards them to a buildx build', async () => {
+      await makeClient(MIRRORS).build({
+        context: '/srv/ctx',
+        dockerfile: '/srv/ctx/Dockerfile',
+        tag: 'seamnex/shop:1',
+      });
+
+      // Before the context, which has to stay the last argument.
+      expect(lastArgs()).toEqual([
+        'buildx',
+        'build',
+        '--load',
+        '-t',
+        'seamnex/shop:1',
+        '-f',
+        '/srv/ctx/Dockerfile',
+        ...EXPECTED,
+        '/srv/ctx',
+      ]);
+    });
+
+    it('adds nothing when no mirror is configured', async () => {
+      runOrThrowMock.mockResolvedValue({ code: 0, stdout: '', stderr: '', truncated: false });
+
+      await makeClient().composeBuild(PROJECT);
+
+      expect(lastArgs()).not.toContain('--build-arg');
+    });
+  });
+
+  /**
+   * ADR-BE-40 §7 — the build endpoint.
+   *
+   * The socket proxy cannot carry a build session, so a configured `SEAMNEX_BUILDKIT_ADDR` has to
+   * reach both build shapes: `docker compose build` (through the environment, because Compose has no
+   * `--builder` flag) and `docker buildx build` (same variable). The builder is registered once, and
+   * a lost registration race is not a failure.
+   */
+  describe('build endpoint', () => {
+    const absent = { code: 1, stdout: '', stderr: 'no builder', truncated: false };
+    const ok = { code: 0, stdout: '', stderr: '', truncated: false };
+
+    it('leaves the daemon builder alone when no endpoint is configured', async () => {
+      runOrThrowMock.mockResolvedValue({ code: 0, stdout: '', stderr: '', truncated: false });
+
+      await makeClient().composeBuild(PROJECT);
+
+      expect(runMock).not.toHaveBeenCalled();
+      const options = runOrThrowMock.mock.calls.at(-1)?.[2] as { env: Record<string, string> };
+      expect(options.env.BUILDX_BUILDER).toBeUndefined();
+    });
+
+    it('registers the remote builder, then builds through it', async () => {
+      runMock.mockResolvedValueOnce(absent).mockResolvedValueOnce(ok);
+      runOrThrowMock.mockResolvedValue({
+        code: 0,
+        stdout: 'built\n',
+        stderr: '',
+        truncated: false,
+      });
+
+      await makeClient({ SEAMNEX_BUILDKIT_ADDR: 'tcp://buildkit:1234' }).composeBuild(PROJECT);
+
+      expect(runMock).toHaveBeenCalledWith(
+        'docker',
+        ['buildx', 'inspect', 'seamnex-buildkit'],
+        expect.objectContaining({ timeoutMs: 60_000 }),
+      );
+      expect(runMock).toHaveBeenCalledWith(
+        'docker',
+        [
+          'buildx',
+          'create',
+          '--name',
+          'seamnex-buildkit',
+          '--driver',
+          'remote',
+          'tcp://buildkit:1234',
+        ],
+        expect.objectContaining({
+          env: expect.objectContaining({ DOCKER_HOST: 'unix:///var/run/docker.sock' }),
+        }),
+      );
+      const options = runOrThrowMock.mock.calls.at(-1)?.[2] as { env: Record<string, string> };
+      expect(options.env.BUILDX_BUILDER).toBe('seamnex-buildkit');
+    });
+
+    it('does not register a builder that is already there', async () => {
+      runMock.mockResolvedValue(ok);
+      runOrThrowMock.mockResolvedValue({ code: 0, stdout: '', stderr: '', truncated: false });
+
+      await makeClient({ SEAMNEX_BUILDKIT_ADDR: 'tcp://buildkit:1234' }).composeBuild(PROJECT);
+
+      expect(runMock.mock.calls.map((call) => call[1])).toEqual([
+        ['buildx', 'inspect', 'seamnex-buildkit'],
+      ]);
+    });
+
+    it('accepts a builder another worker registered first', async () => {
+      runMock.mockResolvedValueOnce(absent).mockResolvedValueOnce(absent).mockResolvedValueOnce(ok);
+      runOrThrowMock.mockResolvedValue({ code: 0, stdout: '', stderr: '', truncated: false });
+
+      await expect(
+        makeClient({ SEAMNEX_BUILDKIT_ADDR: 'tcp://buildkit:1234' }).composeBuild(PROJECT),
+      ).resolves.toBeUndefined();
+    });
+
+    it('refuses to build when the endpoint cannot be registered', async () => {
+      runMock.mockResolvedValue(absent);
+
+      const client = makeClient({ SEAMNEX_BUILDKIT_ADDR: 'tcp://buildkit:1234' });
+      await expect(client.composeBuild(PROJECT)).rejects.toMatchObject({
+        code: 'ADAPTER_UNAVAILABLE',
+        detail: expect.stringContaining('tcp://buildkit:1234'),
+      });
+      expect(runOrThrowMock).not.toHaveBeenCalled();
+    });
   });
 
   it('removes volumes only when asked', async () => {
@@ -785,5 +1246,94 @@ describe('demultiplex', () => {
 
   it('returns an empty string for an empty buffer', () => {
     expect(demultiplex(Buffer.alloc(0))).toBe('');
+  });
+});
+
+describe('volumes without a listing', () => {
+  it('reports no volumes when the daemon omits the array', async () => {
+    // `Volumes` is optional in the Engine's response; reading `.map` on it would crash a backup.
+    h.listVolumes.mockResolvedValueOnce({});
+
+    await expect(
+      makeClient().volumes(['com.docker.compose.project=seamnex-shop']),
+    ).resolves.toEqual([]);
+  });
+});
+
+describe('stats', () => {
+  it('answers null when the daemon omits cpu counters', async () => {
+    // A container that has just started has no delta; `null` is "not measured", not "idle".
+    h.container.stats.mockResolvedValueOnce({});
+
+    await expect(makeClient().stats('c1')).resolves.toBeNull();
+  });
+
+  it('answers null when the daemon omits memory counters', async () => {
+    h.container.stats.mockResolvedValueOnce({ cpu_stats: { cpu_usage: { total_usage: 1 } } });
+
+    await expect(makeClient().stats('c1')).resolves.toBeNull();
+  });
+
+  it('answers null when the daemon returns no payload at all', async () => {
+    h.container.stats.mockResolvedValueOnce(undefined);
+
+    await expect(makeClient().stats('c1')).resolves.toBeNull();
+  });
+
+  it('computes the same snapshot docker stats reports', async () => {
+    h.container.stats.mockResolvedValueOnce({
+      cpu_stats: {
+        cpu_usage: { total_usage: 2_000_000 },
+        system_cpu_usage: 10_000_000,
+        online_cpus: 2,
+      },
+      precpu_stats: {
+        cpu_usage: { total_usage: 1_000_000 },
+        system_cpu_usage: 8_000_000,
+      },
+      memory_stats: {
+        usage: 300 * 1024 * 1024,
+        stats: { inactive_file: 50 * 1024 * 1024 },
+      },
+    });
+
+    // cpu: 1e6 / 2e6 * 2 cpus * 1000; memory: working set, not the cgroup total.
+    await expect(makeClient().stats('c1')).resolves.toEqual({ cpuMilli: 1_000, memoryMb: 250 });
+    expect(h.container.stats).toHaveBeenCalledWith({ stream: false });
+  });
+
+  it('falls back to the per-cpu count and the legacy inactive counter', async () => {
+    h.container.stats.mockResolvedValueOnce({
+      cpu_stats: {
+        cpu_usage: { total_usage: 500, percpu_usage: [1, 2, 3] },
+      },
+      memory_stats: {
+        usage: 10 * 1024 * 1024,
+        stats: { total_inactive_file: 2 * 1024 * 1024 },
+      },
+    });
+
+    // No previous sample means no system delta, so CPU reads 0 rather than a fabricated ratio.
+    await expect(makeClient().stats('c1')).resolves.toEqual({ cpuMilli: 0, memoryMb: 8 });
+  });
+
+  it('treats absent counters as zero and assumes one cpu', async () => {
+    h.container.stats.mockResolvedValueOnce({
+      cpu_stats: { system_cpu_usage: 1_000_000 },
+      precpu_stats: { system_cpu_usage: 0 },
+      memory_stats: {},
+    });
+
+    await expect(makeClient().stats('c1')).resolves.toEqual({ cpuMilli: 0, memoryMb: 0 });
+  });
+
+  it('reads a previous sample that carries no system counter', async () => {
+    h.container.stats.mockResolvedValueOnce({
+      cpu_stats: { cpu_usage: { total_usage: 2_000 }, system_cpu_usage: 5_000 },
+      precpu_stats: { cpu_usage: { total_usage: 1_000 } },
+      memory_stats: { usage: 0, stats: { inactive_file: 0 } },
+    });
+
+    await expect(makeClient().stats('c1')).resolves.toEqual({ cpuMilli: 200, memoryMb: 0 });
   });
 });

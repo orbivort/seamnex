@@ -36,6 +36,8 @@ export function GroupsPage() {
   const [role, setRole] = useState('R5');
   const [scopeType, setScopeType] = useState('platform');
   const [scopeLabel, setScopeLabel] = useState('Platform');
+  // FR-2.4: what the product itself applies; `member` is the declared default, not a platform role.
+  const [productRole, setProductRole] = useState('member');
   const [propagate, setPropagate] = useState(false);
 
   /**
@@ -47,6 +49,7 @@ export function GroupsPage() {
     setRole(group.mapping?.role ?? 'R5');
     setScopeType(group.mapping?.scopeType ?? 'platform');
     setScopeLabel(group.mapping?.scopeLabel ?? 'Platform');
+    setProductRole(group.mapping?.productRole ?? 'member');
     setPropagate(group.mapping?.propagateToProduct ?? false);
   }, []);
 
@@ -90,9 +93,13 @@ export function GroupsPage() {
                 </Badge>
                 {row.mapping.propagateToProduct ? (
                   <Badge tone="caution" size="sm">
-                    propagates
+                    {row.mapping.productRole} in product
                   </Badge>
-                ) : null}
+                ) : (
+                  <Badge tone="neutral" size="sm">
+                    platform only
+                  </Badge>
+                )}
               </div>
             ) : (
               <span className="text-micro text-warning-strong">unmapped</span>
@@ -203,7 +210,10 @@ export function GroupsPage() {
               onClick={() => {
                 if (!editing) return;
                 update.mutate(
-                  { id: editing.id, body: { role, scopeType, scopeLabel, propagate } },
+                  {
+                    id: editing.id,
+                    body: { role, scopeType, scopeLabel, productRole, propagate },
+                  },
                   { onSuccess: () => setEditing(null) },
                 );
               }}
@@ -248,6 +258,17 @@ export function GroupsPage() {
               id="mapping-label"
               value={scopeLabel}
               onChange={(event) => setScopeLabel(event.target.value)}
+            />
+          </Field>
+          <Field
+            label="Product role"
+            htmlFor="mapping-product-role"
+            hint="The role the product itself applies for a subject in this group — e.g. admin, agent, member, viewer. It is recorded on every entitlement this mapping produces."
+          >
+            <Input
+              id="mapping-product-role"
+              value={productRole}
+              onChange={(event) => setProductRole(event.target.value)}
             />
           </Field>
           <Checkbox

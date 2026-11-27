@@ -289,8 +289,9 @@ export function LauncherPage() {
 
       <p className="mt-6 flex items-start gap-2 border-t border-line pt-3 text-meta leading-relaxed text-faint">
         <ShieldCheck className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-        Availability is shown in plain language. A product that keeps its own credential is labelled
-        before you open it, and the launch dialog names the sign-in path you will see.
+        Availability is shown in plain language. Who holds a product's credential is labelled before
+        you open it — the platform's own account, or one issued outside the platform — and the
+        launch dialog names the sign-in path you will see.
       </p>
 
       <LaunchDialog

@@ -36,13 +36,25 @@ const KINDS = new Set<string>(JOB_KINDS);
 export class JobQueryService {
   constructor(@Inject(PG_POOL) private readonly pool: Pool) {}
 
-  async list(filter: {
-    instanceId?: string;
-    kind?: string;
-    state?: string;
-    cursor?: string;
-    limit?: string;
-  }): Promise<JobPage> {
+  async list(
+    filter: {
+      instanceId?: string;
+      kind?: string;
+      state?: string;
+      cursor?: string;
+      limit?: string;
+    },
+    /**
+     * The instances the caller may see, already resolved from the decision's scope (ADR-BE-44).
+     * `undefined` means unrestricted; an empty array means "nothing", which is the honest answer for
+     * a scope that reaches no instance.
+     *
+     * Resolved by the caller rather than here because `catalog_entry` is M05's table, not this
+     * module's — the boundary gate (ADR-BE-18) is what keeps a list query from learning to join
+     * across the platform.
+     */
+    visibleInstanceIds?: readonly string[],
+  ): Promise<JobPage> {
     const limit = readLimit(filter.limit);
     const cursor = decodeCursor(filter.cursor);
     const where: string[] = [];
@@ -51,19 +63,36 @@ export class JobQueryService {
     if (filter.instanceId !== undefined) {
       if (!isUuid(filter.instanceId)) return { items: [], nextCursor: null, total: 0 };
       params.push(filter.instanceId);
-      where.push(`instance_id = $${params.length}`);
+      where.push(`j.instance_id = $${params.length}`);
     }
     if (filter.kind !== undefined) {
       params.push(filter.kind);
-      where.push(`kind = $${params.length}`);
+      where.push(`j.kind = $${params.length}`);
     }
     if (filter.state !== undefined) {
       params.push(filter.state);
-      where.push(`state = $${params.length}`);
+      where.push(`j.state = $${params.length}`);
     }
 
+    /*
+     * A job with no instance is platform work (a catalogue reload, a verification) and is never
+     * inside a scoped grant, so `instance_id IS NOT NULL` is part of the predicate rather than an
+     * accident of the join.
+     */
+    params.push(visibleInstanceIds === undefined, visibleInstanceIds ?? []);
+    where.push(
+      `($${params.length - 1}::boolean OR (j.instance_id IS NOT NULL
+          AND j.instance_id = ANY($${params.length}::uuid[])))`,
+    );
+
+    // One FROM for both statements, so the count is the size of the set the page draws from.
+    const from = `deployment_job j
+         LEFT JOIN instance i ON i.id = j.instance_id
+         LEFT JOIN idp_user u ON u.idp_id = j.requested_by`;
+    const predicate = where.join(' AND ');
+
     const total = await this.pool.query<{ count: string }>(
-      `SELECT count(*)::text AS count FROM deployment_job ${where.length === 0 ? '' : `WHERE ${where.join(' AND ')}`}`,
+      `SELECT count(*)::text AS count FROM ${from} WHERE ${predicate}`,
       params,
     );
 
@@ -71,7 +100,7 @@ export class JobQueryService {
     let keyset = '';
     if (cursor !== undefined && 'createdAt' in cursor) {
       pageParams.push(cursor.createdAt, cursor.id);
-      keyset = `AND (created_at, id) < ($${pageParams.length - 1}::timestamptz, $${pageParams.length}::uuid)`;
+      keyset = `AND (j.created_at, j.id) < ($${pageParams.length - 1}::timestamptz, $${pageParams.length}::uuid)`;
     }
     pageParams.push(limit + 1);
 
@@ -80,9 +109,8 @@ export class JobQueryService {
               COALESCE(u.display_name, u.username) AS requested_by_name,
               j.error_code, j.error_detail,
               j.payload, j.created_at, j.started_at, j.finished_at
-         FROM deployment_job j LEFT JOIN instance i ON i.id = j.instance_id
-         LEFT JOIN idp_user u ON u.idp_id = j.requested_by
-        ${where.length === 0 ? 'WHERE' : 'WHERE'} ${where.length === 0 ? 'true' : where.join(' AND ')} ${keyset}
+         FROM ${from}
+        WHERE ${predicate} ${keyset}
         ORDER BY j.created_at DESC, j.id DESC
         LIMIT $${pageParams.length}`,
       pageParams,

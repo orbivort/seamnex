@@ -12,6 +12,7 @@ import {
   type SourceResolverService,
 } from '../../modules/m02-source-resolver/source-resolver.contract';
 import { InstanceParamsService } from '../../modules/m22-catalog-repository/instance-params.service';
+import { AUDIT_SERVICE, type AuditService } from '../../modules/m17-audit/audit.contract';
 import {
   PORTAL_BFF_SERVICE,
   type PortalBffService,
@@ -65,6 +66,7 @@ export class Phase4AHandlers implements OperationGroup {
     @Inject(InstanceParamsService) private readonly params: InstanceParamsService,
     @Inject(JobService) private readonly jobs: JobService,
     @Inject(PORTAL_BFF_SERVICE) private readonly portal: PortalBffService,
+    @Inject(AUDIT_SERVICE) private readonly audit: AuditService,
     @Optional()
     @Inject(BACKUP_RESTORE_SERVICE)
     private readonly backups?: BackupRestoreService,
@@ -190,6 +192,20 @@ export class Phase4AHandlers implements OperationGroup {
             backupJobId = backup.jobId;
           }
 
+          /*
+           * FR-1.7: `version` means the confirmed upgrade target, not a render-set id.
+           *
+           * The two were conflated: the dialog's delta was dropped and the value was handed to the
+           * rollback resolver, which expected a render-set hash. Rollback keeps its own meaning of
+           * the field, because that is the only action for which it addresses a render set.
+           */
+          const versionField =
+            body_.version === undefined
+              ? {}
+              : action === 'rollback'
+                ? { renderSetId: body_.version }
+                : { targetVersion: body_.version };
+
           const result = await this.executor.lifecycle({
             instanceId,
             action,
@@ -197,9 +213,44 @@ export class Phase4AHandlers implements OperationGroup {
             ...(body_.dataRetention === undefined ? {} : { dataRetention: body_.dataRetention }),
             ...(body_.justification === undefined ? {} : { justification: body_.justification }),
             ...(backupJobId === undefined ? {} : { backupJobId }),
-            ...(body_.version === undefined ? {} : { renderSetId: body_.version }),
+            ...versionField,
           });
           return { kind: 'accepted', jobId: result.jobId };
+        },
+      ],
+      [
+        // FR-1.13 / AC-20 — the exports, read from the on-disk catalogue so the list cannot promise
+        // an archive that is not there.
+        key('GET', '/instances/:id/exports'),
+        async (input) => body(await this.executor.exports(param(input, 'id'))),
+      ],
+      [
+        key('GET', '/instances/:id/exports/:exportId/archive'),
+        async (input): Promise<OperationResult> => {
+          const instanceId = param(input, 'id');
+          const archive = await this.executor.exportArchive(instanceId, param(input, 'exportId'));
+          // A full business dataset leaving the platform is an access event; the audit line records
+          // which artefact and how large, not only that someone asked.
+          await this.audit.append({
+            action: 'instance.export.downloaded',
+            actorType: 'user',
+            actorId: actor(input),
+            targetType: 'instance',
+            targetId: instanceId,
+            outcome: 'success',
+            detail: {
+              exportId: param(input, 'exportId'),
+              fileName: archive.fileName,
+              bytes: archive.bytes,
+            },
+          });
+          return {
+            kind: 'file',
+            path: archive.path,
+            contentType: 'application/gzip',
+            fileName: archive.fileName,
+            bytes: archive.bytes,
+          };
         },
       ],
       [

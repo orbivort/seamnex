@@ -18,8 +18,10 @@ import type {
   EnvPlanValue,
   EnvSchemaVar,
   PolicyException,
+  PreviewBlocker,
+  PreviewBlockerCode,
 } from '@seamnex/domain';
-import { admissionVerdict, PACKAGING_LABELS } from '@seamnex/domain';
+import { admissionVerdict, PACKAGING_LABELS, composeRuleLabel } from '@seamnex/domain';
 import { useDebouncedValue } from '@seamnex/shell';
 import { formatDate, formatRelative } from '@seamnex/utils';
 import type { PreflightCheck, WizardValues } from './steps/types';
@@ -38,6 +40,84 @@ export const STEPS = [
 
 /** Used only until the catalog entry (with its reviewed shape) arrives. */
 const DEFAULT_RESOURCES = { cpu: 1, memoryMb: 2048, diskMb: 20480 };
+
+/**
+ * FR-1.11 — which step can fix a blocker.
+ *
+ * The API names the fact that failed; the wizard owns the field. Keeping the mapping here, keyed on
+ * the blocker code, means a new code is a compile error rather than a row the operator cannot act
+ * on, and it is the only place that knows the step order.
+ */
+const BLOCKER_STEP: Record<PreviewBlockerCode, number> = {
+  unknown_entry: 1,
+  source_unresolved: 1,
+  image_unpinned: 1,
+  /*
+   * NFR-4.16: the wizard cannot fix this one — the remedy is an allow-list revision on the security
+   * posture screen — so it points at step 0 (entry/source review), where the operator sees the
+   * namespace the message names and can stop the deploy.
+   */
+  image_untrusted_registry: 0,
+  scaffold_unapproved: 1,
+  policy_blocked: 1,
+  route_conflict: 0,
+  env_invalid: 2,
+  secret_unresolved: 2,
+  capacity: 3,
+  policy_unknown: STEPS.length - 1,
+};
+
+/**
+ * The field error a blocker becomes, in the vocabulary the steps already render (`slug`,
+ * `resources`, `env.NAME`). `profileKey` is the one exception: the API names the resolution input,
+ * the identity step renders a `profile` field.
+ */
+function errorKeyOf(blocker: PreviewBlocker): string {
+  switch (blocker.code) {
+    case 'env_invalid':
+      return blocker.field === 'profileKey' ? 'profile' : `env.${blocker.field ?? ''}`;
+    case 'secret_unresolved':
+      return `env.${blocker.field ?? ''}`;
+    case 'capacity':
+      return 'resources';
+    case 'route_conflict':
+      return 'slug';
+    default:
+      return 'preflight';
+  }
+}
+
+function stepOfBlocker(blocker: PreviewBlocker): number {
+  return BLOCKER_STEP[blocker.code];
+}
+
+/**
+ * The blockers a field in the wizard can clear.
+ *
+ * A floating catalogue pin, an unapproved scaffold or a policy verdict are catalogue facts: the
+ * wizard can report them and must refuse the deploy, but there is nothing on the form to edit, so
+ * stopping "Continue" on them would trap the operator in a step with no fix. Those keep the deploy
+ * action disabled and their message visible; only the field-scoped ones also stop the step.
+ */
+const EDITABLE_BLOCKERS: ReadonlySet<PreviewBlockerCode> = new Set<PreviewBlockerCode>([
+  'route_conflict',
+  'env_invalid',
+  'secret_unresolved',
+  'capacity',
+]);
+
+function errorsOfBlockers(
+  blockers: readonly PreviewBlocker[],
+  step?: number,
+): Record<string, string> {
+  const found: Record<string, string> = {};
+  for (const blocker of blockers) {
+    if (!blocker.blocking || !EDITABLE_BLOCKERS.has(blocker.code)) continue;
+    if (step !== undefined && stepOfBlocker(blocker) !== step) continue;
+    found[errorKeyOf(blocker)] = blocker.message;
+  }
+  return found;
+}
 
 /**
  * A failure rendered as a sentence, never as `[object Object]` or an empty string.
@@ -157,7 +237,13 @@ export type DeployWizard = {
   submit: () => void;
   verdict: AdmissionOutcome | null;
   checks: PreflightCheck[];
+  /** Every blocker the API reported, blocking or advisory; empty until the preview answers. */
+  blockers: PreviewBlocker[];
+  /** The blockers the step at `index` can resolve, so the reason is shown beside the field. */
+  blockersFor: (index: number) => PreviewBlocker[];
   blocked: boolean;
+  /** Why the deploy action is refused, or `undefined` when it is not. */
+  blockedReason: string | undefined;
   failing: string[];
   /** Checks still waiting on a read; reported apart from `failing`, which has actually failed. */
   waiting: string[];
@@ -204,6 +290,24 @@ export function useDeployWizard(entryKey: string): DeployWizard {
 
   const update = (patch: Partial<WizardValues>) => {
     setDraft((current) => ({ ...current, ...patch }));
+    /*
+     * An error is a verdict on the value that was on screen when the check ran, and only `next()`
+     * and `submit()` ever re-run that check. Kept as it was, "A value is required." stood beside
+     * the password the operator had just typed — the field looked refused while holding a value,
+     * and the only way to learn otherwise was another click. Editing a field retires the verdict
+     * that named it; the next Continue publishes a new one.
+     */
+    setErrors((current) => {
+      const touched = new Set<string>();
+      for (const [name, value] of Object.entries(patch.env ?? {})) {
+        if ((values.env[name] ?? '') !== value) touched.add(`env.${name}`);
+      }
+      if (patch.slug !== undefined) touched.add('slug');
+      if (patch.resources !== undefined) touched.add('resources');
+      if (patch.profileKey !== undefined) touched.add('profile');
+      const next = Object.entries(current).filter(([key]) => !touched.has(key));
+      return next.length === Object.keys(current).length ? current : Object.fromEntries(next);
+    });
   };
 
   const typedOverrides = useMemo(() => {
@@ -239,10 +343,17 @@ export function useDeployWizard(entryKey: string): DeployWizard {
   );
 
   /**
-   * The preview is a read keyed on what it answers about. The two debounced inputs keep typing
-   * from issuing one request per keystroke; `useDeployPreview` cancels a superseded request and
-   * keys the cache on the slug and the size, so an answer for a discarded input cannot be shown
-   * as the current verdict.
+   * The preview is a read keyed on what it answers about. The debounced inputs keep typing from
+   * issuing one request per keystroke; `useDeployPreview` cancels a superseded request and keys
+   * the cache on every input, so an answer for a discarded input cannot be shown as the current
+   * verdict.
+   *
+   * `envOverrides` belongs to that input: the pre-flight plans the environment it is given and
+   * reports a `required` blocker per unresolved variable. Asked without the operator's values, it
+   * answered about an environment nobody was deploying — four required secrets were "missing" in
+   * a form that held all four, and `next()` copied those blockers into field errors that no
+   * amount of typing could clear. Same map `submit()` sends, so the verdict and the request judge
+   * one environment.
    */
   const previewSlug = useDebouncedValue(values.slug, 400);
   const previewResources = useDebouncedValue(values.resources, 400);
@@ -252,8 +363,9 @@ export function useDeployWizard(entryKey: string): DeployWizard {
       slug: previewSlug,
       ...(values.profileKey === '' ? {} : { profile: values.profileKey }),
       resources: previewResources,
+      ...(Object.keys(debouncedOverrides).length === 0 ? {} : { envOverrides: debouncedOverrides }),
     }),
-    [entryKey, previewSlug, values.profileKey, previewResources],
+    [entryKey, previewSlug, values.profileKey, previewResources, debouncedOverrides],
   );
   const preview = useDeployPreview(previewInput, entry.data !== undefined);
   const deploy = useDeploy();
@@ -275,12 +387,16 @@ export function useDeployWizard(entryKey: string): DeployWizard {
     { enabled: step === STEPS.length - 1 && preview.data === undefined },
   );
 
+  /*
+   * Exact match on the product key, not a text fragment. `scope` is the catalog entry key
+   * (NFR-4.15: the scope is part of what is approved), and `includes` matched every exception whose
+   * label happened to mention the key — including another product's.
+   */
   const exception = useMemo(
     () =>
       (exceptions.data ?? []).find(
         (item) =>
-          item.scope.includes(entryKey) &&
-          (item.state === 'approved' || item.state === 'requested'),
+          item.scope === entryKey && (item.state === 'approved' || item.state === 'requested'),
       ) ?? null,
     [exceptions.data, entryKey],
   );
@@ -315,6 +431,17 @@ export function useDeployWizard(entryKey: string): DeployWizard {
       ? !preview.data.slugAvailable
       : (instances.data ?? []).some((item) => item.slug === values.slug);
 
+  /**
+   * FR-1.11 — the API's blocker list, and the step each blocker belongs to.
+   *
+   * The preview used to answer `admissible: false` with one headline. The operator could not tell
+   * which of five steps to go back to, and a field-level refusal (a `none` ceiling, an unresolved
+   * secret) had no field. `blockersFor` is what the steps and the review summary both read.
+   */
+  const blockers = useMemo<PreviewBlocker[]>(() => preview.data?.blockers ?? [], [preview.data]);
+  const blockersFor = (index: number) =>
+    blockers.filter((blocker) => stepOfBlocker(blocker) === index);
+
   const planErrors = () => {
     const found: Record<string, string> = {};
     for (const issue of plan.data?.fieldErrors ?? []) found[`env.${issue.field}`] = issue.message;
@@ -325,6 +452,9 @@ export function useDeployWizard(entryKey: string): DeployWizard {
     const found = {
       ...validate(step, values, vars, entry.data?.resources, planValues),
       ...(step >= 2 ? planErrors() : {}),
+      // A step that owns an unresolved blocker does not advance. It is the same rule the deploy
+      // action follows, applied where the operator can still fix it.
+      ...errorsOfBlockers(blockers, step),
     };
     setErrors(found);
     if (Object.keys(found).length === 0)
@@ -342,14 +472,23 @@ export function useDeployWizard(entryKey: string): DeployWizard {
       ...validate(0, values, vars),
       ...validate(2, values, vars, undefined, planValues),
       ...validate(3, values, vars, entry.data?.resources),
+      ...errorsOfBlockers(blockers),
     };
-    if (slugTaken) found.slug = 'That route is already published; choose another slug.';
+    if (slugTaken && found.slug === undefined)
+      found.slug = 'That route is already published; choose another slug.';
     // A profile is required by the API; sending an empty key would have asked it to resolve nothing.
-    if (values.profileKey === '') found.profile = 'Choose an environment profile.';
+    if (values.profileKey === '' && found.profile === undefined)
+      found.profile = 'Choose an environment profile.';
     setErrors(found);
     // Both verdicts, for the same reason as the pre-flight check: the browser's arithmetic is
-    // advisory, the API's admission decision is the one that refuses.
-    if (Object.keys(found).length > 0 || !verdict?.admissible || preview.data?.admissible !== true)
+    // advisory, the API's admission decision is the one that refuses. A blocking entry is refused
+    // even if `admissible` ever disagreed with the list it came with.
+    if (
+      Object.keys(found).length > 0 ||
+      !verdict?.admissible ||
+      preview.data?.admissible !== true ||
+      blockers.some((blocker) => blocker.blocking)
+    )
       return;
     const envOverrides = Object.fromEntries(
       vars
@@ -452,7 +591,7 @@ export function useDeployWizard(entryKey: string): DeployWizard {
             label: exception ? 'Source path allowed by exception' : 'Source path allowed by policy',
             ok: exception ? exception.state === 'approved' : true,
             detail: exception
-              ? `${exception.id} · ${exception.rule} · ${exception.state === 'approved' ? `approved by ${exception.approver}` : 'awaiting a second party'}.`
+              ? `${exception.id} · ${composeRuleLabel(exception.rule)} · ${exception.state === 'approved' ? `approved by ${exception.approver}` : 'awaiting a second party'}.`
               : `${PACKAGING_LABELS[entryData.packaging]} path; no exception required.`,
           },
           {
@@ -493,6 +632,32 @@ export function useDeployWizard(entryKey: string): DeployWizard {
     .filter((check) => !check.ok && check.pending === true)
     .map((check) => check.label.toLowerCase());
 
+  /**
+   * The disabled button's own sentence. A disabled control with no reason reads as a broken one:
+   * "Deploy instance" was greyed out and the only explanation lived in a check list two panels up.
+   */
+  const blockingBlockers = blockers.filter((blocker) => blocker.blocking);
+  /*
+   * A blocker is named by the field it belongs to. Three unanswered required variables produced
+   * three identical "A value is required." sentences, and the disabled button printed two of them:
+   * an operator could neither tell which inputs to fill nor that a third existed. The cap stays —
+   * a plan with twenty blockers must not push the action off screen — but it now says how many it
+   * left out instead of ending mid-sentence.
+   */
+  const NAMED_BLOCKERS = 3;
+  const named = blockingBlockers
+    .slice(0, NAMED_BLOCKERS)
+    .map((blocker) =>
+      blocker.field === null ? blocker.message : `${blocker.field}: ${blocker.message}`,
+    );
+  const unmentioned = blockingBlockers.length - named.length;
+  const blockedReason =
+    blockingBlockers.length === 0
+      ? undefined
+      : `${blockingBlockers.length} pre-flight blocker${blockingBlockers.length === 1 ? '' : 's'}: ${named.join(' ')}${
+          unmentioned > 0 ? ` And ${unmentioned} more.` : ''
+        }`;
+
   return {
     entry,
     profiles,
@@ -511,7 +676,10 @@ export function useDeployWizard(entryKey: string): DeployWizard {
     submit,
     verdict,
     checks,
+    blockers,
+    blockersFor,
     blocked,
+    blockedReason,
     failing,
     waiting,
     unresolvedFields,

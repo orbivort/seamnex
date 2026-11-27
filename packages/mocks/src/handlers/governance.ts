@@ -1,7 +1,17 @@
 import { http, HttpResponse } from 'msw';
-import { breakGlassStateAt } from '@seamnex/domain';
-import type { BreakGlassSession } from '@seamnex/domain';
+import {
+  NATIVE_FLOOR_DEPLOYMENTS,
+  breakGlassStateAt,
+  isAcceptableFloorDecision,
+  licenseGateVerdict,
+  licenseTerms,
+  mayApproveAccessMode,
+  nativeFloorStatus,
+  updateAvailable,
+} from '@seamnex/domain';
+import type { BreakGlassSession, LicenseReviewRequest } from '@seamnex/domain';
 import { at } from '../fixtures/context';
+import { releasesPageOf } from '../fixtures/governance';
 import { appendAudit, auditProofFor, getState } from '../store';
 import {
   actorFor,
@@ -127,14 +137,21 @@ export const governanceHandlers = [
       );
     }
     const enabled = Boolean(body.enabled);
-    const restricted = record.resaleRestricted || record.hostedServiceRestricted;
-    const gateReason = !record.reviewedAt
-      ? `The ${record.licenseId} licence recorded for ${record.product} has not been reviewed, so hosted-service mode stays off.`
-      : restricted
-        ? `${record.product} is licensed under ${record.licenseId}, which does not permit resale or offering it as a hosted service.`
-        : null;
+    const reviewed =
+      record.reviewedBy !== null && record.reviewedAt !== null && record.upstreamRef !== null;
+    // Same builder as the API (ADR-BE-25): unknown, then unreviewed, then restricted.
+    const verdict = licenseGateVerdict({
+      product: record.product,
+      licenseId: record.licenseId,
+      terms: licenseTerms(record.licenseId),
+      recorded: true,
+      reviewed,
+      resaleRestricted: record.resaleRestricted,
+      hostedServiceRestricted: record.hostedServiceRestricted,
+    });
 
-    if (enabled && gateReason !== null) {
+    if (enabled && verdict.reason !== null) {
+      const licensingRefusal = verdict.code === 'LICENCE_RESTRICTED';
       appendAudit({
         action: 'license.hosted_service.denied',
         targetType: 'instance',
@@ -145,11 +162,13 @@ export const governanceHandlers = [
         actor: actorFor(role),
       });
       return problem(
-        403,
-        'LICENCE_RESTRICTED',
-        'The licence does not allow this configuration',
-        gateReason,
-        'Keep the instance for internal use, or complete the licence review and obtain a commercial licence before enabling hosted-service mode.',
+        licensingRefusal ? 403 : 409,
+        verdict.code ?? 'LICENCE_UNREVIEWED',
+        licensingRefusal
+          ? 'The licence does not allow this configuration'
+          : 'The licence has not been reviewed',
+        verdict.reason,
+        verdict.remediation ?? 'Complete the licence review before enabling hosted-service mode.',
       );
     }
     record.hostedService = enabled;
@@ -165,10 +184,135 @@ export const governanceHandlers = [
     return HttpResponse.json({
       instanceId: record.instanceId,
       hostedService: record.hostedService,
-      restricted,
-      reason: gateReason,
+      restricted: verdict.restricted,
+      reason: verdict.reason,
       evaluatedAt: at(0),
     });
+  }),
+
+  /**
+   * ADR-BE-25: the R2 review write. The mirror of `recordReview` — the same two explicit
+   * confirmations, the same state conflict, and the reviewer taken from the role rather than the
+   * body.
+   */
+  http.put('/api/v1/licenses/:instanceId/review', async ({ params, request }) => {
+    const role = roleOf(request);
+    const guard = requireCapability(role, 'license.review');
+    if (guard) return guard;
+    const body = await readBody<Partial<LicenseReviewRequest>>(request);
+    const record = getState().licenses.find(
+      (item) => item.instanceId === String(params.instanceId),
+    );
+    if (!record) {
+      return problem(
+        404,
+        'LICENSE_NOT_FOUND',
+        'Licence record not found',
+        `No licence is recorded for ${String(params.instanceId)}.`,
+        'Refresh the register.',
+      );
+    }
+
+    const licenseId = (body.licenseId ?? '').trim();
+    if (licenseId === '') {
+      return problem(
+        422,
+        'VALIDATION_FAILED',
+        'The review is incomplete',
+        'A licence identifier is required.',
+        'Check the upstream LICENSE file and enter its identifier.',
+        [{ field: 'licenseId', code: 'minLength', message: 'At least one character.' }],
+      );
+    }
+    const terms = licenseTerms(licenseId);
+    if (terms === null && !body.acknowledgeUnknownLicence) {
+      return problem(
+        422,
+        'VALIDATION_FAILED',
+        'The review is incomplete',
+        `"${licenseId}" is not a licence the platform knows, so it cannot be reviewed without confirmation.`,
+        'Correct the identifier, or acknowledge the unknown licence before recording it.',
+        [
+          {
+            field: 'licenseId',
+            code: 'unknown_licence',
+            message: 'Confirm that you reviewed this licence against its LICENSE file or contract.',
+          },
+        ],
+      );
+    }
+
+    const obligations = (Array.isArray(body.obligations) ? body.obligations : [])
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0);
+    if (obligations.length === 0 && !body.confirmNoObligations) {
+      return problem(
+        422,
+        'VALIDATION_FAILED',
+        'The review is incomplete',
+        'No obligations were supplied.',
+        'Confirm explicitly that no obligations apply, or list them.',
+        [
+          {
+            field: 'obligations',
+            code: 'confirmation_required',
+            message: 'Confirm explicitly when no obligations apply.',
+          },
+        ],
+      );
+    }
+
+    const upstreamRef = (body.upstreamRef ?? '').trim();
+    if (upstreamRef === '') {
+      return problem(
+        422,
+        'VALIDATION_FAILED',
+        'The review is incomplete',
+        'The artefact the review was checked against is required.',
+        'Record the upstream LICENSE URL or the commercial contract id.',
+        [
+          {
+            field: 'upstreamRef',
+            code: 'minLength',
+            message: 'At least one character: a URL or a contract id.',
+          },
+        ],
+      );
+    }
+
+    const resaleRestricted = Boolean(body.resaleRestricted);
+    const hostedServiceRestricted = Boolean(body.hostedServiceRestricted);
+    if ((resaleRestricted || hostedServiceRestricted) && record.hostedService) {
+      return problem(
+        409,
+        'STATE_CONFLICT',
+        'The instance is still offered as a hosted service',
+        `${record.product} is currently offered as a hosted service; disable that configuration before recording a restriction.`,
+        'Ask the platform administrator (R1) to turn hosted-service mode off, then record the review.',
+      );
+    }
+
+    const note = (body.note ?? '').trim();
+    record.licenseId = licenseId;
+    record.obligations = obligations;
+    record.resaleRestricted = resaleRestricted;
+    record.hostedServiceRestricted = hostedServiceRestricted;
+    record.reviewedBy = actorFor(role).id;
+    record.reviewedByName = actorFor(role).name;
+    record.reviewedAt = at(0);
+    record.upstreamRef = upstreamRef;
+    record.reviewNote = note === '' ? null : note;
+    record.status = 'cleared';
+    appendAudit({
+      action: 'license.review.recorded',
+      targetType: 'instance',
+      targetId: record.instanceId,
+      targetLabel: `${record.entryKey} ${record.product}`,
+      outcome: 'success',
+      detail: `Reviewed ${licenseId} with ${obligations.length} obligations.`,
+      actor: actorFor(role),
+    });
+    return HttpResponse.json(record);
   }),
 
   http.get('/api/v1/patch-register', ({ request }) => {
@@ -177,10 +321,127 @@ export const governanceHandlers = [
     return HttpResponse.json(getState().patches);
   }),
 
+  /**
+   * FR-2.12 — the on-demand observation pass.
+   *
+   * The mock does what the real pass does to the register: it stamps the provenance, the observation
+   * time and the release link. It deliberately does not invent a newer version: a feed that is not
+   * reachable is the state the screen has to survive, not a version bump.
+   */
+  http.post('/api/v1/patch-register/observe', ({ request }) => {
+    const role = roleOf(request);
+    const guard = requireCapability(role, 'settings.manage');
+    if (guard) return guard;
+
+    const patches = getState().patches;
+    let releases = 0;
+    let advisories = 0;
+    for (const patch of patches) {
+      // The same rule as the API: `releases` counts versions an operator can move up to, and a
+      // maintenance release published on the previous branch is not one of them.
+      const behind = updateAvailable(patch.currentVersion, patch.latestVersion);
+      patch.source = 'observed';
+      patch.lastObservedAt = at(0);
+      patch.checkedAt = at(0);
+      if (behind) {
+        releases += 1;
+        // The same derivation the fixture uses: a link to the product's releases, never a URL with no
+        // repository in it.
+        patch.releaseUrl = releasesPageOf(patch.entryKey) ?? patch.releaseUrl;
+        if (patch.advisory) advisories += 1;
+        // An observed deployment that is behind has an unapplied update; the age is what the row
+        // reports, and it survives the pass instead of being reset by it.
+        patch.oldestUnappliedSecurityDays = patch.oldestUnappliedSecurityDays ?? 9;
+      }
+    }
+
+    appendAudit({
+      action: 'patch.register.observed',
+      targetType: 'platform',
+      targetId: 'patch-register',
+      targetLabel: 'Patch register',
+      outcome: 'success',
+      detail: `Observed ${patches.length} deployments: ${releases} with a newer release, ${advisories} with an open advisory.`,
+      actor: actorFor(role),
+    });
+
+    return HttpResponse.json({
+      observedAt: at(0),
+      entries: patches.length,
+      releases,
+      advisories,
+      skipped: 0,
+      failed: 0,
+      instancesUpdated: patches.length,
+    });
+  }),
+
   http.get('/api/v1/posture', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'posture.view');
     if (guard) return guard;
     return HttpResponse.json(getState().posture);
+  }),
+
+  /**
+   * S-2 — the only path that may lower the served floor.
+   *
+   * It refuses a decision that is not a lower floor (the default is the floor; "raising" it would be
+   * a re-baseline dressed as a decision) and a reason too short to be a record of what was accepted.
+   */
+  http.post('/api/v1/posture/native-floor/decision', async ({ request }) => {
+    const role = roleOf(request);
+    const guard = requireCapability(role, 'settings.manage');
+    if (guard) return guard;
+
+    const body = await readBody<{ floor?: number; reason?: string }>(request);
+    const floor = Number(body.floor);
+    const reason = (body.reason ?? '').trim();
+
+    if (!isAcceptableFloorDecision({ floor, reason })) {
+      return problem(
+        422,
+        'VALIDATION_FAILED',
+        'That is not a recordable floor decision',
+        `A decision lowers the floor below ${NATIVE_FLOOR_DEPLOYMENTS}, gives a whole number, and states what is being accepted in at least 20 characters.`,
+        `Send a floor between 0 and ${NATIVE_FLOOR_DEPLOYMENTS - 1} with a written reason.`,
+        [{ field: 'reason', code: 'custom', message: 'A substantive reason is required.' }],
+      );
+    }
+
+    const posture = getState().posture;
+    const status = nativeFloorStatus(
+      {
+        native: posture.sso.native,
+        forwardAuth: posture.sso.forwardAuth,
+        signInRequired: posture.sso.signInRequired,
+      },
+      floor,
+    );
+    posture.sso.nativeFloor = {
+      floor: status.floor,
+      baseline: status.baseline,
+      met: status.met,
+      shortfall: status.shortfall,
+    };
+    const decision = {
+      floor,
+      reason,
+      recordedBy: actorFor(role).id,
+      recordedAt: at(0),
+    };
+    posture.sso.ownerDecision = decision;
+
+    appendAudit({
+      action: 'posture.native_floor.decided',
+      targetType: 'native_floor_decision',
+      targetId: `floor-${floor}`,
+      targetLabel: `Native floor ${floor}`,
+      outcome: 'success',
+      detail: `Floor lowered from ${NATIVE_FLOOR_DEPLOYMENTS} to ${floor}: ${reason}`,
+      actor: actorFor(role),
+    });
+
+    return HttpResponse.json(decision);
   }),
 
   http.get('/api/v1/break-glass-sessions', ({ request }) => {
@@ -245,6 +506,7 @@ export const governanceHandlers = [
       instanceId: instance.id,
       product: `${instance.entryKey} ${instance.product}`,
       domainOwner: instance.domainOwner.name,
+      domainOwnerEmail: instance.domainOwner.email ?? null,
       accessMode: body.accessMode,
       justification: body.justification,
       approver: null,
@@ -300,7 +562,9 @@ export const governanceHandlers = [
           'Refresh the list.',
         );
       }
-      if (session.accessMode === 'read_write' && role === 'R2') {
+      // The same rule the API enforces (FR-4.11, `ISSUE-05`): a scoped approver decides read-only
+      // elevations only. This used to be the *only* copy of it, which is what the review recorded.
+      if (!mayApproveAccessMode(role, session.accessMode)) {
         return problem(
           403,
           'APPROVAL_MODE_FORBIDDEN',

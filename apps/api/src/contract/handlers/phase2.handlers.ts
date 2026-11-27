@@ -1,5 +1,10 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { operationKey, type ApiOperation, type WorkflowState } from '@seamnex/domain';
+import {
+  operationKey,
+  type ApiOperation,
+  type LicenseReviewRequest,
+  type WorkflowState,
+} from '@seamnex/domain';
 import type { OperationGroup } from '../operation-handlers';
 import type { OperationHandler, OperationResult } from '../operation-handler';
 import { CATALOG_SERVICE, type CatalogService } from '../../modules/m01-catalog/catalog.contract';
@@ -27,6 +32,7 @@ import {
   ACCESS_CONTROL_SERVICE,
   type AccessControlService,
 } from '../../modules/m09-access-control/access-control.contract';
+import { requireCollectionScope } from '../../common/policy/collection-scope';
 import {
   PORTAL_BFF_SERVICE,
   type PortalBffService,
@@ -58,6 +64,15 @@ import {
   CATALOG_REPOSITORY,
   type CatalogRepositoryService,
 } from '../../modules/m22-catalog-repository/catalog-repo.contract';
+import {
+  CATALOG_SYNC,
+  type CatalogSyncService,
+} from '../../modules/m22-catalog-repository/catalog-sync.contract';
+import { AUDIT_SERVICE, type AuditService } from '../../modules/m17-audit/audit.contract';
+import {
+  ENVIRONMENT_DRIFT,
+  type EnvironmentDriftService,
+} from '../../modules/m22-catalog-repository/environment-drift.contract';
 import type { IntegrationMetadataPatch } from '../../modules/m01-catalog/catalog.contract';
 import { AppError } from '../../common/problem/app-error';
 
@@ -90,6 +105,9 @@ export class Phase2Handlers implements OperationGroup {
     @Inject(CAPACITY_SERVICE) private readonly capacity: CapacityService,
     @Inject(InstanceParamsService) private readonly params: InstanceParamsService,
     @Inject(CATALOG_REPOSITORY) private readonly repository: CatalogRepositoryService,
+    @Inject(CATALOG_SYNC) private readonly catalogSync: CatalogSyncService,
+    @Inject(AUDIT_SERVICE) private readonly audit: AuditService,
+    @Inject(ENVIRONMENT_DRIFT) private readonly drift: EnvironmentDriftService,
     @Inject(ADMIN_CREDENTIAL_SERVICE) private readonly adminCredential: AdminCredentialService,
     @Inject(PRODUCT_ACCOUNT_SERVICE) private readonly accounts: ProductAccountService,
   ) {}
@@ -194,6 +212,84 @@ export class Phase2Handlers implements OperationGroup {
         },
       ],
       [
+        key('GET', '/catalog/repository'),
+        /**
+         * The read model the sync action needs before it can be offered (ADR-BE-42 §10.3, AC-22):
+         * a disabled button needs to know no source is configured, and the dialog needs the last
+         * commit and whether a previous swap left a mixed tree.
+         */
+        async () => body(await this.catalogSync.read()),
+      ],
+      [
+        key('POST', '/catalog/sync'),
+        /**
+         * Fetch → swap → reload, in one request.
+         *
+         * The order matters: a caller must never observe a swapped tree with a stale projection, so
+         * the reload runs here rather than being left to a follow-up call the operator might skip.
+         * The fetch and swap are M22's (`CATALOG_SYNC` owns the working tree); the two projections
+         * and the audit row are this handler's, because M01 may not import M03 and M22 may not
+         * import M17.
+         *
+         * `catalog_commit` is written by the service **before** this reload (AC-19), so a projection
+         * that fails still leaves the provenance of the tree that produced it. A mixed tree is
+         * returned as `staged.pending`, never as a success with an empty list.
+         */
+        async (input) => {
+          const actorId = actor(input);
+          // A bodyless POST is a valid request — the configured default ref applies (§10.2 rule 6).
+          const request = (input.body ?? {}) as { ref?: string };
+          const outcome = await this.catalogSync.sync({
+            ...(request.ref === undefined ? {} : { ref: request.ref }),
+            actorId,
+          });
+
+          const tree = await this.repository.load();
+          const entries = await this.catalog.reload({ actorId, tree });
+          const environment = await this.env.applySchemas({
+            schemas: tree.envSchemas,
+            revision: tree.revision,
+            actorId,
+          });
+          const invalid = [...tree.invalid];
+
+          await this.audit.append({
+            action: 'catalog.source.synced',
+            actorType: 'user',
+            actorId,
+            targetType: 'catalog_repository',
+            targetId: outcome.commit,
+            outcome: 'success',
+            detail: {
+              // The sanitised form: host and path, no scheme, never a credential.
+              source: outcome.url,
+              ref: outcome.ref,
+              commit: outcome.commit,
+              revision: entries.revision,
+              entries: entries.entries,
+              added: entries.added,
+              changed: entries.changed,
+              removed: entries.removed,
+              environment: {
+                added: environment.added,
+                changed: environment.changed,
+                removed: environment.removed,
+              },
+              invalid: invalid.length,
+              staged: outcome.staged === null ? [] : [...outcome.staged.pending],
+            },
+          });
+
+          return body({
+            ...entries,
+            environment,
+            invalid,
+            source: { url: outcome.url, ref: outcome.ref, commit: outcome.commit },
+            staged: outcome.staged ?? { pending: [] },
+          });
+        },
+      ],
+      [
         key('GET', '/catalog/:key'),
         async (input) => body(await this.catalog.entry(param(input, 'key'))),
       ],
@@ -223,6 +319,57 @@ export class Phase2Handlers implements OperationGroup {
       ],
       [key('GET', '/env-profiles'), async () => body(await this.env.profiles())],
       [
+        key('POST', '/env-profiles'),
+        async (input) =>
+          body(
+            await this.env.createProfile(
+              input.body as { key: string; name: string; target: 'production' | 'staging' },
+              actor(input),
+            ),
+          ),
+      ],
+      [
+        key('PATCH', '/env-profiles/:key'),
+        async (input) =>
+          body(
+            await this.env.patchProfile(
+              param(input, 'key'),
+              input.body as { name?: string; target?: 'production' | 'staging' },
+              actor(input),
+            ),
+          ),
+      ],
+      [
+        key('PUT', '/env-profiles/:key/values'),
+        async (input) =>
+          body(
+            await this.env.replaceProfileValues(
+              param(input, 'key'),
+              (
+                input.body as {
+                  values: { varName: string; value?: string | null; secretRef?: string | null }[];
+                }
+              ).values,
+              actor(input),
+            ),
+          ),
+      ],
+      [
+        key('DELETE', '/env-profiles/:key'),
+        async (input) => body(await this.env.deleteProfile(param(input, 'key'), actor(input))),
+      ],
+      [
+        key('POST', '/env-profiles/:key/requests'),
+        async (input) =>
+          body(
+            await this.identity.requestProfileChange(
+              param(input, 'key'),
+              (input.body as { justification: string }).justification,
+              actor(input),
+            ),
+          ),
+      ],
+      [
         key('PATCH', '/catalog/:key/integration-metadata'),
         async (input) =>
           body(
@@ -242,11 +389,16 @@ export class Phase2Handlers implements OperationGroup {
         key('GET', '/instances'),
         async (input) =>
           body(
-            await this.executor.instances({
-              ...optional('q', input.query.q),
-              ...optional('state', input.query.state),
-              ...optional('entryKey', input.query.entryKey),
-            }),
+            await this.executor.instances(
+              {
+                ...optional('q', input.query.q),
+                ...optional('state', input.query.state),
+                ...optional('entryKey', input.query.entryKey),
+              },
+              // ADR-BE-44: the guard published the rows this caller may see; a list that reached
+              // its handler without that predicate is a wiring defect, not a platform-wide read.
+              requireCollectionScope(input.context),
+            ),
           ),
       ],
       [
@@ -270,7 +422,21 @@ export class Phase2Handlers implements OperationGroup {
       ],
       [
         key('GET', '/instances/:id/env'),
-        async (input) => body(await this.env.instanceEnv(param(input, 'id'))),
+        /**
+         * FR-1.29 — the per-variable badge is the open drift row, not a proxy.
+         *
+         * M03 owns the resolved value and M22 owns the drift rows, so the composition belongs here:
+         * teaching M03 to read `drift_record` would give one table two readers across a module edge
+         * for a boolean. The overlay only *narrows* what M03 returns — no value is recomputed.
+         */
+        async (input) => {
+          const instanceId = param(input, 'id');
+          const [values, drifted] = await Promise.all([
+            this.env.instanceEnv(instanceId),
+            this.drift.openVarNames(instanceId),
+          ]);
+          return body(values.map((value) => ({ ...value, drift: drifted.has(value.name) })));
+        },
       ],
       [
         key('PUT', '/instances/:id/env'),
@@ -400,6 +566,7 @@ export class Phase2Handlers implements OperationGroup {
                 role: string;
                 scopeType: string;
                 scopeLabel: string;
+                productRole: string;
                 propagate: boolean;
               },
               actor(input),
@@ -462,13 +629,30 @@ export class Phase2Handlers implements OperationGroup {
             ),
           ),
       ],
+      [
+        key('PUT', '/licenses/:instanceId/review'),
+        async (input) =>
+          body(
+            await this.governance.recordReview(
+              param(input, 'instanceId'),
+              input.body as LicenseReviewRequest,
+              actor(input),
+            ),
+          ),
+      ],
       [key('GET', '/patch-register'), async () => body(await this.governance.patches())],
       [key('GET', '/posture'), async () => body(await this.governance.posture())],
       [key('GET', '/break-glass-sessions'), async () => body(await this.governance.breakGlass())],
 
       // ---- Capacity -----------------------------------------------------------------------------
-      [key('GET', '/capacity'), async () => body(await this.capacity.snapshot())],
-      [key('GET', '/capacity/forecast'), async () => body(await this.capacity.forecast())],
+      [
+        key('GET', '/capacity'),
+        async (input) => body(await this.capacity.snapshot(requireCollectionScope(input.context))),
+      ],
+      [
+        key('GET', '/capacity/forecast'),
+        async (input) => body(await this.capacity.forecast(requireCollectionScope(input.context))),
+      ],
 
       // ---- Registry -----------------------------------------------------------------------------
       [key('GET', '/registry/instances'), async () => body(await this.registry.entries())],
@@ -488,6 +672,9 @@ export class Phase2Handlers implements OperationGroup {
         key('GET', '/workflows'),
         async (input) => {
           const result = await this.workflows.list({
+            // FR-5.9 / NFR-4.4: the visible set follows the caller's write authority, so a domain
+            // owner is not handed the whole portfolio by a capability that only says "may list".
+            actorId: input.context.subject.idpId,
             ...(input.query.state === undefined
               ? {}
               : { state: input.query.state as WorkflowState }),

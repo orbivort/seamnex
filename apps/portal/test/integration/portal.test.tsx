@@ -16,11 +16,11 @@ describe('portal capability and failure behaviour', () => {
     expect(openButtons.length).toBeGreaterThan(0);
   });
 
-  it('shows the guest surface when a guest opens the entitlement route directly', async () => {
+  it('refuses the entitlement route for a guest instead of rendering the page', async () => {
     openAs('R6', 'degraded', '/entitlements');
     render(<App />);
 
-    expect(await screen.findByText('Guest access is scoped to one product')).toBeDefined();
+    expect(await screen.findByText('This surface is not available to your role')).toBeDefined();
     expect(screen.queryByText(/Product roles/i)).toBeNull();
   });
 

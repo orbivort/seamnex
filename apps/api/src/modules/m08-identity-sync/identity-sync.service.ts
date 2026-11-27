@@ -135,10 +135,11 @@ export class PostgresIdentitySyncService implements IdentitySyncService {
       entry_key: string;
       product: string;
       product_role: string;
-      sync_state: string;
+      sync_state: UserEntitlements['entitlements'][number]['syncState'];
+      applied_at: Date | null;
     }>(
       `SELECT e.instance_id, i.entry_key, coalesce(i.payload->>'product', i.entry_key) AS product,
-              e.product_role, e.sync_state
+              e.product_role, e.sync_state, e.applied_at
          FROM entitlement e JOIN instance i ON i.id = e.instance_id
         WHERE e.subject_idp_id = $1 ORDER BY product`,
       [id],
@@ -151,6 +152,10 @@ export class PostgresIdentitySyncService implements IdentitySyncService {
         entryKey: row.entry_key,
         productRole: row.product_role,
         syncState: row.sync_state,
+        appliedAt:
+          row.applied_at === null || row.applied_at === undefined
+            ? null
+            : new Date(row.applied_at).toISOString(),
       })),
     };
   }
@@ -167,10 +172,11 @@ export class PostgresIdentitySyncService implements IdentitySyncService {
       role: string;
       scope_type: string;
       scope_id: string | null;
+      product_role: string;
       propagate_to_product: boolean;
       created_at: Date;
     }>(
-      `SELECT group_idp_id, role, scope_type, scope_id, propagate_to_product, created_at
+      `SELECT group_idp_id, role, scope_type, scope_id, product_role, propagate_to_product, created_at
          FROM group_mapping`,
     );
 
@@ -202,6 +208,7 @@ export class PostgresIdentitySyncService implements IdentitySyncService {
                 scopeType: mapping.scope_type as NonNullable<IdpGroup['mapping']>['scopeType'],
                 scopeId: mapping.scope_id,
                 scopeLabel: mapping.scope_id ?? ROLE_SCOPE_LABEL[mapping.scope_type] ?? 'Platform',
+                productRole: mapping.product_role,
                 propagateToProduct: mapping.propagate_to_product,
               },
         updatedAt: updatedAt.toISOString(),
@@ -211,7 +218,13 @@ export class PostgresIdentitySyncService implements IdentitySyncService {
 
   async mapGroup(
     groupId: string,
-    request: { role: string; scopeType: string; scopeLabel: string; propagate: boolean },
+    request: {
+      role: string;
+      scopeType: string;
+      scopeLabel: string;
+      productRole: string;
+      propagate: boolean;
+    },
     actorId: string,
   ): Promise<IdpGroup> {
     const scopeId = request.scopeType === 'platform' ? null : request.scopeLabel;
@@ -238,15 +251,26 @@ export class PostgresIdentitySyncService implements IdentitySyncService {
         role: string;
         scope_type: string;
         scope_id: string | null;
+        product_role: string;
       }>(
         `DELETE FROM group_mapping WHERE group_idp_id = $1
-         RETURNING role, scope_type, scope_id`,
+         RETURNING role, scope_type, scope_id, product_role`,
         [groupId],
       );
       await tx.query(
-        `INSERT INTO group_mapping (group_idp_id, role, scope_type, scope_id, propagate_to_product, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [groupId, request.role, request.scopeType, scopeId, request.propagate, actorId],
+        `INSERT INTO group_mapping (group_idp_id, role, scope_type, scope_id, product_role, propagate_to_product, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          groupId,
+          request.role,
+          request.scopeType,
+          scopeId,
+          // FR-2.4: the role the product applies. Recorded here so the sync worker can put it on the
+          // entitlement instead of the literal `member` it used to write.
+          request.productRole,
+          request.propagate,
+          actorId,
+        ],
       );
       await this.audit.append(
         {
@@ -258,6 +282,7 @@ export class PostgresIdentitySyncService implements IdentitySyncService {
           outcome: 'success',
           detail: {
             role: request.role,
+            productRole: request.productRole,
             scopeType: request.scopeType,
             scopeLabel: request.scopeLabel,
             propagate: request.propagate,
@@ -283,10 +308,14 @@ export class PostgresIdentitySyncService implements IdentitySyncService {
       finished_at: Date | null;
       changes: number;
       p95_latency_ms: number | null;
+      p95_propagation_ms: number | null;
+      propagation_samples: number;
       errors: number;
       detail: Record<string, unknown>;
     }>(
-      `SELECT id, started_at, finished_at, changes, p95_latency_ms, errors, detail FROM sync_run ORDER BY started_at DESC LIMIT 50`,
+      `SELECT id, started_at, finished_at, changes, p95_latency_ms, p95_propagation_ms,
+              propagation_samples, errors, detail
+         FROM sync_run ORDER BY started_at DESC LIMIT 50`,
     );
     return result.rows.map((row) => ({
       id: row.id,
@@ -295,7 +324,10 @@ export class PostgresIdentitySyncService implements IdentitySyncService {
       users: typeof row.detail.users === 'number' ? row.detail.users : 0,
       groups: typeof row.detail.groups === 'number' ? row.detail.groups : 0,
       changes: row.changes,
+      // Mirror-write latency: kept as a diagnostic, never presented as the propagation figure.
       p95LatencyMs: row.p95_latency_ms ?? 0,
+      p95PropagationMs: row.p95_propagation_ms,
+      propagationSamples: row.propagation_samples,
       errors: Array.isArray(row.detail.errors) ? (row.detail.errors as string[]) : [],
       state: runState(row.detail, row.errors),
     }));
@@ -513,6 +545,64 @@ export class PostgresIdentitySyncService implements IdentitySyncService {
       decidedBy: null,
       decidedAt: null,
       domain: entry.rows[0]?.domain ?? 'Platform',
+    };
+  }
+
+  async requestProfileChange(
+    key: string,
+    justification: string,
+    requesterIdpId: string,
+  ): Promise<AccessRequest> {
+    const [profile, requester] = await Promise.all([
+      this.pool.query<{ name: string }>(`SELECT name FROM env_profile WHERE key = $1`, [key]),
+      this.pool.query<{ name: string | null }>(
+        `SELECT coalesce(display_name, username) AS name FROM idp_user WHERE idp_id = $1`,
+        [requesterIdpId],
+      ),
+    ]);
+    if (profile.rowCount === 0) {
+      throw new AppError({
+        code: 'NOT_FOUND',
+        detail: `No environment profile "${key}".`,
+        remediation: 'Refresh the profile list.',
+      });
+    }
+    const target = `profile:${key}`;
+    const inserted = await withTransaction(this.pool, async (tx) => {
+      await this.audit.lockChain(tx);
+      const result = await tx.query<{ id: string; created_at: Date }>(
+        `INSERT INTO access_request (requester_idp_id, kind, target, justification, state)
+         VALUES ($1, 'instance_param', $2, $3, 'open') RETURNING id, created_at`,
+        [requesterIdpId, target, justification],
+      );
+      const row = result.rows[0];
+      if (row === undefined) throw new Error('access_request insert returned no row');
+      await this.audit.append(
+        {
+          action: 'profile.change_requested',
+          actorType: 'user',
+          actorId: requesterIdpId,
+          targetType: 'env_profile',
+          targetId: key,
+          outcome: 'success',
+          detail: { requestId: row.id },
+        },
+        tx,
+      );
+      return row;
+    });
+
+    return {
+      id: inserted.id,
+      requester: { id: requesterIdpId, name: requester.rows[0]?.name ?? requesterIdpId },
+      kind: 'instance_param',
+      target,
+      justification,
+      state: 'open',
+      createdAt: inserted.created_at.toISOString(),
+      decidedBy: null,
+      decidedAt: null,
+      domain: 'Platform',
     };
   }
 

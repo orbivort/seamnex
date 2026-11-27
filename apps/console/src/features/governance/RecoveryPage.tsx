@@ -456,23 +456,32 @@ export function RecoveryPage() {
                     {/* FR-1.35 — requirement id, developer-only; the panel header used to carry
                         it as its eyebrow. */}
                     <PanelHeader title="What the backup contains" />
-                    <ul className="divide-y divide-line">
-                      {data.contents.map((item) => (
-                        <li key={item.label} className="flex items-start gap-2 px-4 py-2">
-                          <Badge tone={item.included ? 'positive' : 'neutral'} size="sm">
-                            {item.included ? 'in' : 'ref'}
-                          </Badge>
-                          <span className="min-w-0">
-                            <span className="block text-meta font-medium text-text">
-                              {item.label}
+                    {data.contents.length === 0 ? (
+                      <EmptyState
+                        compact
+                        icon={<ArchiveRestore className="size-5" />}
+                        title="No platform set has been captured"
+                        description="This list is read from the newest finished platform backup. Until one exists nothing is claimed — not even the parts a backup is meant to contain."
+                      />
+                    ) : (
+                      <ul className="divide-y divide-line">
+                        {data.contents.map((item) => (
+                          <li key={item.label} className="flex items-start gap-2 px-4 py-2">
+                            <Badge tone={item.included ? 'positive' : 'neutral'} size="sm">
+                              {item.included ? 'in' : 'ref'}
+                            </Badge>
+                            <span className="min-w-0">
+                              <span className="block text-meta font-medium text-text">
+                                {item.label}
+                              </span>
+                              <span className="mt-0.5 block text-micro leading-snug text-faint">
+                                {item.detail}
+                              </span>
                             </span>
-                            <span className="mt-0.5 block text-micro leading-snug text-faint">
-                              {item.detail}
-                            </span>
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
                   </Panel>
                 </div>
               </SplitLayout>

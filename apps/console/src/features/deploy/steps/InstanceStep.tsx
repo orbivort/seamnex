@@ -10,6 +10,7 @@ import {
   Select,
   SplitLayout,
 } from '@seamnex/ui';
+import { formatBytes } from '@seamnex/utils';
 import type { WizardValues } from './types';
 
 export function InstanceStep({
@@ -98,7 +99,19 @@ export function InstanceStep({
               { label: 'Packaging', value: PACKAGING_LABELS[entry.packaging] },
               { label: 'Source', value: entry.packagingSource },
               { label: 'Services', value: ['web', ...entry.dependencies].join(', ') },
-              { label: 'Volumes', value: entry.volumes.map((volume) => volume.name).join(', ') },
+              // The declared quotas are what the deploy is refused against when they exceed the
+              // disk reservation (FR-1.9), so they belong beside the confirmation, not only in the
+              // catalog entry.
+              {
+                label: 'Volumes',
+                value:
+                  entry.volumes.length === 0
+                    ? 'None declared'
+                    : `${entry.volumes.map((volume) => volume.name).join(', ')} · ${formatBytes(
+                        entry.volumes.reduce((total, volume) => total + volume.quotaMb, 0) *
+                          1024 ** 2,
+                      )} of quotas`,
+              },
               { label: 'License', value: entry.licenseId },
             ]}
           />

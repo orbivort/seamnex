@@ -1,6 +1,7 @@
 import type { Backup, RestoreDrill, RestoreRun } from '@seamnex/domain';
 import { at, daysAgo, hoursAgo } from './context';
 import { INSTANCES } from './instances';
+import { includedLabels } from './recovery';
 
 const GB = 1024 ** 3;
 
@@ -59,15 +60,7 @@ export const BACKUPS: Backup[] = [
     finishedAt: hoursAgo(5.7),
     sizeBytes: Math.round(2.2 * GB),
     objectKey: 's3://seamnex-backups/platform/2026/10/22/platform-state.tar.zst.age',
-    includes: [
-      'entitlements and group mappings',
-      'audit log and anchors',
-      'job history',
-      'workflow definitions',
-      'secret-store root keys (escrowed separately)',
-      'TLS material',
-      'identity provider realm, database and configuration',
-    ],
+    includes: includedLabels('bkp-platform-1022'),
     verifiedAt: daysAgo(9),
     verifyMethod: 'platform restore drill with post-restore login',
     renderSetId: 'rs-platform-183',
@@ -82,13 +75,7 @@ export const BACKUPS: Backup[] = [
     finishedAt: at(-30 * 60 + 20),
     sizeBytes: Math.round(2.1 * GB),
     objectKey: 's3://seamnex-backups/platform/2026/10/21/platform-state.tar.zst.age',
-    includes: [
-      'entitlements and group mappings',
-      'audit log and anchors',
-      'job history',
-      'workflow definitions',
-      'identity provider realm, database and configuration',
-    ],
+    includes: includedLabels('bkp-platform-1021'),
     verifiedAt: null,
     verifyMethod: null,
     renderSetId: 'rs-platform-182',

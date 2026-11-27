@@ -1,13 +1,17 @@
 apiVersion: 1
 
 datasources:
+  # Explicit uids: a provisioned dashboard references a datasource by uid, and an auto-generated one
+  # changes between instances — the per-instance dashboard would then load with empty panels.
   - name: Prometheus
+    uid: seamnex-prometheus
     type: prometheus
     access: proxy
     url: http://prometheus:9090
     isDefault: true
 
   - name: Loki
+    uid: seamnex-loki
     type: loki
     access: proxy
     url: http://loki:3100

@@ -86,9 +86,19 @@ export class KeycloakAdminClient {
    * EspoCRM is configured with `oidcGroupClaim: groups` and requests `groups` as an *essential*
    * ID-token claim. The client this platform registers carried only Keycloak's stock scopes
    * (`profile`, `email`, `roles`, …), so the token would arrive without the claim no matter how
-   * healthy the rest of the registration looked. The scope is created on first use, given a group
-   * membership mapper, and assigned to the client; both steps are idempotent, so a re-registration
-   * repairs a client that was created before this existed.
+   * healthy the rest of the registration looked. The scope is found (or created), made to carry a
+   * group-membership mapper, and assigned to the client; every step is idempotent, so a
+   * re-registration repairs a client that was created before this existed.
+   *
+   * Keycloak 26.8.2 made the mapper step permission-sensitive: creating, updating or deleting a
+   * protocol mapper on a client *or a client scope* now requires `manage-realm` unless the mapper
+   * type is allow-listed for client administrators (the list is empty by default). The platform's
+   * admin client holds `manage-clients`, not `manage-realm`, so a scope that has to be created at
+   * registration time can no longer be given its mapper — and a client left without it mints ID
+   * tokens with no `groups`, which is the claim the product was configured to require. The scope
+   * and its mapper are therefore declared in `platform/realm/realm.json` (`groups`), where the
+   * realm-as-code CLI owns them; this method reuses what the realm declares and only reports the
+   * refusal, precisely, if the realm does not.
    */
   async ensureGroupClaimScope(clientId: string, scopeName: string): Promise<void> {
     const client = await this.findClient(clientId);
@@ -99,37 +109,75 @@ export class KeycloakAdminClient {
   }
 
   private async ensureScopeWithGroupMapper(scopeName: string): Promise<string> {
-    const existing = await this.findScope(scopeName);
-    if (existing !== null) return existing;
+    let scopeId = await this.findScope(scopeName);
 
-    await this.request('POST', '/client-scopes', {
-      name: scopeName,
-      protocol: 'openid-connect',
-      attributes: { 'include.in.token.scope': 'true', 'display.on.consent.screen': 'false' },
-    });
-    const created = await this.findScope(scopeName);
-    if (created === null) {
+    if (scopeId === null) {
+      await this.request('POST', '/client-scopes', {
+        name: scopeName,
+        protocol: 'openid-connect',
+        attributes: { 'include.in.token.scope': 'true', 'display.on.consent.screen': 'false' },
+      });
+      scopeId = await this.findScope(scopeName);
+      if (scopeId === null) {
+        throw new AppError({
+          code: 'ADAPTER_UNAVAILABLE',
+          detail: `Keycloak did not return the ${scopeName} client scope after creating it.`,
+          remediation:
+            'Check the realm manually; the product will not receive the claim without the scope.',
+        });
+      }
+    }
+
+    if (await this.scopeMintsClaim(scopeId, scopeName)) return scopeId;
+
+    await this.createGroupMapper(scopeId, scopeName);
+    return scopeId;
+  }
+
+  /** Whether the scope already carries a mapper that writes `claimName` into the token. */
+  private async scopeMintsClaim(scopeId: string, claimName: string): Promise<boolean> {
+    const mappers = await this.adminJson<{ config?: Record<string, string | undefined> }[]>(
+      `/client-scopes/${scopeId}/protocol-mappers/models`,
+    );
+    return mappers.some((mapper) => mapper.config?.['claim.name'] === claimName);
+  }
+
+  /**
+   * The write Keycloak 26.8.2 restricted, with the refusal translated into the one instruction that
+   * repairs it. A generic `403` reaching the deploy log named neither the cause nor the fix.
+   */
+  private async createGroupMapper(scopeId: string, scopeName: string): Promise<void> {
+    const response = await this.requestResponse(
+      'POST',
+      `/client-scopes/${scopeId}/protocol-mappers/models`,
+      {
+        name: scopeName,
+        protocol: 'openid-connect',
+        protocolMapper: 'oidc-group-membership-mapper',
+        config: {
+          'claim.name': scopeName,
+          'full.path': 'true',
+          'id.token.claim': 'true',
+          'access.token.claim': 'true',
+          'userinfo.token.claim': 'true',
+          'jsonType.label': 'String',
+        },
+      },
+    );
+    if (response.status === 403) {
       throw new AppError({
         code: 'ADAPTER_UNAVAILABLE',
-        detail: `Keycloak did not return the ${scopeName} client scope after creating it.`,
-        remediation:
-          'Check the realm manually; the product will not receive the claim without the scope.',
+        detail: `Keycloak refused the ${scopeName} protocol mapper (403). Since 26.8.2 a protocol mapper on a client scope requires \`manage-realm\`, which the platform admin client does not hold.`,
+        remediation: `Declare the ${scopeName} client scope and its oidc-group-membership-mapper in platform/realm/realm.json so realm-as-code owns them, then re-apply with \`pnpm kc:admin\`; the product needs the claim to map groups.`,
       });
     }
-    await this.request('POST', `/client-scopes/${created}/protocol-mappers/models`, {
-      name: scopeName,
-      protocol: 'openid-connect',
-      protocolMapper: 'oidc-group-membership-mapper',
-      config: {
-        'claim.name': scopeName,
-        'full.path': 'true',
-        'id.token.claim': 'true',
-        'access.token.claim': 'true',
-        'userinfo.token.claim': 'true',
-        'jsonType.label': 'String',
-      },
-    });
-    return created;
+    if (!response.ok) {
+      throw new AppError({
+        code: 'ADAPTER_UNAVAILABLE',
+        detail: `Keycloak refused the ${scopeName} protocol mapper (${response.status}).`,
+        remediation: `Check the realm manually; the product will not receive the ${scopeName} claim without the mapper.`,
+      });
+    }
   }
 
   private async findScope(scopeName: string): Promise<string | null> {
@@ -152,6 +200,38 @@ export class KeycloakAdminClient {
     return (await response.json()) as Record<string, unknown>;
   }
 
+  /**
+   * FR-1.36 — put the exported realm back.
+   *
+   * Restoring the identity provider's database already carries the realm, so this is the fallback for
+   * what a database restore cannot cover: a realm that answered but lost configuration the export
+   * holds (clients, scopes, mappers, flows). `POST /admin/realms` creates; a 409 means it is there
+   * and the update goes to `PUT /admin/realms/{realm}`. Both are idempotent, so a retry repairs a
+   * half-applied import instead of failing on it.
+   *
+   * It cannot bootstrap a provider whose admin token cannot be obtained — `token()` authenticates
+   * against the realm being imported, so a provider with no realm answers nothing here. That case
+   * surfaces as `ADAPTER_UNAVAILABLE` with the operator's instruction rather than a silent no-op,
+   * because FR-1.36 requires a restore that cannot authenticate to be reported failed.
+   *
+   * The document carries client secrets, which is why it is written 0600 by the capture stage and
+   * why nothing here logs the body or the response.
+   */
+  async importRealm(document: Record<string, unknown>): Promise<{ created: boolean }> {
+    // A 409 is "the realm is already there", which is the state the update path expects, not a
+    // refusal: it is the difference between create and converge.
+    const created = await this.adminRequest(
+      'POST',
+      '/realms',
+      document,
+      'Keycloak refused the realm import',
+      [409],
+    );
+    if (created.status !== 409) return { created: true };
+    await this.request('PUT', '', document);
+    return { created: false };
+  }
+
   /** The restore gate's identity check: an admin token proves the realm answers. */
   async realmReachable(): Promise<boolean> {
     try {
@@ -160,6 +240,18 @@ export class KeycloakAdminClient {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * FR-1.36 — drop the cached token so the next check is a real call.
+   *
+   * A restored realm is a different realm with the same name, and a token minted before the restore
+   * can still be inside its lifetime: `realmReachable()` would then answer `true` from the cache
+   * without a single request reaching the provider, which is exactly the false evidence the login
+   * gate exists to prevent.
+   */
+  invalidateToken(): void {
+    this.cached = undefined;
   }
 
   /**
@@ -182,6 +274,30 @@ export class KeycloakAdminClient {
    */
   async setUserEnabled(userId: string, enabled: boolean): Promise<void> {
     await this.request('PUT', `/users/${encodeURIComponent(userId)}`, { enabled });
+  }
+
+  /**
+   * FR-3.8 / AC-35 — ends every session this subject holds in the realm.
+   *
+   * This is the single logout the platform was missing: ending the provider session is what makes
+   * Keycloak post a logout token to each client that registered `backchannel.logout.url`, so the
+   * products end their own sessions instead of expiring quietly. "Global sign-out" is exactly the
+   * scope of the call — every browser and every product for this subject goes, which is what the
+   * user asked the button to do.
+   *
+   * A 204 is the accepted answer; an unknown user answers 404 and is tolerated, because the honest
+   * outcome for "this account no longer exists at the provider" is "there is nothing left to end",
+   * not a failed sign-out. A 403 is not tolerated: it means the admin client may not write sessions,
+   * and the caller has to say so rather than assume the products were notified.
+   */
+  async endUserSessions(userId: string): Promise<void> {
+    await this.adminRequest(
+      'POST',
+      `/realms/${this.config.SEAMNEX_KEYCLOAK_REALM}/users/${encodeURIComponent(userId)}/logout`,
+      undefined,
+      'Keycloak refused to end the user session',
+      [404],
+    );
   }
 
   private async findClient(clientId: string): Promise<string | null> {
@@ -243,9 +359,56 @@ export class KeycloakAdminClient {
   }
 
   private async request(method: string, path: string, body?: unknown): Promise<Response> {
-    const response = await this.send(
+    return this.adminRequest(
+      method,
+      `/realms/${this.config.SEAMNEX_KEYCLOAK_REALM}${path}`,
+      body,
+      `Keycloak ${method} ${path} answered`,
+    );
+  }
+
+  /**
+   * One admin call against `/admin`, and the only place a token is attached.
+   *
+   * `importRealm` needs the realm *collection* (`/realms`), which the realm-scoped helper cannot
+   * express; the two share this method so the timeout, the token cache and the failure translation
+   * stay single-valued. `what` is the caller's sentence for a refusal, because "PUT  answered 403" is
+   * not something an operator can act on.
+   */
+  private async adminRequest(
+    method: string,
+    path: string,
+    body?: unknown,
+    what = `Keycloak ${method} ${path} answered`,
+    tolerate: readonly number[] = [],
+  ): Promise<Response> {
+    const response = await this.adminCall(method, path, body);
+    if (!response.ok && !tolerate.includes(response.status)) {
+      throw new AppError({
+        code: 'ADAPTER_UNAVAILABLE',
+        detail: `${what} ${response.status}.`,
+        remediation: 'The identity change was not applied; retry after checking the admin client.',
+      });
+    }
+    return response;
+  }
+
+  /**
+   * A realm-scoped call whose reply is left to the caller.
+   *
+   * A refusal that means different things per status — a 403 for a permission the release now
+   * requires, against a 404 for an unknown client — cannot be translated into one sentence here
+   * without saying nothing useful. Takes a path relative to the realm, like `request`.
+   */
+  private async requestResponse(method: string, path: string, body?: unknown): Promise<Response> {
+    return this.adminCall(method, `/realms/${this.config.SEAMNEX_KEYCLOAK_REALM}${path}`, body);
+  }
+
+  /** The transport: one authenticated admin call, path absolute from `/admin`. */
+  private async adminCall(method: string, path: string, body?: unknown): Promise<Response> {
+    return this.send(
       `${method} ${path}`,
-      `${this.config.SEAMNEX_KEYCLOAK_ADMIN_URL}/admin/realms/${this.config.SEAMNEX_KEYCLOAK_REALM}${path}`,
+      `${this.config.SEAMNEX_KEYCLOAK_ADMIN_URL}/admin${path}`,
       {
         method,
         headers: {
@@ -256,14 +419,6 @@ export class KeycloakAdminClient {
         signal: AbortSignal.timeout(15_000),
       },
     );
-    if (!response.ok) {
-      throw new AppError({
-        code: 'ADAPTER_UNAVAILABLE',
-        detail: `Keycloak ${method} ${path} answered ${response.status}.`,
-        remediation: 'The identity change was not applied; retry after checking the admin client.',
-      });
-    }
-    return response;
   }
 
   /**

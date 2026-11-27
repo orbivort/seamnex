@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import type { Capability, PlatformRole } from '@seamnex/domain';
+import type { Capability, CollectionScope, PlatformRole } from '@seamnex/domain';
 import type { RoleId } from '../../config/config';
 import { requestStore } from '../logging/logger';
 import { AppError } from '../problem/app-error';
@@ -51,6 +51,16 @@ export type RequestContext = {
   /** Session-bound CSRF token used by the request guard; never logged. */
   readonly csrfToken: string | null;
   readonly groups: readonly string[];
+  /**
+   * The rows a collection read is confined to, published by the policy guard after an allow
+   * (ADR-BE-44).
+   *
+   * Mutable by necessity: the identity is resolved before the decision is taken, and the decision
+   * is what produces the scope. Absent on every other request. A collection handler treats absence
+   * as a wiring defect (`requireCollectionScope`), never as "unrestricted" — an allow that lost its
+   * predicate must fail closed.
+   */
+  policyScope?: CollectionScope;
 };
 
 export type ResolvedIdentity = Omit<RequestContext, 'requestId' | 'processRole'>;
@@ -88,10 +98,13 @@ export function runWithContext<T>(context: RequestContext, fn: () => T): T {
   );
 }
 
-/** The four probe/document paths of ADR-BE-06; they never resolve an identity. */
+/** The probe/document paths of ADR-BE-06; they never resolve an identity. */
 export function isAnonymousPath(path: string): boolean {
   const withoutQuery = path.split('?')[0] ?? path;
-  return ANONYMOUS_PATHS.has(withoutQuery);
+  if (ANONYMOUS_PATHS.has(withoutQuery)) return true;
+  // FR-2.6: the per-instance exposition is scraped, so its path carries an instance id and cannot be
+  // a fixed set member. The prefix is narrow — one controller route, no session, aggregate numbers.
+  return /^\/api\/v1\/metrics\/instances\/[^/]+$/.test(withoutQuery);
 }
 
 const ANONYMOUS_PATHS = new Set([

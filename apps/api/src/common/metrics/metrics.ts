@@ -16,6 +16,11 @@ export type Metrics = {
   readonly auditAppendSeconds: Histogram<'outcome'>;
   readonly jobsCreated: Counter<'kind' | 'lane'>;
   readonly jobTransitions: Counter<'from' | 'to'>;
+  /**
+   * NFR-6.5 — the retry pass's decisions. `scheduled` is the human-hours saved; a `skipped_*`
+   * outcome says why a failure still needs one, which is the number to watch against the target.
+   */
+  readonly jobRetries: Counter<'outcome'>;
   readonly jobStreamActive: Gauge<string>;
   readonly jobStreamRejected: Counter<string>;
   readonly secretsDecrypted: Counter<'scope'>;
@@ -86,6 +91,12 @@ export function createMetrics(role: RoleId): Metrics {
       name: 'seamnex_job_transitions_total',
       help: 'Job state transitions',
       labelNames: ['from', 'to'],
+      registers: [registry],
+    }),
+    jobRetries: new Counter({
+      name: 'seamnex_job_retries_total',
+      help: 'Job retry decisions, by outcome',
+      labelNames: ['outcome'],
       registers: [registry],
     }),
     jobStreamActive: new Gauge({

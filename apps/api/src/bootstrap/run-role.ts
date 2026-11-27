@@ -86,6 +86,24 @@ export async function runRole(role: RoleId): Promise<void> {
     }
   }
 
+  /*
+   * NFR-4.1 / ISSUE-07: the edge terminates TLS on every route, so an `http` product URL is not a
+   * preference — it builds launch links and OIDC redirect URIs for a port nothing serves. Production
+   * is refused by the schema; development is warned, because a `.env` copied before the edge served
+   * TLS still carries `http` + `8020` and otherwise fails only in a browser, days later.
+   */
+  if (config.SEAMNEX_PRODUCT_URL_SCHEME === 'http') {
+    logger.warn(
+      {
+        role,
+        productUrlScheme: config.SEAMNEX_PRODUCT_URL_SCHEME,
+        productUrlPort: config.SEAMNEX_PRODUCT_URL_PORT,
+        edgeTlsMode: config.SEAMNEX_EDGE_TLS_MODE,
+      },
+      'product URLs are built with http although the edge serves TLS; launch links and OIDC redirect URIs will name a plain port (ADR-BE-39)',
+    );
+  }
+
   let close: (() => Promise<void>) | undefined;
   let shuttingDown = false;
 

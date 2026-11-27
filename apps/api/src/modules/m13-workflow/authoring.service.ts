@@ -1,9 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { Inject, Injectable, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import {
+  cronExpressionProblem,
+  defaultValueProblem,
   isCredentialGranularity,
-  isWorkflowEligible,
-  mappingExpression,
+  isMappingTransform,
+  mappedValueExpression,
+  normaliseTransform,
+  transformNames,
+  resolvesPath,
   WORKFLOW_EXPORT_API_VERSION,
   workflowIneligibilityReason,
   writeIneligibilityReason,
@@ -42,6 +47,12 @@ import { FieldDiscoveryService } from './field-discovery.service';
 import { snapshotKey } from './field-snapshot.repository';
 import { WorkflowSampleService } from './sample.service';
 import {
+  WORKFLOW_AUTHORITY,
+  type WorkflowAuthority,
+  type WorkflowAuthorityEvidence,
+} from './workflow-authority.contract';
+import { resolveEgressInstance } from './egress-instance';
+import {
   formatIrHash,
   mappingsFor,
   normaliseDescription,
@@ -50,6 +61,15 @@ import {
 
 /** Matches the broker's own ceiling: an active version's credential lives 90 days. */
 const NINETY_DAYS = 90 * 24 * 60 * 60;
+
+/**
+ * NFR-4.14 — how many workflows one rotation pass may re-issue.
+ *
+ * Each rotation is a mint, an n8n credential, a push and a commit, so the batch is small on purpose:
+ * the pass runs hourly, the lead window is a week, and a bounded batch keeps one slow product from
+ * turning a scheduler tick into a multi-minute operation.
+ */
+const ROTATION_BATCH = 10;
 
 type Ir = {
   trigger: WorkflowTrigger;
@@ -89,6 +109,13 @@ type VersionRow = {
 type ValidationPass = { issues: ValidationIssue[]; checkedAt: Date };
 
 /**
+ * Who a run is attributed to. A run is started either by a person or by a signed delivery, and the
+ * audit trail has to say which: an `actorType: 'user'` row naming `trigger:<endpoint>` would claim a
+ * human did something no human did.
+ */
+type RunActor = { readonly type: 'user' | 'service'; readonly id: string };
+
+/**
  * A discovered operation, reduced to what the draft needs: the id the IR stores and the label the
  * canvas shows. `mode` decides which node may take it — a read op cannot bind a write node.
  */
@@ -112,12 +139,21 @@ type EgressProduct = {
  */
 @Injectable()
 export class WorkflowAuthoringService {
+  private readonly logger = new Logger('workflow-credentials');
+
   constructor(
     @Inject(PG_POOL) private readonly pool: Pool,
     @Inject(AUDIT_SERVICE) private readonly audit: AuditService,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     @Inject(N8nClient) private readonly n8n: N8nClient,
     @Inject(CREDENTIAL_BROKER_SERVICE) private readonly broker: CredentialBrokerService,
+    /*
+     * FR-5.9. Required, not optional: a deployment that forgets to provide it must fail to start
+     * rather than serve a workflow authoring API with no write-target authority. The gate is called
+     * from every mutating path below, and `mutate` is where node, mapping and trigger edits converge,
+     * so there is one funnel rather than five.
+     */
+    @Inject(WORKFLOW_AUTHORITY) private readonly authority: WorkflowAuthority,
     /*
      * Both are optional so that a unit test can build the authoring service without a product or a
      * database behind the mapper. When absent, `fields()` refuses and validation simply skips the
@@ -226,6 +262,18 @@ export class WorkflowAuthoringService {
       mappings: [],
     });
 
+    /**
+     * FR-5.9 / AC-26 — authority is decided by the **write** target, and before the row exists: an
+     * R3 naming another domain's product gets a refusal that says which target and which authority,
+     * not a draft they can never activate.
+     */
+    const authority = await this.authority.assertPermitted({
+      actorId,
+      action: 'create',
+      policyKey: 'workflow.author',
+      instanceIds: [input.targetInstanceId],
+    });
+
     const workflowId = await withTransaction(this.pool, async (tx) => {
       await this.audit.lockChain(tx);
       const created = await tx.query<{ id: string }>(
@@ -246,7 +294,7 @@ export class WorkflowAuthoringService {
           targetType: 'workflow',
           targetId: id,
           outcome: 'success',
-          detail: { name: input.name },
+          detail: { name: input.name, ...authorityDetail(authority) },
         },
         tx,
       );
@@ -280,6 +328,17 @@ export class WorkflowAuthoringService {
     }
     const source = document.workflow;
     const ir: Ir = { trigger: source.trigger, nodes: source.nodes, edges: source.edges };
+    /**
+     * FR-5.9: an import is a create with the targets already written down, so the same rule applies
+     * to the document's own list before the row exists. Otherwise the way to get a cross-domain
+     * definition into the platform would be to export it elsewhere and import it here.
+     */
+    const authority = await this.authority.assertPermitted({
+      actorId,
+      action: 'import',
+      policyKey: 'workflow.author',
+      entryKeys: source.writeTargets.map((target) => target.entryKey),
+    });
     const workflowId = await withTransaction(this.pool, async (tx) => {
       await this.audit.lockChain(tx);
       const created = await tx.query<{ id: string }>(
@@ -303,7 +362,7 @@ export class WorkflowAuthoringService {
           targetType: 'workflow',
           targetId: id,
           outcome: 'success',
-          detail: { irHash: document.irHash },
+          detail: { irHash: document.irHash, ...authorityDetail(authority) },
         },
         tx,
       );
@@ -483,7 +542,7 @@ export class WorkflowAuthoringService {
     return this.mutate(workflowId, actorId, 'workflow.trigger.updated', (ir) => {
       ir.trigger = {
         type: update.type,
-        label: triggerLabel(update.type),
+        label: triggerLabel(update),
         config: triggerConfig(update),
         timezone: update.timezone ?? null,
         ...(update.cron === undefined ? {} : { cron: update.cron }),
@@ -545,6 +604,19 @@ export class WorkflowAuthoringService {
        */
       this.n8n.assertReady();
       /**
+       * FR-5.9 — activation is where a definition starts acting, so authority is re-decided here
+       * even though the authoring edits were gated: the grant that allowed the edit may have been
+       * revoked since, and an imported definition arrives `disabled` precisely so that activating it
+       * is a second, attributable act.
+       */
+      const authority = await this.authority.assertPermitted({
+        actorId,
+        action: 'activate',
+        policyKey: 'workflow.author',
+        workflowId,
+        entryKeys: writeTargetsOf(version.ir),
+      });
+      /**
        * Resolved first, for the reason readiness is checked first: a node whose product publishes no
        * callable endpoint cannot run, and finding that out after minting would leave a live
        * credential behind for a definition that never went live. Each node's address is the broker,
@@ -554,7 +626,13 @@ export class WorkflowAuthoringService {
       const plan = await this.egressPlan(version.ir);
       const tokens = await this.mintEgress(workflow, plan.products, version.id);
       const credentials = await this.issueCredentials(workflow, version, plan.products, tokens);
-      const document = compile(workflow, version.ir, plan.addresses, credentials);
+      const document = compile(
+        workflow,
+        version.ir,
+        plan.addresses,
+        credentials,
+        this.retryPolicy(),
+      );
       // The recorded id, when there is one, is what makes a re-activation an update rather than a
       // second n8n workflow; the name search only covers a definition that has never been pushed.
       const compiledId = await this.n8n.upsert(
@@ -589,7 +667,7 @@ export class WorkflowAuthoringService {
             targetType: 'workflow',
             targetId: workflowId,
             outcome: 'success',
-            detail: { version: version.version },
+            detail: { version: version.version, ...authorityDetail(authority) },
           },
           tx,
         );
@@ -615,6 +693,19 @@ export class WorkflowAuthoringService {
        * captured and written into the audit row, so "disabled" here means "disabled locally, n8n
        * unreachable" rather than a claim an operator cannot check.
        */
+      /*
+       * Requirements §5.2 lists enable/disable in the same row as run and replay, so it is gated
+       * too — but note the asymmetry this is *not*: an unauthorised caller is refused, never
+       * "allowed because stopping is safe". The safety action is `activate`'s opposite, and a
+       * definition stopped by someone who does not own it is still an outage.
+       */
+      const authority = await this.authority.assertPermitted({
+        actorId,
+        action: 'disable',
+        policyKey: 'workflow.author',
+        workflowId,
+        entryKeys: writeTargetsOf(version.ir),
+      });
       const deactivation = await this.n8n
         .deactivate(workflow.id, version.compiled_n8n_id)
         .then(() => undefined)
@@ -634,8 +725,12 @@ export class WorkflowAuthoringService {
             outcome: deactivation === undefined ? 'success' : 'failure',
             detail:
               deactivation === undefined
-                ? {}
-                : { n8nDeactivationFailed: deactivation, localStateOnly: true },
+                ? authorityDetail(authority)
+                : {
+                    n8nDeactivationFailed: deactivation,
+                    localStateOnly: true,
+                    ...authorityDetail(authority),
+                  },
           },
           tx,
         );
@@ -644,6 +739,15 @@ export class WorkflowAuthoringService {
     }
 
     if (action === 'duplicate') {
+      // A copy is a create with a definition attached, so it is gated like one: the write targets
+      // travel with the IR, and the caller is about to own a second definition that writes to them.
+      const authority = await this.authority.assertPermitted({
+        actorId,
+        action: 'duplicate',
+        policyKey: 'workflow.author',
+        workflowId,
+        entryKeys: writeTargetsOf(version.ir),
+      });
       const copy = await withTransaction(this.pool, async (tx) => {
         await this.audit.lockChain(tx);
         const created = await tx.query<{ id: string }>(
@@ -654,6 +758,24 @@ export class WorkflowAuthoringService {
         const id = created.rows[0]?.id;
         if (id === undefined) throw internal('The copy was not created.');
         await this.insertVersion(tx, id, version.ir, actorId);
+        // FR-5.9 — a duplicate is a change, and it left no audit row at all before this: the copy
+        // existed with nothing recording who made it, from what, or under which elevation.
+        await this.audit.append(
+          {
+            action: 'workflow.duplicated',
+            actorType: 'user',
+            actorId,
+            targetType: 'workflow',
+            targetId: id,
+            outcome: 'success',
+            detail: {
+              sourceId: workflowId,
+              version: version.version,
+              ...authorityDetail(authority),
+            },
+          },
+          tx,
+        );
         return id;
       });
       return { kind: 'workflow', value: await this.load(copy) };
@@ -682,7 +804,24 @@ export class WorkflowAuthoringService {
           remediation: 'Activate the workflow (which compiles and pushes it), then run it.',
         });
       }
-      const run = await this.startRun(workflow, version, 'manual', actorId, null, idempotencyKey);
+      // FR-5.9: a manual run writes through the definition's targets, so it needs the authority a
+      // change does. Checked before the run row exists, so a refused run leaves nothing behind.
+      const authority = await this.authority.assertPermitted({
+        actorId,
+        action: 'run',
+        policyKey: 'workflow.run',
+        workflowId,
+        entryKeys: writeTargetsOf(version.ir),
+      });
+      const run = await this.startRun(
+        workflow,
+        version,
+        'manual',
+        { type: 'user', id: actorId },
+        null,
+        idempotencyKey,
+        authority.elevations,
+      );
       return { kind: 'run', value: run };
     }
 
@@ -692,6 +831,58 @@ export class WorkflowAuthoringService {
       detail: `Unknown workflow action "${action}".`,
       remediation: 'Use validate, activate, disable, duplicate or run.',
     });
+  }
+
+  /**
+   * FR-5.4 / NFR-2.8: a signed delivery starts the workflow it is bound to.
+   *
+   * Two independent de-duplications protect this path. The delivery row is unique on
+   * `(endpoint, delivery_id)`, so a retrying sender never gets past `accept()`; and the run's
+   * idempotency key is derived from the same delivery id, so a process that dies between the two
+   * steps produces one execution, not two. Neither can be substituted for the other: the first is
+   * the sender's contract, the second is the platform's own crash safety.
+   *
+   * Deliberately **not** routed through `assertPermitted`: there is no human on this request, and
+   * the authority to write through these targets was asserted when the definition was created,
+   * modified and activated. The remaining FR-5.9 gap (write targets are not re-checked against the
+   * current holder of the role at run time) is ISSUE-04's scope; this method must not appear to
+   * close it, which is why the run is attributed to the endpoint and not to a person.
+   */
+  async dispatchTriggerRun(input: {
+    workflowId: string;
+    endpointId: string;
+    deliveryId: string;
+  }): Promise<WorkflowRun> {
+    const workflow = await this.load(input.workflowId);
+    if (workflow.state !== 'active') {
+      throw new AppError({
+        code: 'STATE_CONFLICT',
+        detail: `Workflow ${workflow.name} is ${workflow.state}; a delivery only starts an active workflow.`,
+        remediation: 'Activate the workflow, or revoke the endpoint that points at it.',
+      });
+    }
+
+    const version = await this.currentVersion(input.workflowId);
+    // Checked before the run row exists: a run that cannot be handed to n8n is not evidence, it is
+    // a row the operator has to clean up.
+    this.n8n.assertReady();
+    if (version.compiled_n8n_id === null) {
+      throw new AppError({
+        code: 'STATE_CONFLICT',
+        detail: `Workflow ${workflow.name} has no compiled n8n definition, so the delivery cannot execute.`,
+        remediation: 'Activate the workflow (which compiles and pushes it), then deliver again.',
+      });
+    }
+
+    return this.startRun(
+      workflow,
+      version,
+      'webhook',
+      { type: 'service', id: `trigger:${input.endpointId}` },
+      null,
+      // Prefixed so a sender-chosen id can never collide with a caller's `Idempotency-Key`.
+      `trigger:${input.deliveryId}`,
+    );
   }
 
   /** FR-5.7: replay keyed on (COALESCE(replay_of, run_id), node_id, operation) so a retry cannot duplicate. */
@@ -706,7 +897,25 @@ export class WorkflowAuthoringService {
     }
     const workflow = await this.load(run.workflow_id);
     const version = await this.versionById(run.version_id);
-    return this.startRun(workflow, version, run.trigger as WorkflowRun['trigger'], actorId, runId);
+    // FR-5.9: a replay re-writes through the same targets as the run it retries, and §5.2 gates it
+    // with `workflow.run`. The elevation a replay leans on lands on its own `workflow.run.replayed`
+    // row rather than on the original run's.
+    const authority = await this.authority.assertPermitted({
+      actorId,
+      action: 'replay',
+      policyKey: 'workflow.run',
+      workflowId: run.workflow_id,
+      entryKeys: writeTargetsOf(version.ir),
+    });
+    return this.startRun(
+      workflow,
+      version,
+      run.trigger as WorkflowRun['trigger'],
+      { type: 'user', id: actorId },
+      runId,
+      undefined,
+      authority.elevations,
+    );
   }
 
   async decideApproval(
@@ -825,7 +1034,15 @@ export class WorkflowAuthoringService {
           ),
         );
       }
-      if (mappingsFor(ir, entry).length === 0) {
+      /*
+       * The entry point never takes a mapping. It receives the payload and passes it on, its
+       * mappings are read by nobody (`setMappings` files a source node's rows on the node, and
+       * compile ignores them), and the canvas tells the author to "map fields on the nodes it
+       * feeds". Warning here was permanent noise: every definition carried at least one warning
+       * from the moment it was drafted, so "passed with 1 warning" was the best a workflow could
+       * ever report and the warning stopped meaning anything.
+       */
+      if (entry.kind !== 'trigger' && mappingsFor(ir, entry).length === 0) {
         /*
          * A write node with no mappings compiles to `sendBody: false`, so the request reaches the
          * product with no body and is refused there — after activation succeeded. The warning has to
@@ -917,7 +1134,64 @@ export class WorkflowAuthoringService {
      * snapshot only. No product call happens during validation — a schema read that timed out would
      * otherwise turn every validation into a slow, flaky operation.
      */
+    issues.push(...mappingSemanticsIssues(ir));
     await this.checkMappingFields(ir, issues);
+    await this.checkSourcePaths(workflow, ir, issues);
+
+    /**
+     * FR-5.4: the two trigger modes that need a stated parameter now refuse to activate without one.
+     *
+     * A `poll` trigger with no interval used to compile to a webhook node — a workflow that claimed
+     * to poll and never did. The compiler can only honour an interval that exists, so the missing
+     * value is an error here, where it can be fixed with a field, rather than a default invented at
+     * compile time that nobody chose and no screen shows.
+     */
+    if (ir.trigger.type === 'poll' && (ir.trigger.minimumIntervalMinutes ?? 0) < 1) {
+      issues.push(
+        issue(
+          null,
+          'error',
+          'TRIGGER_INTERVAL_MISSING',
+          'This workflow polls a product but states no minimum interval.',
+          'Set the polling interval in minutes on the Trigger tab; a product without an event mechanism cannot start the workflow otherwise.',
+        ),
+      );
+    }
+    if (ir.trigger.type === 'schedule') {
+      const cron = (ir.trigger.cron ?? '').trim();
+      if (cron.length === 0) {
+        issues.push(
+          issue(
+            null,
+            'error',
+            'TRIGGER_CRON_MISSING',
+            'This workflow is scheduled but states no cron expression.',
+            'Set the cron expression (and its timezone) on the Trigger tab.',
+          ),
+        );
+      } else {
+        /*
+         * FR-5.4: a schedule the engine cannot compile is refused here, before activation.
+         *
+         * Reported only at activation, `61 * * * *` passed validate clean and then came back as n8n's
+         * bare `400`, which surfaces as "a platform adapter is not configured" — a message that sends
+         * the operator to inspect a working credential. The grammar is a property of the definition,
+         * so it is checked with the rest of the definition, and the rule names the offending field.
+         */
+        const problem = cronExpressionProblem(cron);
+        if (problem !== null) {
+          issues.push(
+            issue(
+              null,
+              'error',
+              'TRIGGER_CRON_INVALID',
+              `The cron expression "${cron}" cannot be compiled. ${problem}`,
+              'Correct the expression on the Trigger tab; five fields, for example "0 2 * * *" for 02:00 daily.',
+            ),
+          );
+        }
+      }
+    }
 
     const checkedAt = new Date();
     const valid = issues.every((entry) => entry.severity !== 'error');
@@ -1010,7 +1284,12 @@ export class WorkflowAuthoringService {
     for (const node of ir.nodes) {
       if (node.mode !== 'write') continue;
       if (node.entryKey === null || node.operation === null) continue;
-      if (mappingsFor(ir, node).length === 0) continue;
+      /*
+       * A write node with **no** mappings is included on purpose: `EMPTY_MAPPINGS` warns about it, but
+       * a product that publishes required fields will refuse the write, and that is an error the
+       * snapshot can prove. `mappingFieldIssues` skips the node when no schema is available, so an
+       * unmapped draft with an offline product still produces one warning, not two.
+       */
       try {
         const instanceId = await this.egressInstance(node.entryKey, 'write');
         targets.push({ node, instanceId, operation: node.operation });
@@ -1026,6 +1305,84 @@ export class WorkflowAuthoringService {
       targets.map((target) => ({ instanceId: target.instanceId, operation: target.operation })),
     );
     issues.push(...mappingFieldIssues(ir, targets, snapshots));
+  }
+
+  /**
+   * FR-5.5 — the source half of every mapping, checked against the last item the step received.
+   *
+   * Validation compared mappings with the *target* schema and never with the source shape, so a
+   * definition whose four source paths did not exist in the record it read passed with zero issues
+   * and then posted an empty body the target product refused — a failure that reads as the target's
+   * fault. The mirror already stores one redacted item per node per run; this reads the newest one
+   * instead of asking the product anything, so validation stays local and deterministic.
+   *
+   * Severity follows what one item can prove:
+   *
+   *  - every mapped path missing from an untruncated sample is an **error** — the mapping describes a
+   *    record that does not exist, and activating only buys a failed run;
+   *  - a partial miss is a **warning** — that field may simply be absent on this one record;
+   *  - a truncated sample is a warning either way, because the path may sit past the cut;
+   *  - no sample at all is nothing to report — a definition that has never run has nothing to
+   *    compare, and a warning on every new draft is the noise that stops being read.
+   */
+  private async checkSourcePaths(
+    workflow: Workflow,
+    ir: Ir,
+    issues: ValidationIssue[],
+  ): Promise<void> {
+    if (this.samples === undefined) return;
+
+    for (const node of ir.nodes) {
+      if (node.kind === 'trigger') continue;
+      const mappings = mappingsFor(ir, node).filter((mapping) => mapping.from.trim().length > 0);
+      if (mappings.length === 0) continue;
+      const inbound = ir.edges.find((edge) => edge.target === node.id);
+      if (inbound === undefined) continue;
+      const source = ir.nodes.find((entry) => entry.id === inbound.source);
+      if (source === undefined) continue;
+
+      const sample = await this.samples.latestForCheck(workflow.id, source.id);
+      /*
+       * A sample that is not a record proves nothing about paths.
+       *
+       * `{ data: "<json string>" }` is n8n's wrapper for a body it did not parse — the shape every
+       * read produced before the compiler asked for `responseFormat: 'json'`. Every path is missing
+       * from a string by definition, so reporting it would blame the author for a sample that is
+       * about to be replaced by a structured one on the next run.
+       */
+      if (sample === null || !isRecord(sample.item) || isTextEnvelope(sample.item)) continue;
+
+      const missing = mappings
+        .map((mapping) => mapping.from)
+        .filter((from) => resolvesPath(sample.item, from) === false);
+      if (missing.length === 0) continue;
+
+      const listed = missing.slice(0, 6).join(', ');
+      const more = missing.length > 6 ? `, and ${missing.length - 6} more` : '';
+      const all = missing.length === mappings.length;
+      const severity = all && !sample.truncated ? 'error' : 'warning';
+      const cut = sample.truncated
+        ? ' The stored sample is truncated, so a deeper path may sit past the cut.'
+        : '';
+      // Named so the author knows which run the evidence came from; `run-` is a prefix here, not a
+      // word, so it is dropped before the id is shortened.
+      const run =
+        sample.runId === null ? '' : ` (run ${sample.runId.replace(/^run-/, '').slice(0, 8)})`;
+
+      issues.push(
+        issue(
+          node.id,
+          severity,
+          all ? 'SOURCE_PATHS_UNRESOLVED' : 'SOURCE_PATHS_PARTIAL',
+          all
+            ? `Node "${node.label}" maps ${missing.length} source path${missing.length === 1 ? '' : 's'} the last item from "${source.label}" does not carry: ${listed}${more}.`
+            : `Node "${node.label}" maps ${missing.length} of ${mappings.length} source paths the last item from "${source.label}" did not carry: ${listed}${more}.`,
+          all
+            ? `Map the fields from that item — Mappings → "Last run"${run} — or fix the read operation: as it stands the write sends no value for these fields and the product refuses it.${cut}`
+            : `Those fields were absent on that record${run}. Map a path that always exists, or give the row a default, where a target requires one.${cut}`,
+        ),
+      );
+    }
   }
 
   /**
@@ -1047,52 +1404,14 @@ export class WorkflowAuthoringService {
   }
 
   /**
-   * The instance a node's product resolves to.
+   * The instance a node's product resolves to — see `egress-instance.ts`.
    *
-   * The IR stores the entry key, not an instance id, and one entry can be deployed more than once.
-   * The scoped instance wins and `id` breaks the tie, so two activations of the same definition
-   * cannot mint against different tenants. A write needs `scoped` (C-11); a read needs any
-   * credential the platform can broker, because a product with `none` has nothing to authenticate
-   * with.
+   * Shared with the FR-5.9 gate on purpose: authority has to be decided against the instance the
+   * run will write to. Two implementations of "which deployment" would let a caller be authorised
+   * against one product and compiled against another.
    */
   private async egressInstance(entryKey: string, mode: 'read' | 'write'): Promise<string> {
-    const result = await this.pool.query<{ id: string; granularity: string | null }>(
-      `SELECT i.id, seamnex_effective_granularity(i.id) AS granularity
-         FROM instance i WHERE i.entry_key = $1 AND i.deleted_at IS NULL ORDER BY i.id`,
-      [entryKey],
-    );
-    if (result.rows.length === 0) {
-      throw new AppError({
-        code: 'VALIDATION_FAILED',
-        status: 422,
-        detail: `No deployed ${entryKey} instance to run this node against.`,
-        remediation: 'Deploy the product, then activate again.',
-      });
-    }
-    const usable = (granularity: string | null): boolean =>
-      mode === 'write'
-        ? granularity === 'scoped'
-        : isWorkflowEligible(isCredentialGranularity(granularity) ? granularity : 'none');
-    const chosen =
-      result.rows.find((row) => row.granularity === 'scoped' && usable('scoped')) ??
-      result.rows.find((row) => usable(row.granularity));
-    if (chosen === undefined) {
-      throw new AppError({
-        code: 'VALIDATION_FAILED',
-        status: 422,
-        detail:
-          mode === 'write'
-            ? `No deployed ${entryKey} instance can issue an operation-scoped credential.`
-            : `No deployed ${entryKey} instance can issue a credential the platform can broker.`,
-        // FR-2.14 — the workflow-mode remediation used to end with "(FR-2.14)". Remediation text
-        // is rendered to operators, so the id stays here.
-        remediation:
-          mode === 'write'
-            ? 'Deploy the product, or make the writing node read-only (C-11).'
-            : 'Record a verified credential granularity for the product, or make the node read from a product that has one.',
-      });
-    }
-    return chosen.id;
+    return resolveEgressInstance(this.pool, entryKey, mode);
   }
 
   /**
@@ -1161,6 +1480,20 @@ export class WorkflowAuthoringService {
       products.push({ entryKey, instanceId, ...product });
     }
     return { addresses, products };
+  }
+
+  /**
+   * FR-5.7 — the retry policy this process compiles with.
+   *
+   * Read at compile time, not stored in the version: the ceiling is an operational limit like the
+   * egress timeout, and an operator who lowers it must not have to re-activate every workflow for the
+   * change to apply. A re-activation is what recompiles; nothing else pretends to.
+   */
+  private retryPolicy(): RetryPolicy {
+    return {
+      maxTries: this.config.SEAMNEX_WORKFLOW_RETRY_MAX_TRIES,
+      waitMs: this.config.SEAMNEX_WORKFLOW_RETRY_WAIT_MS,
+    };
   }
 
   /**
@@ -1268,6 +1601,186 @@ export class WorkflowAuthoringService {
     return credentials;
   }
 
+  /**
+   * NFR-4.14 — re-issues the scopes of active workflows that expire within the lead window.
+   *
+   * Called by the scheduler pass. "Due" means the **newest live scope of a product** expires within
+   * `SEAMNEX_WORKFLOW_CREDENTIAL_ROTATE_BEFORE_DAYS`, so an already-expired row is healed on the next
+   * pass (a workflow must not 401 until a human re-activates it) and a workflow that was just rotated
+   * is not a candidate again — the comparison is against the newest row, not any expiring one, which
+   * is what stops a failed revoke from causing a rotation per pass.
+   *
+   * A failure is per workflow: one product that cannot mint must not stop the rest of the batch.
+   */
+  async rotateDueCredentials(
+    limit = ROTATION_BATCH,
+  ): Promise<{ rotated: number; skipped: number }> {
+    if (!this.n8n.ready()) return { rotated: 0, skipped: 0 };
+    const candidates = await this.pool.query<{ id: string }>(
+      `SELECT DISTINCT w.id
+         FROM workflow w
+         JOIN credential_scope s ON s.workflow_id = w.id
+        WHERE w.state = 'active'
+          AND w.current_version_id IS NOT NULL
+          AND s.revoked_at IS NULL
+          AND s.token_hash IS NOT NULL
+          AND (s.version_id IS NULL OR s.version_id = w.current_version_id)
+          AND s.expires_at < now() + make_interval(days => $1)
+          AND s.issued_at = (
+                SELECT max(n.issued_at) FROM credential_scope n
+                 WHERE n.workflow_id = s.workflow_id
+                   AND n.instance_id = s.instance_id
+                   AND n.revoked_at IS NULL)
+        ORDER BY w.id
+        LIMIT $2`,
+      [this.config.SEAMNEX_WORKFLOW_CREDENTIAL_ROTATE_BEFORE_DAYS, limit],
+    );
+
+    let rotated = 0;
+    let skipped = 0;
+    for (const row of candidates.rows) {
+      try {
+        if (await this.rotateWorkflowCredentials(row.id)) rotated += 1;
+        else skipped += 1;
+      } catch (error) {
+        skipped += 1;
+        const detail = errorMessage(error);
+        this.logger.warn(
+          { workflowId: row.id, err: detail },
+          'workflow credential rotation failed',
+        );
+        await this.audit
+          .append({
+            action: 'workflow.credentials.rotation_failed',
+            actorType: 'system',
+            actorId: 'credential-rotation',
+            targetType: 'workflow',
+            targetId: row.id,
+            outcome: 'failure',
+            detail: { message: detail },
+          })
+          .catch(() => undefined);
+      }
+    }
+    return { rotated, skipped };
+  }
+
+  /**
+   * One workflow: mint new tokens, put them in n8n, push the definition, then retire the old ones.
+   *
+   * The order is the safety property, and it is activation's order for the same reason: a new token
+   * that never reaches n8n is an orphan row, a new credential without a new token is a definition
+   * that fails on its first egress, and revoking before the push would leave a live workflow
+   * unauthorised for the length of a network round trip.
+   */
+  private async rotateWorkflowCredentials(workflowId: string): Promise<boolean> {
+    const workflow = await this.load(workflowId);
+    const version = await this.currentVersion(workflowId);
+    const plan = await this.egressPlan(version.ir);
+
+    const oldScopes: { id: string }[] = [];
+    for (const product of plan.products) {
+      oldScopes.push(...(await this.liveScopes(workflow.id, product.entryKey)));
+    }
+
+    /*
+     * A per-generation idempotency key. The unique index on `credential_scope.idempotency_key` rejects
+     * a second row for one key, so a rotation that reused the activation key would collide with the
+     * scope it is replacing — and the broker's reuse path would hand back the very token being retired.
+     *
+     * A UUID rather than the clock: two rotations of one workflow within the same second would share a
+     * timestamp, and the second would then read back the first one's row.
+     */
+    const generation = randomUUID();
+    const tokens = new Map<string, string>();
+    const minted: string[] = [];
+    for (const product of plan.products) {
+      const scope = await this.broker.mint({
+        instanceId: product.instanceId,
+        workflowId: workflow.id,
+        operations: product.operations,
+        mode: product.mode,
+        ttlSeconds: NINETY_DAYS,
+        rotate: true,
+        idempotencyKey: `${workflow.id}:${version.id}:${product.entryKey}:${product.mode}:rotate:${generation}`,
+      });
+      tokens.set(product.entryKey, scope.token);
+      minted.push(scope.scopeId);
+    }
+
+    const credentials = await this.issueCredentials(workflow, version, plan.products, tokens);
+    const document = compile(workflow, version.ir, plan.addresses, credentials, this.retryPolicy());
+    await this.n8n.upsert(workflow.id, document, true, version.compiled_n8n_id);
+
+    if (!(await this.commitRotation(workflowId, version, credentials))) {
+      /*
+       * A new version landed while this rotation was pushing, so the definition now belongs to an
+       * activation that has its own credentials. Retire what this pass created and leave the
+       * definition alone: the new version's activation already wrote the one it intends to use.
+       */
+      for (const scopeId of minted) {
+        await this.broker.revoke(scopeId, 'credential-rotation').catch(() => undefined);
+      }
+      for (const credentialId of credentials.values()) {
+        await this.n8n.removeCredential(credentialId).catch(() => undefined);
+      }
+      return false;
+    }
+
+    const live = new Set(credentials.values());
+    for (const credentialId of Object.values(version.n8n_credentials ?? {})) {
+      if (live.has(credentialId)) continue;
+      await this.n8n.removeCredential(credentialId).catch(() => undefined);
+    }
+    for (const scope of oldScopes) {
+      await this.broker.revoke(scope.id, 'credential-rotation').catch(() => undefined);
+    }
+    return true;
+  }
+
+  /**
+   * Records the rotation, but only if the version it rotated is still the current one.
+   *
+   * The compare-and-set is the whole concurrency answer: an activation that bumped the version
+   * between the mint and the push owns the definition now, and writing this pass's credentials map
+   * over it would point the compiled workflow at tokens no scope recognises.
+   */
+  private async commitRotation(
+    workflowId: string,
+    version: VersionRow,
+    credentials: ReadonlyMap<string, string>,
+  ): Promise<boolean> {
+    return withTransaction(this.pool, async (tx) => {
+      await this.audit.lockChain(tx);
+      const current = await tx.query<{ current_version_id: string | null }>(
+        `SELECT current_version_id FROM workflow WHERE id = $1`,
+        [workflowId],
+      );
+      if (current.rows[0]?.current_version_id !== version.id) return false;
+      await tx.query(`UPDATE workflow_version SET n8n_credentials = $2 WHERE id = $1`, [
+        version.id,
+        JSON.stringify(Object.fromEntries(credentials)),
+      ]);
+      await this.audit.append(
+        {
+          action: 'workflow.credentials.rotated',
+          actorType: 'system',
+          actorId: 'credential-rotation',
+          targetType: 'workflow',
+          targetId: workflowId,
+          outcome: 'success',
+          detail: {
+            versionId: version.id,
+            entryKeys: [...credentials.keys()],
+            reason: 'scope within the rotation window (NFR-4.14)',
+          },
+        },
+        tx,
+      );
+      return true;
+    });
+  }
+
   /** The operations one instance publishes, with the endpoint each of them is called at. */
   private async publishedOperations(
     instanceId: string,
@@ -1337,9 +1850,11 @@ export class WorkflowAuthoringService {
     workflow: Workflow,
     version: VersionRow,
     trigger: WorkflowRun['trigger'],
-    actorId: string,
+    actor: RunActor,
     replayOf: string | null,
     idempotencyKey?: string,
+    /** FR-5.9 — the elevations the caller's authority leaned on, recorded on the run's own row. */
+    elevations: readonly { readonly instanceId: string; readonly elevationId: string }[] = [],
   ): Promise<WorkflowRun> {
     const key = `${replayOf ?? idempotencyKey ?? randomUUID()}:${version.id}`;
     const created = await withTransaction(this.pool, async (tx) => {
@@ -1375,12 +1890,17 @@ export class WorkflowAuthoringService {
       await this.audit.append(
         {
           action: replayOf === null ? 'workflow.run.started' : 'workflow.run.replayed',
-          actorType: 'user',
-          actorId,
+          actorType: actor.type,
+          actorId: actor.id,
           targetType: 'workflow_run',
           targetId: id,
           outcome: 'success',
-          detail: { trigger, version: version.version, replayOf },
+          detail: {
+            trigger,
+            version: version.version,
+            replayOf,
+            ...(elevations.length === 0 ? {} : { elevations }),
+          },
         },
         tx,
       );
@@ -1444,12 +1964,30 @@ export class WorkflowAuthoringService {
     const current = await this.currentVersion(workflowId);
     const ir: Ir = JSON.parse(JSON.stringify(current.ir)) as Ir;
     change(ir);
+    /**
+     * FR-5.9 — the check runs on the definition **as it will be**, not as it was.
+     *
+     * The gap this closes: an R3 owning one domain could take someone else's definition and
+     * `PATCH` a write node into a product they do not own, or add a second write node and turn a
+     * legitimate R4 draft into a pipeline they could never have created. Editing towards a target is
+     * creating that target.
+     */
+    const authority = await this.authority.assertPermitted({
+      actorId,
+      action: 'edit',
+      policyKey: 'workflow.author',
+      workflowId,
+      entryKeys: writeTargetsOf(ir),
+    });
     await withTransaction(this.pool, async (tx) => {
       await this.audit.lockChain(tx);
       await this.insertVersion(tx, workflowId, ir, actorId);
       await tx.query(
-        `UPDATE workflow SET state = CASE WHEN state = 'active' THEN 'disabled' ELSE 'draft' END, updated_at = now() WHERE id = $1`,
-        [workflowId],
+        `UPDATE workflow SET state = CASE WHEN state = 'active' THEN 'disabled' ELSE 'draft' END, write_targets = $2, updated_at = now() WHERE id = $1`,
+        // Kept in step with the version: the column is what the list, the PDP and the authority
+        // gate read, and an edit that adds a write target without recording it would leave all
+        // three answering for the previous definition.
+        [workflowId, writeTargetsOf(ir)],
       );
       await this.audit.append(
         {
@@ -1459,6 +1997,7 @@ export class WorkflowAuthoringService {
           targetType: 'workflow',
           targetId: workflowId,
           outcome: 'success',
+          detail: authorityDetail(authority),
         },
         tx,
       );
@@ -1803,12 +2342,24 @@ export type EgressAddress = {
   readonly method: string;
 };
 
+/**
+ * FR-5.7 — bounded retries per step.
+ *
+ * The defaults are the compiler's own, so a definition compiled without a configured policy still
+ * retries: an operator who never sets the knobs gets the behaviour the requirement asks for, and a
+ * test can pin the emitted node without building a config object.
+ */
+export type RetryPolicy = { readonly maxTries: number; readonly waitMs: number };
+
+export const DEFAULT_RETRY_POLICY: RetryPolicy = { maxTries: 3, waitMs: 5_000 };
+
 /** IR → n8n workflow JSON. One httpRequest node per IR node, one webhook or schedule trigger. */
 export function compile(
   workflow: Workflow,
   ir: Ir,
   addresses: ReadonlyMap<string, EgressAddress>,
   credentials: ReadonlyMap<string, string> = new Map(),
+  retry: RetryPolicy = DEFAULT_RETRY_POLICY,
 ): Record<string, unknown> {
   const nodes = ir.nodes.map((entry) => {
     /**
@@ -1829,9 +2380,13 @@ export function compile(
      */
     const bodyParameters = body.map((mapping) => ({
       name: mapping.to,
-      // The path rule is shared with the console preview: a bracket path (`["first name"]`) must not
-      // become `$json.["first name"]`, which n8n only rejects when it evaluates the expression.
-      value: `=${mappingExpression(mapping.from)}`,
+      /*
+       * FR-5.5: the value is the mapping, not just its path. `mappedValueExpression` applies the
+       * declared conversion and the missing-value policy, and returns exactly `={{ $json.path }}`
+       * for a mapping that declares neither — the path rule is shared with the console preview, so a
+       * bracket path (`["first name"]`) never becomes `$json.["first name"]`.
+       */
+      value: mappedValueExpression(mapping),
     }));
     const address = addresses.get(entry.id);
     if (address === undefined) {
@@ -1875,32 +2430,57 @@ export function compile(
          */
         authentication: 'genericCredentialType',
         genericAuthType: 'httpHeaderAuth',
-        options: { timeout: 30_000 },
+        /*
+         * FR-5.5 — a read must be parsed, because its item is what every downstream mapping reads.
+         *
+         * n8n parses `application/json` and turns anything else into `{ data: "<string>" }`, which
+         * no `$json.<path>` can reach; OpenProject answers `application/hal+json`, so the second step
+         * of a read→write workflow received a string blob and the target product refused the empty
+         * body. Writes keep autodetect: a `204` answer must not turn a successful write into a node
+         * error, and the broker already relabels every JSON body it relays.
+         */
+        options: {
+          timeout: 30_000,
+          ...(entry.mode === 'read' ? { response: { response: { responseFormat: 'json' } } } : {}),
+        },
         sendBody: entry.mode === 'write' && bodyParameters.length > 0,
         ...(entry.mode === 'write' && bodyParameters.length > 0
           ? { specifyBody: 'keypair', bodyParameters: { parameters: bodyParameters } }
           : {}),
       },
       ...(credentialId === undefined ? {} : { credentials: credentials_ }),
+      /*
+       * FR-5.7 — bounded retries for a transient failure, and a hard stop once they are spent.
+       *
+       * Retrying here rather than by re-running the whole workflow is deliberate: a re-run would
+       * repeat every step, including the writes that already landed. n8n's node retry re-sends the
+       * one request that failed, and `waitBetweenTries` is a fixed wait — the fixed form is the
+       * primitive the engine offers, recorded as a deviation in ADR-BE-30 rather than faked with a
+       * sequence of nodes this compiler does not own.
+       */
+      retryOnFail: retry.maxTries > 1,
+      ...(retry.maxTries > 1 ? { maxTries: retry.maxTries, waitBetweenTries: retry.waitMs } : {}),
+      // Never continue past a failed write: the run's later nodes assume the earlier one succeeded.
+      onError: 'stopWorkflow',
     };
   });
 
-  const triggerType =
-    ir.trigger.type === 'schedule' ? 'n8n-nodes-base.scheduleTrigger' : 'n8n-nodes-base.webhook';
-  const triggerNode = {
-    name: 'Trigger',
-    type: triggerType,
-    typeVersion: triggerType.endsWith('webhook') ? 2 : 1.2,
-    position: [-260, 0],
-    parameters:
-      ir.trigger.type === 'schedule'
-        ? {
-            rule: {
-              interval: [{ field: 'cronExpression', expression: ir.trigger.cron ?? '0 2 * * *' }],
-            },
-          }
-        : { path: workflow.id, httpMethod: 'POST' },
-  };
+  const triggerNode = triggerNodeFor(workflow.id, ir.trigger);
+  /*
+   * A second entry point for `Run now`, on every definition whose own trigger is not a webhook.
+   *
+   * `N8nClient.trigger` starts a run by POSTing the webhook the compiler emits, because n8n's public
+   * API has no run endpoint. A schedule or poll trigger compiled to a `scheduleTrigger` only, so the
+   * button was offered for exactly those definitions and answered `503 ADAPTER_UNAVAILABLE — n8n has
+   * no webhook registered` — the one thing an author wants before trusting a cron was the one thing
+   * that could not work. The declared trigger stays the definition's trigger; this node only gives a
+   * manual run somewhere to arrive.
+   */
+  const manualNode =
+    ir.trigger.type === 'schedule' || ir.trigger.type === 'poll'
+      ? manualTriggerNode(workflow.id)
+      : null;
+  const startNames = manualNode === null ? [triggerNode.name] : [triggerNode.name, manualNode.name];
 
   return {
     /*
@@ -1910,14 +2490,111 @@ export function compile(
      * to stop.
      */
     name: `${workflow.name} v${workflow.version} [${workflow.id}]`,
-    nodes: [triggerNode, ...nodes],
-    connections: connectionMap(ir),
+    // Appended, not prepended: `nodes[0]` is the definition's own trigger, and the manual entry
+    // point is a convenience beside it rather than the thing the definition says starts it.
+    nodes: manualNode === null ? [triggerNode, ...nodes] : [triggerNode, ...nodes, manualNode],
+    connections: connectionMap(ir, startNames),
     settings: { executionOrder: 'v1', timezone: ir.trigger.timezone ?? 'UTC' },
     staticData: { irHash: workflow.irHash },
   };
 }
 
-function connectionMap(ir: Ir): Record<string, unknown> {
+/** The schedule `triggerFor` writes when the author picks `schedule`; kept identical to it. */
+const DEFAULT_SCHEDULE_CRON = '0 2 * * *';
+
+/**
+ * The interval used only when an existing definition says `poll` without a value — a row written
+ * before this rule existed. Validation blocks such a definition from (re)activating, so the fallback
+ * keeps an already-compiled workflow runnable instead of silently turning it into a webhook again.
+ */
+const DEFAULT_POLL_MINUTES = 15;
+
+type TriggerNode = {
+  name: string;
+  type: string;
+  typeVersion: number;
+  position: number[];
+  parameters: Record<string, unknown>;
+};
+
+/**
+ * FR-5.4: the trigger the execution engine actually gets.
+ *
+ * - `schedule` → a cron schedule, evaluated in the workflow's timezone (the document's `settings`).
+ * - `poll` → an **interval** schedule at the stated minimum. This is the poller: the previous
+ *   compiler emitted a webhook node for `poll`, so a workflow for a product with no event mechanism
+ *   waited for a delivery that product could never send, and `minimumIntervalMinutes` was read by
+ *   nobody.
+ * - `webhook` and `manual` → the webhook node. `manual` must keep it: `N8nClient.trigger` starts a
+ *   run by POSTing to `/webhook/<path>`, and n8n has no other run endpoint.
+ *
+ * A `schedule` or `poll` definition is named `Schedule` here rather than `Trigger` so that the second
+ * webhook node — see `manualTriggerNode` — can keep the name n8n slugifies to `trigger`, which is the
+ * route `N8nClient.trigger` asks for first.
+ */
+function triggerNodeFor(workflowId: string, trigger: WorkflowTrigger): TriggerNode {
+  if (trigger.type === 'schedule') {
+    return {
+      name: 'Schedule',
+      type: 'n8n-nodes-base.scheduleTrigger',
+      typeVersion: 1.2,
+      position: [-260, 0],
+      parameters: {
+        rule: {
+          interval: [
+            { field: 'cronExpression', expression: trigger.cron ?? DEFAULT_SCHEDULE_CRON },
+          ],
+        },
+      },
+    };
+  }
+
+  if (trigger.type === 'poll') {
+    return {
+      name: 'Schedule',
+      type: 'n8n-nodes-base.scheduleTrigger',
+      typeVersion: 1.2,
+      position: [-260, 0],
+      parameters: {
+        rule: {
+          interval: [
+            {
+              field: 'minutes',
+              minutesInterval: trigger.minimumIntervalMinutes ?? DEFAULT_POLL_MINUTES,
+            },
+          ],
+        },
+      },
+    };
+  }
+
+  return {
+    name: 'Trigger',
+    type: 'n8n-nodes-base.webhook',
+    typeVersion: 2,
+    position: [-260, 0],
+    parameters: { path: workflowId, httpMethod: 'POST' },
+  };
+}
+
+/**
+ * The webhook a scheduled definition needs so `Run now` has somewhere to arrive.
+ *
+ * Named `Trigger` on purpose: n8n slugs the node name into the webhook route, and
+ * `N8nClient.trigger` asks for `<n8nWorkflowId>/trigger/<path>` before the single-process
+ * `<path>`. Positioned below the declared trigger so the editor reads it as a second entry point.
+ */
+function manualTriggerNode(workflowId: string): TriggerNode {
+  return {
+    name: 'Trigger',
+    type: 'n8n-nodes-base.webhook',
+    typeVersion: 2,
+    position: [-260, 140],
+    parameters: { path: workflowId, httpMethod: 'POST' },
+  };
+}
+
+function connectionMap(ir: Ir, startNames: string[]): Record<string, unknown> {
   const connections: Record<string, { main: { node: string; type: string; index: number }[][] }> =
     {};
   for (const edge of ir.edges) {
@@ -1933,14 +2610,18 @@ function connectionMap(ir: Ir): Record<string, unknown> {
    * only the edges left it with no outgoing connection. n8n then starts at a node with nowhere to
    * go and reports the execution as *successful* having run nothing: the platform mirrored nothing,
    * the run stayed `running`, and no product was called while every surface said the workflow had
-   * executed. Each root (a node no edge feeds) starts from the trigger.
+   * executed. Each root (a node no edge feeds) starts from **every** start node: a scheduled
+   * definition has two (its schedule and the manual-run webhook), and an execution started from
+   * either must run the same graph.
    */
   const fed = new Set(ir.edges.map((edge) => edge.target));
   const roots = ir.nodes.filter((entry) => !fed.has(entry.id));
   if (roots.length > 0) {
-    const trigger = (connections.Trigger ??= { main: [[]] });
-    for (const root of roots) {
-      trigger.main[0]?.push({ node: root.label, type: 'main', index: 0 });
+    for (const startName of startNames) {
+      const start = (connections[startName] ??= { main: [[]] });
+      for (const root of roots) {
+        start.main[0]?.push({ node: root.label, type: 'main', index: 0 });
+      }
     }
   }
   return connections;
@@ -1978,29 +2659,64 @@ function writeTargetsOf(ir: Ir): string[] {
 }
 
 /**
+ * FR-5.9 / §5.1 — the elevation a permitted write leaned on, as audit detail.
+ *
+ * Empty when the caller held standing authority: recording an elevation that was not used would
+ * misstate the evidence, and the audit chain is the one place where "which authority was exercised"
+ * has to be exact.
+ */
+function authorityDetail(evidence: WorkflowAuthorityEvidence): Record<string, unknown> {
+  return evidence.elevations.length === 0 ? {} : { elevations: evidence.elevations };
+}
+
+/**
  * The trigger a new draft starts with. `config` used to be the literal `'Manual trigger'` for every
  * type, so a `schedule` workflow read `{type: "schedule", cron: "0 2 * * *", config: "Manual trigger"}`
  * — three fields contradicting each other in one object.
  */
 function triggerFor(type: WorkflowTrigger['type']): WorkflowTrigger {
   const cron = type === 'schedule' ? '0 2 * * *' : null;
+  const timezone = 'UTC';
   return {
     type,
-    label: triggerLabel(type),
+    label: triggerLabel({ type, cron, timezone }),
     config: triggerConfig({ type, ...(cron === null ? {} : { cron }) }),
-    timezone: 'UTC',
+    timezone,
     ...(cron === null ? {} : { cron }),
   };
 }
 
-function triggerLabel(type: WorkflowTrigger['type']): string {
-  return type === 'schedule'
-    ? 'Every day at 02:00 UTC'
-    : type === 'webhook'
-      ? 'On webhook delivery'
-      : type === 'poll'
-        ? 'On a poll interval'
-        : 'Manual';
+/**
+ * The trigger in words the rest of the object agrees with.
+ *
+ * It used to be the constant `Every day at 02:00 UTC` for **any** schedule, so a definition holding
+ * `cron 0 3 * * 1-5` evaluated in `Europe/Berlin` was listed as running daily at 02:00 UTC — the
+ * inventory, the canvas header and the workspace header all repeated it, beside a `config` field
+ * that said `cron 0 3 * * 1-5`. The label now reads the cron and the timezone it is evaluated in.
+ */
+function triggerLabel(update: Pick<WorkflowTriggerUpdate, 'type' | 'cron' | 'timezone'>): string {
+  if (update.type === 'webhook') return 'On webhook delivery';
+  if (update.type === 'poll') return 'On a poll interval';
+  if (update.type === 'manual') return 'Manual';
+  const cron = (update.cron ?? '').trim();
+  const zone = update.timezone ?? 'UTC';
+  if (cron.length === 0) return 'On a cron schedule';
+  // `minute hour * * *` is the one shape worth spelling out; anything else is named by expression.
+  const daily = /^(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+\*$/.exec(cron);
+  const minute = Number(daily?.[1] ?? Number.NaN);
+  const hour = Number(daily?.[2] ?? Number.NaN);
+  if (!Number.isInteger(minute) || !Number.isInteger(hour)) return `Cron ${cron} (${zone})`;
+  return `Every day at ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} ${zone}`;
+}
+
+/** A plain object — what a record of a product's answer looks like. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** n8n's wrapper for a response body it did not parse: `{ data: "<text>" }` and nothing else. */
+function isTextEnvelope(item: Record<string, unknown>): boolean {
+  return Object.keys(item).length === 1 && typeof item['data'] === 'string';
 }
 
 function triggerConfig(update: WorkflowTriggerUpdate): string {
@@ -2008,7 +2724,7 @@ function triggerConfig(update: WorkflowTriggerUpdate): string {
   if (update.minimumIntervalMinutes !== null && update.minimumIntervalMinutes !== undefined) {
     return `every ${update.minimumIntervalMinutes} minute(s)`;
   }
-  return triggerLabel(update.type);
+  return triggerLabel(update);
 }
 
 /**
@@ -2062,10 +2778,10 @@ export function mappingFieldIssues(
   for (const target of targets) {
     const row = snapshots.get(snapshotKey(target.instanceId, target.operation));
     const mappings = mappingsFor(ir, target.node);
-    // Nothing is sent for a node without mappings; `EMPTY_MAPPINGS` already speaks for it, and a
-    // second warning about an unknown schema would be noise on every unmapped draft node.
-    if (mappings.length === 0) continue;
     if (row === undefined || row.status !== 'available') {
+      // Nothing is sent for a node without mappings; `EMPTY_MAPPINGS` already speaks for it, and a
+      // second warning about an unknown schema would be noise on every unmapped draft node.
+      if (mappings.length === 0) continue;
       issues.push(
         issue(
           target.node.id,
@@ -2079,6 +2795,29 @@ export function mappingFieldIssues(
     }
     const known = fieldsOf(row.fields);
     const accepted = new Set(known.map((field) => field.name));
+    /*
+     * FR-5.6 "completeness of required mappings": the product published the list and marked a field
+     * required, so a write that omits it is one the product will refuse on the first run — after
+     * activation succeeded. This is an error only here, where the knowledge exists; a snapshot that
+     * is missing or unavailable never produces it (ADR-BE-24 §2).
+     */
+    const written = new Set(mappings.map((mapping) => mapping.to));
+    const uncovered = known.filter((field) => field.required && !written.has(field.name));
+    if (uncovered.length > 0) {
+      issues.push(
+        issue(
+          target.node.id,
+          'error',
+          'MISSING_REQUIRED_FIELD',
+          `Node "${target.node.label}" sends no value for ${uncovered
+            .map((field) => `"${field.name}"`)
+            .join(
+              ', ',
+            )}, which ${target.node.entryKey ?? 'the product'} "${target.operation}" requires.`,
+          'Map the required field(s), or remove the operation and pick one the step can satisfy.',
+        ),
+      );
+    }
     const unknown = mappings.filter((mapping) => !accepted.has(mapping.to));
     if (unknown.length === 0) continue;
     const example = known
@@ -2100,6 +2839,57 @@ export function mappingFieldIssues(
           : `Use a field the operation publishes (${example}${known.length > 6 ? ', …' : ''}), then validate again.`,
       ),
     );
+  }
+  return issues;
+}
+
+/**
+ * FR-5.5 — a declared conversion or missing-value policy has to be one the compiler can emit.
+ *
+ * Exported and pure for the same reason as `mappingFieldIssues`: the rule is the contract. The
+ * platform owns the transform catalogue, so an unrecognised name is an error — the same "strict where
+ * the platform has knowledge" rule ADR-BE-24 §2 applies to target fields. A prose value
+ * (`currency → EUR`) is documentation; it compiled to nothing before this check existed, and the
+ * product silently received the unconverted value.
+ *
+ * Read nodes are not inspected: a read node sends no body, so its mappings are authoring notes the
+ * compiler never reads, and refusing activation over them would block a definition that runs.
+ */
+export function mappingSemanticsIssues(ir: Ir): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const allowed = transformNames().join(', ');
+  for (const node of ir.nodes) {
+    if (node.mode !== 'write') continue;
+    for (const mapping of mappingsFor(ir, node)) {
+      const transform = normaliseTransform(mapping.transform);
+      if (transform !== null && !isMappingTransform(transform)) {
+        issues.push(
+          issue(
+            node.id,
+            'error',
+            'UNKNOWN_TRANSFORM',
+            // Quoted as the author wrote it: they have to recognise the value to correct it, and the
+            // catalogue's own comparison is case-insensitive.
+            `Node "${node.label}" converts "${mapping.to}" with "${(mapping.transform ?? '').trim()}", which the platform cannot apply.`,
+            `Use one of: ${allowed}. A description of the conversion is not a conversion.`,
+          ),
+        );
+        // The default's type depends on the conversion, so it is judged only once that is known.
+        continue;
+      }
+      const problem = defaultValueProblem(mapping);
+      if (problem === null) continue;
+      const blank = (mapping.defaultValue ?? '').trim().length === 0;
+      issues.push(
+        issue(
+          node.id,
+          'error',
+          blank ? 'MISSING_DEFAULT_VALUE' : 'INVALID_DEFAULT_VALUE',
+          problem,
+          "Set a default in the target field's own units, or choose a different handling for a missing value.",
+        ),
+      );
+    }
   }
   return issues;
 }

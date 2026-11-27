@@ -25,6 +25,7 @@ import type { CatalogRepositoryService, CatalogWorkingTree } from './catalog-rep
  * The revision is the Git head when the path is a repository and a content hash otherwise: the
  * loader must be testable in a temporary directory, and CI validates the same files. The hash covers
  * both artefact kinds, so an environment-only edit still produces a new revision.
+ * `docs/operations/catalog-repo-format.md` is the operator-facing statement of this layout.
  */
 @Injectable()
 export class WorkingTreeCatalogRepository implements CatalogRepositoryService {
@@ -141,6 +142,13 @@ export class WorkingTreeCatalogRepository implements CatalogRepositoryService {
     );
   }
 
+  revision(): Promise<string | null> {
+    const root = this.config.SEAMNEX_CATALOG_REPO_PATH;
+    if (!existsSync(join(root, 'catalog'))) return Promise.resolve(null);
+    // A hand-placed tree has no `.git`, so the content hash is the only honest label there.
+    return Promise.resolve(this.gitHead(root) ?? this.readWorkingTree().revision);
+  }
+
   /**
    * `catalog/env/<KEY>.json`, one file per entry.
    *
@@ -195,15 +203,8 @@ export class WorkingTreeCatalogRepository implements CatalogRepositoryService {
     documents: readonly CatalogEntry[],
     envSchemas: readonly EnvSchemaFile[],
   ): string {
-    if (existsSync(join(root, '.git'))) {
-      try {
-        // `execFile` with an argument array: no shell, so a path with a space or a quote cannot
-        // become a second command.
-        return execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
-      } catch {
-        this.logger.warn({ msg: 'git rev-parse failed; falling back to a content hash', root });
-      }
-    }
+    const head = this.gitHead(root);
+    if (head !== null) return head;
     const digest = createHash('sha256');
     for (const document of [...documents].sort((a, b) => a.key.localeCompare(b.key))) {
       digest.update(JSON.stringify(document));
@@ -212,6 +213,23 @@ export class WorkingTreeCatalogRepository implements CatalogRepositoryService {
       digest.update(`env:${JSON.stringify(schema)}`);
     }
     return `content-${digest.digest('hex').slice(0, 16)}`;
+  }
+
+  /**
+   * `git rev-parse HEAD`, or `null` when this root is not a checkout (or git cannot read it).
+   *
+   * `execFile` with an argument array: no shell, so a path with a space or a quote cannot become a
+   * second command. A failed read falls back to the content hash rather than throwing, because a
+   * tree that git refuses (a differing host uid, a stripped `.git`) is still a readable catalogue.
+   */
+  private gitHead(root: string): string | null {
+    if (!existsSync(join(root, '.git'))) return null;
+    try {
+      return execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    } catch {
+      this.logger.warn({ msg: 'git rev-parse failed; falling back to a content hash', root });
+      return null;
+    }
   }
 }
 

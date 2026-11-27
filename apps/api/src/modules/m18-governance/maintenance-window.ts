@@ -1,4 +1,4 @@
-import type { MaintenanceWindow } from '@seamnex/domain';
+import type { MaintenanceWindow, PolicyException } from '@seamnex/domain';
 
 /**
  * One row, one shape.
@@ -91,6 +91,81 @@ export function policyExceptionRequester(exception: {
     if (typeof requestedBy === 'string' && requestedBy.length > 0) return requestedBy;
   }
   return exception.approver;
+}
+
+/**
+ * The one projection of a `policy_exception` row, shared by the queue and by both write answers.
+ *
+ * Both name columns hold subject identifiers and the screen shows people, so each side is resolved
+ * to the directory name once, here. `requestedBy` lives in `patch_diff` because the table has no
+ * requester column (see `policyExceptionRequester`); until a decision overwrites `approver`, that
+ * column still holds whoever created the row.
+ */
+export const POLICY_EXCEPTION_SELECT = `
+  SELECT pe.id, pe.rule, pe.scope, pe.justification, pe.approver, pe.state, pe.created_at,
+         pe.expires_at, pe.patch_diff,
+         coalesce(r.display_name, r.username) AS requester_name,
+         coalesce(a.display_name, a.username) AS approver_name
+    FROM policy_exception pe
+    LEFT JOIN idp_user r ON r.idp_id = coalesce(pe.patch_diff->>'requestedBy', pe.approver)
+    LEFT JOIN idp_user a ON a.idp_id = pe.approver`;
+
+export type PolicyExceptionRow = {
+  id: string;
+  rule: string;
+  scope: string;
+  justification: string;
+  approver: string;
+  state: string;
+  created_at: Date;
+  expires_at: Date;
+  patch_diff: unknown;
+  requester_name?: string | null;
+  approver_name?: string | null;
+};
+
+/**
+ * One row, one shape — the same lesson `maintenanceWindow` learned: the queue and the write answers
+ * were mapped separately and disagreed on the same row.
+ *
+ * Two read-time corrections live here rather than in each screen:
+ *   - `pending` and `requested` both mean "awaiting a second party" (the column predates the wire
+ *     vocabulary), and anything unrecognised is not silently "approved";
+ *   - an **approved row past its expiry is `expired`, not `approved`.** It waives nothing — the
+ *     resolver refuses it — so reporting it as approved told an operator the rule was covered while
+ *     the next deployment was already being blocked (AC-33).
+ */
+export function toPolicyException(row: PolicyExceptionRow, now = Date.now()): PolicyException {
+  const lapsed = row.expires_at.getTime() <= now;
+  const state: PolicyException['state'] = (() => {
+    switch (row.state) {
+      case 'approved':
+        return lapsed ? 'expired' : 'approved';
+      case 'pending':
+      case 'requested':
+        return 'requested';
+      case 'rejected':
+        return 'rejected';
+      default:
+        // `expired`, and anything the column has never defined: terminal, so no button appears.
+        return 'expired';
+    }
+  })();
+  return {
+    id: row.id,
+    rule: row.rule,
+    scope: row.scope,
+    justification: row.justification,
+    // The requester to the row, never the approver: the console decides who may act on it.
+    requester: row.requester_name ?? policyExceptionRequester(row),
+    // `approver` is NOT NULL and holds the creator until a decision overwrites it, so reading it raw
+    // reported an open exception as already approved by its own requester.
+    approver: state === 'requested' ? null : (row.approver_name ?? row.approver),
+    state,
+    requestedAt: row.created_at.toISOString(),
+    expiresAt: row.expires_at.toISOString(),
+    patchDiff: policyExceptionDiff(row.patch_diff),
+  };
 }
 
 /** The written diff an approver decides on, not a JSON envelope around it. */

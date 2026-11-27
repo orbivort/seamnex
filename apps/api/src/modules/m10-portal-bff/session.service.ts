@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
-import type { PlatformRole, ResidualSession } from '@seamnex/domain';
+import type { PlatformRole } from '@seamnex/domain';
 import type { Pool } from 'pg';
 import { Repository } from '@seamnex/db';
 import { PG_POOL } from '../../database/database.module';
@@ -10,7 +10,12 @@ import {
   type AccessControlService,
 } from '../m09-access-control/access-control.contract';
 import { SIGN_IN_RELAY, type SignInRelay } from '../m24-sign-in-relay/relay.contract';
-import type { SessionCreateInput, SessionRecord, SessionService } from './session.contract';
+import type {
+  SessionCreateInput,
+  SessionRecord,
+  SessionService,
+  SignOutProductSessions,
+} from './session.contract';
 import { SessionStore } from './session.store';
 
 /** Refresh `last_seen` at most this often, so a read path costs one Redis GET in the common case. */
@@ -192,8 +197,15 @@ export class RedisSessionService extends Repository implements SessionService {
    * end-to-end check failed is not listed — there is no session to end, and telling the user to
    * "end it in the product" sends them into a login that cannot succeed. Everything else keeps its
    * verified lifetime and now carries the verification date, so the estimate reads as an estimate.
+   *
+   * `outcome.identityProviderEnded` closes the third gap, AC-35's: a product whose session the
+   * provider was actually asked to end does not belong in a list titled "may persist". The set is
+   * therefore derived from what the sign-out did, not from what the product declares.
    */
-  async residualSessions(sub: string): Promise<ResidualSession[]> {
+  async signOutProductSessions(
+    sub: string,
+    outcome: { identityProviderEnded: boolean } = { identityProviderEnded: false },
+  ): Promise<SignOutProductSessions> {
     const rows = await this.many<{
       instance_id: string;
       product: string;
@@ -201,11 +213,13 @@ export class RedisSessionService extends Repository implements SessionService {
       slo_supported: boolean | null;
       verified_at: Date | null;
       idp_client_id: string | null;
+      backchannel_logout_url: string | null;
       sso_ok: boolean | null;
     }>(
       `SELECT DISTINCT ON (i.id) i.id AS instance_id, c.product,
               m.session_max_minutes, m.slo_supported, m.verified_at,
-              ic.client_id AS idp_client_id, sso.ok AS sso_ok
+              ic.client_id AS idp_client_id, ic.backchannel_logout_url,
+              sso.ok AS sso_ok
          FROM entitlement e
          JOIN instance i ON i.id = e.instance_id AND i.deleted_at IS NULL
          JOIN catalog_entry c ON c.key = i.entry_key
@@ -221,18 +235,32 @@ export class RedisSessionService extends Repository implements SessionService {
       [sub],
     );
 
-    return rows
-      .filter((row) => !(row.idp_client_id !== null && row.sso_ok === false))
-      .map((row) => {
-        const verified = row.verified_at !== null;
-        return {
-          instanceId: row.instance_id,
-          product: row.product,
-          maxRemainingMinutes: verified ? row.session_max_minutes : null,
-          singleLogout: verified && row.slo_supported === true,
-          verifiedAt: row.verified_at?.toISOString() ?? null,
-        };
-      });
+    const live = rows.filter((row) => !(row.idp_client_id !== null && row.sso_ok === false));
+    /*
+     * FR-3.8 / AC-35: a product leaves the residual list only when the platform actually asked the
+     * identity provider to end it — a declared `slo_supported` with no registered back-channel
+     * endpoint is a capability the provider cannot exercise, and treating it as ended was the
+     * original defect. `verified_at` gates it because an unverified declaration is not evidence.
+     */
+    const endedByProvider = outcome.identityProviderEnded
+      ? live.filter(coveredByProvider).map((row) => row.product)
+      : [];
+
+    return {
+      endedByProvider,
+      residual: live
+        .filter((row) => !(outcome.identityProviderEnded && coveredByProvider(row)))
+        .map((row) => {
+          const verified = row.verified_at !== null;
+          return {
+            instanceId: row.instance_id,
+            product: row.product,
+            maxRemainingMinutes: verified ? row.session_max_minutes : null,
+            singleLogout: verified && row.slo_supported === true,
+            verifiedAt: row.verified_at?.toISOString() ?? null,
+          };
+        }),
+    };
   }
 
   async idleSeconds(): Promise<number> {
@@ -279,4 +307,26 @@ export class RedisSessionService extends Repository implements SessionService {
 function newSessionId(): string {
   // 256 bits, URL-safe: guessing one is not a search problem anyone wins.
   return randomBytes(32).toString('base64url');
+}
+
+/**
+ * Whether the identity provider can be asked to end this product's session (FR-3.8).
+ *
+ * Three facts, all of them recorded rather than assumed: the product's support was verified, the
+ * platform registered a back-channel logout endpoint for its client, and the product's sign-in is
+ * not known to be broken. A declaration alone is a claim about the product; the endpoint is what
+ * makes it reachable.
+ */
+function coveredByProvider(row: {
+  slo_supported: boolean | null;
+  verified_at: Date | null;
+  backchannel_logout_url: string | null;
+  idp_client_id: string | null;
+}): boolean {
+  return (
+    row.idp_client_id !== null &&
+    row.slo_supported === true &&
+    row.verified_at !== null &&
+    row.backchannel_logout_url !== null
+  );
 }

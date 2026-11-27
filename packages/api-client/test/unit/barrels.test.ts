@@ -11,6 +11,7 @@ import * as jobs from '../../src/hooks/jobs';
 import * as portal from '../../src/hooks/portal';
 import * as privacy from '../../src/hooks/privacy';
 import * as recovery from '../../src/hooks/recovery';
+import * as security from '../../src/hooks/security';
 import * as workflows from '../../src/hooks/workflows';
 import * as auth from '../../src/auth';
 import * as http from '../../src/http';
@@ -40,6 +41,8 @@ const HOOK_MODULES = [
   ['backups', backups],
   ['workflows', workflows],
   ['governance', governance],
+  // NFR-4.16 / NFR-4.6: the allow-list and the retained scan reports.
+  ['security', security],
   ['admin', admin],
   ['recovery', recovery],
   ['privacy', privacy],

@@ -25,6 +25,14 @@ export type CatalogWorkingTree = {
  */
 export interface CatalogRepositoryService {
   load(): Promise<CatalogWorkingTree>;
+  /**
+   * The label a reload would report now, without projecting anything (ADR-BE-42 §10.3).
+   *
+   * `null` when no tree is present: the read model has to distinguish "nothing cloned yet" from
+   * "cloned, and this is the revision", which the loader's `revision: 'absent'` cannot express on a
+   * screen that also has to show whether a source is configured.
+   */
+  revision(): Promise<string | null>;
   /** Records that the projected hash and the repository hash diverged (ADR-BE-08 point 4). */
   recordDrift(entryKey: string, expectedHash: string | null, observedHash: string): Promise<void>;
   /**

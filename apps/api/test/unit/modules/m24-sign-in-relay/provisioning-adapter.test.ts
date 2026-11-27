@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import type { AppConfig } from '../../../../src/config/config';
 import { OrangeHrmApiClient } from '../../../../src/modules/m24-sign-in-relay/adapters/orangehrm-api';
+import { MauticApiClient } from '../../../../src/modules/m24-sign-in-relay/adapters/mautic-api';
 import { ProductApiClient } from '../../../../src/modules/m24-sign-in-relay/product-api.client';
 import { ProductApiAdapters } from '../../../../src/modules/m24-sign-in-relay/provisioning-adapters';
 import type {
@@ -38,17 +39,24 @@ vi.mock('../../../../src/modules/m24-sign-in-relay/product-http', () => ({
 const config = { SEAMNEX_RELAY_HTTP_TIMEOUT_MS: 1_000 } as unknown as AppConfig;
 
 /**
- * Both shipped adapters, constructed the way the module wires them, then widened to the port: the
+ * Every shipped adapter, constructed the way the module wires them, then widened to the port: the
  * tests below ask what the *contract* promises, and only the port declares `passwordVariables`.
  */
 function adapters(): {
   openproject: ProductProvisioningAdapter;
   orangehrm: ProductProvisioningAdapter;
+  mautic: ProductProvisioningAdapter;
   registry: ProductApiAdapters;
 } {
   const openproject = new ProductApiClient(config);
   const orangehrm = new OrangeHrmApiClient(config);
-  return { openproject, orangehrm, registry: new ProductApiAdapters(openproject, orangehrm) };
+  const mautic = new MauticApiClient(config);
+  return {
+    openproject,
+    orangehrm,
+    mautic,
+    registry: new ProductApiAdapters(openproject, orangehrm, mautic),
+  };
 }
 
 const target: ProductProvisioningTarget = {
@@ -119,7 +127,7 @@ describe('provisioning-adapter', () => {
   });
 
   it('declares, per adapter, the credential shape that product accepts', () => {
-    const { openproject, orangehrm } = adapters();
+    const { openproject, orangehrm, mautic } = adapters();
 
     // OpenProject: one instance-scoped personal access token, named by config.
     expect(openproject.credentialKind).toBe('bearer');
@@ -134,11 +142,19 @@ describe('provisioning-adapter', () => {
       password: 'ORANGEHRM_ADMIN_PASSWORD',
     });
     expect(orangehrm.name).toBe('orangehrm');
+
+    // Mautic: basic auth to its REST API, so the administrator's login pair and nothing else.
+    expect(mautic.credentialKind).toBe('password');
+    expect(mautic.passwordVariables).toEqual({
+      username: 'MAUTIC_ADMIN_USERNAME',
+      password: 'MAUTIC_ADMIN_PASSWORD',
+    });
+    expect(mautic.name).toBe('mautic');
   });
 
   it('gives every registered adapter a credential descriptor it can actually be handed', () => {
     const { registry } = adapters();
-    const entries = ['D09-01', 'D07-01', 'D9', 'D7'];
+    const entries = ['D09-01', 'D07-01', 'D02-01', 'D9', 'D7', 'D2'];
 
     const registered = entries.map((entry) => registry.for(entry));
     expect(registered.every((adapter) => adapter !== null)).toBe(true);
@@ -159,13 +175,17 @@ describe('provisioning-adapter', () => {
   });
 
   it('refuses the wrong half instead of sending it to the product', async () => {
-    const { openproject, orangehrm } = adapters();
+    const { openproject, orangehrm, mautic } = adapters();
 
     const toTokenProduct = await openproject.createUser(
       { ...target, credential: { kind: 'password', username: 'admin', password: 'x' } },
       user,
     );
     const toPasswordProduct = await orangehrm.createUser(
+      { ...target, credential: { kind: 'bearer', token: 'admin-token' } },
+      user,
+    );
+    const toMautic = await mautic.createUser(
       { ...target, credential: { kind: 'bearer', token: 'admin-token' } },
       user,
     );
@@ -180,13 +200,18 @@ describe('provisioning-adapter', () => {
       status: 0,
       detail: expect.stringContaining('administrator login pair'),
     });
-    // `status: 0` is "never asked", and the transport proves it: neither credential reached a
-    // socket, so neither product can have logged the other product's secret.
+    expect(toMautic).toEqual({
+      ok: false,
+      status: 0,
+      detail: expect.stringContaining('administrator login pair'),
+    });
+    // `status: 0` is "never asked", and the transport proves it: no credential reached a socket, so
+    // no product can have logged another product's secret.
     expect(productFetchMock).not.toHaveBeenCalled();
   });
 
   it('applies the wrong-half refusal to every verb, not only to create', async () => {
-    const { openproject, orangehrm } = adapters();
+    const { openproject, orangehrm, mautic } = adapters();
     const pair: ProductProvisioningTarget = {
       ...target,
       credential: { kind: 'password', username: 'admin', password: 'x' },
@@ -203,6 +228,9 @@ describe('provisioning-adapter', () => {
       orangehrm.findUserByLogin(token, 'jdoe'),
       orangehrm.resetPassword(token, '9', 'next-password'),
       orangehrm.disableUser(token, '9'),
+      mautic.findUserByLogin(token, 'jdoe'),
+      mautic.resetPassword(token, '9', 'next-password'),
+      mautic.disableUser(token, '9'),
     ]);
 
     for (const verdict of verdicts) {

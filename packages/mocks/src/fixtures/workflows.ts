@@ -79,8 +79,8 @@ export const WORKFLOWS: Workflow[] = [
         summary: 'Creates the delivery epic in the Services project.',
         mappings: [
           { from: 'opportunity.name', to: 'subject', transform: 'trim' },
-          { from: 'opportunity.amount', to: 'budget', transform: 'currency → EUR' },
-          { from: 'opportunity.closeDate', to: 'dueDate', transform: 'ISO-8601 date' },
+          { from: 'opportunity.amount', to: 'budget', transform: 'number' },
+          { from: 'opportunity.closeDate', to: 'dueDate', transform: 'date_iso' },
         ],
       },
       {
@@ -94,7 +94,7 @@ export const WORKFLOWS: Workflow[] = [
         x: 760,
         y: 240,
         summary: 'Announces the kickoff with links to CRM and the new work package.',
-        mappings: [{ from: 'project.url', to: 'message.bodyText', transform: 'template' }],
+        mappings: [{ from: 'project.url', to: 'message.bodyText', transform: 'text' }],
       },
     ],
     edges: [
@@ -181,7 +181,7 @@ export const WORKFLOWS: Workflow[] = [
         summary: 'Maps correspondent, total and due date from OCR metadata.',
         mappings: [
           { from: 'document.correspondent', to: 'message.supplier', transform: 'trim' },
-          { from: 'document.total', to: 'message.amount', transform: 'decimal → EUR' },
+          { from: 'document.total', to: 'message.amount', transform: 'number' },
         ],
       },
       {
@@ -195,7 +195,7 @@ export const WORKFLOWS: Workflow[] = [
         x: 560,
         y: 140,
         summary: 'Posts supplier, amount and a deep link to the archived document.',
-        mappings: [{ from: 'document.url', to: 'message.link', transform: 'template' }],
+        mappings: [{ from: 'document.url', to: 'message.link', transform: 'text' }],
       },
     ],
     edges: [
@@ -277,7 +277,7 @@ export const WORKFLOWS: Workflow[] = [
         y: 150,
         summary: 'Draft sales order against the customer; billing is reviewed by finance.',
         mappings: [
-          { from: 'ticket.customer', to: 'customer', transform: 'lookup by ERP id' },
+          { from: 'ticket.customer', to: 'customer', transform: 'text' },
           { from: 'ticket.id', to: 'po_no', transform: null },
         ],
       },
@@ -353,6 +353,9 @@ export const WORKFLOWS: Workflow[] = [
       label: 'D02-01 Mautic — segment `MQL`',
       config: 'Every 15 minutes',
       timezone: 'Europe/Berlin',
+      // FR-5.4: the interval the summary already states, as the field the compiler reads. Without
+      // it the prototype would show a polling workflow whose polling interval is missing.
+      minimumIntervalMinutes: 15,
     },
     writeTargets: [{ entryKey: 'D01-01', product: 'EspoCRM', mode: 'write' }],
     nodes: [
@@ -381,7 +384,7 @@ export const WORKFLOWS: Workflow[] = [
         y: 140,
         summary: 'Splits full name and normalises the country code.',
         mappings: [
-          { from: 'lead.email', to: 'emailAddress', transform: 'lowercase' },
+          { from: 'lead.email', to: 'emailAddress', transform: 'lower' },
           { from: 'lead.company', to: 'description', transform: 'trim' },
         ],
       },

@@ -1,5 +1,15 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import {
+  createReadStream,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 /**
@@ -20,6 +30,46 @@ export function ensureDir(path: string): void {
 
 export function sha256(content: string | Buffer): string {
   return createHash('sha256').update(content).digest('hex');
+}
+
+/**
+ * The digest of a file's *bytes*, streamed in 64 KB chunks.
+ *
+ * The backup manifest records this per artefact, and a digest is only evidence if it covers the
+ * content: the previous `sha256(key:bytes)` shorthand proved the object's name and size, not that
+ * the downloaded bytes were the ones captured. Streaming keeps a multi-gigabyte dump out of the
+ * API process's memory.
+ */
+export async function sha256File(path: string): Promise<string> {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
+  return hash.digest('hex');
+}
+
+/** Deletes a scratch file whose absence is the expected state; any other failure is ignored too. */
+export function removeQuietly(path: string): void {
+  try {
+    unlinkSync(path);
+  } catch {
+    // A file that is already gone needs no cleanup, and a scratch directory is not worth failing a
+    // completed capture over.
+  }
+}
+
+/**
+ * Removes a scratch directory and everything under it.
+ *
+ * Used when a capture fails: the directory holds database dumps and an unencrypted realm export,
+ * which carry product data and client secrets. A failed set is retried by capturing again, so
+ * nothing here is worth keeping.
+ */
+export function removeTree(path: string): void {
+  try {
+    rmSync(path, { recursive: true, force: true });
+  } catch {
+    // A directory that cannot be removed is a disk-space problem surfaced by the next capture, not a
+    // reason to fail the settlement of the current one.
+  }
 }
 
 export function readTextFile(path: string): string {

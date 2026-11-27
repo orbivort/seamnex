@@ -17,8 +17,17 @@ import { PG_POOL } from '../../database/database.module';
 import { AUDIT_SERVICE, type AuditService } from '../m17-audit/audit.contract';
 import { SECRETS_SERVICE, type SecretsService } from '../m15-secrets/secrets.contract';
 import { AppError } from '../../common/problem/app-error';
-import type { RenderInput, RenderSet, RendererService } from './renderer.contract';
+import type {
+  EnvProfileCreateInput,
+  EnvProfilePatchInput,
+  EnvProfileValueInput,
+  RenderInput,
+  RenderSet,
+  RendererService,
+  UnresolvedSecret,
+} from './renderer.contract';
 import { RenderSetService } from './render.service';
+import { mirroredEnvValues } from '../../common/identity/derived-env';
 
 type VarRow = {
   name: string;
@@ -78,10 +87,11 @@ export class PostgresRendererService implements RendererService {
   async profiles(): Promise<EnvProfile[]> {
     const result = await this.pool.query<{
       key: string;
+      name: string;
       target: 'production' | 'staging';
       updated_by: string | null;
       updated_at: Date;
-    }>(`SELECT key, target, updated_by, updated_at FROM env_profile ORDER BY key`);
+    }>(`SELECT key, name, target, updated_by, updated_at FROM env_profile ORDER BY key`);
     const values = await this.pool.query<{
       profile_key: string;
       var_name: string;
@@ -90,7 +100,7 @@ export class PostgresRendererService implements RendererService {
     }>(`SELECT profile_key, var_name, value_enc, secret_ref FROM env_profile_value`);
     return result.rows.map((row) => ({
       key: row.key,
-      name: row.key,
+      name: row.name,
       target: row.target,
       updatedBy: row.updated_by ?? 'system',
       updatedAt: row.updated_at.toISOString(),
@@ -102,6 +112,188 @@ export class PostgresRendererService implements RendererService {
           secretRef: value.secret_ref,
         })),
     }));
+  }
+
+  async createProfile(input: EnvProfileCreateInput, actorId: string): Promise<EnvProfile> {
+    const existing = await this.pool.query(`SELECT 1 FROM env_profile WHERE key = $1`, [input.key]);
+    if ((existing.rowCount ?? 0) > 0) {
+      throw new AppError({
+        code: 'STATE_CONFLICT',
+        detail: `The environment profile "${input.key}" already exists.`,
+        remediation: 'Choose another key, or edit the existing profile.',
+        fieldErrors: [{ field: 'key', code: 'duplicate', message: 'This key is already in use.' }],
+      });
+    }
+    await withTransaction(this.pool, async (tx) => {
+      await this.audit.lockChain(tx);
+      await tx.query(
+        `INSERT INTO env_profile (key, name, target, updated_by) VALUES ($1, $2, $3, $4)`,
+        [input.key, input.name, input.target, actorId],
+      );
+      await this.audit.append(
+        {
+          action: 'profile.created',
+          actorType: 'user',
+          actorId,
+          targetType: 'env_profile',
+          targetId: input.key,
+          outcome: 'success',
+          detail: { key: input.key, name: input.name, target: input.target },
+        },
+        tx,
+      );
+    });
+    return this.profileOrThrow(input.key);
+  }
+
+  async patchProfile(
+    key: string,
+    input: EnvProfilePatchInput,
+    actorId: string,
+  ): Promise<EnvProfile> {
+    const before = await this.profileOrThrow(key);
+    const name = input.name ?? before.name;
+    const target = input.target ?? before.target;
+    // A save that changes nothing is not an event: re-signing the row would move `updated_at` and
+    // make "who last touched this" wrong.
+    if (name === before.name && target === before.target) return before;
+
+    await withTransaction(this.pool, async (tx) => {
+      await this.audit.lockChain(tx);
+      await tx.query(
+        `UPDATE env_profile SET name = $2, target = $3, updated_by = $4, updated_at = now()
+          WHERE key = $1`,
+        [key, name, target, actorId],
+      );
+      await this.audit.append(
+        {
+          action: 'profile.updated',
+          actorType: 'user',
+          actorId,
+          targetType: 'env_profile',
+          targetId: key,
+          outcome: 'success',
+          detail: {
+            key,
+            before: { name: before.name, target: before.target },
+            after: { name, target },
+          },
+        },
+        tx,
+      );
+    });
+    return this.profileOrThrow(key);
+  }
+
+  async replaceProfileValues(
+    key: string,
+    values: readonly EnvProfileValueInput[],
+    actorId: string,
+  ): Promise<EnvProfile> {
+    await this.profileOrThrow(key);
+    await this.validateProfileValues(values);
+
+    await withTransaction(this.pool, async (tx) => {
+      await this.audit.lockChain(tx);
+      await tx.query(`DELETE FROM env_profile_value WHERE profile_key = $1`, [key]);
+      for (const value of values) {
+        await tx.query(
+          `INSERT INTO env_profile_value (profile_key, var_name, value_enc, secret_ref)
+           VALUES ($1, $2, $3::bytea, $4)`,
+          [
+            key,
+            value.varName,
+            typeof value.value === 'string' ? Buffer.from(value.value, 'utf8') : null,
+            typeof value.secretRef === 'string' ? value.secretRef : null,
+          ],
+        );
+      }
+      await tx.query(`UPDATE env_profile SET updated_by = $2, updated_at = now() WHERE key = $1`, [
+        key,
+        actorId,
+      ]);
+      await this.audit.append(
+        {
+          // Names only: a profile value may be a credential-adjacent setting even when it is not
+          // typed `secret`, and the audit chain is not the place to copy one.
+          action: 'profile.values_replaced',
+          actorType: 'user',
+          actorId,
+          targetType: 'env_profile',
+          targetId: key,
+          outcome: 'success',
+          detail: { key, variables: values.map((value) => value.varName) },
+        },
+        tx,
+      );
+    });
+    return this.profileOrThrow(key);
+  }
+
+  async deleteProfile(key: string, actorId: string): Promise<{ key: string; deleted: boolean }> {
+    await this.profileOrThrow(key);
+    /*
+     * FR-1.26: the FK would refuse the delete as a 500. Counting first turns "in use" into a sentence
+     * an operator can act on, and naming the instances is the part that makes it actionable.
+     */
+    const used = await this.pool.query<{ slug: string }>(
+      `SELECT slug FROM instance WHERE profile_key = $1 AND deleted_at IS NULL ORDER BY slug LIMIT 20`,
+      [key],
+    );
+    if (used.rows.length > 0) {
+      const slugs = used.rows.map((row) => row.slug);
+      throw new AppError({
+        code: 'STATE_CONFLICT',
+        detail: `The environment profile "${key}" is used by ${slugs.length} instance(s): ${slugs.join(', ')}.`,
+        remediation: 'Move those instances to another profile before deleting it.',
+      });
+    }
+
+    await withTransaction(this.pool, async (tx) => {
+      await this.audit.lockChain(tx);
+      await tx.query(`DELETE FROM env_profile WHERE key = $1`, [key]);
+      await this.audit.append(
+        {
+          action: 'profile.deleted',
+          actorType: 'user',
+          actorId,
+          targetType: 'env_profile',
+          targetId: key,
+          outcome: 'success',
+          detail: { key },
+        },
+        tx,
+      );
+    });
+    return { key, deleted: true };
+  }
+
+  async unresolvedSecrets(input: {
+    entryKey: string;
+    profileKey?: string;
+  }): Promise<UnresolvedSecret[]> {
+    const profileKey = await this.resolveProfile(input.profileKey);
+    const rows = await this.pool.query<{ var_name: string; secret_ref: string }>(
+      `SELECT v.var_name, v.secret_ref
+         FROM env_profile_value v
+         JOIN env_schema_var s ON s.name = v.var_name AND s.entry_key = $2
+        WHERE v.profile_key = $1 AND v.secret_ref IS NOT NULL
+        ORDER BY v.var_name`,
+      [profileKey, input.entryKey],
+    );
+    const problems: UnresolvedSecret[] = [];
+    for (const row of rows.rows) {
+      try {
+        await this.secrets.describe(row.secret_ref);
+      } catch {
+        problems.push({
+          varName: row.var_name,
+          secretRef: row.secret_ref,
+          reason: 'The secret reference does not resolve; set the value again.',
+        });
+      }
+    }
+    return problems;
   }
 
   async plan(input: {
@@ -161,11 +353,28 @@ export class PostgresRendererService implements RendererService {
           source = 'instance';
         }
       } else if (profileValue !== undefined) {
-        value =
-          profileValue.secret_ref === null
-            ? (profileValue.value_enc?.toString('utf8') ?? null)
-            : null;
-        source = profileValue.secret_ref === null ? 'profile' : 'secret';
+        /*
+         * AC-51: a `none` ceiling rejects a profile value too.
+         *
+         * The instance branch had this check and the profile branch did not, so a variable the
+         * declaration forbids anyone to override was populated from `env_profile_value` in silence —
+         * the ceiling was enforced against the operator and not against the platform. The value falls
+         * back to the declaration's default and the message names the source to change.
+         */
+        if (row.override_ceiling === 'none') {
+          fieldErrors.push({
+            field: row.name,
+            code: 'ceiling',
+            message: `This variable is not overridable; remove it from the ${profileKey} profile.`,
+          });
+          rejected = true;
+        } else {
+          value =
+            profileValue.secret_ref === null
+              ? (profileValue.value_enc?.toString('utf8') ?? null)
+              : null;
+          source = profileValue.secret_ref === null ? 'profile' : 'secret';
+        }
       }
 
       if (row.required && (value === null || value.length === 0)) {
@@ -346,6 +555,14 @@ export class PostgresRendererService implements RendererService {
       (await this.vars(row.entry_key)).map((variable) => [variable.name, variable]),
     );
 
+    /**
+     * An entry may need a second variable written alongside the one the operator changed, because
+     * the product applies the two on different schedules (`mirroredEnvValues`). Doing it here, on the
+     * single write path, is what keeps the pair equal whether the change came from a deploy, an
+     * override in the wizard, or a later environment update.
+     */
+    const applied = mirroredEnvValues(row.entry_key, values);
+
     const diff: EnvUpdateResponse['diff'] = [];
     let requiresRecreate = false;
 
@@ -359,7 +576,7 @@ export class PostgresRendererService implements RendererService {
      * a value the wizard refused cannot be stored through this route either.
      */
     const fieldErrors: NonNullable<EnvPlan['fieldErrors']> = [];
-    for (const [name, value] of Object.entries(values)) {
+    for (const [name, value] of Object.entries(applied)) {
       const variable = vars.get(name);
       if (variable === undefined) {
         fieldErrors.push({
@@ -394,7 +611,7 @@ export class PostgresRendererService implements RendererService {
 
     await withTransaction(this.pool, async (tx) => {
       await this.audit.lockChain(tx);
-      for (const [name, value] of Object.entries(values)) {
+      for (const [name, value] of Object.entries(applied)) {
         const variable = vars.get(name);
         // The pre-pass above proved these; a missing one here would be a defect, not a user error.
         if (variable === undefined)
@@ -454,10 +671,14 @@ export class PostgresRendererService implements RendererService {
     return {
       diff,
       requiresRecreate,
-      // Render and apply belong to Phase 4A: the values are persisted, the containers are not
-      // restarted, and the response says so rather than implying a deployment happened.
+      /*
+       * This method stores; it does not render. `PUT /instances/:id/env` queues the reconfigure and
+       * replaces this note when there is a diff, so the sentence below is the answer for a caller
+       * that reached the service directly — it says what is true of the container, which is that its
+       * environment is fixed until the definition is re-rendered, not that a restart would do.
+       */
       applied: false,
-      note: 'Stored. Render and apply run in Phase 4A; a redeploy is required for the containers to see these values.',
+      note: 'Stored. The container keeps the environment it was created with until the instance is reconfigured.',
     };
   }
 
@@ -770,6 +991,113 @@ export class PostgresRendererService implements RendererService {
       `SELECT key FROM env_profile ORDER BY key LIMIT 1`,
     );
     return result.rows[0]?.key ?? 'default';
+  }
+
+  private async profileOrThrow(key: string): Promise<EnvProfile> {
+    const profile = (await this.profiles()).find((entry) => entry.key === key);
+    if (profile === undefined) {
+      throw new AppError({
+        code: 'NOT_FOUND',
+        detail: `No environment profile "${key}".`,
+        remediation: 'Refresh the profile list; another operator may have deleted it.',
+      });
+    }
+    return profile;
+  }
+
+  /**
+   * AC-51 at write time.
+   *
+   * The ceiling is declared per entry, and a profile is cross-entry, so a variable that one entry
+   * forbids and another permits is a legal profile value: the resolution-time check refuses it per
+   * entry with a field-level error. Only a variable that *no* declaring entry permits is refused
+   * here, because in that case no deployment could ever use the value.
+   */
+  private async validateProfileValues(values: readonly EnvProfileValueInput[]): Promise<void> {
+    const seen = new Set<string>();
+    const fieldErrors: { field: string; code: string; message: string }[] = [];
+    for (const value of values) {
+      if (seen.has(value.varName)) {
+        fieldErrors.push({
+          field: value.varName,
+          code: 'duplicate',
+          message: 'This variable is listed twice.',
+        });
+      }
+      seen.add(value.varName);
+    }
+
+    const names = [...seen];
+    if (names.length > 0) {
+      const declared = await this.pool.query<{
+        name: string;
+        ceilings: string[];
+        secret: boolean;
+      }>(
+        `SELECT name, array_agg(DISTINCT override_ceiling) AS ceilings, bool_or(secret) AS secret
+           FROM env_schema_var WHERE name = ANY ($1::text[]) GROUP BY name`,
+        [names],
+      );
+      const byName = new Map(declared.rows.map((row) => [row.name, row]));
+
+      for (const value of values) {
+        const declaration = byName.get(value.varName);
+        if (declaration === undefined) {
+          fieldErrors.push({
+            field: value.varName,
+            code: 'unknown_variable',
+            message: 'No catalog entry declares this variable.',
+          });
+          continue;
+        }
+        if (declaration.ceilings.every((ceiling) => ceiling === 'none')) {
+          fieldErrors.push({
+            field: value.varName,
+            code: 'ceiling',
+            message: 'Every entry that declares this variable caps it at "none".',
+          });
+          continue;
+        }
+        const hasSecret = typeof value.secretRef === 'string' && value.secretRef.length > 0;
+        if (declaration.secret && !hasSecret) {
+          fieldErrors.push({
+            field: value.varName,
+            code: 'secret_required',
+            message: 'This variable is a secret; reference a stored secret instead of a value.',
+          });
+          continue;
+        }
+        if (!declaration.secret && hasSecret) {
+          fieldErrors.push({
+            field: value.varName,
+            code: 'value_required',
+            message: 'This variable is not a secret; enter a value.',
+          });
+          continue;
+        }
+        if (hasSecret) {
+          try {
+            await this.secrets.describe(value.secretRef as string);
+          } catch {
+            fieldErrors.push({
+              field: value.varName,
+              code: 'secret_unresolved',
+              message: 'The secret reference does not resolve.',
+            });
+          }
+        }
+      }
+    }
+
+    if (fieldErrors.length > 0) {
+      throw new AppError({
+        code: 'VALIDATION_FAILED',
+        status: 422,
+        detail: 'The profile values were refused; nothing was written.',
+        fieldErrors,
+        remediation: 'Fix the named fields and save again.',
+      });
+    }
   }
 }
 

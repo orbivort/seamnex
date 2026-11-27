@@ -12,13 +12,16 @@ import {
   EnvValueSchema,
   ImageSchema,
   InstanceDetailSchema,
+  InstanceExportListSchema,
   RelayProvisionReportSchema,
   InstanceListSchema,
+  InstanceLogsSchema,
   InstancePlanSchema,
   InstanceStatusSchema,
   JobAcceptedSchema,
+  ObservabilityReportSchema,
 } from '@seamnex/domain';
-import { request } from '../http';
+import { openDownload, request, type DownloadHandle } from '../http';
 import { queryKeys } from '../query-keys';
 
 const ContainerListSchema = z.array(ContainerStatusSchema);
@@ -116,6 +119,44 @@ export function useInstanceBackups(id: string) {
   });
 }
 
+/**
+ * FR-1.13 / AC-20 — the portable exports this instance has on disk.
+ *
+ * `enabled` because the read is `instance.lifecycle` (R1-only): a domain owner's screen must not
+ * fire a query that is a guaranteed 403, which is what would put a refusal in the console's log for
+ * simply opening a tab.
+ */
+export function useInstanceExports(id: string, options: { enabled?: boolean } = {}) {
+  return useQuery({
+    queryKey: queryKeys.instanceExports(id),
+    queryFn: ({ signal }) =>
+      request(`/instances/${id}/exports`, { schema: InstanceExportListSchema, signal }),
+    enabled: id.length > 0 && (options.enabled ?? true),
+    // The list is written by a job on the server, so a tab switch must not show a stale archive
+    // next to a download button that no longer resolves.
+    refetchOnWindowFocus: true,
+  });
+}
+
+/**
+ * Opens one archive for the caller to save.
+ *
+ * Not a query: the body is the artefact, not a cache entry, and re-fetching it because a component
+ * re-rendered would transfer a business's dataset twice. The caller owns the response body.
+ */
+export function openInstanceExport(
+  instanceId: string,
+  exportId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<DownloadHandle> {
+  return openDownload(`/instances/${instanceId}/exports/${exportId}/archive`, {
+    // The server stats the file and starts streaming; a big archive can take a moment to open on a
+    // busy host, and the 15 s JSON default would abort before the first byte.
+    timeoutMs: 120_000,
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+  });
+}
+
 export function useInstancePlan(id: string, action: string | null) {
   return useQuery({
     queryKey: [...queryKeys.instance(id), 'plan', action] as const,
@@ -137,6 +178,47 @@ export function useContainerLogs(instanceId: string, containerId: string | null)
         signal,
       }),
     enabled: instanceId.length > 0 && containerId !== null,
+  });
+}
+
+/**
+ * FR-2.6 / AC-45 — what the platform observes about this instance.
+ *
+ * One query feeds the whole tab: profile, target state and log availability are one server answer,
+ * so the tab cannot show a target that exists beside a log panel that claims the store is missing.
+ */
+export function useInstanceObservability(id: string) {
+  return useQuery({
+    queryKey: [...queryKeys.instance(id), 'observability'] as const,
+    queryFn: ({ signal }) =>
+      request(`/instances/${id}/observability`, { schema: ObservabilityReportSchema, signal }),
+    enabled: id.length > 0,
+    // The scheduler republishes targets every minute; a tab left open is how an operator watches one
+    // appear after a deploy.
+    refetchOnWindowFocus: true,
+  });
+}
+
+/**
+ * FR-4.6 — the platform log query for one instance.
+ *
+ * Keyed on the applied filter, not on every keystroke: a log query is a Loki round trip and a typed
+ * search term is not a reason to make one per character. `enabled` keeps a role that may read logs
+ * but a deployment without a log store from firing a query whose answer cannot change.
+ */
+export function useInstanceLogs(
+  id: string,
+  query: { since: number; limit: number; filter: string },
+  options: { enabled?: boolean } = {},
+) {
+  const params = new URLSearchParams({ since: String(query.since), limit: String(query.limit) });
+  if (query.filter.trim().length > 0) params.set('filter', query.filter.trim());
+  return useQuery({
+    queryKey: [...queryKeys.instance(id), 'logs', query] as const,
+    queryFn: ({ signal }) =>
+      request(`/instances/${id}/logs?${params.toString()}`, { schema: InstanceLogsSchema, signal }),
+    enabled: id.length > 0 && (options.enabled ?? true),
+    placeholderData: keepPreviousData,
   });
 }
 
@@ -190,6 +272,7 @@ export function useDeployPreview(input: DeployInput, enabled = true) {
       input.slug,
       input.profile ?? '',
       input.resources,
+      input.envOverrides ?? {},
     ),
     queryFn: ({ signal }) =>
       request('/instances/preview', {
@@ -212,12 +295,24 @@ export function useLifecycleAction() {
       id: string;
       action: string;
       dataRetention?: 'keep' | 'export' | 'delete';
-    }) =>
-      request(`/instances/${input.id}/${input.action}`, {
+      /**
+       * FR-1.7: the version the operator confirmed in the dialog. The server refuses an upgrade
+       * whose target no longer matches the catalogue pin instead of silently re-resolving it.
+       */
+      version?: string;
+      justification?: string;
+    }) => {
+      const body: Record<string, string> = {
+        ...(input.dataRetention === undefined ? {} : { dataRetention: input.dataRetention }),
+        ...(input.version === undefined ? {} : { version: input.version }),
+        ...(input.justification === undefined ? {} : { justification: input.justification }),
+      };
+      return request(`/instances/${input.id}/${input.action}`, {
         schema: JobAcceptedSchema,
         method: 'POST',
-        ...(input.dataRetention ? { body: { dataRetention: input.dataRetention } } : {}),
-      }),
+        ...(Object.keys(body).length === 0 ? {} : { body }),
+      });
+    },
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.instances });
       void client.invalidateQueries({ queryKey: queryKeys.jobs });

@@ -8,6 +8,7 @@ import {
   INSTANCE_STATE_LABELS,
   JOB_STATE_LABELS,
   PLAIN_STATUS_LABELS,
+  accessFor,
   admissionVerdict,
   plainStatusFor,
 } from '@seamnex/domain';
@@ -27,10 +28,13 @@ import {
   StatusPill,
   buttonVariants,
   defineColumns,
+  rulerBands,
 } from '@seamnex/ui';
 import { cn, formatNumber, formatRelative } from '@seamnex/utils';
 import { AsyncPanel, QueryError } from '@seamnex/shell';
+import { admitsRoute, routeById } from '../../routes';
 import { useSession } from '../../session';
+import { useCapabilities } from '../../use-capabilities';
 import { buildAttention } from './attention';
 
 const TONE_CLASS = {
@@ -91,6 +95,9 @@ function admissionFor(data: CapacitySnapshot) {
     oversubscriptionFactor: data.oversubscriptionFactor,
   });
 }
+
+/** Fallback bands for a snapshot persisted before the thresholds became configurable (FR-4.5). */
+const DEFAULT_THRESHOLDS = { cpuPercent: 75, memoryPercent: 90, diskPercent: 85 } as const;
 
 /**
  * Every cell reads only its row, so the array is a module constant — and because it is, filtering
@@ -180,10 +187,23 @@ const columns = defineColumns<Instance>([
 
 export function OverviewPage() {
   const { session } = useSession();
+  const capabilities = useCapabilities();
   const instances = useInstances();
   const jobs = useJobs();
   const capacity = useCapacity();
   const posture = usePosture();
+  /*
+   * The attention queue mixes the fleet read (scoped, ADR-BE-44) with the posture board, which is a
+   * platform-wide read: `posture.view` resolves through the `domain` rule and there is no id on
+   * `/posture` to resolve, so a domain-scoped grant is refused. The panel says that in one line
+   * instead of printing the API's "not granted" refusal over a capability the role does hold.
+   */
+  const postureScoped = accessFor(session.role, 'posture.view') === 'scoped';
+  const postureRoute = routeById('posture');
+  const postureBoardHref =
+    postureRoute !== undefined && admitsRoute(session.role, postureRoute)
+      ? '/governance/posture'
+      : null;
 
   const rows = useMemo(() => instances.data ?? [], [instances.data]);
   const attention = useMemo(() => buildAttention(rows, posture.data), [rows, posture.data]);
@@ -205,11 +225,14 @@ export function OverviewPage() {
   /*
    * "Nothing needs attention" is a conclusion, and it needs every input behind it. While the reads
    * are in flight the panel says so, and after a failure it reports the gap instead of the all-clear.
+   * A refused posture read is named for what it is — a scope limit, not an outage.
    */
   const attentionTitle = !attentionComplete
     ? attentionPending
       ? 'Checking readiness, restore and metadata'
-      : 'Attention status unavailable'
+      : postureScoped
+        ? 'Attention queue needs a platform-wide read'
+        : 'Attention status unavailable'
     : attention.length === 0
       ? 'Nothing needs attention'
       : `${attention.length} items need an operator`;
@@ -248,12 +271,15 @@ export function OverviewPage() {
               A link styled as a button, not a `<Button>` inside a `<Link>`: the nested form put a
               `<button>` inside an `<a>`, which is invalid HTML and exposes two competing roles to
               assistive technology for one action. `buttonVariants` is the design system's own
-              escape hatch for a control that navigates.
+              escape hatch for a control that navigates. Offered only to a role that may deploy:
+              the catalogue is readable by more roles than may start a deployment.
             */}
-            <Link to="/catalog" className={buttonVariants({ variant: 'primary', size: 'sm' })}>
-              Deploy a product
-              <ArrowRight className="size-4" aria-hidden />
-            </Link>
+            {capabilities.held.has('instance.deploy') ? (
+              <Link to="/catalog" className={buttonVariants({ variant: 'primary', size: 'sm' })}>
+                Deploy a product
+                <ArrowRight className="size-4" aria-hidden />
+              </Link>
+            ) : null}
           </>
         }
       />
@@ -329,14 +355,18 @@ export function OverviewPage() {
             eyebrow="Attention queue"
             title={attentionTitle}
             description="Ranked by user impact. Every item links to the evidence and the corrective action."
-            actions={
-              <Link
-                to="/governance/posture"
-                className={buttonVariants({ variant: 'quiet', size: 'sm' })}
-              >
-                Posture board
-              </Link>
-            }
+            {...(postureBoardHref === null
+              ? {}
+              : {
+                  actions: (
+                    <Link
+                      to={postureBoardHref}
+                      className={buttonVariants({ variant: 'quiet', size: 'sm' })}
+                    >
+                      Posture board
+                    </Link>
+                  ),
+                })}
           />
           {posture.isPending || instances.isPending ? (
             <div className="p-4">
@@ -345,7 +375,18 @@ export function OverviewPage() {
           ) : null}
           {posture.isError ? (
             <div className="p-4">
-              <QueryError error={posture.error} onRetry={() => void posture.refetch()} compact />
+              {postureScoped ? (
+                <p
+                  className="max-w-3xl text-meta leading-relaxed text-muted"
+                  data-testid="scope-note"
+                >
+                  <span className="label-caps-sans mr-1.5 text-warning-strong">Scoped</span>
+                  The attention queue reads the platform posture board, which reports platform-wide.
+                  Your grant covers one domain, so the queue is not shown here.
+                </p>
+              ) : (
+                <QueryError error={posture.error} onRetry={() => void posture.refetch()} compact />
+              )}
             </div>
           ) : null}
           {instances.isError ? (
@@ -387,12 +428,14 @@ export function OverviewPage() {
                   <span className="text-meta text-muted">
                     {hiddenAttention} more item{hiddenAttention === 1 ? '' : 's'} not shown
                   </span>
-                  <Link
-                    to="/governance/posture"
-                    className="inline-flex items-center gap-1 text-meta font-semibold text-link hover:underline"
-                  >
-                    Open the posture board <ArrowRight className="size-3" aria-hidden />
-                  </Link>
+                  {postureBoardHref === null ? null : (
+                    <Link
+                      to={postureBoardHref}
+                      className="inline-flex items-center gap-1 text-meta font-semibold text-link hover:underline"
+                    >
+                      Open the posture board <ArrowRight className="size-3" aria-hidden />
+                    </Link>
+                  )}
                 </li>
               ) : null}
             </ul>
@@ -419,6 +462,7 @@ export function OverviewPage() {
               >
                 {(data) => {
                   const verdict = admissionFor(data);
+                  const thresholds = data.thresholds ?? DEFAULT_THRESHOLDS;
                   return (
                     <>
                       <CapacityRuler
@@ -426,18 +470,21 @@ export function OverviewPage() {
                         used={verdict.used.cpu}
                         total={verdict.limits.cpu}
                         unit="vCPU"
+                        thresholds={rulerBands(thresholds.cpuPercent)}
                       />
                       <CapacityRuler
                         label="Memory"
                         used={verdict.used.memoryMb / 1024}
                         total={verdict.limits.memoryMb / 1024}
                         unit="GB"
+                        thresholds={rulerBands(thresholds.memoryPercent)}
                       />
                       <CapacityRuler
                         label="Disk"
                         used={verdict.used.diskMb / 1024}
                         total={verdict.limits.diskMb / 1024}
                         unit="GB"
+                        thresholds={rulerBands(thresholds.diskPercent)}
                       />
                       <p className="flex items-start gap-1.5 border-t border-line pt-2 text-micro leading-relaxed text-faint">
                         <CircleSlash className="mt-0.5 size-3 shrink-0" aria-hidden />

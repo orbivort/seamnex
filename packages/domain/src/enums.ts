@@ -112,6 +112,13 @@ export const JOB_KINDS = [
   'dsar',
   'platform-backup',
   'platform-restore',
+  /**
+   * The portfolio tier of a platform restore (FR-1.36): queued by the gate release, because the
+   * administrative login sits between the control plane and the products. Without it here the job
+   * list projected the tier as a `deploy` — and without it in `deployment_job_kind_check` the tier
+   * could not be inserted at all (migration `0033`).
+   */
+  'platform-restore-products',
   'synthetic',
 ] as const;
 export type JobKind = (typeof JOB_KINDS)[number];

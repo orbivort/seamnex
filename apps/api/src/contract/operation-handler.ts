@@ -16,6 +16,12 @@ export type OperationInput = {
   /** The `prefix: true` query family, keyed by declaration name (`env` → `{MAIL_HOST: …}`). */
   readonly families: Readonly<Record<string, Readonly<Record<string, string>>>>;
   readonly body: unknown;
+  /**
+   * The bytes the request arrived with, captured only for an operation that declares
+   * `rawBody: true` (webhook signatures). `null` everywhere else, so no handler can mistake the
+   * absence of a capture for an empty body.
+   */
+  readonly rawBody: Buffer | null;
   readonly headers: Readonly<Record<string, string | string[] | undefined>>;
   /** Parsed request cookies; only the platform's own two names are read. */
   readonly cookies: Readonly<Record<string, string>>;
@@ -43,6 +49,20 @@ export type OperationResult =
   | { readonly kind: 'accepted'; readonly jobId: string }
   | { readonly kind: 'noContent' }
   /** The handler owns the reply (SSE): the dispatcher writes nothing. */
-  | { readonly kind: 'stream' };
+  | { readonly kind: 'stream' }
+  /**
+   * A file the handler resolved but never reads (FR-1.13 export archives).
+   *
+   * The dispatcher streams it and writes the headers this variant declares, so a multi-gigabyte
+   * artefact goes from disk to socket without passing through the process. Distinct from `stream`:
+   * there the handler owns the whole reply, here the dispatcher owns the framing.
+   */
+  | {
+      readonly kind: 'file';
+      readonly path: string;
+      readonly contentType: 'application/gzip';
+      readonly fileName: string;
+      readonly bytes: number;
+    };
 
 export type OperationHandler = (input: OperationInput) => Promise<OperationResult>;

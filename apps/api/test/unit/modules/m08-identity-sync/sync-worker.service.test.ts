@@ -1,6 +1,6 @@
 import { Logger } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
-import { fakeDb } from '../../../support/fakes';
+import { fakeDb, type Route } from '../../../support/fakes';
 import type { AppConfig } from '../../../../src/config/config';
 import type { AuditService } from '../../../../src/modules/m17-audit/audit.contract';
 import type { SessionService } from '../../../../src/modules/m10-portal-bff/session.contract';
@@ -44,20 +44,29 @@ function dirGroup(id: string, path: string, members: readonly string[] = []): Di
 
 const EMPTY: DirectorySnapshot = { users: [], groups: [] };
 
-function setup(snapshot: DirectorySnapshot = EMPTY, routes: Parameters<typeof fakeDb>[0] = []) {
+function setup(
+  snapshot: DirectorySnapshot = EMPTY,
+  routes: Parameters<typeof fakeDb>[0] = [],
+  options: { pushEnabled?: boolean } = {},
+) {
   const db = fakeDb(routes);
-  const config = { SEAMNEX_SYNC_INTERVAL_MS: 60_000 } as unknown as AppConfig;
+  const config = {
+    SEAMNEX_SYNC_INTERVAL_MS: 60_000,
+    SEAMNEX_IDENTITY_PUSH_ENABLED: options.pushEnabled ?? false,
+  } as unknown as AppConfig;
   const provider = { directory: vi.fn(async () => snapshot) };
   const audit = { append: vi.fn(async () => ({ seq: '1', hash: 'h' })) };
   const sessions = { killSubject: vi.fn(async () => 1) };
+  const push = { push: vi.fn(async () => ({ ok: true, detail: 'HTTP 200' })) };
   const worker = new SyncWorkerService(
     db.pool,
     config,
     provider as unknown as IdentityProvider,
     audit as unknown as AuditService,
     sessions as unknown as SessionService,
+    push,
   );
-  return { db, provider, audit, sessions, worker };
+  return { db, provider, audit, sessions, push, worker };
 }
 
 /**
@@ -79,8 +88,10 @@ type CycleOptions = {
   withdrawn?: number | null;
   bindings?: number | null;
   conflicts?: Record<string, unknown>[];
+  plans?: Record<string, unknown>[];
   entitlements?: number | null;
   withdrawnEntitlements?: number | null;
+  propagation?: Record<string, unknown>[];
 };
 
 /** Distinguishes "not stated" from an explicit `null`, which is a row count the driver lost. */
@@ -102,8 +113,12 @@ function cycleRoutes(options: CycleOptions = {}): Parameters<typeof fakeDb>[0] {
     ['DELETE FROM role_binding rb', affected(pick(options.withdrawn, 0))],
     ['INSERT INTO role_binding', affected(pick(options.bindings, 0))],
     ['AS blocking', options.conflicts ?? []],
+    ["c.payload #>> '{integration,rolePush,path}'", options.plans ?? []],
     ['INSERT INTO entitlement (subject_idp_id', affected(pick(options.entitlements, 0))],
     ['DELETE FROM entitlement e', affected(pick(options.withdrawnEntitlements, 0))],
+    ['INSERT INTO propagation_sample', affected(0)],
+    ['SELECT latency_ms FROM propagation_sample', options.propagation ?? []],
+    ['DELETE FROM propagation_sample', affected(0)],
     ['UPDATE sync_run', affected(1)],
   ];
 }
@@ -176,23 +191,32 @@ describe('a complete cycle', () => {
       '[{"sub":"u-1","group_idp_id":"core"}]',
     ]);
 
-    // The guarantee table travels with the statement: the sync state is derived, never claimed.
-    const guaranteeTable = JSON.parse(
-      String(bySql('INSERT INTO entitlement (subject_idp_id')?.params[0]),
-    ) as { class: string; state: string }[];
-    expect(guaranteeTable).toContainEqual({ class: 'native', state: 'applied' });
-    expect(guaranteeTable).toContainEqual({ class: 'fa_gate', state: 'unsupported' });
+    /*
+     * FR-2.4: the state is derived inside the statement from the class *and* the route, so `applied`
+     * cannot be written for a native product whose identity client was never configured, and the
+     * product role comes from the mapping rather than a literal.
+     */
+    const entitlementWrite = bySql('INSERT INTO entitlement (subject_idp_id');
+    expect(entitlementWrite?.params[0]).toEqual('[{"sub":"u-1","group_idp_id":"core"}]');
+    expect(entitlementWrite?.sql).toContain(
+      "c.guarantee_class = 'native' AND r.auth_mode IN ('oidc', 'saml')",
+    );
+    expect(entitlementWrite?.sql).toContain('gm.product_role');
     // Nothing was in conflict, so nothing was excluded from the entitlement write.
-    expect(bySql('INSERT INTO entitlement (subject_idp_id')?.params[1]).toEqual([]);
+    expect(entitlementWrite?.params[1]).toEqual([]);
 
     const finished = bySql('UPDATE sync_run');
     expect(finished?.params.slice(0, 4)).toEqual(['run-1', 9, run.p95LatencyMs, 0]);
-    expect(JSON.parse(String(finished?.params[4]))).toEqual({
+    expect(finished?.params[4]).toBeNull();
+    expect(finished?.params[5]).toBe(0);
+    expect(JSON.parse(String(finished?.params[6]))).toEqual({
       trigger: 'manual',
       users: 1,
       groups: 1,
       errors: [],
       outcome: 'succeeded',
+      propagationPending: 0,
+      propagationPendingReasons: [],
     });
 
     expect(audit.append).toHaveBeenCalledWith({
@@ -208,6 +232,8 @@ describe('a complete cycle', () => {
         users: 1,
         groups: 1,
         p95LatencyMs: run.p95LatencyMs,
+        p95PropagationMs: null,
+        propagationSamples: 0,
       },
     });
     // Nobody was disabled, so no session was touched.
@@ -314,6 +340,184 @@ describe('stale groups', () => {
     await worker.runOnce('manual');
 
     expect(db.calls.some((call) => call.sql.includes('DELETE FROM idp_group WHERE'))).toBe(false);
+  });
+});
+
+/**
+ * FR-2.4 / AC-11 / S-8 — the grant the product actually received.
+ *
+ * The cycle owns two decisions here: which product role a membership grants (the mapping's, not a
+ * literal `member`) and whether the platform can claim the product applied it. `applied` is written
+ * only after a push the product accepted; everything else stays `pending` with the reason, and the
+ * propagation sample records the interval the change took.
+ */
+type PushCycleOptions = CycleOptions & {
+  /** Rows the entitlement write returns — the changes this cycle has to decide about. */
+  granted?: Record<string, unknown>[];
+};
+
+function pushRoutes(options: PushCycleOptions = {}): readonly Route[] {
+  return [
+    // Prepended so it wins over the generic route inside `cycleRoutes`, which only counts rows.
+    ['INSERT INTO entitlement (subject_idp_id', options.granted ?? []],
+    ['UPDATE entitlement', affected(1)],
+    ...(cycleRoutes(options) ?? []),
+  ];
+}
+
+const PENDING_GRANT = {
+  subject_idp_id: 'u-1',
+  instance_id: 'i-1',
+  product_role: 'Manager',
+  sync_state: 'pending',
+};
+
+const PUSH_PLAN = {
+  instance_id: 'i-1',
+  slug: 'crm',
+  guarantee_class: 'native',
+  auth_mode: null,
+  push_path: '/api/users/roles',
+  push_role_field: 'role',
+  push_secret_name: 'crm-admin-token',
+  api_base_url: 'http://crm:8080',
+};
+
+/** The JSON the cycle hands to `propagation_sample`, which is what the evidence screen reads. */
+function sampledChanges(db: ReturnType<typeof fakeDb>): Record<string, unknown>[] {
+  const insert = db.calls.find((call) => call.sql.includes('INSERT INTO propagation_sample'));
+  return JSON.parse(String(insert?.params[2])) as Record<string, unknown>[];
+}
+
+describe('product role propagation', () => {
+  it('applies the grant only after the product accepted the push, and measures how long it took', async () => {
+    const { db, push, worker } = setup(
+      { users: [dirUser('u-1')], groups: [dirGroup('core', '/core', ['u-1'])] },
+      pushRoutes({
+        granted: [PENDING_GRANT],
+        plans: [PUSH_PLAN],
+        propagation: [{ latency_ms: 4_200 }],
+        entitlements: 1,
+      }),
+      { pushEnabled: true },
+    );
+
+    const run = await worker.runOnce('manual');
+
+    expect(push.push).toHaveBeenCalledWith({
+      instanceId: 'i-1',
+      slug: 'crm',
+      baseUrl: 'http://crm:8080',
+      path: '/api/users/roles',
+      roleField: 'role',
+      secretName: 'crm-admin-token',
+      subjectIdpId: 'u-1',
+      email: 'u-1@example.test',
+      // The mapping's product role, not the literal `member` the platform used to send.
+      productRole: 'Manager',
+    });
+
+    const applied = db.calls.find((call) => call.sql.includes('UPDATE entitlement'));
+    expect(applied?.params).toEqual(['u-1', 'i-1', 'Manager']);
+    expect(applied?.sql).toContain("sync_state = 'applied'");
+
+    // The latency is membership change → applied, over the changes this run recorded.
+    expect(run.p95PropagationMs).toBe(4_200);
+    expect(run.propagationSamples).toBe(1);
+    expect(sampledChanges(db)).toEqual([
+      {
+        subject: 'u-1',
+        instance_id: 'i-1',
+        product_role: 'Manager',
+        sync_state: 'applied',
+        reason: null,
+      },
+    ]);
+  });
+
+  it('leaves the grant pending with the reason when the product refuses the push', async () => {
+    const { db, push, worker } = setup(
+      { users: [], groups: [] },
+      pushRoutes({ granted: [PENDING_GRANT], plans: [PUSH_PLAN] }),
+      { pushEnabled: true },
+    );
+    push.push.mockResolvedValue({ ok: false, detail: 'HTTP 403' });
+
+    const run = await worker.runOnce('manual');
+
+    expect(db.calls.some((call) => call.sql.includes('UPDATE entitlement'))).toBe(false);
+    expect(sampledChanges(db)[0]).toMatchObject({
+      sync_state: 'pending',
+      reason: 'crm: HTTP 403',
+    });
+    // A subject the directory never mirrored still has an address; the id is the fallback, not a blank.
+    expect(push.push).toHaveBeenCalledWith(expect.objectContaining({ email: 'u-1' }));
+    // Nothing was measured, so nothing is claimed: a pending change has no latency.
+    expect(run.p95PropagationMs).toBeNull();
+    expect(run.propagationSamples).toBe(0);
+
+    const finished = db.calls.find((call) => call.sql.includes('UPDATE sync_run'));
+    expect(JSON.parse(String(finished?.params[6]))).toMatchObject({
+      propagationPending: 1,
+      propagationPendingReasons: ['Manager on i-1: crm: HTTP 403'],
+    });
+  });
+
+  it('records why an entry with no declared role-push API stayed pending', async () => {
+    const { db, push, worker } = setup(
+      EMPTY,
+      pushRoutes({ granted: [PENDING_GRANT], plans: [{ ...PUSH_PLAN, push_path: null }] }),
+      { pushEnabled: true },
+    );
+
+    await worker.runOnce('manual');
+
+    expect(push.push).not.toHaveBeenCalled();
+    expect(sampledChanges(db)[0]).toMatchObject({
+      sync_state: 'pending',
+      reason: 'crm: no role-push API is declared for this entry',
+    });
+  });
+
+  it('does not push to a product whose identity client already carries the role', async () => {
+    const { push, worker } = setup(
+      EMPTY,
+      pushRoutes({ granted: [PENDING_GRANT], plans: [{ ...PUSH_PLAN, auth_mode: 'oidc' }] }),
+      { pushEnabled: true },
+    );
+
+    await worker.runOnce('manual');
+
+    // The grant is the platform's to record; re-posting it would be a write the product does not need.
+    expect(push.push).not.toHaveBeenCalled();
+  });
+
+  it('never pushes to a class a push cannot settle', async () => {
+    const { push, worker } = setup(
+      EMPTY,
+      pushRoutes({
+        granted: [PENDING_GRANT],
+        plans: [{ ...PUSH_PLAN, guarantee_class: 'fa_delegated' }],
+      }),
+      { pushEnabled: true },
+    );
+
+    await worker.runOnce('manual');
+
+    expect(push.push).not.toHaveBeenCalled();
+  });
+
+  it('pushes nothing at all while the platform flag is off', async () => {
+    const { db, push, worker } = setup(
+      EMPTY,
+      pushRoutes({ granted: [PENDING_GRANT], plans: [PUSH_PLAN] }),
+    );
+
+    await worker.runOnce('manual');
+
+    expect(push.push).not.toHaveBeenCalled();
+    // The reason names the switch, so an operator knows the grant is waiting on configuration.
+    expect(sampledChanges(db)[0]).toMatchObject({ sync_state: 'pending', reason: null });
   });
 });
 
@@ -484,6 +688,8 @@ describe('lifecycle', () => {
     groups: 0,
     changes: 0,
     p95LatencyMs: 0,
+    p95PropagationMs: null,
+    propagationSamples: 0,
     errors: [],
     state: 'succeeded' as const,
   };

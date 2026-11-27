@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { CREDENTIAL_GRANULARITIES, WORKFLOW_STATES } from './enums';
+import { CREDENTIAL_GRANULARITIES, GUARANTEE_CLASSES, WORKFLOW_STATES } from './enums';
 import { ANY_OF_POLICY_KEYS, POLICY_KEYS, type PolicyKey } from './policy';
 import { AuthSessionSchema, SignInRequestSchema } from './schemas/auth';
 import { JobAcceptedSchema } from './schemas/common';
@@ -22,11 +22,22 @@ import {
   EnvImportRequestSchema,
   EnvImportResultSchema,
   EnvPlanSchema,
+  EnvProfileCreateRequestSchema,
+  EnvProfileDeleteResponseSchema,
+  EnvProfilePatchRequestSchema,
   EnvProfileSchema,
+  EnvProfileValuesRequestSchema,
   EnvSchemaVarSchema,
+  EventModeSchema,
+  OperationSchema,
   ScaffoldConfirmationSchema,
   ScaffoldDraftSchema,
 } from './schemas/catalog';
+import {
+  CatalogRepositoryViewSchema,
+  CatalogSyncRequestSchema,
+  CatalogSyncResultSchema,
+} from './schemas/catalog-repository';
 import {
   AdminCredentialRequestSchema,
   AdminCredentialSchema,
@@ -42,6 +53,7 @@ import {
   EnvValueSchema,
   ImageSchema,
   InstanceDetailSchema,
+  InstanceExportListSchema,
   InstanceListSchema,
   InstancePlanSchema,
   InstanceStatusSchema,
@@ -52,6 +64,7 @@ import { NodeFieldsSchema, NodeSampleSchema } from './schemas/field-discovery';
 import {
   CredentialScopeCreateRequestSchema,
   CredentialScopeMintResultSchema,
+  TriggerDeliveryReceiptSchema,
   TriggerEndpointCreateRequestSchema,
   TriggerEndpointListSchema,
   TriggerEndpointSchema,
@@ -76,14 +89,25 @@ import {
   DsarRequestSchema,
   LicenseGateSchema,
   LicenseRecordSchema,
+  LicenseReviewRequestSchema,
   MaintenanceWindowCreateRequestSchema,
   MaintenanceWindowPatchRequestSchema,
   MaintenanceWindowSchema,
+  NativeFloorDecisionRequestSchema,
+  NativeFloorDecisionSchema,
   PatchRecordSchema,
+  PolicyExceptionRequestSchema,
   PolicyExceptionSchema,
   PostureSummarySchema,
+  UpstreamObservationResultSchema,
 } from './schemas/governance';
+import {
+  ImageScanReportSchema,
+  TrustedRegistryStateSchema,
+  TrustedRegistryUpdateSchema,
+} from './schemas/security';
 import { CapacitySnapshotSchema, ForecastPointSchema } from './schemas/capacity';
+import { InstanceLogsSchema, ObservabilityReportSchema } from './schemas/observability';
 import {
   AlertChannelSchema,
   AlertTestResultSchema,
@@ -177,14 +201,28 @@ export type DeclaredOperation = {
   etag?: true;
   /** `external` = consumed by BI or scripts, not by a screen in this repository. */
   consumer?: 'ui' | 'external';
-  contentType?: 'application/json' | 'text/event-stream';
+  /**
+   * The success body's media type. `text/event-stream` is a reply the handler owns (SSE);
+   * `application/gzip` is a streamed file whose description is a separate read.
+   */
+  contentType?: 'application/json' | 'text/event-stream' | 'application/gzip';
   /**
    * Declared anonymous: no session is required and the PDP is skipped. The set is pinned to
    * `ANONYMOUS_OPERATIONS` by the route-policy check.
    */
   anonymous?: true;
-  /** Contract-driven throttling (ADR-BE-05 / deliverable 3.2). Only sign-in declares it. */
-  rateLimit?: { bucket: 'auth'; limit: number; windowSeconds: number };
+  /**
+   * The handler needs the exact bytes that arrived, not the parsed document: a webhook signature
+   * is computed over the wire form, so re-serialising the parsed body would change key order and
+   * whitespace and never match. Capturing is per-route — a global body parser would change error
+   * handling for every JSON route in the product.
+   */
+  rawBody?: true;
+  /**
+   * Contract-driven throttling (ADR-BE-05 / deliverable 3.2). Sign-in uses `auth`; the anonymous
+   * delivery ingress uses its own bucket so a noisy product cannot exhaust the sign-in budget.
+   */
+  rateLimit?: { bucket: 'auth' | 'trigger'; limit: number; windowSeconds: number };
 };
 
 /**
@@ -229,12 +267,41 @@ const WorkflowDraftRequestSchema = z.object({
   targetInstanceId: z.string().min(1),
 });
 
-export const IntegrationMetadataRequestSchema = z.object({
-  // FR-2.14: the value is a fact the whole platform branches on; a free-text string used to be
-  // persisted into the catalog document and only failed later, as an unreadable projection.
-  credentialGranularity: z.enum(CREDENTIAL_GRANULARITIES).optional(),
-  sessionMaxMinutes: z.number().int().positive().optional(),
-});
+/**
+ * The delivery payload is the product's event, not a platform document: the platform authenticates
+ * it and forwards it without interpreting a single field, so the only thing the contract can
+ * truthfully require is a JSON object. A top-level array or scalar is refused rather than silently
+ * accepted, because a sender cannot tell the difference afterwards.
+ */
+const TriggerDeliveryBodySchema = z.record(z.string(), z.unknown());
+
+/**
+ * FR-2.14: every fact onboarding has to verify, not just the two that were convenient to store.
+ *
+ * The values supersede the catalogue assumption, so an omitted field means "leave the recorded fact
+ * alone", never "reset to the document". An empty body is refused: it would restart the staleness
+ * clock without anyone having verified anything (FR-2.15).
+ */
+export const IntegrationMetadataRequestSchema = z
+  .object({
+    // FR-2.14: the value is a fact the whole platform branches on; a free-text string used to be
+    // persisted into the catalog document and only failed later, as an unreadable projection.
+    credentialGranularity: z.enum(CREDENTIAL_GRANULARITIES).optional(),
+    sessionMaxMinutes: z.number().int().positive().optional(),
+    /** Actual API origin, verified against the running product. */
+    apiBaseUrl: z.string().min(1).optional(),
+    /** `oidc`, `saml`, `forward-auth`, ... — the path the product really authenticates with. */
+    authMethod: z.string().min(1).optional(),
+    /** FR-2.16: the guarantee class actually measured, not the one the document assumed. */
+    guaranteeClass: z.enum(GUARANTEE_CLASSES).optional(),
+    operationInventory: z.array(OperationSchema).optional(),
+    eventModes: z.array(EventModeSchema).optional(),
+    sloSupported: z.boolean().optional(),
+  })
+  .refine((value) => Object.values(value).some((entry) => entry !== undefined), {
+    message:
+      'Verify at least one fact. An empty request would restart the review clock without evidence.',
+  });
 
 /**
  * NFR-4.13: the queue is addressed by an opaque pseudonymous reference, never by a name or an
@@ -276,6 +343,8 @@ const GroupMappingRequestSchema = z.object({
   role: z.string().min(1),
   scopeType: z.string().min(1),
   scopeLabel: z.string().min(1),
+  /** FR-2.4: the role the product itself applies; `entitlement.product_role` records it. */
+  productRole: z.string().trim().min(1).max(64).default('member'),
   propagate: z.boolean().default(false),
 });
 
@@ -403,6 +472,25 @@ const DECLARED_OPERATIONS: readonly DeclaredOperation[] = [
   }),
   op({
     method: 'GET',
+    path: '/catalog/repository',
+    summary:
+      'The catalogue checkout being served: revision, configured source, last fetched commit, ' +
+      'and whether an interrupted swap left a mixed tree (ADR-BE-42).',
+    tag: 'catalog',
+    response: CatalogRepositoryViewSchema,
+  }),
+  op({
+    method: 'POST',
+    path: '/catalog/sync',
+    summary:
+      'Fetch the configured catalogue source at a tag or commit, swap it into the working tree and ' +
+      'reconcile the projection. The URL is configuration; the tree swap is not atomic (ADR-BE-42).',
+    tag: 'catalog',
+    response: CatalogSyncResultSchema,
+    request: CatalogSyncRequestSchema,
+  }),
+  op({
+    method: 'GET',
     path: '/catalog/:key',
     summary: 'One catalog entry with expected and verified integration metadata.',
     tag: 'catalog',
@@ -445,6 +533,47 @@ const DECLARED_OPERATIONS: readonly DeclaredOperation[] = [
     summary: 'Environment profiles available to deployments.',
     tag: 'catalog',
     response: z.array(EnvProfileSchema),
+  }),
+  op({
+    method: 'POST',
+    path: '/env-profiles',
+    summary: 'Create a lifecycle environment profile (FR-1.26).',
+    tag: 'catalog',
+    response: EnvProfileSchema,
+    request: EnvProfileCreateRequestSchema,
+  }),
+  op({
+    method: 'PATCH',
+    path: '/env-profiles/:key',
+    summary: 'Rename a profile or move it to another lifecycle target (FR-1.26).',
+    tag: 'catalog',
+    response: EnvProfileSchema,
+    request: EnvProfilePatchRequestSchema,
+  }),
+  op({
+    method: 'PUT',
+    path: '/env-profiles/:key/values',
+    summary:
+      'Replace a profile’s variable values, subject to each override ceiling (FR-1.26, AC-51).',
+    tag: 'catalog',
+    response: EnvProfileSchema,
+    request: EnvProfileValuesRequestSchema,
+  }),
+  op({
+    method: 'DELETE',
+    path: '/env-profiles/:key',
+    summary: 'Delete a profile no instance uses (FR-1.26).',
+    tag: 'catalog',
+    response: EnvProfileDeleteResponseSchema,
+  }),
+  op({
+    method: 'POST',
+    path: '/env-profiles/:key/requests',
+    summary:
+      'Ask R1 for a profile change; the request lands in the governance queue (FR-1.26, §5.2).',
+    tag: 'catalog',
+    response: AccessRequestSchema,
+    request: z.object({ justification: z.string().trim().min(1).max(500) }),
   }),
   op({
     method: 'PATCH',
@@ -601,6 +730,75 @@ const DECLARED_OPERATIONS: readonly DeclaredOperation[] = [
     tag: 'instances',
     response: ContainerLogListSchema,
   }),
+  /**
+   * FR-2.6 / AC-45 — what the platform observes about this instance, without an operator opening
+   * Grafana by hand: the entry's dashboard/rule profile, the scrape target's state, and whether the
+   * log store can answer a per-instance query.
+   */
+  op({
+    method: 'GET',
+    path: '/instances/:id/observability',
+    summary: 'Per-instance observability profile, scrape target and log availability (AC-45).',
+    tag: 'instances',
+    response: ObservabilityReportSchema,
+  }),
+  /**
+   * FR-4.6 — the platform's own log query, scoped to one instance and masked before it leaves the
+   * process. `since` and `limit` are capped by configuration, not by the caller.
+   */
+  op({
+    method: 'GET',
+    path: '/instances/:id/logs',
+    summary: 'Queryable per-instance logs from the platform log store (FR-4.6).',
+    tag: 'instances',
+    query: [
+      {
+        name: 'since',
+        type: 'integer',
+        description: 'Minutes of history to query; capped by the platform.',
+      },
+      {
+        name: 'limit',
+        type: 'integer',
+        description: 'Newest N lines; capped by the platform.',
+      },
+      {
+        name: 'filter',
+        type: 'string',
+        description: 'Literal substring filter, applied as a line filter rather than a selector.',
+      },
+    ],
+    response: InstanceLogsSchema,
+  }),
+  /**
+   * FR-1.13 / AC-20 — the portable exports this instance has produced, newest first.
+   *
+   * Read from the on-disk catalogue, not from a table: an export is a file a business takes away, and
+   * the record of it travels with the artefact (see `instance-exports.ts` in M05).
+   */
+  op({
+    method: 'GET',
+    path: '/instances/:id/exports',
+    summary: 'Portable data exports of this instance, with what each one actually contains.',
+    tag: 'instances',
+    response: InstanceExportListSchema,
+  }),
+  /**
+   * FR-1.13 / AC-20 — the archive itself.
+   *
+   * `z.unknown()` for the same reason the SSE read uses it: the body is not JSON, and the document
+   * publishes `application/gzip` with `format: binary` from `contentType`. The *description* of the
+   * archive is the listing above. The handler streams from disk, so a multi-gigabyte export never
+   * passes through the process's memory.
+   */
+  op({
+    method: 'GET',
+    path: '/instances/:id/exports/:exportId/archive',
+    summary: 'Download one portable export archive (a plain .tar.gz the business can keep).',
+    tag: 'instances',
+    response: z.unknown(),
+    contentType: 'application/gzip',
+  }),
   op({
     method: 'POST',
     path: '/instances/:id/backups',
@@ -646,6 +844,25 @@ const DECLARED_OPERATIONS: readonly DeclaredOperation[] = [
     summary: 'Image history retained for rollback (AC-22).',
     tag: 'instances',
     response: z.array(ImageSchema),
+  }),
+  /**
+   * NFR-4.6 / S-10: "a scan report is retrievable per deployment". The digest identifies which
+   * retained image is asked about — the same image may have been scanned under an older digest.
+   */
+  op({
+    method: 'GET',
+    path: '/instances/:id/image-scan',
+    summary: 'Retained vulnerability scan report for one image digest (NFR-4.6).',
+    tag: 'instances',
+    response: ImageScanReportSchema,
+    query: [
+      {
+        name: 'digest',
+        type: 'string',
+        required: true,
+        description: 'The image digest the report belongs to (`sha256:…`).',
+      },
+    ],
   }),
   op({
     method: 'GET',
@@ -711,6 +928,31 @@ const DECLARED_OPERATIONS: readonly DeclaredOperation[] = [
     summary: 'Revoke a trigger endpoint and release its token hash.',
     tag: 'instances',
     noContent: true,
+    consumer: 'external',
+  }),
+
+  /**
+   * FR-5.4 / NFR-2.8: the delivery ingress. The opaqueness of the URL token is *not* the
+   * authentication — an unknown token, an inactive endpoint, a missing signature and a wrong
+   * signature are one indistinguishable `401`, so the route cannot be used to enumerate
+   * endpoints. The HMAC over the raw body is the authentication, which is why no session is
+   * required and no role matrix applies: a sending product holds no platform account.
+   *
+   * Headers: `x-seamnex-signature` (hex HMAC-SHA256 over the exact bytes) and an optional
+   * `x-seamnex-delivery-id`; without one the id is derived from the body hash, so a retrying
+   * sender that changes nothing is still recognised as a duplicate.
+   */
+  op({
+    method: 'POST',
+    path: '/trigger/:token',
+    summary:
+      'Accept a signed product event, start the bound workflow once, and answer with a receipt (FR-5.4).',
+    tag: 'workflows',
+    response: TriggerDeliveryReceiptSchema,
+    request: TriggerDeliveryBodySchema,
+    anonymous: true,
+    rawBody: true,
+    rateLimit: { bucket: 'trigger', limit: 120, windowSeconds: 60 },
     consumer: 'external',
   }),
 
@@ -1030,11 +1272,31 @@ const DECLARED_OPERATIONS: readonly DeclaredOperation[] = [
     request: z.object({ enabled: z.boolean() }),
   }),
   op({
+    method: 'PUT',
+    path: '/licenses/:instanceId/review',
+    summary: 'Record the auditor review: obligations, restriction flags and evidence.',
+    tag: 'governance',
+    response: LicenseRecordSchema,
+    request: LicenseReviewRequestSchema,
+  }),
+  op({
     method: 'GET',
     path: '/patch-register',
     summary: 'Patch register with severity and remediation state (AC-44).',
     tag: 'governance',
     response: z.array(PatchRecordSchema),
+  }),
+  /**
+   * FR-2.12: the observation is what advances the register. The route exists so an operator can
+   * prove the feed works without waiting for the scheduler, and `settings.manage` (R1) matches the
+   * scheduler pass that performs the same work.
+   */
+  op({
+    method: 'POST',
+    path: '/patch-register/observe',
+    summary: 'Observe upstream releases and advisories now, then refresh the register (FR-2.12).',
+    tag: 'governance',
+    response: UpstreamObservationResultSchema,
   }),
   op({
     method: 'GET',
@@ -1042,6 +1304,15 @@ const DECLARED_OPERATIONS: readonly DeclaredOperation[] = [
     summary: 'Posture summary: unverified restores, stale metadata, expiring certificates.',
     tag: 'governance',
     response: PostureSummarySchema,
+  }),
+  /** S-2: the floor may be lowered only by a recorded owner decision, never by editing the UI. */
+  op({
+    method: 'POST',
+    path: '/posture/native-floor/decision',
+    summary: 'Record an owner decision that lowers the S-2 native floor.',
+    tag: 'governance',
+    response: NativeFloorDecisionSchema,
+    request: NativeFloorDecisionRequestSchema,
   }),
   op({
     method: 'GET',
@@ -1213,6 +1484,26 @@ const DECLARED_OPERATIONS: readonly DeclaredOperation[] = [
     tag: 'admin',
     response: AlertTestResultSchema,
   }),
+  /**
+   * NFR-4.16 — the allow-list the pull/build guard reads. The read is `settings.view` (R1/R2) so the
+   * security posture screen can show the control, and the write is `settings.manage` (R1 only):
+   * "maintained by the platform owner" is one role, not a domain-scoped grant.
+   */
+  op({
+    method: 'GET',
+    path: '/security/trusted-registries',
+    summary: 'Current trusted-registry allow-list revision and its history (NFR-4.16).',
+    tag: 'admin',
+    response: TrustedRegistryStateSchema,
+  }),
+  op({
+    method: 'POST',
+    path: '/security/trusted-registries',
+    summary: 'Add or remove trusted registries/namespaces as a new audited revision.',
+    tag: 'admin',
+    response: TrustedRegistryStateSchema,
+    request: TrustedRegistryUpdateSchema,
+  }),
   op({
     method: 'GET',
     path: '/admin/access-requests',
@@ -1273,6 +1564,15 @@ const DECLARED_OPERATIONS: readonly DeclaredOperation[] = [
     summary: 'Policy exceptions awaiting a second-party decision (NFR-4.15).',
     tag: 'admin',
     response: z.array(PolicyExceptionSchema),
+  }),
+  op({
+    method: 'POST',
+    path: '/admin/policy-exceptions',
+    summary:
+      'File a time-boxed exception to one compose policy rule for one product (FR-1.20, NFR-4.15).',
+    tag: 'admin',
+    response: PolicyExceptionSchema,
+    request: PolicyExceptionRequestSchema,
   }),
   op({
     method: 'POST',
@@ -1501,26 +1801,37 @@ export function buildOpenApiDocument(): OpenApiDocument {
     const successContent =
       operation.contentType === 'text/event-stream'
         ? { 'text/event-stream': { schema: { type: 'string' } } }
-        : { 'application/json': { schema: jsonSchemaFor(operation.response ?? z.unknown()) } };
+        : operation.contentType === 'application/gzip'
+          ? { 'application/gzip': { schema: { type: 'string', format: 'binary' } } }
+          : { 'application/json': { schema: jsonSchemaFor(operation.response ?? z.unknown()) } };
+
+    const successHeaders = {
+      // The validator a later `If-Match` replays. A read that publishes none leaves the paired
+      // conditional write with nothing to send, so it is part of the document.
+      ...(operation.etag === true
+        ? {
+            ETag: {
+              description: 'Validator of this representation; replay it as `If-Match` on a write.',
+              schema: { type: 'string' },
+            },
+          }
+        : {}),
+      ...(operation.contentType === 'application/gzip'
+        ? {
+            'Content-Disposition': {
+              description: 'Attachment filename the client saves the archive under.',
+              schema: { type: 'string' },
+            },
+          }
+        : {}),
+    };
 
     const success = operation.noContent
       ? { '204': { description: 'No content; the operation succeeded without a body.' } }
       : {
           [operation.accepted ? '202' : '200']: {
             description: operation.accepted ? 'Accepted; poll the job link.' : 'Success.',
-            // The validator a later `If-Match` replays. A read that publishes none leaves the
-            // paired conditional write with nothing to send, so it is part of the document.
-            ...(operation.etag === true
-              ? {
-                  headers: {
-                    ETag: {
-                      description:
-                        'Validator of this representation; replay it as `If-Match` on a write.',
-                      schema: { type: 'string' },
-                    },
-                  },
-                }
-              : {}),
+            ...(Object.keys(successHeaders).length > 0 ? { headers: successHeaders } : {}),
             content: successContent,
           },
         };

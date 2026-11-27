@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Phase2Handlers } from '../../../../src/contract/handlers/phase2.handlers';
 import type { OperationHandler } from '../../../../src/contract/operation-handler';
 import { AppError } from '../../../../src/common/problem/app-error';
-import { callHandler, operationInput } from '../../../support/operation-input';
+import { callHandler, operationInput, testContext } from '../../../support/operation-input';
 
 /**
  * Handlers are orchestration, so each case asserts the delegation it performs and the result shape
@@ -22,7 +22,7 @@ function services() {
       plan: vi.fn().mockResolvedValue({ diff: [] }),
       importEnv: vi.fn().mockResolvedValue({ imported: 2 }),
       profiles: vi.fn().mockResolvedValue([]),
-      instanceEnv: vi.fn().mockResolvedValue({ values: {} }),
+      instanceEnv: vi.fn().mockResolvedValue([]),
       updateInstanceEnv: vi.fn().mockResolvedValue({ diff: [] }),
     },
     executor: {
@@ -82,6 +82,7 @@ function services() {
       policyExceptions: vi.fn().mockResolvedValue([]),
       dsar: vi.fn().mockResolvedValue([]),
       licenses: vi.fn().mockResolvedValue([]),
+      recordReview: vi.fn().mockResolvedValue({ instanceId: 'i1' }),
       setHostedService: vi.fn().mockResolvedValue({ enabled: true }),
       patches: vi.fn().mockResolvedValue([]),
       posture: vi.fn().mockResolvedValue({}),
@@ -97,6 +98,32 @@ function services() {
     },
     repository: {
       load: vi.fn().mockResolvedValue({ entries: [], envSchemas: [], revision: 'r1', invalid: [] }),
+      recordCommit: vi.fn().mockResolvedValue(undefined),
+      revision: vi.fn().mockResolvedValue('r1'),
+    },
+    // ADR-BE-42: the fetch/swap service. The handler only orchestrates around it.
+    catalogSync: {
+      read: vi.fn().mockResolvedValue({
+        revision: 'r1',
+        source: { configured: true, host: 'github.com/o/r', ref: 'catalog-2026.11.0' },
+        commit: null,
+        staged: null,
+      }),
+      sync: vi.fn().mockResolvedValue({
+        url: 'github.com/o/r',
+        ref: 'catalog-2026.11.0',
+        commit: 'c0ffee',
+        staged: null,
+      }),
+    },
+    audit: { append: vi.fn().mockResolvedValue({ seq: '1', hash: 'h' }) },
+    // FR-1.29: the env screen's drift badge is the producer's open rows, not M03's proxy.
+    drift: {
+      scan: vi.fn().mockResolvedValue({ observed: true, detected: [], created: [], resolved: 0 }),
+      scannable: vi.fn().mockResolvedValue([]),
+      definitionDrift: vi.fn().mockResolvedValue([]),
+      openVarNames: vi.fn().mockResolvedValue(new Set<string>()),
+      reconcileDefinition: vi.fn().mockResolvedValue(null),
     },
     // The relay's provisioning credential. Write-only by contract: both calls answer metadata.
     adminCredential: {
@@ -151,6 +178,9 @@ beforeEach(() => {
     s.capacity as never,
     s.params as never,
     s.repository as never,
+    s.catalogSync as never,
+    s.audit as never,
+    s.drift as never,
     s.adminCredential as never,
     s.accounts as never,
   ).handlers();
@@ -239,6 +269,66 @@ describe('catalog handlers', () => {
     });
   });
 
+  it('GET /catalog/repository serves the checkout state without reloading', async () => {
+    const result = await call('GET /catalog/repository');
+    expect(s.catalogSync.read).toHaveBeenCalledOnce();
+    expect(s.repository.load).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      kind: 'body',
+      body: expect.objectContaining({ revision: 'r1', staged: null }),
+    });
+  });
+
+  it('POST /catalog/sync fetches, reloads and audits inside one request', async () => {
+    const result = await call('POST /catalog/sync', { body: { ref: 'catalog-2026.11.0' } });
+
+    expect(s.catalogSync.sync).toHaveBeenCalledWith({
+      ref: 'catalog-2026.11.0',
+      actorId: 'sub-1',
+    });
+    // Fetch → swap → reload, so no caller sees a swapped tree with a stale projection.
+    expect(s.catalog.reload).toHaveBeenCalledWith({ actorId: 'sub-1', tree: expect.anything() });
+    expect(s.audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'catalog.source.synced',
+        targetId: 'c0ffee',
+        detail: expect.objectContaining({
+          source: 'github.com/o/r',
+          ref: 'catalog-2026.11.0',
+          commit: 'c0ffee',
+        }),
+      }),
+    );
+    expect(result).toEqual({
+      kind: 'body',
+      body: expect.objectContaining({
+        source: { url: 'github.com/o/r', ref: 'catalog-2026.11.0', commit: 'c0ffee' },
+        staged: { pending: [] },
+      }),
+    });
+  });
+
+  it('POST /catalog/sync reports a mixed tree instead of claiming success', async () => {
+    s.catalogSync.sync.mockResolvedValueOnce({
+      url: 'github.com/o/r',
+      ref: 'catalog-2026.11.0',
+      commit: 'c0ffee',
+      staged: { pending: ['upstream', '.git'] },
+    });
+
+    const result = await call('POST /catalog/sync');
+
+    expect(result).toEqual({
+      kind: 'body',
+      body: expect.objectContaining({ staged: { pending: ['upstream', '.git'] } }),
+    });
+    expect(s.audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        detail: expect.objectContaining({ staged: ['upstream', '.git'] }),
+      }),
+    );
+  });
+
   it('GET /catalog/:key and its env surfaces pass the key through', async () => {
     await call('GET /catalog/:key', { params: { key: 'D01-01' } });
     await call('GET /catalog/:key/env-schema', { params: { key: 'D01-01' } });
@@ -283,15 +373,37 @@ describe('catalog handlers', () => {
 });
 
 describe('instance handlers', () => {
-  it('GET /instances forwards present filters only', async () => {
+  it('GET /instances forwards present filters and the published scope', async () => {
     await call('GET /instances');
-    expect(s.executor.instances).toHaveBeenCalledWith({});
+    expect(s.executor.instances).toHaveBeenCalledWith({}, { kind: 'platform' });
     await call('GET /instances', { query: { q: 'x', state: 'ready', entryKey: 'D01-01' } });
-    expect(s.executor.instances).toHaveBeenLastCalledWith({
-      q: 'x',
-      state: 'ready',
-      entryKey: 'D01-01',
+    expect(s.executor.instances).toHaveBeenLastCalledWith(
+      {
+        q: 'x',
+        state: 'ready',
+        entryKey: 'D01-01',
+      },
+      { kind: 'platform' },
+    );
+  });
+
+  it('GET /instances confines a scoped caller to the rows the decision named', async () => {
+    // The handler does not derive the scope; it forwards what the guard published (ADR-BE-44), so a
+    // domain owner's list is the predicate the PDP already answered.
+    await call('GET /instances', {
+      context: testContext({
+        policyScope: { kind: 'scoped', domains: ['CRM & Sales Pipeline'], instanceIds: [] },
+      }),
     });
+
+    expect(s.executor.instances).toHaveBeenLastCalledWith(
+      {},
+      {
+        kind: 'scoped',
+        domains: ['CRM & Sales Pipeline'],
+        instanceIds: [],
+      },
+    );
   });
 
   it('GET /instances/:id combines the instance with its integration checks', async () => {
@@ -323,6 +435,25 @@ describe('instance handlers', () => {
   it('GET /instances/:id/plan honours an explicit action', async () => {
     await call('GET /instances/:id/plan', { params: { id: 'i1' }, query: { action: 'delete' } });
     expect(s.executor.plan).toHaveBeenCalledWith('i1', 'delete');
+  });
+
+  it('GET /instances/:id/env marks only the variables the producer has an open row for', async () => {
+    s.env.instanceEnv.mockResolvedValue([
+      { name: 'MAIL_HOST', drift: true },
+      { name: 'MAIL_PORT', drift: false },
+    ]);
+    s.drift.openVarNames.mockResolvedValue(new Set(['MAIL_PORT']));
+
+    const result = await call('GET /instances/:id/env', { params: { id: 'i1' } });
+
+    expect(s.drift.openVarNames).toHaveBeenCalledWith('i1');
+    expect(result).toEqual({
+      kind: 'body',
+      body: [
+        { name: 'MAIL_HOST', drift: false },
+        { name: 'MAIL_PORT', drift: true },
+      ],
+    });
   });
 });
 
@@ -472,14 +603,29 @@ describe('admin handlers', () => {
     });
     expect(s.governance.setHostedService).toHaveBeenCalledWith('i1', true, 'sub-1');
   });
+
+  it('PUT /licenses/:instanceId/review forwards the review with the session actor', async () => {
+    const body = {
+      licenseId: 'AGPL-3.0',
+      obligations: ['Offer the source to network users'],
+      resaleRestricted: false,
+      hostedServiceRestricted: false,
+      upstreamRef: 'https://example.invalid/LICENSE',
+    };
+    await call('PUT /licenses/:instanceId/review', {
+      params: { instanceId: 'i1' },
+      body,
+    });
+    expect(s.governance.recordReview).toHaveBeenCalledWith('i1', body, 'sub-1');
+  });
 });
 
 describe('capacity and registry handlers', () => {
-  it('delegates the capacity reads', async () => {
+  it('delegates the capacity reads with the published scope', async () => {
     await call('GET /capacity');
     await call('GET /capacity/forecast');
-    expect(s.capacity.snapshot).toHaveBeenCalledOnce();
-    expect(s.capacity.forecast).toHaveBeenCalledOnce();
+    expect(s.capacity.snapshot).toHaveBeenCalledWith({ kind: 'platform' });
+    expect(s.capacity.forecast).toHaveBeenCalledWith({ kind: 'platform' });
   });
 
   it('delegates the registry reads', async () => {
@@ -505,14 +651,16 @@ describe('workflow handlers', () => {
     });
   });
 
-  it('GET /workflows omits absent filters and coerces present ones', async () => {
+  it('GET /workflows omits absent filters, coerces present ones and names the caller', async () => {
     await call('GET /workflows');
-    expect(s.workflows.list).toHaveBeenCalledWith({});
+    // FR-5.9 / NFR-4.4: the visible set is the caller's, so the actor always travels with the query.
+    expect(s.workflows.list).toHaveBeenCalledWith({ actorId: 'sub-1' });
 
     await call('GET /workflows', {
       query: { state: 'draft', q: 'mail', limit: '10', offset: '20' },
     });
     expect(s.workflows.list).toHaveBeenLastCalledWith({
+      actorId: 'sub-1',
       state: 'draft',
       q: 'mail',
       limit: 10,
@@ -627,7 +775,9 @@ describe('relay provisioning (ADR-BE-22)', () => {
 
 describe('phase 2 handler registry', () => {
   it('implements every key exactly once', () => {
-    expect(handlers.size).toBe(59);
+    // 60 originally, plus the five FR-1.26 profile operations (create, patch, values, delete and
+    // the request-only change path), plus the two ADR-BE-42 catalogue checkout operations.
+    expect(handlers.size).toBe(67);
     expect(new Set(handlers.keys()).size).toBe(handlers.size);
   });
 

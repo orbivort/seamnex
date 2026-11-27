@@ -8,6 +8,8 @@ import {
   kcBootstrapDecision,
   stackDeclaresKeycloak,
 } from './lib/kc-admin.mjs';
+import { edgeConfigProblems, productUrlFor } from './lib/edge-config.mjs';
+import { pnpmCommandLine } from './lib/pnpm.mjs';
 import { ensureRootKey } from './lib/root-key.mjs';
 import { ensureRuntimeDirs } from './lib/runtime-dirs.mjs';
 
@@ -65,14 +67,7 @@ function readEnvFile() {
 /**
  * `docker` is a real `docker.exe`, so it is spawned without a shell and its arguments — which
  * include the absolute `.env` path — never reach `cmd.exe` quoting.
- *
- * `pnpm` on Windows is a `.cmd` shim, and since Node's fix for CVE-2024-27980 a `.cmd` cannot be
- * spawned with `shell: false` (it fails with `EINVAL`). That one command keeps a shell; every
- * argument it is given is a literal flag, so there is nothing to interpolate.
  */
-const PNPM = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
-const PNPM_SHELL = process.platform === 'win32';
-
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: root,
@@ -80,6 +75,20 @@ function run(command, args, options = {}) {
     ...options,
   });
   return result.status === 0;
+}
+
+/**
+ * A pnpm subcommand. `lib/pnpm.mjs` builds the command line, so no call site pairs `shell: true`
+ * with an argument array (DEP0190) — pnpm is a `.cmd` shim on Windows and cannot be spawned without
+ * a shell there, but the arguments are literals that need no escaping.
+ */
+function runPnpm(args, options = {}) {
+  return spawnSync(pnpmCommandLine(args), {
+    cwd: root,
+    stdio: 'inherit',
+    shell: true,
+    ...options,
+  });
 }
 
 function dockerAvailable() {
@@ -148,10 +157,7 @@ function reconcileKeycloakAdminClient(env) {
 
 function migrate(env) {
   log('applying schema migrations');
-  const status = spawnSync(PNPM, ['--filter', '@seamnex/db', 'migrate:up'], {
-    cwd: root,
-    stdio: 'inherit',
-    shell: PNPM_SHELL,
+  const status = runPnpm(['--filter', '@seamnex/db', 'migrate:up'], {
     env: { ...process.env, DATABASE_URL: env.DATABASE_URL },
   });
   if (status.status !== 0) {
@@ -160,33 +166,29 @@ function migrate(env) {
   }
 
   log('seeding development data');
-  const seeded = spawnSync(PNPM, ['--filter', '@seamnex/db', 'seed'], {
-    cwd: root,
-    stdio: 'inherit',
-    shell: PNPM_SHELL,
+  const seeded = runPnpm(['--filter', '@seamnex/db', 'seed'], {
     env: { ...process.env, DATABASE_URL: env.DATABASE_URL },
   });
-  // The seed's status used to be dropped, so a stack whose default catalogue failed to materialise
-  // still booted and every catalogue screen showed an empty product. A failed seed is a failed
-  // startup, exactly like a failed migration.
+  // The seed's status used to be dropped, so a stack whose catalogue could not be projected still
+  // booted and every catalogue screen showed an empty product. A failed seed is a failed startup,
+  // exactly like a failed migration. An *absent* checkout is not a failure: the seed says so and
+  // exits 0 (ADR-BE-42 §9.3), which is what keeps a fresh clone bootable before its first sync.
   if (seeded.status !== 0) {
-    fail('the development seed failed; the default catalogue is not usable');
+    fail('the development seed failed; the catalogue projection is not usable');
     return false;
   }
 
   /*
-   * The seed writes `catalog/env/<KEY>.json`; `env_schema_var` is M03's and is projected by its own
-   * command. Running it here is what makes "a fresh clone is usable after one command" true for the
-   * environment half as well: without it the deploy wizard has no variables to offer and
+   * The checkout carries `catalog/env/<KEY>.json`; `env_schema_var` is M03's and is projected by its
+   * own command. Running it here is what makes "a fresh clone is usable after one command" true for
+   * the environment half as well: without it the deploy wizard has no variables to offer and
    * `GET /catalog/:key/env-schema` answers `[]` for a product that declares 30.
    *
-   * Idempotent by content hash, so a warm stack pays one read per file and writes nothing.
+   * Idempotent by content hash, so a warm stack pays one read per file and writes nothing. With no
+   * checkout it exits 0 and says there is nothing to project, so this step stays safe.
    */
-  log('projecting the default environment schemas');
-  const projected = spawnSync(PNPM, ['catalog:project'], {
-    cwd: root,
-    stdio: 'inherit',
-    shell: PNPM_SHELL,
+  log('projecting the catalogue environment schemas');
+  const projected = runPnpm(['catalog:project'], {
     env: { ...process.env, DATABASE_URL: env.DATABASE_URL },
   });
   if (projected.status !== 0) {
@@ -196,12 +198,41 @@ function migrate(env) {
   return true;
 }
 
+/**
+ * NFR-4.1 / ISSUE-07 — refuse a `.env` that still describes the pre-TLS edge (ADR-BE-39).
+ *
+ * `ensureEnvFile` only writes `.env` when it is missing, so an install created before the edge served
+ * TLS keeps `http` + `8020` and gains no `SEAMNEX_EDGE_TLS_MODE`. The rule lives in
+ * `lib/edge-config.mjs`; this function only decides the precedence (the file overrides an exported
+ * variable, the same order the dev servers get) and says what to do about it.
+ */
+function validateEdgeConfig(env) {
+  const effective = { ...process.env, ...env };
+  const problems = edgeConfigProblems(effective);
+  if (problems.length === 0) {
+    const { url, tlsMode } = productUrlFor(effective);
+    // Named with the command that starts the edge: `pnpm dev` starts the datastores only, so a reader
+    // who tries the URL after this line needs to know which process serves it.
+    log(
+      `products open at ${url} (edge tls mode: ${tlsMode}; the edge runs with \`pnpm dev:stack\`)`,
+    );
+    return true;
+  }
+
+  fail(
+    'the .env still describes the pre-TLS edge. Update these lines, then run `pnpm dev` again:\n' +
+      problems.map((problem) => `  - ${problem}`).join('\n') +
+      '\n  Frontend-only work does not need the stack: `pnpm dev:web`.',
+  );
+  return false;
+}
+
 function startDevServers(env) {
   log('starting portal, console and api (Ctrl+C stops them)');
-  const child = spawn(PNPM, ['turbo', 'run', 'dev', '--parallel'], {
+  const child = spawn(pnpmCommandLine(['turbo', 'run', 'dev', '--parallel']), {
     cwd: root,
     stdio: 'inherit',
-    shell: PNPM_SHELL,
+    shell: true,
     env: { ...process.env, ...env },
   });
 
@@ -221,7 +252,8 @@ const env = readEnvFile();
 
 // Identity is reconciled before the API starts, so the first deploy of the session can register a
 // client: a deployment that runs without it succeeds and leaves the product on its own credential.
-const identityReady = startDatastores() && reconcileKeycloakAdminClient(env);
+const edgeReady = validateEdgeConfig(env);
+const identityReady = edgeReady && startDatastores() && reconcileKeycloakAdminClient(env);
 if (identityReady && migrate(env)) {
   startDevServers(env);
 }

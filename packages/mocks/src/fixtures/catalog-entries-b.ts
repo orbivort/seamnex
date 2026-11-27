@@ -82,21 +82,23 @@ export const ENTRY_SEEDS_B: EntrySeed[] = [
     guaranteeClass: 'fa_gate',
     authMethod:
       'Proxy gate only: the product keeps its own local credential (native OIDC/SAML needs the Enterprise token for `sso_auth_providers`)',
-    // The vendored tree is a Compose file pinning the all-in-one image (17.9.6); the entry still
-    // said `dockerfile` at 16.4.1, which the console renders as the packaging column and which was
-    // two releases behind the image the deployment actually runs. The live catalogue document
-    // already reads `compose`; the fixture had drifted, exactly as it had for `httpPort`.
+    // The tree is a Compose file pinning the all-in-one image (17.9.6); the entry still said
+    // `dockerfile` at 16.4.1, which the console renders as the packaging column and which was two
+    // releases behind the image the deployment actually runs. The live catalogue document already
+    // reads `compose`; the fixture had drifted, exactly as it had for `httpPort`.
     packaging: 'compose',
+    // ADR-BE-42: the tree comes from the catalogue checkout, not from a directory in this repository.
     packagingSource:
-      'vendored definition (platform/upstream/D09-01) pinning the published all-in-one image @ 17.9.6',
+      'upstream definition (upstream/D09-01 in the catalogue checkout) pinning the published all-in-one image @ 17.9.6',
     primaryInstanceId: 'inst-projects',
     sharedWith: [],
-    // The container port, not the host side of the canonical `8080:80` example: the compose policy
-    // rewrites every published port to `expose:` and the platform never binds a host port, so 8080
-    // is never addressed and `render` would refuse the entry with HTTP_PORT_NOT_EXPOSED. The live
-    // catalog document already says 80; the fixture had drifted.
+    // The container port, not a host port: the definition declares `expose: ['80']`, and the
+    // platform never binds a host port. A catalogue value of 8080 would make `render` refuse the
+    // entry with HTTP_PORT_NOT_EXPOSED. The live catalog document says 80; the fixture follows it.
     httpPort: 80,
-    resources: { cpu: 1, memoryMb: 2048, diskMb: 51_200 },
+    // OpenProject's documented minimum for the all-in-one image: the bundled PostgreSQL, Puma,
+    // Apache and worker share one cgroup.
+    resources: { cpu: 4, memoryMb: 4096, diskMb: 51_200 },
     dependencies: ['database', 'cache', 'worker'],
     volumes: [
       { name: 'pgdata', mountPath: '/var/openproject/pgdata', quotaMb: 30_720 },
@@ -216,6 +218,7 @@ export const ENTRY_SEEDS_B: EntrySeed[] = [
     authMethod: 'Proxy gate only: the product keeps its own credential (SSO is a paid tier)',
     packaging: 'dockerfile',
     packagingSource: 'repository Dockerfile @ v0.57.3',
+    imageRef: 'metabase/metabase:v0.57.3',
     primaryInstanceId: 'inst-insights',
     sharedWith: [],
     httpPort: 3000,

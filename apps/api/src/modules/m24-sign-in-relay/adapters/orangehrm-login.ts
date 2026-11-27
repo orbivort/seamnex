@@ -38,6 +38,11 @@ import type { ProductLoginAdapter, SessionVerifyInput } from '../login-adapter';
  *     login route. The redirect target *is* the verdict, and because a stale CSRF token is
  *     indistinguishable from a bad password from the outside, this driver never retries: retrying
  *     would spend a second attempt on the one failure the ADR forbids repeating.
+ *   * The **session cookie name is derived from the scheme**: `orangehrm` (and `Secure`) when the
+ *     request looks like HTTPS, `_orangehrm` otherwise (`CorePluginConfiguration::getSessionStorage`
+ *     reads `$request->isSecure()`). The edge terminates TLS, so `X-Forwarded-Proto` is the only
+ *     thing that makes the relay and the browser agree on which session they exchange — without it
+ *     the relay authenticates into a cookie the browser's request never carries.
  *   * There is **no identity endpoint a self-service account may call**. `/api/v2/admin/users/{id}`
  *     answers 401 anonymously and 403 for an ESS session (measured). Confirmation is therefore the
  *     product's own authentication outcome: the POST redirected to an application path, and that
@@ -240,6 +245,15 @@ function makeCall(
         // The product is reached by its container alias; only the public name is one it configured
         // itself for, and `productFetch` exists because `fetch` drops a `Host` header it was given.
         host: new URL(input.publicOrigin).host,
+        /*
+         * The browser's scheme reaches the product only in this header, because the edge terminates
+         * TLS. OrangeHRM derives its session cookie *name* from it — `orangehrm` + `Secure` over
+         * HTTPS, `_orangehrm` otherwise — so omitting it made the relay sign in to a session the
+         * browser could never present: the hop planted `_orangehrm`, the TLS-facing product read
+         * `orangehrm`, and the user landed on the login form while the relay audited a success.
+         * `http` when the route is genuinely plain, which is what the product would have concluded.
+         */
+        'x-forwarded-proto': new URL(input.publicOrigin).protocol.replace(':', ''),
         accept: 'text/html',
         ...(init.method === 'POST'
           ? {

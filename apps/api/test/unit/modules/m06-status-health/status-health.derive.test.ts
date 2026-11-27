@@ -37,4 +37,24 @@ describe('status derivation', () => {
       reason: 'transition in progress',
     });
   });
+
+  it('does not promote a product that is answering with its own installer', () => {
+    // The observed incident: every container running, `wget` getting a 302 from `/`, the portal tile
+    // offering the product, and the page behind it the Setup Wizard. `httpReady` is true and that is
+    // exactly the fact that must not decide the state on its own.
+    expect(derive('degraded', running, true, '/installer/index.php/welcome')).toEqual({
+      state: 'degraded',
+      ready: false,
+      reason:
+        'the product is serving its own installer at /installer/index.php/welcome; the installation has not been completed',
+    });
+  });
+
+  it('promotes the same instance once the installer is gone', () => {
+    expect(derive('degraded', running, true, null)).toEqual({
+      state: 'ready',
+      ready: true,
+      reason: null,
+    });
+  });
 });

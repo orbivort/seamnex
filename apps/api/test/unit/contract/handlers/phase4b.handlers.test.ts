@@ -20,12 +20,22 @@ function services() {
         deliveredAt: '2026-01-01T00:00:00.000Z',
       }),
     },
+    observability: {
+      report: vi
+        .fn()
+        .mockResolvedValue({ instanceId: 'i1', profile: { dashboards: [], rules: [] } }),
+      logs: vi.fn().mockResolvedValue({ instanceId: 'i1', source: 'none', lines: [] }),
+    },
   };
 }
 
 beforeEach(() => {
   s = services();
-  handlers = new Phase4BHandlers(s.status as never, s.notifications as never).handlers();
+  handlers = new Phase4BHandlers(
+    s.status as never,
+    s.notifications as never,
+    s.observability as never,
+  ).handlers();
 });
 
 const call = (key: string, overrides = {}) =>
@@ -33,7 +43,10 @@ const call = (key: string, overrides = {}) =>
 
 describe('Phase4BHandlers', () => {
   it('tags the group phase-4b', () => {
-    expect(new Phase4BHandlers(s.status as never, s.notifications as never).tag).toBe('phase-4b');
+    expect(
+      new Phase4BHandlers(s.status as never, s.notifications as never, s.observability as never)
+        .tag,
+    ).toBe('phase-4b');
   });
 
   it('GET container logs reads the last 200 lines without shell access', async () => {
@@ -86,10 +99,39 @@ describe('Phase4BHandlers', () => {
     ).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
   });
 
-  it('implements the four 4B operations', () => {
+  it('GET /instances/:id/observability reads the report', async () => {
+    const result = await call('GET /instances/:id/observability', { params: { id: 'i1' } });
+
+    expect(s.observability.report).toHaveBeenCalledWith('i1');
+    expect(result).toMatchObject({ kind: 'body', body: { instanceId: 'i1' } });
+  });
+
+  it('GET /instances/:id/logs applies the declared caps, not the caller s numbers', async () => {
+    const result = await call('GET /instances/:id/logs', {
+      params: { id: 'i1' },
+      query: { since: '15', limit: '50', filter: 'boom' },
+    });
+
+    expect(s.observability.logs).toHaveBeenCalledWith('i1', {
+      sinceMinutes: 15,
+      limit: 50,
+      filter: 'boom',
+    });
+    expect(result).toMatchObject({ kind: 'body' });
+  });
+
+  it('GET /instances/:id/logs falls back to the defaults for an unparseable range', async () => {
+    await call('GET /instances/:id/logs', { params: { id: 'i1' }, query: { since: 'soon' } });
+
+    expect(s.observability.logs).toHaveBeenCalledWith('i1', { sinceMinutes: 60, limit: 200 });
+  });
+
+  it('implements the six 4B operations', () => {
     expect([...handlers.keys()].sort()).toEqual([
       'GET /admin/settings/alerts',
       'GET /instances/:id/containers/:cid/logs',
+      'GET /instances/:id/logs',
+      'GET /instances/:id/observability',
       'POST /admin/settings/alerts/:id/test',
       'PUT /admin/settings/alerts',
     ]);

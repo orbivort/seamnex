@@ -313,6 +313,8 @@ function harness(overrides: Route[] = [], discovery?: unknown, samples?: unknown
   };
   const n8n = {
     assertReady: vi.fn(),
+    // Rotation asks whether n8n is configured before it mints anything (NFR-4.14).
+    ready: vi.fn(() => true),
     upsert: vi.fn(async () => 'n8n-workflow-1'),
     deactivate: vi.fn(async () => undefined),
     trigger: vi.fn(async () => 'n8n-execution-1'),
@@ -330,17 +332,35 @@ function harness(overrides: Route[] = [], discovery?: unknown, samples?: unknown
     })),
     revoke: vi.fn(async () => undefined),
   };
-  const config = { SEAMNEX_BROKER_URL: 'http://broker.test' };
+  // Activation reads the retry policy from config (FR-5.7), so the fake carries the real defaults
+  // rather than `undefined`, which would compile every node with retries disabled.
+  const config = {
+    SEAMNEX_BROKER_URL: 'http://broker.test',
+    SEAMNEX_WORKFLOW_RETRY_MAX_TRIES: 3,
+    SEAMNEX_WORKFLOW_RETRY_WAIT_MS: 5_000,
+    // NFR-4.14: the rotation lead window the pass queries with.
+    SEAMNEX_WORKFLOW_CREDENTIAL_ROTATE_BEFORE_DAYS: 7,
+  };
+  /**
+   * FR-5.9's gate, allowed by default: these tests are about the authoring behaviour behind it, and
+   * the rule itself is proved in `workflow-authority.service.test.ts` plus the domain matrix. A test
+   * that needs the refusal makes this reject.
+   */
+  const authority = {
+    assertPermitted: vi.fn(async () => ({ elevations: [] })),
+    listScope: vi.fn(async () => ({ unrestricted: true as const })),
+  };
   const service = new WorkflowAuthoringService(
     db.pool,
     audit as never,
     config as never,
     n8n as never,
     broker as never,
+    authority as never,
     discovery as never,
     samples as never,
   );
-  return { db, audit, n8n, broker, service };
+  return { db, audit, n8n, broker, authority, service };
 }
 
 /** The statement that persisted a version, so a test reads back exactly what the edit wrote. */
@@ -451,9 +471,9 @@ describe('compile', () => {
       staticData: { irHash: `sha256:${HASH}` },
     });
     const nodes = document.nodes as Record<string, unknown>[];
-    expect(nodes).toHaveLength(3);
+    expect(nodes).toHaveLength(4);
     expect(nodes[0]).toMatchObject({
-      name: 'Trigger',
+      name: 'Schedule',
       type: 'n8n-nodes-base.scheduleTrigger',
       typeVersion: 1.2,
       parameters: { rule: { interval: [{ field: 'cronExpression', expression: '0 2 * * *' }] } },
@@ -501,10 +521,72 @@ describe('compile', () => {
     });
     // The trigger is not an IR node, so its edge to the entry node has to be added here. Without
     // it n8n runs an empty graph and calls that a success.
+    /*
+     * A scheduled definition also carries the manual-run webhook, so `Run now` has somewhere to
+     * arrive — n8n has no run endpoint and `N8nClient.trigger` POSTs `/webhook/<path>`. Both start
+     * nodes feed the same graph, and the webhook keeps the name whose slug is the route it calls.
+     */
+    expect(nodes[3]).toMatchObject({
+      name: 'Trigger',
+      type: 'n8n-nodes-base.webhook',
+      typeVersion: 2,
+      parameters: { path: WORKFLOW_ID, httpMethod: 'POST' },
+    });
     expect(document.connections).toEqual({
+      Schedule: { main: [[{ node: 'Read contacts', type: 'main', index: 0 }]] },
       Trigger: { main: [[{ node: 'Read contacts', type: 'main', index: 0 }]] },
       'Read contacts': { main: [[{ node: 'Create contact', type: 'main', index: 0 }]] },
     });
+  });
+
+  it('gives a scheduled definition a webhook so Run now can start it', async () => {
+    const { service } = harness();
+    const workflow = await service.load(WORKFLOW_ID);
+
+    const document = compile(workflow, healthyIr(), ADDRESSES, CREDENTIALS);
+    const nodes = document.nodes as Record<string, unknown>[];
+
+    /*
+     * n8n's public API has no run endpoint, so `POST /workflows/:id/run` arrives as a delivery to
+     * the webhook the compiler emits. A scheduled definition used to compile to a `scheduleTrigger`
+     * only, so Run now — offered for exactly that definition — answered `503 ADAPTER_UNAVAILABLE,
+     * n8n has no webhook registered`.
+     */
+    expect(nodes.filter((node) => node.type === 'n8n-nodes-base.webhook')).toEqual([
+      expect.objectContaining({
+        name: 'Trigger',
+        typeVersion: 2,
+        parameters: { path: WORKFLOW_ID, httpMethod: 'POST' },
+      }),
+    ]);
+    expect(Object.keys(document.connections as Record<string, unknown>)).toEqual(
+      expect.arrayContaining(['Schedule', 'Trigger']),
+    );
+  });
+
+  it('asks n8n to parse a read and leaves a write on autodetect', async () => {
+    const { service } = harness();
+    const workflow = await service.load(WORKFLOW_ID);
+
+    const document = compile(workflow, healthyIr(), ADDRESSES, CREDENTIALS);
+    const nodes = document.nodes as Record<string, unknown>[];
+    const optionsOf = (index: number) =>
+      (nodes[index]?.parameters as { options?: Record<string, unknown> }).options;
+
+    /*
+     * The read decides the item every downstream mapping reads. n8n parses `application/json` and
+     * turns anything else into `{ data: "<string>" }`; OpenProject answers `application/hal+json`,
+     * so the write received a string blob and the target product refused the empty body.
+     */
+    expect(optionsOf(1)).toEqual({
+      timeout: 30_000,
+      response: { response: { responseFormat: 'json' } },
+    });
+    /*
+     * A write keeps autodetect: a `204 No Content` answer must not turn a successful write into a
+     * node error, and the broker already relabels every JSON body it relays.
+     */
+    expect(optionsOf(2)).toEqual({ timeout: 30_000 });
   });
 
   /**
@@ -581,6 +663,93 @@ describe('compile', () => {
     expect(webhook.settings).toEqual({ executionOrder: 'v1', timezone: 'Europe/Berlin' });
   });
 
+  /**
+   * FR-5.4: `poll` is a poller, not a webhook waiting for an event a product cannot send. The
+   * interval the author states is the one the engine runs at — before this, `minimumIntervalMinutes`
+   * was written to the IR and read by nothing.
+   */
+  it('compiles a poll trigger into an interval schedule at the stated minimum', async () => {
+    const { service } = harness();
+    const workflow = await service.load(WORKFLOW_ID);
+
+    const document = compile(
+      workflow,
+      {
+        trigger: {
+          type: 'poll',
+          label: 'Poll Mautic',
+          config: 'every 5 minute(s)',
+          timezone: 'Europe/Berlin',
+          minimumIntervalMinutes: 5,
+        },
+        nodes: [],
+        edges: [],
+      },
+      ADDRESSES,
+      CREDENTIALS,
+    );
+
+    const [trigger] = document.nodes as Record<string, unknown>[];
+    expect(trigger).toMatchObject({
+      type: 'n8n-nodes-base.scheduleTrigger',
+      typeVersion: 1.2,
+      parameters: { rule: { interval: [{ field: 'minutes', minutesInterval: 5 }] } },
+    });
+    expect(document.settings).toEqual({ executionOrder: 'v1', timezone: 'Europe/Berlin' });
+  });
+
+  it('keeps a poll definition compiled when a legacy row states no interval', async () => {
+    const { service } = harness();
+    const workflow = await service.load(WORKFLOW_ID);
+
+    // Written before the interval was required. Validation blocks re-activation, but an already
+    // compiled workflow must keep running rather than silently reverting to a webhook node.
+    const document = compile(
+      workflow,
+      {
+        trigger: { type: 'poll', label: 'Poll', config: 'poll', timezone: null },
+        nodes: [],
+        edges: [],
+      },
+      ADDRESSES,
+      CREDENTIALS,
+    );
+
+    expect((document.nodes as Record<string, unknown>[])[0]).toMatchObject({
+      type: 'n8n-nodes-base.scheduleTrigger',
+      parameters: { rule: { interval: [{ field: 'minutes', minutesInterval: 15 }] } },
+    });
+  });
+
+  it('keeps manual on the webhook node, because that is how a run is started', async () => {
+    const { service } = harness();
+    const workflow = await service.load(WORKFLOW_ID);
+
+    const document = compile(
+      workflow,
+      {
+        trigger: {
+          type: 'manual',
+          label: 'Manual',
+          config: 'run from the console',
+          timezone: null,
+        },
+        nodes: [],
+        edges: [],
+      },
+      ADDRESSES,
+      CREDENTIALS,
+    );
+
+    // `N8nClient.trigger` POSTs /webhook/<path>; replacing this node would break Run now.
+    expect((document.nodes as Record<string, unknown>[])[0]).toMatchObject({
+      type: 'n8n-nodes-base.webhook',
+      parameters: { path: WORKFLOW_ID, httpMethod: 'POST' },
+    });
+    // One webhook, not two: the manual entry point exists only where the trigger is not one.
+    expect(document.nodes).toHaveLength(1);
+  });
+
   it('refuses a node the plan has no address for, instead of emitting a relative URL', async () => {
     const { service } = harness();
     const workflow = await service.load(WORKFLOW_ID);
@@ -615,7 +784,8 @@ describe('compile', () => {
     );
 
     expect(document.connections).toEqual({
-      // The ghost edge cannot feed anything, so the read node is still a root the trigger starts.
+      // The ghost edge cannot feed anything, so the read node is still a root the triggers start.
+      Schedule: { main: [[{ node: 'Read contacts', type: 'main', index: 0 }]] },
       Trigger: { main: [[{ node: 'Read contacts', type: 'main', index: 0 }]] },
       'Read contacts': {
         main: [
@@ -626,6 +796,123 @@ describe('compile', () => {
         ],
       },
     });
+  });
+
+  /**
+   * FR-5.7 — a transient failure is retried, and the run stops once the attempts are spent. The
+   * wait is fixed because that is the only shape n8n's node-level retry offers (ADR-BE-30).
+   */
+  it('gives every step a bounded retry and stops the run when it is exhausted', async () => {
+    const { service } = harness();
+    const workflow = await service.load(WORKFLOW_ID);
+
+    const document = compile(workflow, healthyIr(), ADDRESSES, CREDENTIALS, {
+      maxTries: 4,
+      waitMs: 7_500,
+    });
+    const [, read, write] = document.nodes as Record<string, unknown>[];
+
+    for (const node of [read, write]) {
+      expect(node).toMatchObject({
+        retryOnFail: true,
+        maxTries: 4,
+        waitBetweenTries: 7_500,
+        onError: 'stopWorkflow',
+      });
+    }
+    // The trigger is not an HTTP step: retrying a schedule changes nothing.
+    expect((document.nodes as Record<string, unknown>[])[0]?.retryOnFail).toBeUndefined();
+  });
+
+  it('compiles a single attempt when retries are switched off', async () => {
+    const { service } = harness();
+    const workflow = await service.load(WORKFLOW_ID);
+
+    const document = compile(workflow, healthyIr(), ADDRESSES, CREDENTIALS, {
+      maxTries: 1,
+      waitMs: 5_000,
+    });
+
+    expect((document.nodes as Record<string, unknown>[])[1]).toMatchObject({ retryOnFail: false });
+    expect((document.nodes as Record<string, unknown>[])[1]).not.toHaveProperty('maxTries');
+  });
+
+  /**
+   * FR-5.5 — the four mapping fields reach the body. `transform` converts the value, and the
+   * missing-value policy decides what happens when the source item has no such field.
+   */
+  it('compiles a declared conversion into the body value', async () => {
+    const { service } = harness();
+    const workflow = await service.load(WORKFLOW_ID);
+
+    const document = compile(
+      workflow,
+      {
+        trigger: scheduleTrigger(),
+        nodes: [readNode(), writeNode({ mappings: [] })],
+        edges: [
+          edge(NODE_READ, NODE_WRITE, [
+            { from: 'contact.amount', to: 'budget', transform: 'number' },
+          ]),
+        ],
+      },
+      ADDRESSES,
+      CREDENTIALS,
+    );
+    const write = (document.nodes as Record<string, unknown>[])[2] as {
+      parameters: { bodyParameters: { parameters: { name: string; value: string }[] } };
+    };
+
+    expect(write.parameters.bodyParameters.parameters).toEqual([
+      {
+        name: 'budget',
+        value:
+          "={{ ($json.contact.amount ?? '') === '' ? $json.contact.amount : Number($json.contact.amount) }}",
+      },
+    ]);
+  });
+
+  it('fails the step when a required mapping has no value', async () => {
+    const { service } = harness();
+    const workflow = await service.load(WORKFLOW_ID);
+
+    const document = compile(
+      workflow,
+      {
+        trigger: scheduleTrigger(),
+        nodes: [readNode(), writeNode({ mappings: [] })],
+        edges: [
+          edge(NODE_READ, NODE_WRITE, [
+            { from: 'contact.email', to: 'email', transform: null, required: true },
+          ]),
+        ],
+      },
+      ADDRESSES,
+      CREDENTIALS,
+    );
+    const write = (document.nodes as Record<string, unknown>[])[2] as {
+      parameters: { bodyParameters: { parameters: { value: string }[] } };
+    };
+
+    expect(write.parameters.bodyParameters.parameters[0]?.value).toContain('throw new Error');
+    expect(write.parameters.bodyParameters.parameters[0]?.value).toContain(
+      'Missing required value',
+    );
+  });
+
+  /** A mapping that opted into nothing must not be re-pointed by a version bump. */
+  it('keeps an opted-out mapping byte-identical to the expression it always compiled to', async () => {
+    const { service } = harness();
+    const workflow = await service.load(WORKFLOW_ID);
+
+    const document = compile(workflow, healthyIr(), ADDRESSES, CREDENTIALS);
+    const write = (document.nodes as Record<string, unknown>[])[2] as {
+      parameters: { bodyParameters: { parameters: { name: string; value: string }[] } };
+    };
+
+    expect(write.parameters.bodyParameters.parameters).toEqual([
+      { name: 'email', value: '={{ $json.contact.email }}' },
+    ]);
   });
 });
 
@@ -1462,7 +1749,8 @@ describe('setMappings', () => {
 
 describe('setTrigger', () => {
   it.each([
-    ['schedule', 'Every day at 02:00 UTC'],
+    // A schedule with no expression has nothing to promise, so it is not labelled as a daily run.
+    ['schedule', 'On a cron schedule'],
     ['webhook', 'On webhook delivery'],
     ['poll', 'On a poll interval'],
     ['manual', 'Manual'],
@@ -1475,6 +1763,8 @@ describe('setTrigger', () => {
   });
 
   it('describes a cron schedule from the expression it was given', async () => {
+    // The label was the constant "Every day at 02:00 UTC" whatever the cron and timezone were, so
+    // the inventory announced a daily UTC run for a weekday schedule evaluated in Berlin.
     const { db, service } = harness();
 
     await service.setTrigger(
@@ -1485,10 +1775,25 @@ describe('setTrigger', () => {
 
     expect(persistedIr(db).trigger).toEqual({
       type: 'schedule',
-      label: 'Every day at 02:00 UTC',
+      label: 'Cron 0 3 * * 1-5 (Europe/Berlin)',
       config: 'cron 0 3 * * 1-5',
       timezone: 'Europe/Berlin',
       cron: '0 3 * * 1-5',
+    });
+  });
+
+  it('spells out a daily cron in the timezone it is evaluated in', async () => {
+    const { db, service } = harness();
+
+    await service.setTrigger(
+      WORKFLOW_ID,
+      { type: 'schedule', cron: '15 6 * * *', timezone: 'Europe/Berlin' },
+      ACTOR,
+    );
+
+    expect(persistedIr(db).trigger).toMatchObject({
+      label: 'Every day at 06:15 Europe/Berlin',
+      timezone: 'Europe/Berlin',
     });
   });
 
@@ -1664,10 +1969,16 @@ describe('action: validate', () => {
     // Only the node with no entry key is credential-blocked: D02-01 is a scoped product, so its
     // scope is activation's job rather than a precondition.
     expect(countOf(codes, 'CREDENTIAL_MISSING')).toBe(1);
-    // A node with an empty mapping list is advice, never a blocker.
-    const empty = value.issues.find((issue) => issue.code === 'EMPTY_MAPPINGS');
-    expect(empty?.severity).toBe('warning');
-    expect(empty?.nodeId).toBe(NODE_READ);
+    /*
+     * A node with an empty mapping list is advice, never a blocker — and the trigger is exempt:
+     * nothing reads a mapping filed against the entry point, and the console tells the author to
+     * map on the nodes it feeds. Warning there made every definition carry a warning forever.
+     */
+    const empty = value.issues.filter((issue) => issue.code === 'EMPTY_MAPPINGS');
+    expect(empty.every((issue) => issue.severity === 'warning')).toBe(true);
+    // NODE_READ is the trigger in this fixture and holds an empty list: it is the node under test.
+    expect(empty.map((issue) => issue.nodeId)).not.toContain(NODE_READ);
+    expect(empty.length).toBeGreaterThan(0);
   });
 
   it('sees the mappings setMappings filed on the inbound edge', async () => {
@@ -2592,6 +2903,124 @@ describe('replay', () => {
   });
 });
 
+// ---- FR-5.9 authority gate ----------------------------------------------------------------------
+
+/**
+ * The rule itself is proved twice over — the domain matrix and `workflow-authority.service.test.ts`.
+ * What these cases pin is that **no entry point forgets to ask it**: a capability check that one
+ * path skips is indistinguishable from no check at all, and the paths that matter (activate, run,
+ * replay) end in a real write against a customer's system of record.
+ */
+describe('FR-5.9 authority gate', () => {
+  it('asks before creating, naming the target the caller chose', async () => {
+    const { authority, service } = harness();
+
+    await service.create(CREATE_INPUT, ACTOR);
+
+    expect(authority.assertPermitted).toHaveBeenCalledWith({
+      actorId: ACTOR,
+      action: 'create',
+      policyKey: 'workflow.author',
+      instanceIds: [TARGET_INSTANCE],
+    });
+  });
+
+  it('asks on an edit, naming the write targets of the definition it is about to persist', async () => {
+    const { authority, service } = harness();
+
+    await service.addNode(WORKFLOW_ID, addRequest(newNode(), NODE_READ), ACTOR);
+
+    expect(authority.assertPermitted).toHaveBeenCalledWith({
+      actorId: ACTOR,
+      action: 'edit',
+      policyKey: 'workflow.author',
+      workflowId: WORKFLOW_ID,
+      // The resulting IR, not the one on disk: the added node could be the write target.
+      entryKeys: ['D02-01'],
+    });
+  });
+
+  it('asks before activating, under the authoring capability', async () => {
+    const { authority, service } = harness([
+      route('LEFT JOIN idp_user', [workflowRow({ state: 'validated' })]),
+    ]);
+
+    await service.action(WORKFLOW_ID, 'activate', ACTOR);
+
+    expect(authority.assertPermitted).toHaveBeenCalledWith({
+      actorId: ACTOR,
+      action: 'activate',
+      policyKey: 'workflow.author',
+      workflowId: WORKFLOW_ID,
+      entryKeys: ['D02-01'],
+    });
+  });
+
+  it.each(['duplicate', 'disable'] as const)('asks before %s', async (action) => {
+    const { authority, service } = harness([
+      route('LEFT JOIN idp_user', [workflowRow({ state: 'active' })]),
+    ]);
+
+    await service.action(WORKFLOW_ID, action, ACTOR);
+
+    expect(authority.assertPermitted).toHaveBeenCalledWith(
+      expect.objectContaining({ action, policyKey: 'workflow.author', workflowId: WORKFLOW_ID }),
+    );
+  });
+
+  it.each([
+    ['run', 'workflow.run'],
+    ['replay', 'workflow.run'],
+  ] as const)('asks before a %s, under the execution capability', async (action, policyKey) => {
+    const { authority, service } = harness([
+      route('LEFT JOIN idp_user', [workflowRow({ state: 'active' })]),
+      compiledVersion,
+    ]);
+
+    if (action === 'run') {
+      await service.action(WORKFLOW_ID, 'run', ACTOR);
+      expect(authority.assertPermitted).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'run', policyKey }),
+      );
+      return;
+    }
+
+    await service.replay(RUN_ID, ACTOR);
+    expect(authority.assertPermitted).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'replay', policyKey }),
+    );
+  });
+
+  it('does not ask to validate, which writes no definition', async () => {
+    const { authority, service } = harness();
+
+    await service.action(WORKFLOW_ID, 'validate', ACTOR);
+
+    expect(authority.assertPermitted).not.toHaveBeenCalled();
+  });
+
+  it('mints nothing and activates nothing when the gate refuses', async () => {
+    const { authority, n8n, broker, service } = harness([
+      route('LEFT JOIN idp_user', [workflowRow({ state: 'validated' })]),
+    ]);
+    authority.assertPermitted.mockRejectedValueOnce(
+      new AppError({
+        code: 'WORKFLOW_WRITE_NOT_PERMITTED',
+        status: 403,
+        detail: 'D02-01 is outside the domains you own.',
+        remediation: 'Remove that write target.',
+      }),
+    );
+
+    await expect(service.action(WORKFLOW_ID, 'activate', ACTOR)).rejects.toMatchObject({
+      code: 'WORKFLOW_WRITE_NOT_PERMITTED',
+      status: 403,
+    });
+    expect(broker.mint).not.toHaveBeenCalled();
+    expect(n8n.upsert).not.toHaveBeenCalled();
+  });
+});
+
 // ---- approvals ---------------------------------------------------------------------------------
 
 describe('decideApproval', () => {
@@ -2689,6 +3118,387 @@ describe('decideApproval', () => {
       expect.objectContaining({ action: 'workflow.approval.reject' }),
       db.client,
     );
+  });
+});
+
+// ---- trigger configuration and delivery dispatch ------------------------------------------------
+
+/**
+ * FR-5.4: the two modes that need a stated parameter are refused at validation, where the author
+ * can fix them, instead of at compile time where a default would have to be invented. The schedule's
+ * expression is checked for grammar too: a stated but impossible one only failed at activation.
+ */
+describe('action: validate trigger configuration', () => {
+  const withTrigger = (trigger: WorkflowTrigger): Route =>
+    route('JOIN workflow_version v ON v.id = w.current_version_id', [
+      versionRow({ ir: { ...healthyIr(), trigger } }),
+    ]);
+
+  it('blocks a polling workflow that states no interval', async () => {
+    const { value } = await validate([
+      withTrigger({ type: 'poll', label: 'Poll Mautic', config: 'poll', timezone: null }),
+    ]);
+
+    expect(value.valid).toBe(false);
+    expect(value.issues).toEqual([
+      expect.objectContaining({
+        code: 'TRIGGER_INTERVAL_MISSING',
+        severity: 'error',
+        nodeId: null,
+      }),
+    ]);
+  });
+
+  it('accepts a polling workflow that states its minimum interval', async () => {
+    const { value } = await validate([
+      withTrigger({
+        type: 'poll',
+        label: 'Poll Mautic',
+        config: 'every 15 minute(s)',
+        timezone: null,
+        minimumIntervalMinutes: 15,
+      }),
+    ]);
+
+    expect(value.issues).toEqual([]);
+    expect(value.valid).toBe(true);
+  });
+
+  it('blocks a scheduled workflow that states no cron expression', async () => {
+    const { value } = await validate([withTrigger({ ...scheduleTrigger(), cron: null })]);
+
+    expect(value.valid).toBe(false);
+    expect(value.issues).toEqual([
+      expect.objectContaining({ code: 'TRIGGER_CRON_MISSING', severity: 'error', nodeId: null }),
+    ]);
+  });
+
+  it('blocks a scheduled workflow whose cron expression cannot be compiled', async () => {
+    /*
+     * The check this rule adds: `61 * * * *` used to pass validation, then fail at activation with
+     * n8n's bare 400, which the adapter layer reported as a missing configuration. The issue has to
+     * name the field, so the operator is not left counting characters across five tokens.
+     */
+    const { value } = await validate([withTrigger({ ...scheduleTrigger(), cron: '61 * * * *' })]);
+
+    expect(value.valid).toBe(false);
+    expect(value.issues).toEqual([
+      expect.objectContaining({
+        code: 'TRIGGER_CRON_INVALID',
+        severity: 'error',
+        nodeId: null,
+        message: expect.stringContaining('Minute "61" is not a number from 0 to 59'),
+      }),
+    ]);
+  });
+
+  it('accepts a scheduled workflow whose cron expression the engine can compile', async () => {
+    const { value } = await validate([
+      withTrigger({ ...scheduleTrigger(), cron: '*/15 9-17 * * MON-FRI' }),
+    ]);
+
+    expect(value.issues).toEqual([]);
+    expect(value.valid).toBe(true);
+  });
+});
+
+describe('dispatchTriggerRun', () => {
+  const INPUT = { workflowId: WORKFLOW_ID, endpointId: 't1', deliveryId: 'delivery-1' };
+
+  const live = (overrides: Route[] = []): Route[] => [
+    ...overrides,
+    route('LEFT JOIN idp_user', [workflowRow({ state: 'active' })]),
+    compiledVersion,
+  ];
+
+  it('starts one run, keyed by the delivery and attributed to the endpoint', async () => {
+    const { db, audit, n8n, service } = harness(live());
+
+    const run = await service.dispatchTriggerRun(INPUT);
+
+    const insert = statement(db, 'INSERT INTO workflow_run (');
+    expect(insert?.params.slice(0, 3)).toEqual([WORKFLOW_ID, VERSION_ID, 'webhook']);
+    // The delivery id is the idempotency key: a sender that retries cannot execute twice.
+    expect(String(insert?.params[3])).toBe(`trigger:delivery-1:${VERSION_ID}`);
+    expect(n8n.trigger).toHaveBeenCalledWith('n8n-workflow-1', WORKFLOW_ID);
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'workflow.run.started',
+        actorType: 'service',
+        actorId: 'trigger:t1',
+      }),
+      db.client,
+    );
+    expect(run.id).toBe(RUN_ID);
+  });
+
+  it('does not consult the human write-authority gate', async () => {
+    const { authority, service } = harness(live());
+
+    await service.dispatchTriggerRun(INPUT);
+
+    // ISSUE-04 is open: there is no human on a delivery, so FR-5.9 cannot be applied here and this
+    // service must not look as if it had.
+    expect(authority.assertPermitted).not.toHaveBeenCalled();
+  });
+
+  it.each(['draft', 'validated', 'disabled'])(
+    'refuses a %s workflow without creating a run',
+    async (state) => {
+      const { db, service } = harness([
+        route('LEFT JOIN idp_user', [workflowRow({ state })]),
+        compiledVersion,
+      ]);
+
+      await expect(service.dispatchTriggerRun(INPUT)).rejects.toMatchObject({
+        code: 'STATE_CONFLICT',
+      });
+      expect(statement(db, 'INSERT INTO workflow_run (')).toBeUndefined();
+    },
+  );
+
+  it('refuses a version that was never compiled, before writing a run', async () => {
+    const { db, service } = harness([
+      route('LEFT JOIN idp_user', [workflowRow({ state: 'active' })]),
+      route('JOIN workflow_version v ON v.id = w.current_version_id', [versionRow()]),
+    ]);
+
+    await expect(service.dispatchTriggerRun(INPUT)).rejects.toMatchObject({
+      code: 'STATE_CONFLICT',
+      detail: expect.stringContaining('no compiled n8n definition'),
+    });
+    expect(statement(db, 'INSERT INTO workflow_run (')).toBeUndefined();
+  });
+});
+
+/**
+ * NFR-4.14 — a live workflow's scope expires after 90 days, so something has to replace it while it
+ * is still working. Without this pass a running workflow simply started returning 401 on day 90 and
+ * stayed that way until a human re-activated it.
+ */
+describe('rotateDueCredentials', () => {
+  const OLD_SCOPE = scopeRow();
+  const LIVE_VERSION = versionRow({ n8n_credentials: { 'D02-01': 'cred-old' } });
+
+  /** Everything a rotation of the healthy definition issues, in the order it issues them. */
+  function rotationRoutes(overrides: Route[] = []): Route[] {
+    return [
+      ...overrides,
+      route('SELECT DISTINCT w.id', [{ id: WORKFLOW_ID }]),
+      route('JOIN workflow_version v ON v.id = w.current_version_id', [LIVE_VERSION]),
+      route('SELECT current_version_id FROM workflow', [{ current_version_id: VERSION_ID }]),
+      route('UPDATE workflow_version SET n8n_credentials', []),
+    ];
+  }
+
+  it('re-issues the scope, repoints the definition and retires the token it replaced', async () => {
+    const { db, n8n, broker, audit, service } = harness(rotationRoutes());
+
+    await expect(service.rotateDueCredentials()).resolves.toEqual({ rotated: 1, skipped: 0 });
+
+    // A rotation must bypass the reuse path, or it would hand back the very token it is replacing.
+    expect(broker.mint).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rotate: true,
+        workflowId: WORKFLOW_ID,
+        idempotencyKey: expect.stringContaining(':rotate:'),
+      }),
+    );
+    // Activation is re-issued, not created: the definition keeps the id it already has.
+    expect(n8n.upsert).toHaveBeenCalledWith(WORKFLOW_ID, expect.anything(), true, null);
+
+    const recorded = statement(db, 'UPDATE workflow_version SET n8n_credentials');
+    expect(recorded?.params?.[0]).toBe(VERSION_ID);
+    expect(String(recorded?.params?.[1])).toContain('cred-D02-01');
+
+    // Only after the commit does the old token die: a revoked scope is a workflow that 401s.
+    expect(broker.revoke).toHaveBeenCalledWith(OLD_SCOPE.id, 'credential-rotation');
+    expect(n8n.removeCredential).toHaveBeenCalledWith('cred-old');
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'workflow.credentials.rotated',
+        targetId: WORKFLOW_ID,
+        detail: expect.objectContaining({ versionId: VERSION_ID }),
+      }),
+      expect.anything(),
+    );
+  });
+
+  it('looks for the newest scope of each product, so one pass cannot rotate twice', async () => {
+    const { db, service } = harness(rotationRoutes());
+
+    await service.rotateDueCredentials();
+
+    const candidate = statement(db, 'SELECT DISTINCT w.id');
+    // The lead window is the configured number of days before expiry…
+    expect(candidate?.params?.[0]).toBe(7);
+    expect(candidate?.params?.[1]).toBe(10);
+    // …and "newest live row per product" is what stops a failed revoke from re-arming the workflow.
+    expect(candidate?.sql).toContain('SELECT max(n.issued_at) FROM credential_scope n');
+    expect(candidate?.sql).toContain("w.state = 'active'");
+  });
+
+  it('does nothing when no scope is inside the window', async () => {
+    const { n8n, broker, service } = harness(rotationRoutes([route('SELECT DISTINCT w.id', [])]));
+
+    await expect(service.rotateDueCredentials()).resolves.toEqual({ rotated: 0, skipped: 0 });
+    expect(broker.mint).not.toHaveBeenCalled();
+    expect(n8n.upsert).not.toHaveBeenCalled();
+  });
+
+  it('does nothing when n8n is not configured, rather than minting tokens nothing can hold', async () => {
+    const { db, n8n, broker, service } = harness(rotationRoutes());
+    // Without a URL there is nowhere to put the new credential, so the pass must not start.
+    n8n.ready.mockReturnValue(false);
+
+    await expect(service.rotateDueCredentials()).resolves.toEqual({ rotated: 0, skipped: 0 });
+
+    expect(broker.mint).not.toHaveBeenCalled();
+    expect(db.calls.some((call) => call.sql.includes('SELECT DISTINCT w.id'))).toBe(false);
+  });
+
+  /**
+   * The race: an activation bumps `current_version_id` while this pass is pushing. Committing the
+   * rotation would point the new definition at tokens bound to the version it replaced.
+   */
+  it('abandons the rotation when the version moved under it, and cleans up what it minted', async () => {
+    const { db, n8n, broker, service } = harness(
+      rotationRoutes([
+        route('SELECT current_version_id FROM workflow', [{ current_version_id: 'other-version' }]),
+      ]),
+    );
+
+    await expect(service.rotateDueCredentials()).resolves.toEqual({ rotated: 0, skipped: 1 });
+
+    expect(statement(db, 'UPDATE workflow_version SET n8n_credentials')).toBeUndefined();
+    expect(broker.revoke).toHaveBeenCalledWith('scope-1', 'credential-rotation');
+    expect(n8n.removeCredential).toHaveBeenCalledWith('cred-D01-01');
+  });
+
+  it('keeps the batch going when one workflow cannot be rotated, and leaves a failure trail', async () => {
+    const { audit, broker, service } = harness(
+      rotationRoutes([route('SELECT DISTINCT w.id', [{ id: WORKFLOW_ID }, { id: WORKFLOW_ID }])]),
+    );
+    // The second workflow's mint fails: one product that cannot issue must not stop the others.
+    broker.mint.mockRejectedValueOnce(new Error('broker unavailable'));
+
+    await expect(service.rotateDueCredentials()).resolves.toEqual({ rotated: 1, skipped: 1 });
+
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'workflow.credentials.rotation_failed',
+        outcome: 'failure',
+        detail: expect.objectContaining({ message: 'broker unavailable' }),
+      }),
+    );
+  });
+});
+
+// ---- FR-5.5: the source half of a mapping -------------------------------------------------------
+
+/** A definition whose single edge carries exactly these source paths. */
+function irWithMappings(froms: readonly string[]) {
+  return {
+    trigger: scheduleTrigger(),
+    nodes: [readNode({ mappings: [] }), writeNode({ mappings: [] })],
+    edges: [
+      edge(
+        NODE_READ,
+        NODE_WRITE,
+        froms.map((from, index) => ({ from, to: `field${index}`, transform: null })),
+      ),
+    ],
+  };
+}
+
+/** A validate pass with a stored item, so the rule that reads one can be exercised. */
+async function validateWithSample(
+  sample: unknown,
+  options: { truncated?: boolean; runId?: string | null; ir?: unknown } = {},
+): Promise<ValidationValue> {
+  const { service } = harness(
+    options.ir === undefined
+      ? []
+      : [
+          route('JOIN workflow_version v ON v.id = w.current_version_id', [
+            versionRow({ ir: options.ir as never }),
+          ]),
+        ],
+    undefined,
+    {
+      latestForCheck: vi.fn(async () => ({
+        item: sample,
+        truncated: options.truncated === true,
+        runId: options.runId === undefined ? 'run-916a8d86' : options.runId,
+      })),
+    },
+  );
+  const result = await service.action(WORKFLOW_ID, 'validate', ACTOR);
+  return result.value as unknown as ValidationValue;
+}
+
+describe('action: validate — source paths', () => {
+  it('passes when every mapped path exists in the item the step received', async () => {
+    const value = await validateWithSample({ contact: { email: 'someone@example.com' } });
+
+    expect(value.valid).toBe(true);
+    expect(value.issues).toEqual([]);
+  });
+
+  it('blocks activation when none of the mapped paths exist in that item', async () => {
+    // The live failure: four paths describing a work package were mapped against a collection
+    // envelope, so the write posted an empty body and the *target* product refused it — after a
+    // validation pass that reported nothing at all.
+    const value = await validateWithSample({ _type: 'WorkPackageCollection', total: 33 });
+
+    expect(value.valid).toBe(false);
+    const issue = value.issues.find((entry) => entry.code === 'SOURCE_PATHS_UNRESOLVED');
+    expect(issue).toMatchObject({ severity: 'error', nodeId: NODE_WRITE });
+    expect(issue?.message).toContain('"Create contact"');
+    expect(issue?.message).toContain('"Read contacts"');
+    expect(issue?.message).toContain('contact.email');
+    expect(issue?.remediation).toContain('Last run');
+    // The evidence is named, so the author knows which run to look at.
+    expect(issue?.remediation).toContain('run 916a8d86');
+  });
+
+  it('advises when only some paths are missing, because a field can be absent on one record', async () => {
+    const value = await validateWithSample(
+      { contact: { email: 'someone@example.com' } },
+      { ir: irWithMappings(['contact.email', 'contact.phone']) },
+    );
+
+    expect(value.valid).toBe(true);
+    const issue = value.issues.find((entry) => entry.code === 'SOURCE_PATHS_PARTIAL');
+    expect(issue).toMatchObject({ severity: 'warning', nodeId: NODE_WRITE });
+    expect(issue?.message).toContain('1 of 2 source paths');
+    expect(issue?.message).toContain('contact.phone');
+    expect(issue?.message).not.toContain('contact.email');
+  });
+
+  it('never blocks on a truncated sample, because the path may sit past the cut', async () => {
+    const value = await validateWithSample(
+      { contact: {} },
+      { truncated: true, runId: null, ir: irWithMappings(['contact.email', 'contact.phone']) },
+    );
+
+    expect(value.valid).toBe(true);
+    const issue = value.issues.find(
+      (entry) => entry.code === 'SOURCE_PATHS_UNRESOLVED' || entry.code === 'SOURCE_PATHS_PARTIAL',
+    );
+    expect(issue?.severity).toBe('warning');
+    expect(issue?.remediation).toContain('truncated');
+    // No run id worth naming, so the remediation does not invent one.
+    expect(issue?.remediation).not.toContain('run ');
+  });
+
+  it('says nothing when the stored item is text, because it proves nothing about paths', async () => {
+    // n8n produced `{ data: "<json string>" }` before read nodes were told to parse; blaming the
+    // author for paths inside a string would be wrong, so the rule stays quiet.
+    const value = await validateWithSample({ data: '{"contact":{"email":"a@b.c"}}' });
+
+    expect(value.valid).toBe(true);
+    expect(value.issues).toEqual([]);
   });
 });
 

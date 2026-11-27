@@ -36,3 +36,6 @@ platform/upstream
 **/.turbo
 temp
 node_modules
+
+# Development folders.
+docs/dev-reference

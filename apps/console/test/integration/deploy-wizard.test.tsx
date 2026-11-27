@@ -106,6 +106,69 @@ describe('deploy wizard', () => {
     expect(screen.getByText('step 3 / 5')).toBeDefined();
   });
 
+  it('asks the pre-flight about the environment the operator typed', async () => {
+    /*
+     * The pre-flight plans the environment it is handed and reports a `required` blocker per
+     * unresolved variable. Asked without the typed values it answered about an environment nobody
+     * was deploying: four required secrets were "missing" in a form that held every one of them,
+     * and the wizard copied those blockers into field errors no amount of typing could clear.
+     */
+    const sent: { envOverrides?: Record<string, string> }[] = [];
+    server.use(
+      http.post('/api/v1/instances/preview', async ({ request }) => {
+        sent.push((await request.json()) as { envOverrides?: Record<string, string> });
+        return HttpResponse.json({
+          admissible: true,
+          headline: 'Within the host budget',
+          detail: 'Nothing further is required.',
+          shortfall: { cpuMilli: 0, memoryMb: 0, diskMb: 0 },
+          capacitySource: 'measured',
+          routeHost: 'espocrm.seamnex.local',
+          slugAvailable: true,
+          policyVerdict: 'allowed',
+          policyEvaluatedAt: '2026-10-22T09:00:00.000Z',
+          policySource: 'local_evaluation',
+          blockers: [],
+          warnings: [],
+          evaluatedAt: '2026-10-22T09:00:00.000Z',
+        });
+      }),
+    );
+
+    openAs('R1', '/deploy/D01-01');
+    render(<App />);
+    await reachEnvironment();
+
+    await supplyRequiredValues();
+
+    await waitFor(() =>
+      expect(sent.at(-1)?.envOverrides).toMatchObject({
+        ADMIN_EMAIL: 'portal-admin@seamnex.local',
+      }),
+    );
+
+    await continueStep();
+    expect(await screen.findByText('Resources and admission')).toBeDefined();
+  });
+
+  it('retires a required error as soon as the field holds a value', async () => {
+    // Only Continue re-runs the checks, so a refusal outlived the value it was about: the field
+    // read "ADMIN_EMAIL is required." while holding one, which looked like validation that had
+    // not registered the input at all.
+    openAs('R1', '/deploy/D01-01');
+    render(<App />);
+    await reachEnvironment();
+
+    await continueStep();
+    expect(await screen.findByText('ADMIN_EMAIL is required.')).toBeDefined();
+
+    fireEvent.change(screen.getByLabelText(/ADMIN_EMAIL/), {
+      target: { value: 'portal-admin@seamnex.local' },
+    });
+
+    await waitFor(() => expect(screen.queryByText('ADMIN_EMAIL is required.')).toBeNull());
+  });
+
   it('locks a required secret the plan resolves instead of demanding it', async () => {
     openAs('R1', '/deploy/D01-01');
     render(<App />);

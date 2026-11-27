@@ -11,7 +11,7 @@ import { EntryKeySchema, IdSchema, TimestampSchema } from './common';
 /**
  * FR-5.5 mapping entry. `transform` covers value/type conversion and date or unit
  * normalization; `required`/`onMissing` are the explicit handling of a missing required
- * field. Authoring is descoped for the MVP (see docs/mvp-platform-exceptions.md); the
+ * field. Authoring is descoped for the MVP; the
  * shape is contractual so the backend can implement it without a further schema change.
  */
 export const FieldMappingSchema = z.object({
@@ -233,9 +233,27 @@ export const TriggerEndpointSchema = z.object({
 
 export const TriggerEndpointListSchema = z.array(TriggerEndpointSchema);
 
+/**
+ * FR-5.4: an endpoint exists to start *a* workflow, so the binding is required. A registration
+ * without one produced an endpoint whose deliveries could only be acknowledged: there was nothing
+ * to execute, and the sender had no way to know.
+ */
 export const TriggerEndpointCreateRequestSchema = z.object({
   eventName: z.string().min(1),
-  workflowId: IdSchema.optional(),
+  workflowId: IdSchema,
+});
+
+/**
+ * FR-5.4 / NFR-2.8: the receipt a sender gets. `reason` is a fixed, non-enumerating phrase — it
+ * says what happened to *this* delivery, never whether an endpoint exists. `runId` is present only
+ * when a run was actually started, so a duplicate is distinguishable from a first delivery without
+ * the sender having to interpret the status code.
+ */
+export const TriggerDeliveryReceiptSchema = z.object({
+  accepted: z.boolean(),
+  reason: z.string().min(1),
+  workflowId: IdSchema.nullable(),
+  runId: IdSchema.nullable(),
 });
 
 /** 4E.3: an operation-scoped token, bounded by a workflow version and a 90-day ceiling. */
@@ -293,6 +311,7 @@ export type WorkflowMappingsRequest = z.infer<typeof WorkflowMappingsRequestSche
 export type WorkflowTriggerUpdate = z.infer<typeof WorkflowTriggerUpdateSchema>;
 export type TriggerEndpoint = z.infer<typeof TriggerEndpointSchema>;
 export type TriggerEndpointCreateRequest = z.infer<typeof TriggerEndpointCreateRequestSchema>;
+export type TriggerDeliveryReceipt = z.infer<typeof TriggerDeliveryReceiptSchema>;
 export type CredentialScopeCreateRequest = z.infer<typeof CredentialScopeCreateRequestSchema>;
 export type CredentialScopeMintResult = z.infer<typeof CredentialScopeMintResultSchema>;
 export type WorkflowApprovalDecisionRequest = z.infer<typeof WorkflowApprovalDecisionRequestSchema>;

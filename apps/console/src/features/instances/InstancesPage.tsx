@@ -1,5 +1,5 @@
-import { useMemo, useState, type ReactNode } from 'react';
-import { Link } from 'react-router';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Link, useSearchParams } from 'react-router';
 import { Boxes, RefreshCw } from 'lucide-react';
 import type { InstanceFilters } from '@seamnex/api-client';
 import { useInstances } from '@seamnex/api-client';
@@ -22,9 +22,24 @@ import {
   defineColumns,
 } from '@seamnex/ui';
 import { cn, formatRelative } from '@seamnex/utils';
-import { AsyncPanel, QueryError, useDebouncedValue } from '@seamnex/shell';
+import { AsyncPanel, QueryError } from '@seamnex/shell';
+import { ScopeNote } from '../../components/ScopeNote';
+import { useCapabilities } from '../../use-capabilities';
 
 const STATE_FILTERS = ['all', 'ready', 'degraded', 'stopped', 'failed', 'upgrading'] as const;
+type StateFilter = (typeof STATE_FILTERS)[number];
+
+/** Typing settles before it reaches the request and the address bar; clearing does not wait. */
+const SEARCH_DEBOUNCE_MS = 250;
+
+/**
+ * The address bar is the record of the view. A filter held in component state alone could not be
+ * bookmarked, shared with a colleague or restored by the back button, which is the whole point of a
+ * fleet screen an operator links into an incident channel.
+ */
+function parseState(value: string | null): StateFilter {
+  return STATE_FILTERS.includes(value as StateFilter) ? (value as StateFilter) : 'all';
+}
 
 /**
  * Module scope on purpose: `DataTable` no longer compares props, so a `Column[]` rebuilt during
@@ -157,16 +172,85 @@ const instanceRowLink = (row: Instance, className: string, children: ReactNode) 
 );
 
 export function InstancesPage() {
-  const [state, setState] = useState<(typeof STATE_FILTERS)[number]>('all');
-  const [query, setQuery] = useState('');
-  const debouncedQuery = useDebouncedValue(query);
+  const capabilities = useCapabilities();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const state = parseState(searchParams.get('state'));
+  const urlQuery = searchParams.get('q') ?? '';
+  // Typed value stays local so a keystroke repaints immediately; the settled copy is what reaches
+  // both the API and the address bar.
+  const [query, setQuery] = useState(urlQuery);
+  /** What the request and the address bar carry: the typed text, once it has settled. */
+  const [appliedQuery, setAppliedQuery] = useState(urlQuery);
+  /**
+   * The last query string this component wrote. An address bar that differs from it came from a
+   * navigation (back, forward, a pasted link) and is adopted; one that matches is our own echo and
+   * must not be written back over what is being typed.
+   */
+  const writtenUrl = useRef<string | null>(null);
+  /**
+   * The query string this component last rendered against. `setSearchParams` does not land in the
+   * same render as the call, so one render still sees the address the user is leaving; comparing
+   * against this ref is what stops that stale render from being mistaken for a navigation and
+   * adopted back.
+   */
+  const renderedUrl = useRef(searchParams.toString());
+
+  useEffect(() => {
+    const trimmed = query.trim();
+    if (trimmed.length === 0 || trimmed === appliedQuery) return;
+    const timer = setTimeout(() => setAppliedQuery(trimmed), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [query, appliedQuery]);
+
+  /**
+   * A clear is not a keystroke: an emptied box must empty the list and the address bar at once.
+   * Waiting for the debounce let the pending value be written back over the clear a moment later,
+   * which made "Clear filters" look inert on a filtered fleet.
+   */
+  const search = (value: string) => {
+    setQuery(value);
+    if (value.trim().length === 0) setAppliedQuery('');
+  };
+
+  useEffect(() => {
+    if (appliedQuery === urlQuery) return;
+    const next = new URLSearchParams(searchParams);
+    if (appliedQuery.length > 0) next.set('q', appliedQuery);
+    else next.delete('q');
+    writtenUrl.current = next.toString();
+    setSearchParams(next, { replace: true });
+  }, [appliedQuery, urlQuery, searchParams, setSearchParams]);
+
+  useEffect(() => {
+    const current = searchParams.toString();
+    if (current === renderedUrl.current) return;
+    renderedUrl.current = current;
+    if (current === writtenUrl.current) return;
+    setQuery(urlQuery);
+    setAppliedQuery(urlQuery);
+  }, [searchParams, urlQuery]);
+
+  const selectState = (option: StateFilter) => {
+    const next = new URLSearchParams(searchParams);
+    if (option === 'all') next.delete('state');
+    else next.set('state', option);
+    writtenUrl.current = next.toString();
+    setSearchParams(next, { replace: true });
+  };
+
+  const clearFilters = () => {
+    setQuery('');
+    setAppliedQuery('');
+    writtenUrl.current = '';
+    setSearchParams(new URLSearchParams(), { replace: true });
+  };
 
   const filters = useMemo<InstanceFilters>(() => {
     const next: InstanceFilters = {};
     if (state !== 'all') next.state = state;
-    if (debouncedQuery.trim().length > 0) next.q = debouncedQuery.trim();
+    if (appliedQuery.length > 0) next.q = appliedQuery;
     return next;
-  }, [state, debouncedQuery]);
+  }, [state, appliedQuery]);
 
   const instances = useInstances(filters);
   const rows = useMemo(() => instances.data ?? [], [instances.data]);
@@ -188,11 +272,18 @@ export function InstancesPage() {
         eyebrow="Deployments"
         title="Instances"
         description="Every deployed copy, its derived state and the evidence behind it. Container detail stays one click away."
-        actions={
-          <Link to="/catalog" className={buttonVariants({ variant: 'primary', size: 'sm' })}>
-            Deploy a product
-          </Link>
-        }
+        // The affordance is only offered to a role that may actually deploy; the route is open to
+        // anyone who may read the fleet, so the button was previously a link to a screen that
+        // refused the operation at the last step.
+        {...(capabilities.held.has('instance.deploy')
+          ? {
+              actions: (
+                <Link to="/catalog" className={buttonVariants({ variant: 'primary', size: 'sm' })}>
+                  Deploy a product
+                </Link>
+              ),
+            }
+          : {})}
         meta={
           <>
             <Badge tone="accent" size="sm">
@@ -208,7 +299,9 @@ export function InstancesPage() {
         }
       />
 
-      <Panel>
+      <ScopeNote capability="instance.view_logs" />
+
+      <Panel className="mt-3">
         <PanelHeader
           eyebrow="Fleet"
           title="Deployment inventory"
@@ -216,23 +309,28 @@ export function InstancesPage() {
         />
         <FilterBar
           search={query}
-          onSearch={setQuery}
+          onSearch={search}
           searchLabel="Search instances"
           placeholder="Search product, domain, slug or key"
           trailing={`${rows.length} shown`}
         >
           {STATE_FILTERS.map((option) => (
-            <FilterChip key={option} active={state === option} onClick={() => setState(option)}>
+            <FilterChip key={option} active={state === option} onClick={() => selectState(option)}>
               <span className="capitalize">{option}</span>
             </FilterChip>
           ))}
           {/* Ghost, not `quiet`: inside a row of bordered chips a `quiet` button draws the same
-              border and reads as a seventh state. A command is not a filter. */}
+              border and reads as a seventh state. A command is not a filter.
+
+              Disabled while a read is in flight: an enabled button with no feedback invited a
+              second click, which queued a redundant request behind the first. */}
           <Button
             size="sm"
             variant="ghost"
-            icon={<RefreshCw />}
+            icon={<RefreshCw className={cn(instances.isFetching && 'motion-safe:animate-spin')} />}
             onClick={() => void instances.refetch()}
+            disabled={instances.isFetching}
+            aria-busy={instances.isFetching}
           >
             Refresh
           </Button>
@@ -274,7 +372,13 @@ export function InstancesPage() {
                       : 'Deploy the first product from the catalog; the platform renders compose, health checks, volumes and the route.'
                   }
                   action={
-                    filtered ? null : (
+                    filtered ? (
+                      // The copy above told the operator to clear the filter but handed them no
+                      // control to do it, so the only way out was to find the chip again.
+                      <Button size="sm" variant="secondary" onClick={clearFilters}>
+                        Clear filters
+                      </Button>
+                    ) : (
                       <Link
                         to="/catalog"
                         className={buttonVariants({ variant: 'primary', size: 'sm' })}

@@ -1,7 +1,8 @@
 import { Module } from '@nestjs/common';
 import { CatalogRepositoryModule } from '../m22-catalog-repository/catalog-repo.module';
-import { SOURCE_RESOLVER_SERVICE } from './source-resolver.contract';
+import { SOURCE_RESOLVER_SERVICE, TRUSTED_REGISTRY_SERVICE } from './source-resolver.contract';
 import { FilesystemSourceResolver } from './source-resolver.service';
+import { PostgresTrustedRegistryService } from './trusted-registry.service';
 
 /**
  * M02 — source resolution and the compose policy (4A.2, 4A.3).
@@ -11,7 +12,10 @@ import { FilesystemSourceResolver } from './source-resolver.service';
  */
 @Module({
   imports: [CatalogRepositoryModule],
-  providers: [{ provide: SOURCE_RESOLVER_SERVICE, useClass: FilesystemSourceResolver }],
-  exports: [SOURCE_RESOLVER_SERVICE],
+  providers: [
+    { provide: SOURCE_RESOLVER_SERVICE, useClass: FilesystemSourceResolver },
+    { provide: TRUSTED_REGISTRY_SERVICE, useClass: PostgresTrustedRegistryService },
+  ],
+  exports: [SOURCE_RESOLVER_SERVICE, TRUSTED_REGISTRY_SERVICE],
 })
 export class SourceResolverModule {}

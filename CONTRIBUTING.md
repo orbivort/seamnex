@@ -70,8 +70,11 @@ pnpm dev:web          # both SPAs against the mock API: the fastest inner loop
 - **Mock or live.** `VITE_API_MODE=mock` (the default) runs the deterministic MSW platform in the
   browser; `live` drives the same screens against `apps/api`. Both are first-class — a change that
   works in only one mode is incomplete.
-- **Ports.** Portal `:5173`, console `:5174`, API `:8080`. If a native PostgreSQL already holds
-  `5432`, move the container with `SEAMNEX_PG_HOST_PORT` and keep `DATABASE_URL` in step.
+- **Ports.** Portal `:5173` and console `:5174` over **HTTPS** (a leaf issued by the development CA in
+  `temp/certs`; trust `temp/certs/dev-ca.crt` once, see `packages/config/vite/dev-cert.ts`), API `:8080`
+  plain HTTP behind the Vite proxy.
+  If a native PostgreSQL already holds `5432`, move the container with `SEAMNEX_PG_HOST_PORT` and keep
+  `DATABASE_URL` in step.
 - **Cross-platform.** Scripts are plain Node and run on Linux, macOS and Windows in CI; bash-only
   syntax is a defect.
 
@@ -106,15 +109,16 @@ local run is a red pull request.
 
 Gates for specific changes:
 
-| Command                   | Run when                                        |
-| ------------------------- | ----------------------------------------------- |
-| `pnpm check:migrations`   | a migration was added or renumbered             |
-| `pnpm check:route-policy` | a route was added or changed                    |
-| `pnpm check:bundle`       | first-load size changed                         |
-| `pnpm check:version`      | manifests or the release identity changed       |
-| `pnpm check:license`      | any licence declaration or distributed artefact |
-| `pnpm check:images`       | a container image tag changed (needs network)   |
-| `pnpm check:s3`           | backup or S3 code changed                       |
+| Command                     | Run when                                                                |
+| --------------------------- | ----------------------------------------------------------------------- |
+| `pnpm check:migrations`     | a migration was added or renumbered                                     |
+| `pnpm check:route-policy`   | a route was added or changed                                            |
+| `pnpm check:bundle`         | first-load size changed                                                 |
+| `pnpm check:version`        | manifests or the release identity changed                               |
+| `pnpm check:license`        | any licence declaration or distributed artefact                         |
+| `pnpm check:images:offline` | `docker/images.json`, a scanner default or the generated module changed |
+| `pnpm check:images`         | a container image reference changed (needs network)                     |
+| `pnpm check:s3`             | backup or S3 code changed                                               |
 
 Notes:
 

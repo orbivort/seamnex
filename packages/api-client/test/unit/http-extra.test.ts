@@ -7,11 +7,13 @@ import {
   isAbortError,
   lastKnownStatusAt,
   onUnauthorized,
+  openDownload,
   openEventStream,
   request,
   resetTransport,
   toProblem,
 } from '../../src/http';
+import { openInstanceExport } from '../../src/hooks/instances';
 import type { Transport } from '../../src/transport';
 
 /**
@@ -435,5 +437,147 @@ describe('openEventStream', () => {
     });
 
     await expect(openEventStream('/jobs/x/stream')).rejects.toBe(aborted);
+  });
+});
+
+/**
+ * FR-1.13 — an export is a body, not a JSON document.
+ *
+ * `openDownload` shares the transport, the credentials and the problem handling with `request` but
+ * none of the body reading: validating a multi-gigabyte archive as JSON is the one thing an export
+ * endpoint must never do. The tests below pin the parts that are shared and the part that is not.
+ */
+describe('openDownload', () => {
+  it('asks for the archive and hands the unread body back with its filename', async () => {
+    const calls: Parameters<Transport>[0][] = [];
+    configureTransport(async (input) => {
+      calls.push(input);
+      return new Response(null, {
+        status: 200,
+        headers: { 'Content-Disposition': 'attachment; filename="crm-2026-02-01.tar.gz"' },
+      });
+    });
+
+    const handle = await openDownload('/instances/inst-crm/exports/exp-1/archive');
+
+    expect(calls[0]).toMatchObject({
+      path: '/instances/inst-crm/exports/exp-1/archive',
+      method: 'GET',
+      headers: { Accept: 'application/gzip' },
+    });
+    // The caller owns the body; reading it here would defeat the point of a streamed export.
+    expect(handle.response.status).toBe(200);
+    expect(handle.fileName).toBe('crm-2026-02-01.tar.gz');
+  });
+
+  it('derives a filename from the path when the header is missing or unhelpful', async () => {
+    configureTransport(respond(new Response(null, { status: 200 })));
+    const fallback = await openDownload('/instances/inst-crm/exports/exp-1/archive');
+    expect(fallback.fileName).toBe('archive');
+
+    // A compromised server must not be able to hand the browser a path.
+    configureTransport(
+      respond(
+        new Response(null, {
+          status: 200,
+          headers: { 'Content-Disposition': 'attachment; filename="../../etc/passwd"' },
+        }),
+      ),
+    );
+    const stripped = await openDownload('/instances/inst-crm/exports/exp-1/archive');
+    // Every separator becomes an underscore, so the result cannot escape the save directory.
+    expect(stripped.fileName).toBe('.._.._etc_passwd');
+
+    // An empty name cannot become an empty save dialog.
+    configureTransport(
+      respond(
+        new Response(null, {
+          status: 200,
+          headers: { 'Content-Disposition': 'attachment; filename=""' },
+        }),
+      ),
+    );
+    const empty = await openDownload('/instances/inst-crm/exports/');
+    expect(empty.fileName).toBe('export.tar.gz');
+  });
+
+  it('reports a refusal with the problem, the retry window and the lapsed-session signal', async () => {
+    configureTransport(
+      respond(
+        new Response(
+          problemDocument(409, 'EXPORT_NOT_READY', 'The archive is still being written.'),
+          {
+            status: 409,
+            headers: { 'Content-Type': 'application/problem+json' },
+          },
+        ),
+      ),
+    );
+    const refused = await openDownload('/instances/inst-crm/exports/exp-1/archive').catch(
+      (thrown: unknown) => thrown,
+    );
+    expect((refused as ApiError).problem.code).toBe('EXPORT_NOT_READY');
+
+    configureTransport(
+      respond(
+        new Response(problemDocument(429, 'RATE_LIMITED'), {
+          status: 429,
+          headers: { 'Content-Type': 'application/problem+json', 'Retry-After': '3' },
+        }),
+      ),
+    );
+    const limited = await openDownload('/instances/inst-crm/exports/exp-1/archive').catch(
+      (thrown: unknown) => thrown,
+    );
+    expect((limited as ApiError).retryAfterMs).toBe(3_000);
+
+    configureTransport(respond(new Response('gateway down', { status: 502 })));
+    const unexpected = await openDownload('/instances/inst-crm/exports/exp-1/archive').catch(
+      (thrown: unknown) => thrown,
+    );
+    expect((unexpected as ApiError).problem.code).toBe('UNEXPECTED_RESPONSE');
+
+    // A download is a data call like any other: a 401 must reach the sign-in bridge.
+    configureTransport(respond(new Response('', { status: 401 })));
+    await openDownload('/instances/inst-crm/exports/exp-1/archive').catch(() => undefined);
+    expect(window.dispatchEvent).toHaveBeenCalledOnce();
+  });
+
+  it('normalises a network failure and passes an abort through', async () => {
+    configureTransport(async () => {
+      throw new TypeError('fetch failed');
+    });
+    const failed = await openDownload('/instances/inst-crm/exports/exp-1/archive').catch(
+      (thrown: unknown) => thrown,
+    );
+    expect((failed as ApiError).problem.code).toBe('NETWORK_ERROR');
+
+    const aborted = new Error('aborted');
+    aborted.name = 'AbortError';
+    configureTransport(async () => {
+      throw aborted;
+    });
+    await expect(openDownload('/instances/inst-crm/exports/exp-1/archive')).rejects.toBe(aborted);
+  });
+
+  it('gives the instance export opener a window that a large archive can use', async () => {
+    const calls: Parameters<Transport>[0][] = [];
+    configureTransport(async (input) => {
+      calls.push(input);
+      return new Response(null, { status: 200 });
+    });
+    const controller = new AbortController();
+
+    await openInstanceExport('inst-crm', 'exp-1');
+    await openInstanceExport('inst-crm', 'exp-1', { signal: controller.signal });
+
+    expect(calls[0]).toMatchObject({
+      path: '/instances/inst-crm/exports/exp-1/archive',
+      // The 15 s JSON default would abort before the first byte of a large archive.
+      timeoutMs: 120_000,
+    });
+    // No signal is "null", not "undefined": the transport contract declares it nullable.
+    expect(calls[0]).toMatchObject({ signal: null });
+    expect(calls[1]).toMatchObject({ signal: controller.signal });
   });
 });

@@ -67,16 +67,27 @@ export type EntrySeed = {
   stale?: boolean;
 };
 
+/**
+ * FR-1.9: a deployment is refused when the declared quotas add up to more than the disk
+ * reservation, so a fixture that declared 40 GB of volumes on a 20 GB shape described a product the
+ * platform would not deploy. The pair below totals 19 GB, the same shape the seeded catalog uses.
+ */
 const DEFAULT_VOLUMES = [
-  { name: 'app-data', mountPath: '/var/www/html/data', quotaMb: 20_480 },
-  { name: 'db-data', mountPath: '/var/lib/mysql', quotaMb: 20_480 },
+  { name: 'app-data', mountPath: '/var/www/html/data', quotaMb: 12_288 },
+  { name: 'db-data', mountPath: '/var/lib/mysql', quotaMb: 7_168 },
 ];
 
-/** Deterministic 32-byte digest so fixtures never contain randomness. */
+/**
+ * Deterministic 32-byte digest so fixtures never contain randomness.
+ *
+ * 32 rounds of two hex characters is exactly 64 — the length a `sha256:` digest has. A longer value
+ * is not a cosmetic difference: the entry screen's FR-1.5 check refuses anything that is not
+ * `sha256:` plus 64 hex characters, so a 128-character fixture made every entry read as unpinnable.
+ */
 function digestFor(value: string): string {
   let hash = 0x811c9dc5;
   let hex = '';
-  for (let index = 0; index < 64; index += 1) {
+  for (let index = 0; index < 32; index += 1) {
     hash = (hash ^ (value.charCodeAt(index % value.length) + index * 31)) >>> 0;
     hash = Math.imul(hash, 0x01000193) >>> 0;
     hex += ((hash >>> 24) & 0xff).toString(16).padStart(2, '0');

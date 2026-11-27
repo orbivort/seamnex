@@ -1,7 +1,26 @@
-import type { ScaffoldConfirmation, ScaffoldDraft } from '@seamnex/domain';
+import type {
+  ScaffoldConfirmation,
+  ScaffoldDraft,
+  TrustedRegistryState,
+  TrustedRegistryUpdate,
+} from '@seamnex/domain';
 import type { ComposePolicyResult, ComposeRule } from '../../common/compose/compose-policy';
 
 export const SOURCE_RESOLVER_SERVICE = Symbol('seamnex.m02.source-resolver');
+
+/** NFR-4.16 — the allow-list's maintenance surface; the read side is `common/security`. */
+export const TRUSTED_REGISTRY_SERVICE = Symbol('seamnex.m02.trusted-registry');
+
+export interface TrustedRegistryService {
+  state(): Promise<TrustedRegistryState>;
+  /**
+   * Applies an add/remove set as a new revision and audits it in the same transaction. Throws
+   * `VALIDATION_FAILED` for a no-op change or one that would empty the list.
+   */
+  update(input: { actorId: string; update: TrustedRegistryUpdate }): Promise<TrustedRegistryState>;
+  /** Entries in force, for callers that need the list without the revision history. */
+  entries(): Promise<readonly string[]>;
+}
 
 /**
  * Owns `source_resolution`, `source_file`, `compose_policy` and `scaffold_artefact`.
@@ -9,8 +28,30 @@ export const SOURCE_RESOLVER_SERVICE = Symbol('seamnex.m02.source-resolver');
  * The precedence is fixed (4A.2): a Compose file if the tree has one, otherwise a Dockerfile,
  * otherwise an approved scaffold. It is *not* "whatever the entry's packaging says" — a repository
  * can contain both, and the Compose path is the one the platform can apply without building.
+ *
+ * Whichever path is taken, the source passes the same blocking policy (NFR-4.15) before a job can
+ * start, and the verdict travels with the resolution so the plan, the render manifest and the
+ * instance screen all report what the policy decided.
  */
 export type SourcePath = 'compose' | 'dockerfile' | 'scaffold';
+
+/**
+ * FR-1.11 / FR-1.20 — the verdict a pre-flight can report before anything is copied, cloned or
+ * applied.
+ *
+ * `unknown` is a first-class answer: for an entry whose source is fetched at deployment time there is
+ * no local artefact to evaluate, and saying so is the only honest option. `local_evaluation` means the
+ * vendored tree (or the approved scaffold) was read and evaluated in place, with the same waivers the
+ * job would use — no clone, no `source_resolution` row, no side effect.
+ */
+export type PolicyPreview = {
+  readonly verdict: 'allowed' | 'blocked' | 'unsafe_approved' | 'unknown';
+  readonly violations: readonly { readonly rule: ComposeRule; readonly service: string | null }[];
+  readonly evaluatedAt: string | null;
+  readonly source: 'local_evaluation' | 'none';
+  /** Why no verdict could be produced; null when one was. */
+  readonly reason: string | null;
+};
 
 export type ResolveInput = {
   readonly instanceId: string;
@@ -54,6 +95,23 @@ export interface SourceResolverService {
   ): Promise<ScaffoldConfirmation>;
   /** The draft the entry screen renders before a commit exists; `approvedBy` is null until confirmed. */
   scaffold(entryKey: string): Promise<ScaffoldDraft>;
-  /** The policy alone, for a dry run and for the compose-policy test. */
-  evaluate(composeContent: string, waived: readonly ComposeRule[]): ComposePolicyResult;
+  /**
+   * The policy alone, for a dry run and for the compose-policy test.
+   *
+   * `trustedRegistries` is the NFR-4.16 allow-list; omitting it skips that one rule, which is only
+   * correct for a caller evaluating a single rule in isolation.
+   */
+  evaluate(
+    composeContent: string,
+    waived: readonly ComposeRule[],
+    trustedRegistries?: readonly string[] | null,
+  ): ComposePolicyResult;
+  /**
+   * FR-1.11: the policy verdict for an entry that has not been deployed.
+   *
+   * Reads the vendored tree or the approved scaffold in place. It deliberately does not fetch: a
+   * clone inside a preview would take minutes and write a `source_resolution` row for an attempt that
+   * never happened.
+   */
+  previewPolicy(entryKey: string): Promise<PolicyPreview>;
 }

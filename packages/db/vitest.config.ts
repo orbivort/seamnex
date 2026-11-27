@@ -20,6 +20,11 @@ export default defineConfig({
         // would report 0/0 forever. Naming them keeps the per-file threshold meaningful.
         'src/index.ts',
         'src/tables.ts',
+        // A deprecation stub with no behaviour to cover (ADR-BE-42 §11): it prints the replacement
+        // command and sets an exit code. Kept registered for one release so a stale script gets the
+        // sentence instead of "missing script"; its message is asserted nowhere because asserting a
+        // literal against itself would only pin the wording.
+        'src/seed/restore-catalog-tree.ts',
       ],
       // The shared per-file floor applies to every package; for this one it is measured by
       // `db-unit`, because the schema suites are skipped unless a disposable database is

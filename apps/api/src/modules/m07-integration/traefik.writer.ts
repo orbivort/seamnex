@@ -1,4 +1,4 @@
-import { unlinkSync } from 'node:fs';
+import { readdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { Inject, Injectable } from '@nestjs/common';
 import { stringify } from 'yaml';
@@ -7,6 +7,21 @@ import type { AppConfig } from '../../config/config';
 import { ensureDir, writeFileAtomic } from '../../common/fs/files';
 import { requireAdapters } from '../../common/adapters';
 import { LAUNCH_BOOTSTRAP_PATH } from '../../common/launch/bootstrap';
+
+/**
+ * The name the edge's static configuration gives the ACME resolver
+ * (`certificatesResolvers.seamnex` in `docker/traefik/traefik.yml`). It is a constant because the
+ * two halves are one contract: a router that names a resolver the edge does not declare is dropped
+ * with the rest of its document, and the product 404s with nothing in the platform log.
+ */
+const CERTIFICATE_RESOLVER = 'seamnex';
+
+/**
+ * A year, which is the longest a browser honours. NFR-4.1 requires TLS on every external route, so
+ * there is no downgrade to keep possible: `max-age=0` would instruct the browser to forget the
+ * policy it was given the visit before.
+ */
+const HSTS_SECONDS = 31_536_000;
 
 export type RouterSpec = {
   readonly slug: string;
@@ -19,6 +34,12 @@ export type RouterSpec = {
   readonly bootstrapAddress: string;
   /** Guarantee class of the instance. Only the `fa_*` classes are gated at the edge. */
   readonly authMode: 'native' | 'fa_header' | 'fa_delegated' | 'fa_gate';
+  /**
+   * Certificate mode projected from `instance_route.tls_mode` (NFR-4.1, ISSUE-07). `acme` asks the
+   * edge's resolver for a certificate for this host; `internal` serves the edge's own, which is what
+   * the development stack does because no laptop name can satisfy a public CA.
+   */
+  readonly tlsMode: 'acme' | 'internal';
 };
 
 /**
@@ -28,6 +49,13 @@ export type RouterSpec = {
  * watches the directory and would otherwise read a half-written document. A gated or unpublished
  * route emits **no router at all**: re-opening the gate is then a single projection rather than a
  * remembered previous state.
+ *
+ * Every router is published on `websecure` and carries its own TLS and security-header
+ * configuration. Both used to be borrowed: the entrypoint was `web` (plain HTTP) and the headers came
+ * from a middleware defined only in the development stack's static dynamic file, so a deployment
+ * that mounted its own dynamic directory lost the router — the file provider rejects a document
+ * whose middleware reference cannot be resolved, and it rejects the whole document, not one key
+ * (ISSUE-07).
  */
 @Injectable()
 export class TraefikRouteWriter {
@@ -63,6 +91,24 @@ export class TraefikRouteWriter {
      */
     const forwardsIdentityHeaders = spec.authMode === 'fa_header';
 
+    /**
+     * `{}` is not "no TLS": Traefik reads an empty `tls` block as "terminate here with the default
+     * certificate". Only the resolver name differs between the two modes.
+     *
+     * A fresh object per router, not a shared constant: the serialiser would emit one anchored node
+     * and two aliases, which is valid YAML but made the generated file read as if the routers were
+     * coupled.
+     */
+    const tls = () => (spec.tlsMode === 'acme' ? { certResolver: CERTIFICATE_RESOLVER } : {});
+
+    /**
+     * The headers live in this document rather than in a shared one, because the generated file and
+     * the middleware it names have to travel together: the platform writes routes into a dynamic
+     * directory the operator mounts, and any definition that is not in that directory does not exist
+     * as far as Traefik is concerned.
+     */
+    const headersMiddleware = `${spec.slug}-headers`;
+
     const document = {
       http: {
         routers: {
@@ -75,18 +121,20 @@ export class TraefikRouteWriter {
             ? {
                 [`${spec.slug}-session`]: {
                   rule: `${hostRule} && Path(\`${LAUNCH_BOOTSTRAP_PATH}\`)`,
-                  entryPoints: ['web'],
+                  entryPoints: ['websecure'],
                   service: `${spec.slug}-session`,
-                  middlewares: ['security-headers'],
+                  middlewares: [headersMiddleware],
+                  tls: tls(),
                   priority: 200,
                 },
               }
             : {}),
           [`${spec.slug}-product`]: {
             rule: productRule,
-            entryPoints: ['web'],
+            entryPoints: ['websecure'],
             service: `${spec.slug}-product`,
-            middlewares: gated ? [`${spec.slug}-auth`, 'security-headers'] : ['security-headers'],
+            middlewares: gated ? [`${spec.slug}-auth`, headersMiddleware] : [headersMiddleware],
+            tls: tls(),
             priority: 100,
           },
         },
@@ -100,12 +148,22 @@ export class TraefikRouteWriter {
             : {}),
           [`${spec.slug}-product`]: { loadBalancer: { servers: [{ url: spec.upstream }] } },
         },
-        // The key is omitted, never written as an empty map: Traefik's file provider rejects the
-        // whole document with "middlewares cannot be a standalone element", which silently drops
-        // the router as well. One invalid key loses the route.
-        ...(gated
-          ? {
-              middlewares: {
+        middlewares: {
+          [headersMiddleware]: {
+            headers: {
+              // NFR-4.1 / AC-42: TLS on every route, and the browser told to insist on it.
+              stsSeconds: HSTS_SECONDS,
+              stsIncludeSubdomains: true,
+              contentTypeNosniff: true,
+              frameDeny: true,
+              browserXssFilter: true,
+            },
+          },
+          // An ungated route gets no `-auth` key at all. The map is never empty (the headers entry
+          // above is unconditional), because Traefik rejects the whole document — router included —
+          // for an empty `middlewares:` block ("middlewares cannot be a standalone element").
+          ...(gated
+            ? {
                 [`${spec.slug}-auth`]: {
                   forwardAuth: {
                     address: spec.forwardAuthAddress,
@@ -123,9 +181,9 @@ export class TraefikRouteWriter {
                       : {}),
                   },
                 },
-              },
-            }
-          : {}),
+              }
+            : {}),
+        },
       },
     };
 
@@ -138,6 +196,37 @@ export class TraefikRouteWriter {
       unlinkSync(this.fileFor(slug));
     } catch {
       // Absent is the desired state.
+    }
+  }
+
+  /**
+   * Deletes every generated document the caller did not just write (ISSUE-07).
+   *
+   * Writing alone is not reconciliation: a route removed from the database leaves its file behind,
+   * and the edge keeps serving it — after ADR-BE-39 those leftovers are worse than dead, because they
+   * were written before the TLS change and still name the `web` entrypoint, which no longer has a
+   * published port. Nothing in the platform ever re-reads such a file, so it survives every restart.
+   * Only `instance-<slug>.yml` is considered: the hand-written documents in the same directory
+   * (`routes.yml`, a future restore gate) are not the projection's to delete.
+   */
+  prune(keep: ReadonlySet<string>): void {
+    let names: string[];
+    try {
+      names = readdirSync(this.config.SEAMNEX_TRAEFIK_DYNAMIC_DIR);
+    } catch {
+      // No directory means no projection either; `write` reports that failure where it happens.
+      return;
+    }
+
+    for (const name of names) {
+      const match = /^instance-(.+)\.ya?ml$/i.exec(name);
+      if (match === null || match[1] === undefined) continue;
+      if (keep.has(match[1])) continue;
+      try {
+        unlinkSync(join(this.config.SEAMNEX_TRAEFIK_DYNAMIC_DIR, name));
+      } catch {
+        // A concurrent projection won the race; the next pass sees the outcome.
+      }
     }
   }
 

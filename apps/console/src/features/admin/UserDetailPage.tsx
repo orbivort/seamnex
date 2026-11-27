@@ -138,15 +138,34 @@ export function UserDetailPage() {
                 {data.entitlements.map((item) => (
                   <li
                     key={item.instanceId}
-                    className="flex items-center justify-between gap-3 px-4 py-2"
+                    className="flex flex-wrap items-center justify-between gap-3 px-4 py-2"
                   >
                     <span className="text-meta text-text">
                       <span className="font-mono text-micro text-faint">{item.entryKey}</span>{' '}
                       {item.product}
                     </span>
-                    <Badge tone="neutral" size="sm">
-                      {item.productRole}
-                    </Badge>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {/* FR-2.4: the role the product applies, then whether it actually arrived. */}
+                      <Badge tone="neutral" size="sm">
+                        {item.productRole}
+                      </Badge>
+                      <StatusPill
+                        tone={
+                          item.syncState === 'applied'
+                            ? 'positive'
+                            : item.syncState === 'pending'
+                              ? 'caution'
+                              : 'neutral'
+                        }
+                        label={item.syncState}
+                        size="sm"
+                      />
+                      <span className="text-micro text-faint">
+                        {item.appliedAt === null
+                          ? 'not applied yet'
+                          : `applied ${formatDateTime(item.appliedAt)}`}
+                      </span>
+                    </div>
                   </li>
                 ))}
               </ul>

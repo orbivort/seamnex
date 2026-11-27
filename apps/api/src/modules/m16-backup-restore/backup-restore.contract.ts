@@ -56,6 +56,10 @@ export interface BackupRestoreService {
    * 4C.4 gate release. A restore cannot publish product routes until an administrative session
    * proves the restored identity provider works. The proof is a real authenticated request by a
    * role holding `recovery.manage`, not a flag the restore sets on itself.
+   *
+   * It records the login, reopens the gate and **queues the product tier**; it never completes the
+   * run. FR-1.36 puts the products after the login, and a login proves nothing about a deployment
+   * that has not been restored yet — so `succeeded` belongs to that tier's own `verify` stage.
    */
   openGateAfterLogin(actorId: string, role: string): Promise<{ opened: boolean; reason: string }>;
 }

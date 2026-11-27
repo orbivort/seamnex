@@ -32,6 +32,7 @@ const BASE: LauncherTile = {
   maintenanceTitle: null,
   lastVerifiedAt: '2026-11-02T08:00:00.000Z',
   badge: null,
+  relayState: 'unavailable',
 };
 
 function renderTile(
@@ -96,6 +97,33 @@ describe('ProductTile sign-in and action claims', () => {
 
     expect(screen.getByText('Credential outside platform')).toBeDefined();
     expect(screen.getByText('Sign-in required')).toBeDefined();
+  });
+
+  it('names a relay-managed gate as a platform-managed credential', () => {
+    // ADR-BE-22: the class is the same, the holder is not. Printing "outside the platform" over a
+    // gate the relay signs into is the sentence EX-3 exists to retire.
+    renderTile({
+      guaranteeClass: 'fa_gate',
+      ssoState: null,
+      authLabel: 'Sign-in required',
+      relayState: 'ready',
+    });
+
+    expect(screen.getByText('Platform-managed credential')).toBeDefined();
+    expect(screen.queryByText('Credential outside platform')).toBeNull();
+    expect(screen.getByText('Sign-in required')).toBeDefined();
+  });
+
+  it('does not promise a credential that is still being created', () => {
+    renderTile({
+      guaranteeClass: 'fa_gate',
+      ssoState: null,
+      authLabel: 'Sign-in required',
+      relayState: 'preparing',
+    });
+
+    expect(screen.getByText('Credential preparing')).toBeDefined();
+    expect(screen.queryByText('Platform-managed credential')).toBeNull();
   });
 
   it('describes a sign-in path that is wired but unproven', () => {

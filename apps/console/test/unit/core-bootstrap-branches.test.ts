@@ -30,14 +30,23 @@ vi.mock('@seamnex/mocks/browser', () => ({ startMockWorker: hoisted.platform.sta
 
 vi.mock('@seamnex/domain', async (importOriginal) => {
   const actual = await importOriginal<typeof Domain>();
+  // Delegates to the real matrix unless a test substitutes a policy to walk one branch of
+  // `defaultRouteFor` that no shipped role can reach.
+  const substitute = (role: PlatformRole, capability: Capability): boolean => {
+    const grant = hoisted.policy.grant;
+    return grant === null ? actual.can(role, capability) : grant(role, capability);
+  };
   return {
     ...actual,
-    // Delegates to the real matrix unless a test substitutes a policy to walk one branch of
-    // `defaultRouteFor` that no shipped role can reach.
-    can: (role: PlatformRole, capability: Capability) =>
+    can: substitute,
+    // The navigation filter reads the three-valued answer (ADR-FE-01), so the same seam has to
+    // speak it: a capability the substituted policy grants counts as `full`, anything else `none`.
+    entryAccess: (role: PlatformRole, capabilities: readonly Capability[]) =>
       hoisted.policy.grant === null
-        ? actual.can(role, capability)
-        : hoisted.policy.grant(role, capability),
+        ? actual.entryAccess(role, capabilities)
+        : capabilities.some((capability) => substitute(role, capability))
+          ? 'full'
+          : 'none',
   };
 });
 

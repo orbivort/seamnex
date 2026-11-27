@@ -187,7 +187,7 @@ describe('mint: scope creation', () => {
       scopeId: 'scope-1',
       secretRef: 'secret-row-1',
       // The plaintext exists once, for the n8n credential activation writes; the table keeps a digest.
-      token: expect.stringMatching(/^seamnex_[0-9a-f]{48}$/),
+      token: expect.stringMatching(/^seamnex_[0-9a-f]{64}$/),
       expiresAt: '2030-01-01T00:00:00.000Z',
       mode: 'read',
       operations: ['orders.read'],
@@ -196,7 +196,7 @@ describe('mint: scope creation', () => {
       'workflow',
       'wf-1',
       expect.stringMatching(/^scope_[0-9a-f]{32}$/),
-      expect.stringMatching(/^seamnex_[0-9a-f]{48}$/),
+      expect.stringMatching(/^seamnex_[0-9a-f]{64}$/),
     );
     expect(audit.lockChain).toHaveBeenCalledOnce();
     expect(audit.append).toHaveBeenCalledWith(
@@ -340,6 +340,60 @@ describe('mint: scope creation', () => {
     expect(audit.append).not.toHaveBeenCalled();
   });
 
+  /**
+   * NFR-4.14 — a rotation exists to replace a token that is still valid, so it must not take the
+   * reuse path: that path returns the very value the rotation was asked to retire. The unique index
+   * on `idempotency_key` means the caller also passes a per-generation key; here the key matches the
+   * live row, which is exactly the state rotation runs in.
+   */
+  it('mints a new token when the caller asks to rotate, instead of reopening the live one', async () => {
+    let digest = '';
+    const { db, secrets, service } = setup({
+      routes: [
+        ['FROM workflow WHERE id', [{ current_version_id: 'v1' }]],
+        [
+          'SELECT id, secret_ref, token_hash, expires_at, mode, operations',
+          [
+            {
+              id: 'scope-live',
+              secret_ref: 'old-secret-row',
+              token_hash: digestOf('seamnex_old_token'),
+              expires_at: new Date('2031-01-01T00:00:00Z'),
+              mode: 'read',
+              operations: ['orders.read'],
+            },
+          ],
+        ],
+        [
+          'INSERT INTO credential_scope',
+          (_sql: string, params: readonly unknown[]) => {
+            digest = String(params[6]);
+            return [{ id: 'scope-new' }];
+          },
+        ],
+        [
+          'SELECT secret_ref, token_hash, expires_at',
+          () => [
+            {
+              secret_ref: 'secret-row-1',
+              token_hash: digest,
+              expires_at: new Date('2031-04-01T00:00:00Z'),
+            },
+          ],
+        ],
+      ],
+    });
+
+    const result = await service.mint({ ...INPUT, idempotencyKey: 'retry', rotate: true });
+
+    expect(result.scopeId).toBe('scope-new');
+    expect(result.token).toMatch(/^seamnex_[0-9a-f]{64}$/);
+    expect(result.token).not.toBe('seamnex_old_token');
+    // The live scope was never even looked up: reuse is what a rotation must not do.
+    expect(db.calls.some((call) => call.sql.includes('SELECT id, secret_ref'))).toBe(false);
+    expect(secrets.put).toHaveBeenCalledOnce();
+  });
+
   it('fails when neither the insert nor the idempotency lookup finds a row', async () => {
     const { service } = setup({
       routes: [
@@ -380,7 +434,7 @@ describe('mint: scope creation', () => {
     const result = await service.mint({ ...INPUT, idempotencyKey: 'retry' });
 
     expect(secrets.put).toHaveBeenCalledOnce();
-    expect(result.token).toMatch(/^seamnex_[0-9a-f]{48}$/);
+    expect(result.token).toMatch(/^seamnex_[0-9a-f]{64}$/);
     expect(result.token).not.toBe('seamnex_reused_token');
     expect(audit.append).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'credential.scope.minted' }),
@@ -444,7 +498,7 @@ describe('mint: scope creation', () => {
 
     // The token n8n is about to receive is the one the row now honours.
     expect(result.secretRef).toBe('secret-row-1');
-    expect(result.token).toMatch(/^seamnex_[0-9a-f]{48}$/);
+    expect(result.token).toMatch(/^seamnex_[0-9a-f]{64}$/);
     const update = db.calls.find((call) =>
       call.sql.includes('UPDATE credential_scope SET secret_ref'),
     );

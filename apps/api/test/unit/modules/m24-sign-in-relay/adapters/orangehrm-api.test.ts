@@ -116,6 +116,23 @@ describe('OrangeHrmApiClient.createUser', () => {
     });
   });
 
+  it('presents the same TLS view the administrator session was minted under', async () => {
+    productFetchMock
+      .mockResolvedValueOnce(data({ empNumber: 12 }))
+      .mockResolvedValueOnce(data({ id: 5 }));
+
+    await client().createUser(
+      { ...target, publicOrigin: 'https://orangehrm.seamnex.localhost:8443' },
+      user,
+    );
+
+    // The cookie the driver minted is named for the secure view; a call without the header would
+    // be read as `_orangehrm` and answered `401`, so provisioning would re-sign-in on every pass.
+    for (const [, init] of productFetchMock.mock.calls as [string, RequestInit][]) {
+      expect(new Headers(init.headers).get('x-forwarded-proto')).toBe('https');
+    }
+  });
+
   it('reports a refusal to create the employee without trying to create the user', async () => {
     productFetchMock.mockResolvedValueOnce(refused({ message: 'Invalid Parameter' }));
 

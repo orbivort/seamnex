@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { forwardRef, Inject, Injectable } from '@nestjs/common';
 import { withTransaction, type Queryable, type SecretVersionRow } from '@seamnex/db';
 import type { Pool } from 'pg';
 import { PG_POOL } from '../../database/database.module';
@@ -25,7 +25,13 @@ export class EnvelopeSecretsService implements SecretsService {
   constructor(
     @Inject(PG_POOL) private readonly pool: Pool,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
-    @Inject(AUDIT_SERVICE) private readonly audit: AuditService,
+    /*
+     * `forwardRef` because the audit chain signs its daily anchor with a key this service holds
+     * (NFR-4.10), so M17 depends on M15 for a key and M15 depends on M17 for the `secret.read` row
+     * that makes the read accountable. Neither edge can be dropped without losing a control, and
+     * neither is needed at construction time: `audit` is used only inside `open`.
+     */
+    @Inject(forwardRef(() => AUDIT_SERVICE)) private readonly audit: AuditService,
     @Inject(METRICS) private readonly metrics: Metrics,
   ) {}
 
@@ -34,6 +40,19 @@ export class EnvelopeSecretsService implements SecretsService {
       strictMode: this.config.SEAMNEX_ROOT_KEY_STRICT_MODE,
     });
     return this.cachedRootKey;
+  }
+
+  /**
+   * FR-1.35 — the key's identifier, never the key. Swallows a missing or unreadable key file because
+   * a backup of a role that holds no secrets is still a valid backup; the manifest then records no
+   * root-key id, and a restore that needs one refuses for want of the key, not for want of a backup.
+   */
+  rootKeyId(): string | null {
+    try {
+      return this.rootKey().id;
+    } catch {
+      return null;
+    }
   }
 
   async put(

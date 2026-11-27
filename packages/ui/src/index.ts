@@ -72,4 +72,4 @@ export {
 } from './theme';
 export { AppShell, BrandLockup, Masthead, PageHeader, Section, SideNav } from './layout/AppShell';
 export { FilterBar, FilterChip } from './patterns/FilterBar';
-export { CapacityRuler, Meter, Sparkline } from './charts/Charts';
+export { CapacityRuler, Meter, Sparkline, rulerBands } from './charts/Charts';

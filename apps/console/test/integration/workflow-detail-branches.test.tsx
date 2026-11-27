@@ -381,12 +381,26 @@ describe('field mapping workbench', () => {
     fireEvent.click(within(drawer).getByRole('button', { name: 'Save mapping' }));
 
     await waitFor(() => expect(received).not.toBeNull());
+    // FR-5.5: the save carries the conversion and the missing-value policy too, so an imported
+    // definition does not lose them the first time a row is edited here.
     expect(received).toEqual({
       nodeId: 'lead-create',
       body: {
         mappings: [
-          { from: 'lead.consentSource', to: 'consentSource', transform: null },
-          { from: 'lead.email', to: 'emailAddress', transform: null },
+          {
+            from: 'lead.consentSource',
+            to: 'consentSource',
+            transform: null,
+            required: false,
+            defaultValue: null,
+          },
+          {
+            from: 'lead.email',
+            to: 'emailAddress',
+            transform: null,
+            required: false,
+            defaultValue: null,
+          },
         ],
       },
     });

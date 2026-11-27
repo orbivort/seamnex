@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import {
   ArrowLeft,
@@ -19,12 +19,19 @@ import {
   useWorkflow,
   useWorkflowAction,
 } from '@seamnex/api-client';
-import { can, RUN_STATE_LABELS, TRIGGER_LABELS, WORKFLOW_STATE_LABELS } from '@seamnex/domain';
+import {
+  can,
+  ROLE_LABELS,
+  RUN_STATE_LABELS,
+  TRIGGER_LABELS,
+  WORKFLOW_STATE_LABELS,
+} from '@seamnex/domain';
 import type { Tone, Workflow, WorkflowRun, WorkflowValidationResult } from '@seamnex/domain';
 import {
   Alert,
   Badge,
   Button,
+  buttonVariants,
   Callout,
   Dialog,
   Field,
@@ -47,6 +54,7 @@ import { usePageCrumb } from '../../page-crumb';
 import { QueryError } from '@seamnex/shell';
 import { WorkflowCanvas } from './WorkflowCanvas';
 import { RUN_POLL_INTERVAL_MS, WorkflowRunsPanel } from './WorkflowRuns';
+import { WorkflowTriggerPanel } from './WorkflowTriggerPanel';
 
 /** The header's "last run" badge is part of the run's state, so it must settle with the table. */
 const LAST_RUN_IN_FLIGHT = new Set<WorkflowRun['state']>(['queued', 'running', 'waiting_approval']);
@@ -74,14 +82,38 @@ export function WorkflowWorkspacePage() {
   /**
    * The tone is part of the notice: a failed validation used to be announced in a green
    * "Validation re-run" alert, which read as success next to a still-disabled Activate button.
+   *
+   * The definition version is part of it too. A trigger or mapping save writes version N+1 and
+   * resets the validation, but the banner from the previous pass stayed on screen — so the page
+   * claimed "Validation passed, activation is available" beside a disabled Activate button and no
+   * issue list. The banner now belongs to the version it was produced for.
    */
-  const [notice, setNotice] = useState<{ tone: Tone; text: string } | null>(null);
+  const [notice, setNotice] = useState<{
+    tone: Tone;
+    text: string;
+    version: number;
+    /** A copy of this workflow is a real destination; the banner carries the way to it. */
+    action?: ReactNode;
+  } | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [draftName, setDraftName] = useState('');
   const [draftDescription, setDraftDescription] = useState('');
   const removeProblem = remove.error ? toProblem(remove.error) : null;
   const canWrite = can(session.role, 'workflow.author');
+  /**
+   * Running is a separate grant from authoring (`workflow.run`), and an auditor holds neither. The
+   * header used to offer Validate, Activate, Duplicate and Run now to every reader of the
+   * definition, so a reviewer selected an action whose only answer was `403` — the list screen
+   * hides the authoring actions from that role, and this screen now agrees with it.
+   */
+  const canRun = can(session.role, 'workflow.run');
+  /**
+   * A disabled action explains itself twice: a `title` for a mouse, and the read-only note below,
+   * which the button *describes*. `title` alone was the whole story, and a disabled button takes
+   * no focus and a tooltip has no place on a touch screen.
+   */
+  const readOnlyNote = canWrite ? {} : { 'aria-describedby': 'workspace-read-only' };
 
   if (workflow.isPending) {
     return (
@@ -91,7 +123,23 @@ export function WorkflowWorkspacePage() {
     );
   }
   if (workflow.isError)
-    return <QueryError error={workflow.error} onRetry={() => void workflow.refetch()} />;
+    /*
+     * The failure keeps the way back. A missing or out-of-scope id answered `403`, and the screen
+     * rendered the problem document alone: no crumb, no page, no link to the inventory — an
+     * operator whose bookmark was stale had to use the sidebar to escape a page that had nothing
+     * to show.
+     */
+    return (
+      <Page>
+        <Link
+          to="/workflows"
+          className="mb-3 inline-flex items-center gap-1.5 text-meta font-medium text-muted hover:text-link"
+        >
+          <ArrowLeft className="size-3.5" aria-hidden /> Workflows
+        </Link>
+        <QueryError error={workflow.error} onRetry={() => void workflow.refetch()} />
+      </Page>
+    );
 
   const data = workflow.data;
   const state = WORKFLOW_STATE_LABELS[data.state];
@@ -101,12 +149,19 @@ export function WorkflowWorkspacePage() {
 
   const runAction = (next: 'validate' | 'activate' | 'disable' | 'run' | 'duplicate') => {
     setNotice(null);
+    // The version the verdict describes. None of these actions rewrites the definition, so it is
+    // the version on screen; a later trigger or mapping save bumps it and retires the banner.
+    const version = data.version;
     action.mutate(next, {
       onSuccess: (result) => {
         if (next === 'validate') {
           const validation = asValidationResult(result);
           if (validation === null) {
-            setNotice({ tone: 'caution', text: 'The validation response was not understood.' });
+            setNotice({
+              tone: 'caution',
+              text: 'The validation response was not understood.',
+              version,
+            });
             return;
           }
           const blocking = validation.issues.filter((issue) => issue.severity === 'error').length;
@@ -117,6 +172,7 @@ export function WorkflowWorkspacePage() {
                   // A pass with warnings is not a clean pass: the write may still be refused by the
                   // product, so the count travels with the verdict.
                   tone: advice === 0 ? 'positive' : 'caution',
+                  version,
                   text:
                     advice === 0
                       ? `Validation passed at ${formatDateTime(validation.checkedAt)}. Activation is available.`
@@ -124,6 +180,7 @@ export function WorkflowWorkspacePage() {
                 }
               : {
                   tone: 'danger',
+                  version,
                   text: `Validation found ${blocking} blocking issue${blocking === 1 ? '' : 's'}. Activation stays blocked; the issues and their remediation are listed below the canvas.`,
                 },
           );
@@ -131,28 +188,58 @@ export function WorkflowWorkspacePage() {
         if (next === 'activate')
           setNotice({
             tone: 'positive',
+            version,
             text: 'Workflow activated. Triggers are live and runs will be recorded.',
           });
         if (next === 'disable')
           setNotice({
             tone: 'info',
+            version,
             text: 'Workflow disabled. Trigger endpoints are paused; history is retained.',
           });
         if (next === 'run') {
           setTab('runs');
-          // The API records the run as `running` and hands it to the executor; it is not complete
-          // when this response arrives, and saying so was the one thing this screen got wrong.
-          const run = result as WorkflowRun;
+          /*
+           * No state in this banner. It used to read `Run ${run.state}` from the response, which is
+           * `running` at that moment — and the banner then outlived the run, so a run that had ended
+           * `failed` still sat under a blue "Run running" while the table beside it said otherwise.
+           * The Runs tab is the status; this only says where to look, which stays true.
+           */
           setNotice({
             tone: 'info',
-            text: `Run ${run.state ?? 'queued'}. Per-node outcomes appear in the Runs tab.`,
+            version,
+            text: 'Run requested. The Runs tab follows it to its outcome.',
           });
         }
-        if (next === 'duplicate')
+        if (next === 'duplicate') {
+          /*
+           * "It appears in the workflow list" sent the operator to another screen to find one row
+           * among rows, then back here-shaped: the copy is a workflow with an id, and its
+           * workspace is the only place the next step (validate, map, activate) exists. The
+           * response is the new workflow, so the banner links to it directly.
+           */
+          const copy = asWorkflow(result);
           setNotice({
             tone: 'positive',
-            text: 'A draft copy was created. It appears in the workflow list.',
+            version,
+            text:
+              copy === null
+                ? 'A draft copy was created. It appears in the workflow list.'
+                : `A draft copy was created: ${copy.name}.`,
+            ...(copy === null
+              ? {}
+              : {
+                  action: (
+                    <Link
+                      to={`/workflows/${copy.id}`}
+                      className={buttonVariants({ variant: 'secondary', size: 'sm' })}
+                    >
+                      Open the copy
+                    </Link>
+                  ),
+                }),
           });
+        }
       },
     });
   };
@@ -189,7 +276,9 @@ export function WorkflowWorkspacePage() {
               size="sm"
               variant="secondary"
               icon={<BadgeCheck />}
-              disabled={action.isPending}
+              disabled={action.isPending || !canWrite}
+              title={canWrite ? undefined : 'workflow.author is required to validate'}
+              {...readOnlyNote}
               onClick={() => runAction('validate')}
             >
               Validate
@@ -200,6 +289,7 @@ export function WorkflowWorkspacePage() {
                 variant="ghost"
                 icon={<Pencil />}
                 disabled={!canWrite || rename.isPending}
+                {...readOnlyNote}
                 onClick={() => {
                   setDraftName(data.name);
                   setDraftDescription(data.description ?? '');
@@ -214,7 +304,9 @@ export function WorkflowWorkspacePage() {
                 size="sm"
                 variant="secondary"
                 icon={<PowerOff />}
-                disabled={action.isPending}
+                disabled={action.isPending || !canWrite}
+                title={canWrite ? undefined : 'workflow.author is required to disable'}
+                {...readOnlyNote}
                 onClick={() => runAction('disable')}
               >
                 Disable
@@ -224,7 +316,9 @@ export function WorkflowWorkspacePage() {
                 size="sm"
                 variant="primary"
                 icon={<Power />}
-                disabled={action.isPending}
+                disabled={action.isPending || !canWrite}
+                title={canWrite ? undefined : 'workflow.author is required to activate'}
+                {...readOnlyNote}
                 onClick={() => runAction('activate')}
               >
                 Activate
@@ -237,7 +331,13 @@ export function WorkflowWorkspacePage() {
                     : 'Resolve blocking validation errors first'
                 }
               >
-                <Button size="sm" variant="primary" icon={<Power />} disabled>
+                <Button
+                  size="sm"
+                  variant="primary"
+                  icon={<Power />}
+                  disabled
+                  aria-describedby="activation-blocked"
+                >
                   Activate
                 </Button>
               </Tooltip>
@@ -246,7 +346,8 @@ export function WorkflowWorkspacePage() {
               size="sm"
               variant="secondary"
               icon={<Play />}
-              disabled={action.isPending || data.state !== 'active'}
+              disabled={action.isPending || data.state !== 'active' || !canRun}
+              title={canRun ? undefined : 'workflow.run is required to start a run'}
               onClick={() => runAction('run')}
             >
               Run now
@@ -268,7 +369,9 @@ export function WorkflowWorkspacePage() {
               size="sm"
               variant="ghost"
               icon={<Copy />}
-              disabled={action.isPending}
+              disabled={action.isPending || !canWrite}
+              title={canWrite ? undefined : 'workflow.author is required to duplicate'}
+              {...readOnlyNote}
               onClick={() => runAction('duplicate')}
             >
               Duplicate
@@ -278,7 +381,9 @@ export function WorkflowWorkspacePage() {
                 size="sm"
                 variant="ghost"
                 icon={<Trash2 />}
-                disabled={remove.isPending}
+                disabled={remove.isPending || !canWrite}
+                title={canWrite ? undefined : 'workflow.author is required to delete'}
+                {...readOnlyNote}
                 onClick={() => setDeleteOpen(true)}
               >
                 Delete
@@ -296,11 +401,43 @@ export function WorkflowWorkspacePage() {
         }
       />
 
-      {notice ? (
+      {/* A verdict for a definition that has since changed is not a statement about this one. */}
+      {notice !== null && notice.version === data.version ? (
         <div className="mb-3">
-          <Alert tone={notice.tone} title={notice.text} />
+          <Alert
+            tone={notice.tone}
+            title={notice.text}
+            {...(notice.action === undefined ? {} : { action: notice.action })}
+          />
         </div>
       ) : null}
+      {/*
+        The other half of the same defect: when the banner is retired, say why. Without this the
+        page went from "activation is available" to a disabled button with no explanation, and the
+        issue list disappeared with the validation pass it belonged to.
+      */}
+      {data.state !== 'active' && data.validation.checkedAt === null ? (
+        <p id="activation-blocked" className="mb-3 text-meta text-muted">
+          This version has not been validated since it changed. Run Validate before activating.
+        </p>
+      ) : null}
+      {/*
+        The third case: a pass ran and refused. The reason lived only in a tooltip on a disabled
+        button, and a disabled button takes no focus — so the sentence was unreachable with a
+        keyboard, and invisible on touch.
+      */}
+      {data.state !== 'active' && data.validation.checkedAt !== null && !data.validation.valid ? (
+        <p id="activation-blocked" className="mb-3 text-meta text-muted">
+          Activation is blocked by {errors.length !== 0 ? errors.length : 'at least one'} validation
+          error{errors.length === 1 ? '' : 's'}, listed under the canvas.
+        </p>
+      ) : null}
+      {canWrite ? null : (
+        <p id="workspace-read-only" className="mb-3 text-meta text-muted">
+          Read-only: the {ROLE_LABELS[session.role].name} role can inspect and export this
+          definition, but cannot change it.
+        </p>
+      )}
       {action.isError ? <QueryError error={action.error} compact /> : null}
       {exporter.isError ? <QueryError error={exporter.error} compact /> : null}
       {removeProblem ? (
@@ -375,6 +512,9 @@ export function WorkflowWorkspacePage() {
                       action.reset();
                       setNotice({
                         tone: 'positive',
+                        // Renaming is metadata: it does not rewrite the definition, so the version
+                        // — and any validation verdict already on screen — still applies.
+                        version: data.version,
                         text: 'Workflow renamed. The change is in the audit trail.',
                       });
                     },
@@ -458,6 +598,7 @@ export function WorkflowWorkspacePage() {
         onValueChange={setTab}
         tabs={[
           { value: 'canvas', label: 'Canvas' },
+          { value: 'trigger', label: 'Trigger' },
           { value: 'runs', label: 'Runs' },
         ]}
       >
@@ -500,6 +641,14 @@ export function WorkflowWorkspacePage() {
             </Grid>
           </Panel>
         </TabPanel>
+        <TabPanel value="trigger" className="pt-3">
+          {/*
+            FR-5.4: the header already shows the trigger as a badge; this is where it is edited.
+            The panel owns its own mutation and notice so a save cannot be mistaken for the
+            activate/validate banner that belongs to the header above.
+          */}
+          <WorkflowTriggerPanel key={data.id} workflow={data} canWrite={canWrite} />
+        </TabPanel>
         <TabPanel value="runs" className="pt-3">
           <Panel inset>
             <WorkflowRunsPanel workflow={data} />
@@ -519,4 +668,15 @@ function asValidationResult(value: unknown): WorkflowValidationResult | null {
   if (typeof value !== 'object' || value === null) return null;
   if (!('checkedAt' in value) || !('issues' in value) || !Array.isArray(value.issues)) return null;
   return value as WorkflowValidationResult;
+}
+
+/**
+ * `duplicate` and `activate`/`disable` answer with the workflow itself, narrowed the same way —
+ * the union carries no published discriminant, so identity is checked structurally.
+ */
+function asWorkflow(value: unknown): Workflow | null {
+  if (typeof value !== 'object' || value === null) return null;
+  if (!('id' in value) || !('name' in value) || !('state' in value)) return null;
+  if (typeof value.id !== 'string' || typeof value.name !== 'string') return null;
+  return value as Workflow;
 }

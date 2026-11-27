@@ -11,8 +11,8 @@ import { resolveKey } from '@seamnex/domain';
  *   - EspoCRM calls back on `/oauth-callback.php`, not `/oauth2/callback`. Keycloak answered
  *     `invalid_redirect_uri` and the product's OIDC login could never complete, however correct the
  *     rest of the configuration was.
- *   - Scheme and port belong to the edge, not to the product. The dev edge serves plain HTTP on
- *     :8020, so a hardcoded `https://<host>` named a port nothing listens on.
+ *   - Scheme and port belong to the edge, not to the product. The dev edge terminates TLS on :8443,
+ *     so a hardcoded `https://<host>` named a port nothing listens on.
  */
 
 export type ProductUrlScheme = 'http' | 'https';
@@ -44,6 +44,19 @@ const OIDC_CALLBACK_PATHS: Readonly<Record<string, string>> = {
    * an endpoint that answers 404 is not revocation support.
    */
   'D09-01': '/auth/keycloak/callback',
+  /*
+   * ERPNext (Frappe): the browser returns to a whitelisted *method*, and the method name is the
+   * provider's, not the record's. `social_login_provider = Keycloak` has its own entry point
+   * (`frappe/integrations/oauth2_logins.py#login_via_keycloak`, v16), unlike a `Custom` provider,
+   * which Frappe routes through `oauth2_logins.custom/<Social Login Key name>`.
+   *
+   * Frappe is also the one product here that sends back the value *it* stores: `Social Login Key
+   * .redirect_url` is passed as `redirect_uri` on both the authorize and the token request
+   * (`frappe/utils/oauth.py#get_redirect_uri`). The first boot writes that field as
+   * `<ERPNEXT_SITE_ORIGIN>` + this path, so the two halves of the byte-for-byte comparison are
+   * built from the same origin and the same literal.
+   */
+  'D06-01': '/api/method/frappe.integrations.oauth2_logins.login_via_keycloak',
 };
 
 /** Default for an entry with no declared path: the convention used by the platform's own scaffolds. */
@@ -59,6 +72,35 @@ const BACKCHANNEL_LOGOUT_PATHS: Readonly<Record<string, string>> = {
 };
 
 /**
+ * The product's own sign-in page, and the literal that page carries only when it offers the identity
+ * provider.
+ *
+ * The platform's login check drives the identity-provider side of the flow, and every stage of that can
+ * pass while the product is not configured at all: ERPNext was deployed with a registered Keycloak
+ * client, a successful code exchange, and no `Social Login Key` on the site, so its sign-in page showed
+ * a password form and nothing else while the portal reported "single sign-on". Only an entry whose
+ * product renders the provider on a page of its own declares one here — the marker is the callback path
+ * the client was registered on, which is what Frappe puts in the button's `redirect_uri`.
+ */
+const SIGN_IN_PAGES: Readonly<Record<string, { readonly path: string; readonly marker: string }>> =
+  {
+    'D06-01': {
+      path: '/login',
+      // `frappe/www/login.html` renders `<a href="{{ provider.auth_url }}">`, and that URL carries
+      // `redirect_uri=<origin>/api/method/frappe.integrations.oauth2_logins.login_via_keycloak`,
+      // percent-encoded. The method name survives encoding unchanged, the slashes around it do not,
+      // which is why the marker stops at the method name.
+      marker: 'login_via_keycloak',
+    },
+  };
+
+export function signInPageFor(
+  entryKey: string,
+): { readonly path: string; readonly marker: string } | null {
+  return SIGN_IN_PAGES[resolveKey(entryKey)] ?? null;
+}
+
+/**
  * The instance environment variable that carries this product's OIDC client secret.
  *
  * The secret exists twice by design — once in Keycloak, once in the product — and both must be the
@@ -68,6 +110,9 @@ const BACKCHANNEL_LOGOUT_PATHS: Readonly<Record<string, string>> = {
  */
 const OIDC_SECRET_VARIABLES: Readonly<Record<string, string>> = {
   'D01-01': 'ESPOCRM_CONFIG_OIDC_CLIENT_SECRET',
+  // ERPNext: read by the first boot, which writes it into the site's `Social Login Key` row. Left
+  // empty in the plan, so `registerIdentity` mints one and writes it back as the applied value.
+  'D06-01': 'ERPNEXT_SSO_CLIENT_SECRET',
 };
 
 /**

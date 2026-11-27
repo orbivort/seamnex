@@ -49,8 +49,11 @@ import { BackupsTab } from './tabs/BackupsTab';
 import { ContainersTab } from './tabs/ContainersTab';
 import { DriftTab } from './tabs/DriftTab';
 import { EnvironmentTab } from './tabs/EnvironmentTab';
+import { ExportsTab } from './tabs/ExportsTab';
+import { ImageSecurityTab } from './tabs/ImageSecurityTab';
 import { IntegrationTab } from './tabs/IntegrationTab';
 import { JobsTab } from './tabs/JobsTab';
+import { ObservabilityTab } from './tabs/ObservabilityTab';
 import { OverviewTab } from './tabs/OverviewTab';
 
 type DialogKind = LifecycleAction | null;
@@ -134,6 +137,12 @@ export function InstanceDetailPage() {
    * disagree — and so no role without the grant ever mounts the panel's query.
    */
   const canReadEnv = can(session.role, 'instance.env');
+  /**
+   * FR-2.6 — the telemetry tab is the same reach as the container log drawer: both routes bind to
+   * `instance.view_logs`. A role without it sees no tab rather than a tab whose every panel is a
+   * guaranteed 403.
+   */
+  const canReadTelemetry = can(session.role, 'instance.view_logs');
 
   /**
    * A whole-screen gate, not a region — but only when there is nothing to render. `isError` is also
@@ -142,12 +151,39 @@ export function InstanceDetailPage() {
    * the data and shows the banner below instead.
    */
   if (!instance.data) {
-    return instance.isPending ? (
-      <Panel inset>
-        <SkeletonLines lines={10} />
-      </Panel>
-    ) : (
-      <QueryError error={instance.error} onRetry={() => void instance.refetch()} />
+    return (
+      <Page>
+        {/*
+          The failure branch is a screen, not a floating panel. As a bare `QueryError` it had no
+          heading and no link, so an operator who followed a stale link from an incident channel had
+          one control — "Retry", which re-ran the request that had just 404'd — and no way back to
+          the fleet short of the sidebar.
+        */}
+        <Link
+          to="/instances"
+          className="mb-3 inline-flex items-center gap-1.5 text-meta font-medium text-muted hover:text-link"
+        >
+          <ArrowLeft className="size-3.5" aria-hidden /> Instances
+        </Link>
+        <PageHeader
+          eyebrow="Deployments"
+          // Deliberately not the problem's own title: `QueryError` prints that below, and a heading
+          // that repeats it word for word reads as two failures rather than one.
+          title={instance.isPending ? 'Loading instance…' : 'This instance could not be loaded'}
+          description={
+            instance.isPending
+              ? 'Reading the deployment, its status and its evidence.'
+              : 'The deployment this address names could not be read.'
+          }
+        />
+        {instance.isPending ? (
+          <Panel inset>
+            <SkeletonLines lines={10} />
+          </Panel>
+        ) : (
+          <QueryError error={instance.error} onRetry={() => void instance.refetch()} />
+        )}
+      </Page>
     );
   }
 
@@ -169,7 +205,14 @@ export function InstanceDetailPage() {
 
   const run = (action: LifecycleAction) => {
     lifecycle.mutate(
-      { id: data.id, action, ...(action === 'delete' ? { dataRetention: retention } : {}) },
+      {
+        id: data.id,
+        action,
+        ...(action === 'delete' ? { dataRetention: retention } : {}),
+        // FR-1.7: send what the operator confirmed. The server re-asserts it against the catalogue
+        // pin, so an upgrade cannot quietly apply a version nobody approved.
+        ...(action === 'upgrade' && upgradeTarget !== null ? { version: upgradeTarget } : {}),
+      },
       { onSuccess: (accepted) => navigate(`/jobs/${accepted.jobId}`) },
     );
   };
@@ -404,9 +447,16 @@ export function InstanceDetailPage() {
         tabs={[
           { value: 'overview', label: 'Overview' },
           { value: 'containers', label: 'Containers' },
+          // NFR-4.6: the scan report is as sensitive as a log excerpt, and `GET
+          // /instances/:id/image-scan` binds to the same `instance.view_logs`. Same gate, same reason.
+          ...(canReadTelemetry ? [{ value: 'image-security', label: 'Image security' }] : []),
+          ...(canReadTelemetry ? [{ value: 'observability', label: 'Observability' }] : []),
           ...(canReadEnv ? [{ value: 'env', label: 'Environment' }] : []),
           { value: 'drift', label: 'Drift' },
           { value: 'backups', label: 'Backups' },
+          // FR-1.13: the exit-strategy artefact. Only a role that may export sees it, because the
+          // read behind it is the same R1-only capability (a guaranteed refusal otherwise).
+          ...(canLifecycle ? [{ value: 'exports', label: 'Exports' }] : []),
           { value: 'jobs', label: 'Jobs' },
           { value: 'integration', label: 'Integration' },
         ]}
@@ -417,6 +467,16 @@ export function InstanceDetailPage() {
         <TabPanel value="containers" className="pt-3">
           <ContainersTab instance={data} />
         </TabPanel>
+        {canReadTelemetry ? (
+          <TabPanel value="image-security" className="pt-3">
+            <ImageSecurityTab instance={data} />
+          </TabPanel>
+        ) : null}
+        {canReadTelemetry ? (
+          <TabPanel value="observability" className="pt-3">
+            <ObservabilityTab instance={data} />
+          </TabPanel>
+        ) : null}
         {/*
           `keepMounted` on this panel only: it is the one tab that holds typed-but-unapplied input.
           Radix otherwise unmounts it on switch, which is why the draft had to be rescued into a
@@ -441,6 +501,11 @@ export function InstanceDetailPage() {
         <TabPanel value="backups" className="pt-3">
           <BackupsTab instance={data} />
         </TabPanel>
+        {canLifecycle ? (
+          <TabPanel value="exports" className="pt-3">
+            <ExportsTab instance={data} />
+          </TabPanel>
+        ) : null}
         <TabPanel value="jobs" className="pt-3">
           <JobsTab instance={data} />
         </TabPanel>
@@ -478,7 +543,11 @@ export function InstanceDetailPage() {
               </Button>
               <Button
                 variant="primary"
-                disabled={!plan.data?.capacityVerdict.admissible || lifecycle.isPending}
+                disabled={
+                  !plan.data?.capacityVerdict.admissible ||
+                  lifecycle.isPending ||
+                  upgradeTarget === null
+                }
                 onClick={() => {
                   run('upgrade');
                   setDialog(null);
@@ -511,6 +580,12 @@ export function InstanceDetailPage() {
                     pre-upgrade backup
                   </Badge>
                 </div>
+                {upgradeTarget === null ? (
+                  <Alert tone="caution" title="No newer version is pinned">
+                    The catalogue pins {data.currentVersion} for this entry. Refresh the entry after
+                    a catalogue reload, or redeploy to apply the current pin.
+                  </Alert>
+                ) : null}
                 <p className="font-mono text-micro text-faint">
                   render {planData.from} → {planData.to}
                 </p>

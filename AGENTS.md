@@ -57,17 +57,22 @@ pnpm lint               # ESLint, --max-warnings=0
 pnpm stylelint          # CSS
 pnpm format:check       # Prettier
 pnpm test               # unit tests inside each package
+pnpm test:coverage      # test coverage inside each package, shall meet global threshold
 ```
 
-Conditional gates — run the one your change touches: `pnpm check:migrations`, `check:route-policy`,
-`check:version`, `check:license`, `check:bundle`, `check:no-shim`, `check:test-tasks`.
-Report a gate you skipped as skipped; never claim a run that did not happen.
+Conditional gates — run the one your change touches: `pnpm check:migrations`, `check:catalog`,
+`check:route-policy`, `check:version`, `check:license`, `check:bundle`, `check:no-shim`,
+`check:test-tasks`. Report a gate you skipped as skipped; never claim a run that did not happen.
 
 ## Boundaries
 
 - **Ask first:** adding a dependency, changing an API contract or route policy, writing a schema
   migration, deleting files, touching CI, Docker or `platform/` assets, regenerating the committed
   artifact `docs/openapi.json`.
+- **Catalogue content is not here.** Entry documents, environment declarations and upstream render
+  sets live in `orbivort/seamnex-catalog` and reach a host as a checkout at a tag (ADR-BE-42).
+  `platform/` holds the Keycloak realm only. A change that needs a catalogue document is a change in
+  the other repository, then a tag this platform fetches — `pnpm catalog:sync --ref <tag>`.
 - **Never:** commit `.env*`, keys or tokens; print secret values; edit generated output by hand;
   commit the MSW worker (`*/public/mockServiceWorker.js` — untracked, written by `pnpm mocks:init`);
   weaken or skip a lint rule, test or gate to make a change pass; rewrite git history.

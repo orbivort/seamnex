@@ -34,6 +34,8 @@ export const BASE_TILE: LauncherTile = {
   maintenanceTitle: null,
   lastVerifiedAt: '2026-11-02T08:00:00.000Z',
   badge: null,
+  // The fixture is a native entry, so no gate relays for it (ADR-BE-22).
+  relayState: 'unavailable',
 };
 
 export function tile(overrides: Partial<LauncherTile> = {}): LauncherTile {

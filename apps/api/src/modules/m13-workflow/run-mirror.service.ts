@@ -1,10 +1,15 @@
-import { Inject, Injectable, Logger, type OnApplicationShutdown } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional, type OnApplicationShutdown } from '@nestjs/common';
 import type { Pool } from 'pg';
 import { APP_CONFIG } from '../../config/config.module';
 import type { AppConfig } from '../../config/config';
 import { PG_POOL } from '../../database/database.module';
 import { AUDIT_SERVICE, type AuditService } from '../m17-audit/audit.contract';
+import {
+  NOTIFICATION_SERVICE,
+  type NotificationService,
+} from '../m20-notification/notification.contract';
 import { redactSample } from '../../common/privacy/sample-redaction';
+import { ownerName } from './workflow.representation';
 import { N8nClient } from './n8n.client';
 
 /** A run that claims to be in flight, with the n8n id and the IR its nodes were copied from. */
@@ -56,6 +61,14 @@ export class RunMirrorService implements OnApplicationShutdown {
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     @Inject(AUDIT_SERVICE) private readonly audit: AuditService,
     @Inject(N8nClient) private readonly n8n: N8nClient,
+    /*
+     * FR-5.8 — the owner is told when their workflow keeps failing, and the only mechanism this
+     * platform has for telling anyone is M20. Optional so the mirror still runs in a process that
+     * does not host notification delivery; an absent module disables the alert, never the mirror.
+     */
+    @Optional()
+    @Inject(NOTIFICATION_SERVICE)
+    private readonly notifications?: NotificationService,
   ) {}
 
   /**
@@ -100,6 +113,17 @@ export class RunMirrorService implements OnApplicationShutdown {
       await this.sweepSamples().catch((error: unknown) => {
         this.logger.warn(
           `workflow sample retention sweep failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+      /*
+       * FR-5.8 — run history is retained for a configured window, and a run row is the only thing
+       * that stops the table growing for ever. The sample sweep above nulls the payload; this one
+       * removes the rows whose window has passed, on the same cadence and for the same reason (one
+       * hourly whole-table statement, not one per poll).
+       */
+      await this.sweepRuns().catch((error: unknown) => {
+        this.logger.warn(
+          `workflow run retention sweep failed: ${error instanceof Error ? error.message : String(error)}`,
         );
       });
     }
@@ -163,17 +187,42 @@ export class RunMirrorService implements OnApplicationShutdown {
     return result.rowCount ?? 0;
   }
 
+  /**
+   * FR-5.8 — "retained ≥ 30 days", and then removed.
+   *
+   * Two statements because the two windows differ: an ordinary run is kept for the configured
+   * retention, and a failed run for twice as long — the failed-run queue is the artefact an operator
+   * inspects, corrects and replays (FR-5.7), so it must outlive the history it sits in.
+   *
+   * Only terminal states are deleted. A `queued` or `running` row past the window is a run whose
+   * outcome was never mirrored, and deleting it would erase the evidence that the mirror stopped
+   * settling — a defect an operator has to be able to see, not one the retention pass tidies away.
+   */
+  async sweepRuns(): Promise<number> {
+    const days = this.config.SEAMNEX_WORKFLOW_RUN_RETENTION_DAYS;
+    const succeeded = await this.pool.query(
+      `DELETE FROM workflow_run
+        WHERE state = 'succeeded' AND started_at < now() - make_interval(days => $1)`,
+      [days],
+    );
+    const failed = await this.pool.query(
+      `DELETE FROM workflow_run
+        WHERE state = 'failed' AND started_at < now() - make_interval(days => $1)`,
+      [days * 2],
+    );
+    return (succeeded.rowCount ?? 0) + (failed.rowCount ?? 0);
+  }
+
   private async settle(run: RunningRun, executionId: string): Promise<boolean> {
     const detail = await this.n8n.execution(executionId).catch(() => null);
     if (detail === null || !TERMINAL.has(detail.status)) return false;
 
     const succeeded = detail.status === 'success';
     const state = succeeded ? 'succeeded' : 'failed';
+    const failedNode = detail.nodes.find((node) => node.error !== null) ?? null;
     const message = succeeded
       ? null
-      : (detail.error ??
-        detail.nodes.find((node) => node.error !== null)?.error ??
-        'n8n reported a failure.');
+      : (detail.error ?? failedNode?.error ?? 'n8n reported a failure.');
 
     /*
      * The run ended when n8n says it ended, not when this pass noticed. `now()` here made the run
@@ -209,7 +258,8 @@ export class RunMirrorService implements OnApplicationShutdown {
         // not valid json and aborted the pass after the run row had already moved.
         `UPDATE workflow_run_node
             SET state = $3, duration_ms = $4, error = $5::jsonb,
-                sample_item = $6::jsonb, sample_captured_at = $7, sample_truncated = $8
+                sample_item = $6::jsonb, sample_captured_at = $7, sample_truncated = $8,
+                attempt = $9
           WHERE run_id = $1 AND node_id = $2`,
         [
           run.id,
@@ -221,6 +271,12 @@ export class RunMirrorService implements OnApplicationShutdown {
           redacted === null || redacted.item === null ? null : JSON.stringify(redacted.item),
           redacted === null ? null : new Date(),
           redacted?.truncated === true,
+          /*
+           * FR-5.7: the row is keyed by `(run_id, node_id, attempt)`, and the attempt is what n8n
+           * reports, not a constant. A step that was retried three times used to read `attempt: 1`,
+           * so the retry policy could not be evidenced from the run history at all.
+           */
+          observed?.tries ?? 1,
         ],
       );
     }
@@ -236,8 +292,134 @@ export class RunMirrorService implements OnApplicationShutdown {
         detail: { workflowId: run.workflow_id, executionId, status: detail.status },
       })
       .catch(() => undefined);
+
+    if (!succeeded) {
+      /*
+       * FR-5.8 — a repetition is the signal, not one failure. A failure alert is queued after the
+       * run row is settled and the audit row written, so the alert can only ever describe a run the
+       * platform already recorded; and it is isolated like the audit append, because a mail server
+       * that is down must not stop the mirror from settling runs.
+       */
+      await this.alertOwner(run, failedNode?.name ?? null, message).catch((error: unknown) => {
+        this.logger.warn(
+          `workflow failure alert could not be queued: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }
     return true;
   }
+
+  /**
+   * FR-5.8 — tells the owner, once per milestone of a failure streak.
+   *
+   * The streak is **derived** from the run table ("failed runs since the last success") rather than
+   * kept in a counter: a counter would have to be reset by whichever writer settles the next
+   * success, and a restart between the two would leave it wrong. `streak % threshold === 0` is the
+   * whole dedupe — one alert at the threshold, then one per further threshold, so a workflow that
+   * fails every night alerts weekly instead of hourly, and no new state is needed to remember that
+   * it already did.
+   *
+   * The body carries the workflow, the run, the failing step and n8n's own sentence, capped: the same
+   * text the run detail shows an operator, and nothing read from the product's payload.
+   */
+  private async alertOwner(
+    run: RunningRun,
+    nodeLabel: string | null,
+    message: string | null,
+  ): Promise<void> {
+    const notifications = this.notifications;
+    if (notifications === undefined) return;
+    const threshold = Math.max(1, this.config.SEAMNEX_WORKFLOW_FAILURE_ALERT_THRESHOLD);
+    const streak = await this.failureStreak(run.workflow_id);
+    if (streak === 0 || streak % threshold !== 0) return;
+
+    const owner = await this.workflowOwner(run.workflow_id);
+    if (owner === null) return;
+    const severity = streak === threshold ? 'warning' : 'critical';
+    const queued = await notifications.notify({
+      severity,
+      subject: `Workflow "${owner.name}" failed ${streak} runs in a row`,
+      body: [
+        `Owner: ${owner.owner}.`,
+        nodeLabel === null
+          ? `Run ${run.id} failed.`
+          : `Run ${run.id} failed at step "${nodeLabel}".`,
+        message === null ? '' : `Error: ${truncate(message)}`,
+        'Open the workflow to see the failed-run queue; nothing was retried beyond the configured attempts.',
+      ]
+        .filter((line) => line.length > 0)
+        .join('\n'),
+    });
+    await this.audit
+      .append({
+        action: 'workflow.run.alerted',
+        actorType: 'system',
+        actorId: 'broker-proxy',
+        targetType: 'workflow_run',
+        targetId: run.id,
+        outcome: queued.queued ? 'success' : 'failure',
+        detail: {
+          workflowId: run.workflow_id,
+          streak,
+          threshold,
+          severity,
+          queued: queued.queued,
+          suppressedBy: queued.suppressedBy,
+        },
+      })
+      .catch(() => undefined);
+  }
+
+  /**
+   * Failed runs since the last success. One indexed read on
+   * `workflow_run_workflow_idx (workflow_id, started_at DESC)`, bounded by the two aggregate scans
+   * the same index serves — no table scan, no stored counter.
+   */
+  private async failureStreak(workflowId: string): Promise<number> {
+    const result = await this.pool.query<{ streak: number }>(
+      `SELECT count(*)::int AS streak
+         FROM workflow_run r
+        WHERE r.workflow_id = $1
+          AND r.state = 'failed'
+          AND r.started_at > COALESCE(
+                (SELECT max(s.started_at) FROM workflow_run s
+                  WHERE s.workflow_id = $1 AND s.state = 'succeeded'),
+                '-infinity'::timestamptz)`,
+      [workflowId],
+    );
+    return result.rows[0]?.streak ?? 0;
+  }
+
+  /** Who to name in the alert. A workflow deleted between settle and alert is not an error. */
+  private async workflowOwner(workflowId: string): Promise<{ name: string; owner: string } | null> {
+    const result = await this.pool.query<{
+      name: string;
+      owner_idp_id: string;
+      owner_username: string | null;
+      owner_display_name: string | null;
+    }>(
+      `SELECT w.name, w.owner_idp_id, u.username AS owner_username, u.display_name AS owner_display_name
+         FROM workflow w
+         LEFT JOIN idp_user u ON u.idp_id = w.owner_idp_id
+        WHERE w.id = $1`,
+      [workflowId],
+    );
+    const row = result.rows[0];
+    if (row === undefined) return null;
+    return {
+      name: row.name,
+      owner: ownerName(row.owner_display_name, row.owner_username, row.owner_idp_id),
+    };
+  }
+}
+
+/** Long enough to identify the failure in a notification, short enough for a subject line. */
+const ALERT_MESSAGE_LIMIT = 200;
+
+function truncate(message: string): string {
+  return message.length > ALERT_MESSAGE_LIMIT
+    ? `${message.slice(0, ALERT_MESSAGE_LIMIT)}…`
+    : message;
 }
 
 /**

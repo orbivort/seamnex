@@ -74,9 +74,9 @@ describe('SignOutDialog before the request', () => {
 
     const dialog = screen.getByRole('dialog');
     expect(within(dialog).getByText('Sign out of the platform?')).toBeDefined();
-    expect(
-      within(dialog).getByText(/Your identity provider will ask you to confirm/),
-    ).toBeDefined();
+    // FR-3.8/AC-35: the promise is about the request the platform makes, not about delivery.
+    expect(within(dialog).getByText(/asks your identity provider to end its own/)).toBeDefined();
+    expect(within(dialog).queryByText(/are signed out too/i)).toBeNull();
     expect(within(dialog).getByRole('button', { name: 'Stay signed in' })).toBeDefined();
     expect(within(dialog).getByRole('button', { name: 'Sign out' })).toBeDefined();
     expect(onOpenChange).not.toHaveBeenCalled();
@@ -161,6 +161,60 @@ describe('SignOutDialog after the request', () => {
 
     expect(await screen.findByText('Projects')).toBeDefined();
     expect(screen.getByText('lifetime not verified')).toBeDefined();
+  });
+
+  /** AC-35: the dialog names what the provider was asked to do, and never claims delivery. */
+  it('names the products the identity provider was asked to end', async () => {
+    succeedWith(
+      logoutResponse({
+        residualSessions: [],
+        singleLogout: { identityProviderEnded: true, products: ['Core CRM', 'Projects'] },
+        statement: 'Signed out. The identity provider was asked to end 2 product session(s).',
+      }),
+    );
+    render(<SignOutDialog open onOpenChange={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+
+    expect(
+      await screen.findByText(/the provider was asked to end these product sessions/i),
+    ).toBeDefined();
+    expect(screen.getByText('Core CRM, Projects')).toBeDefined();
+    expect(screen.queryByText(/are signed out/i)).toBeNull();
+  });
+
+  it('says the provider could not be asked when single logout did not happen', async () => {
+    succeedWith(
+      logoutResponse({
+        residualSessions: [
+          residualSession({ instanceId: 'inst-1', product: 'Core CRM', maxRemainingMinutes: 480 }),
+        ],
+        singleLogout: { identityProviderEnded: false, products: [] },
+        statement: 'Signed out. Product sessions could not be ended at the identity provider.',
+      }),
+    );
+    render(<SignOutDialog open onOpenChange={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+
+    expect(
+      await screen.findByText(/could not be asked to end its session, so products that support/i),
+    ).toBeDefined();
+  });
+
+  it('explains a residual session whose single logout the platform cannot reach', async () => {
+    succeedWith(
+      logoutResponse({
+        residualSessions: [
+          residualSession({ instanceId: 'inst-1', product: 'Core CRM', singleLogout: true }),
+        ],
+      }),
+    );
+    render(<SignOutDialog open onOpenChange={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+
+    expect(await screen.findByText(/no back-channel endpoint is registered/i)).toBeDefined();
   });
 
   it('prints the estimate without a verification stamp when none was recorded', async () => {

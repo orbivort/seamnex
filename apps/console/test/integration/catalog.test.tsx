@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { HttpResponse, http } from 'msw';
 import { describe, expect, it } from 'vitest';
-import { scaffoldFor } from '@seamnex/mocks';
+import { getState, scaffoldFor } from '@seamnex/mocks';
 import { server } from '@seamnex/mocks/server';
 import { App } from '../../src/app';
 import { openAs } from '../helpers';
@@ -61,6 +61,90 @@ describe('catalog list', () => {
   });
 });
 
+/**
+ * ADR-BE-42 §10.4 — the fetch action.
+ *
+ * The acquisition is a server operation now, so the console has three things it must get right: it
+ * must not offer a fetch when the deployment has no source (AC-22), it must name the tree a
+ * successful fetch produced rather than only the delta, and it must report a mixed tree as a
+ * standing condition instead of an error the operator can dismiss.
+ */
+describe('catalog sync', () => {
+  it('disables the action and names the command when no source is configured', async () => {
+    openAs('R1', '/catalog');
+    getState().catalogRepository.source = { configured: false, host: null, ref: null };
+    render(<App />);
+    await screen.findByText('Domain catalog');
+
+    const sync = await screen.findByRole('button', { name: 'Sync from source' });
+    expect(sync.hasAttribute('disabled')).toBe(true);
+    // AC-22: the explanation has to name the way out, not just say "disabled".
+    expect(sync.getAttribute('title')).toContain('catalog:sync');
+  });
+
+  it('syncs a tag and names the source, ref and commit in the receipt', async () => {
+    openAs('R1', '/catalog');
+    render(<App />);
+    await screen.findByText('Domain catalog');
+
+    const trigger = await screen.findByRole('button', { name: 'Sync from source' });
+    // The action is disabled until the checkout view loads, and a click on it is then a no-op.
+    await waitFor(() => {
+      expect(trigger.hasAttribute('disabled')).toBe(false);
+    });
+    fireEvent.click(trigger);
+    const dialog = await screen.findByRole('dialog');
+
+    // The ref is pre-filled from configuration, so the operator confirms rather than retypes.
+    expect((within(dialog).getByLabelText(/Tag or commit/i) as HTMLInputElement).value).toBe(
+      'catalog-2026.11.0',
+    );
+    fireEvent.click(
+      within(dialog).getByRole('checkbox', { name: /I understand a sync can remove entries/i }),
+    );
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Sync now' }));
+
+    expect(await screen.findByText(/Catalogue synced at revision/i)).toBeDefined();
+    expect(screen.getByText(/github\.com\/orbivort\/seamnex-catalog/)).toBeDefined();
+  });
+
+  it('reports a refused fetch with its title and refuses to claim anything changed', async () => {
+    openAs('R1', '/catalog');
+    render(<App />);
+    await screen.findByText('Domain catalog');
+
+    const trigger = await screen.findByRole('button', { name: 'Sync from source' });
+    // The action is disabled until the checkout view loads, and a click on it is then a no-op.
+    await waitFor(() => {
+      expect(trigger.hasAttribute('disabled')).toBe(false);
+    });
+    fireEvent.click(trigger);
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText(/Tag or commit/i), {
+      target: { value: 'catalog-2099.01.0' },
+    });
+    fireEvent.click(
+      within(dialog).getByRole('checkbox', { name: /I understand a sync can remove entries/i }),
+    );
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Sync now' }));
+
+    expect(await screen.findByText('The source has no such tag')).toBeDefined();
+    expect(screen.getByText(/Nothing is reported as changed/i)).toBeDefined();
+  });
+
+  it('reports a mixed tree and names the repair', async () => {
+    openAs('R1', '/catalog');
+    const repository = getState().catalogRepository;
+    getState().catalogRepository = { ...repository, staged: { pending: ['upstream', '.git'] } };
+    render(<App />);
+
+    expect(await screen.findByText('The catalogue tree is mixed')).toBeDefined();
+    // AC-18: the banner names what is still old and what repairs it.
+    expect(screen.getByText('upstream, .git')).toBeDefined();
+    expect(screen.getByText(/Re-run the sync at the same ref/)).toBeDefined();
+  });
+});
+
 describe('catalog entry', () => {
   it('states the entry facts, its pinned image and its licence', async () => {
     openAs('R1', '/catalog/D01-01');
@@ -71,6 +155,22 @@ describe('catalog entry', () => {
     expect(screen.getByText('Upstream repository')).toBeDefined();
     expect(screen.getByText('Pinned image')).toBeDefined();
     expect(screen.getByText('Default resource shape')).toBeDefined();
+  });
+
+  /**
+   * FR-1.9 — the entry is where an operator decides to deploy, so the declared per-volume quotas and
+   * their total against the disk reservation belong here: a deployment whose quotas exceed that
+   * reservation is refused, and no other screen said so before the refusal.
+   */
+  it('shows each declared volume with its quota and the total against the reservation', async () => {
+    openAs('R1', '/catalog/D01-01');
+    render(<App />);
+    await screen.findByRole('heading', { name: /EspoCRM/ });
+
+    expect(await screen.findByText('app-data')).toBeDefined();
+    expect(screen.getByText('12.0 GB')).toBeDefined();
+    expect(screen.getByText('7.0 GB')).toBeDefined();
+    expect(screen.getByText(/19.0 GB of 20.0 GB reserved/)).toBeDefined();
   });
 
   it('lists the verified integration facts and the operation inventory', async () => {
@@ -105,9 +205,14 @@ describe('catalog entry', () => {
     render(<App />);
     await screen.findByRole('heading', { name: /EspoCRM/ });
 
+    // FR-2.15: the record action only fires on a real fact, so the form is edited first.
+    fireEvent.change(await screen.findByLabelText(/Session maximum/), {
+      target: { value: '481' },
+    });
     fireEvent.click(await screen.findByRole('button', { name: /Record verified review/ }));
 
     expect(await screen.findByText('D01-01 metadata verified')).toBeDefined();
+    expect(screen.getByText(/Verified: Session maximum/)).toBeDefined();
     expect(screen.getByText(/Review recorded by/)).toBeDefined();
   });
 
@@ -118,7 +223,7 @@ describe('catalog entry', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: /Prefetch images/ }));
 
-    expect(await screen.findByText(/Pre-pulling the images for D01-01/)).toBeDefined();
+    expect(await screen.findByText(/Preparing the images for D01-01/)).toBeDefined();
     expect(
       screen.getByText(/It does not create containers or touch the published route/),
     ).toBeDefined();

@@ -14,7 +14,12 @@
       "owns": [],
       "reads": []
     },
-    { "dir": "common", "owns": [], "reads": [] },
+    {
+      "$comment": "NFR-4.16: the image-trust guard runs inside common/docker, so the cached allow-list reader names that one table. M02 still owns the writes and the audit row.",
+      "dir": "common",
+      "owns": [],
+      "reads": ["trusted_registry_revision"]
+    },
     { "dir": "config", "owns": [], "reads": [] },
     { "dir": "contract", "owns": [], "reads": [] },
     { "dir": "database", "owns": [], "reads": [] },
@@ -40,13 +45,21 @@
         "integration_metadata"
       ],
       "mayImport": ["M22"],
-      "reads": ["instance"]
+      "$comment": "FR-2.14: `verified_by` records the reviewer's name, so the catalog resolves a subject id against the identity mirror the way M10 and M18 do. M08 still owns `idp_user` and every write to it.",
+      "reads": ["instance", "idp_user"]
     },
     {
       "id": "M02",
       "name": "Source Resolver",
       "dir": "m02-source-resolver",
-      "owns": ["source_resolution", "source_file", "compose_policy", "scaffold_artefact"],
+      "owns": [
+        "source_resolution",
+        "source_file",
+        "compose_policy",
+        "scaffold_artefact",
+        "trusted_registry_revision"
+      ],
+      "$comment": "NFR-4.16: the allow-list is source policy, so the module that evaluates compose/Dockerfile evidence also owns its revision rows. The pull/build guard in common/docker reads the same state through this module's reader rather than holding a copy.",
       "mayImport": ["M01", "M22"],
       "reads": ["catalog_entry", "deployment_definition", "policy_exception"]
     },
@@ -82,11 +95,14 @@
         "instance",
         "instance_service",
         "instance_volume",
+        "instance_usage_sample",
         "deployment_job",
         "job_step",
-        "job_log"
+        "job_log",
+        "image_scan_result"
       ],
       "mayImport": ["M02", "M03", "M04", "M07", "M15", "M19"],
+      "$comment": "M05 builds the instance read model, so it reads the evidence the other modules own rather than a copy of it: `backup`/`backup_schedule` (M16) are read because the fleet list and the detail header state the backup posture, and the document in `instance.payload` is only a fallback for rows no schedule or backup set has been recorded against yet. M16 still owns the writes.",
       "reads": [
         "deployment_plan",
         "render_set",
@@ -98,7 +114,9 @@
         "source_resolution",
         "instance_route",
         "scaffold_artefact",
-        "instance_env_value"
+        "instance_env_value",
+        "backup",
+        "backup_schedule"
       ]
     },
     {
@@ -114,7 +132,8 @@
       "name": "Integration",
       "dir": "m07-integration",
       "owns": ["idp_client", "instance_route", "integration_check"],
-      "mayImport": ["M05", "M15", "M23"],
+      "$comment": "M03 is the edge that makes a client secret real: the product reads it from `instance_env_value`, which M03 owns, so `ensureIdentitySecret` writes through M03's contract instead of this module's SQL.",
+      "mayImport": ["M05", "M15", "M23", "M03"],
       "reads": [
         "instance",
         "integration_metadata",
@@ -133,10 +152,19 @@
         "idp_group_member",
         "group_mapping",
         "sync_run",
+        "propagation_sample",
         "access_request"
       ],
-      "mayImport": ["M07", "M09", "M10", "M24"],
-      "reads": ["entitlement", "role_binding", "instance", "catalog_entry", "instance_route"]
+      "mayImport": ["M07", "M09", "M10", "M15", "M24"],
+      "$comment": "M15 is the product admin token for the FR-2.4 role push: the secret store is the only place a product credential may live, and opening it is audited.",
+      "reads": [
+        "entitlement",
+        "role_binding",
+        "instance",
+        "catalog_entry",
+        "instance_route",
+        "env_profile"
+      ]
     },
     {
       "id": "M09",
@@ -144,7 +172,15 @@
       "dir": "m09-access-control",
       "owns": ["role_binding", "policy_version", "settings", "machine_client"],
       "mayImport": [],
-      "reads": ["group_mapping", "idp_user", "instance", "catalog_entry"]
+      "$comment": "`workflow`/`workflow_run` are reads, not an edge: FR-5.9 decides scope by the products a definition writes to, so the PDP must resolve a workflow (or one of its runs) to instances without depending on M13.",
+      "reads": [
+        "group_mapping",
+        "idp_user",
+        "instance",
+        "catalog_entry",
+        "workflow",
+        "workflow_run"
+      ]
     },
     {
       "id": "M10",
@@ -195,7 +231,8 @@
         "workflow_approval",
         "field_snapshot"
       ],
-      "mayImport": ["M12", "M14"],
+      "$comment": "FR-5.9 needs two facts this module does not own: the live role bindings (M09) and the break-glass elevations an R1 write leans on (M18). Both are read through their contracts. FR-5.8 adds one more edge: the owner failure alert is delivered by M20, through its interface (ADR-BE-30).",
+      "mayImport": ["M09", "M12", "M14", "M18", "M20"],
       "reads": ["instance", "credential_scope", "catalog_entry", "idp_user", "registry_snapshot"]
     },
     {
@@ -229,7 +266,8 @@
         "instance_env_value",
         "instance_service",
         "instance_volume",
-        "instance_route"
+        "instance_route",
+        "render_file"
       ]
     },
     {
@@ -247,6 +285,8 @@
       "owns": [
         "license_record",
         "patch_record",
+        "patch_advisory",
+        "native_floor_decision",
         "break_glass_session",
         "policy_exception",
         "maintenance_window",
@@ -255,6 +295,7 @@
         "subject_ref"
       ],
       "mayImport": ["M08", "M09", "M10", "M17"],
+      "$comment": "FR-4.7: `instance_service` is read for the primary service's image tag — the version a deployment actually runs. The register's `current` is the baseline every `behind` verdict is measured from, and the catalogue pin (M01) is not it.",
       "reads": [
         "instance",
         "integration_metadata",
@@ -264,8 +305,10 @@
         "catalog_entry",
         "instance_status",
         "render_set",
+        "instance_service",
         "idp_user",
-        "product_account"
+        "product_account",
+        "source_resolution"
       ]
     },
     {
@@ -274,7 +317,8 @@
       "dir": "m19-capacity",
       "owns": ["capacity_snapshot", "capacity_reservation"],
       "mayImport": [],
-      "reads": ["instance", "instance_status", "catalog_entry"]
+      "$comment": "FR-4.5: `instance_usage_sample` is the measured half of the board. The owner is M05 because it is the module that reads the containers and writes the row; M19 only reads the newest sample per instance.",
+      "reads": ["instance", "instance_status", "catalog_entry", "instance_usage_sample"]
     },
     {
       "id": "M20",
@@ -282,7 +326,15 @@
       "dir": "m20-notification",
       "owns": ["alert_channel", "notification"],
       "mayImport": [],
-      "reads": ["maintenance_window", "break_glass_session", "instance", "instance_status"]
+      "$comment": "FR-4.5 adds the consumption samples (the threshold rule) and `catalog_entry` (FR-4.11: the domain owner the break-glass notice is addressed to). Both are reads; M20 writes only its own two tables.",
+      "reads": [
+        "maintenance_window",
+        "break_glass_session",
+        "instance",
+        "instance_status",
+        "instance_usage_sample",
+        "catalog_entry"
+      ]
     },
     {
       "id": "M21",
@@ -290,14 +342,15 @@
       "dir": "m21-observability",
       "owns": ["observability_profile"],
       "mayImport": ["M01"],
-      "reads": ["catalog_entry"]
+      "$comment": "FR-2.6/AC-45: the profile writer owns `observability_profile`; the report and exposition read the instance read model and the newest consumption sample. `instance` was absent while the module was contract-only, which is how the gap survived review.",
+      "reads": ["catalog_entry", "instance", "instance_usage_sample"]
     },
     {
       "id": "M22",
       "name": "Catalogue Repository Adapter",
       "dir": "m22-catalog-repository",
       "owns": ["catalog_commit", "drift_record", "instance_param"],
-      "mayImport": ["M01"],
+      "mayImport": ["M01", "M03"],
       "reads": ["instance", "scaffold_artefact", "instance_env_value"]
     },
     {

@@ -3,14 +3,22 @@ import { Plus } from 'lucide-react';
 import {
   toProblem,
   useCancelMaintenanceWindow,
+  useCatalog,
   useCreateMaintenanceWindow,
   useDecidePolicyException,
   useInstances,
   useMaintenanceWindows,
   usePolicyExceptions,
+  useRequestPolicyException,
 } from '@seamnex/api-client';
-import type { MaintenanceWindow } from '@seamnex/domain';
-import { can, canMutate } from '@seamnex/domain';
+import type { MaintenanceWindow, WaivableComposeRule } from '@seamnex/domain';
+import {
+  COMPOSE_RULE_LABELS,
+  WAIVABLE_RULES,
+  can,
+  canMutate,
+  composeRuleLabel,
+} from '@seamnex/domain';
 import {
   Alert,
   Badge,
@@ -29,12 +37,19 @@ import {
   Select,
   SkeletonLines,
   StatusPill,
+  Textarea,
   useNow,
 } from '@seamnex/ui';
 import { formatDateTime } from '@seamnex/utils';
 import { AsyncPanel } from '@seamnex/shell';
 import { useSession } from '../../session';
-import { localInputToIso, toLocalInputValue, windowStateLabel } from './maintenance-time';
+import {
+  endOfDayToIso,
+  localInputToIso,
+  toDateInputValue,
+  toLocalInputValue,
+  windowStateLabel,
+} from './maintenance-time';
 
 /** A window is defined by two instants, so a list that never re-reads the clock goes stale. */
 const WINDOW_TICK_MS = 30_000;
@@ -56,6 +71,11 @@ export function MaintenancePage() {
   const canConfigure = canMutate(session.role, 'maintenance.configure');
   const canReadExceptions = can(session.role, 'exception.decide');
   const canDecide = canMutate(session.role, 'exception.decide');
+  /*
+   * NFR-4.15: filing is R1's act and deciding is the second party's, so they are two capabilities and
+   * two buttons. R3 approves and cannot file; R1 files and never decides its own request.
+   */
+  const canRequest = canMutate(session.role, 'exception.request');
 
   const windows = useMaintenanceWindows({
     enabled: canReadWindows,
@@ -81,6 +101,7 @@ export function MaintenancePage() {
   const [startsAt, setStartsAt] = useState('');
   const [endsAt, setEndsAt] = useState('');
   const [cancelTarget, setCancelTarget] = useState<MaintenanceWindow | null>(null);
+  const [requestOpen, setRequestOpen] = useState(false);
 
   /* Only the role that may schedule a window needs the instance list, and only while the form is
      open: the platform-wide list is refused to a scoped grant. */
@@ -263,7 +284,23 @@ export function MaintenancePage() {
           <PanelHeader
             eyebrow="Exceptions"
             title="Compose policy exceptions"
-            description="Rejected by default: published ports, host networking, privileged mode, host bind mounts, unpinned images."
+            description="Rejected by default: host networking, privileged mode, host bind mounts, external networks, unpinned images."
+            actions={
+              <Button
+                variant="secondary"
+                size="sm"
+                icon={<Plus />}
+                disabled={!canRequest}
+                title={
+                  canRequest
+                    ? undefined
+                    : 'Filing an exception needs exception.request (R1); the second party decides it.'
+                }
+                onClick={() => setRequestOpen(true)}
+              >
+                Request exception
+              </Button>
+            }
           />
           {/* Mutation feedback belongs to the control that caused it, so it stays outside the async
               region: the decision is already made whether or not the list has reloaded yet. */}
@@ -281,7 +318,7 @@ export function MaintenancePage() {
             <div className="p-3">
               <Alert
                 tone={decide.data.state === 'approved' ? 'positive' : 'caution'}
-                title={`${decide.data.rule} · ${decide.data.state}`}
+                title={`${composeRuleLabel(decide.data.rule)} · ${decide.data.state}`}
                 action={
                   <Button size="sm" variant="quiet" onClick={() => decide.reset()}>
                     Dismiss
@@ -321,7 +358,7 @@ export function MaintenancePage() {
                       <div className="flex flex-wrap items-start justify-between gap-2">
                         <div>
                           <p className="text-body font-semibold text-text">
-                            {exception.rule} ·{' '}
+                            {composeRuleLabel(exception.rule)} ·{' '}
                             <span className="font-mono text-micro">{exception.scope}</span>
                           </p>
                           <p className="mt-0.5 max-w-2xl text-meta leading-snug text-muted">
@@ -574,6 +611,197 @@ export function MaintenancePage() {
           cancel.mutate(target.id, { onSuccess: () => setCancelTarget(null) });
         }}
       />
+
+      {/*
+        Mounted only while open: the product list is `GET /catalog`, and a screen that is merely being
+        read should not issue it. The dialog owns its own state so the page's form state stays one
+        form (CL-05's window) and the two cannot reset each other.
+      */}
+      {requestOpen ? <RequestExceptionDialog onClose={() => setRequestOpen(false)} /> : null}
     </Page>
+  );
+}
+
+/** Matches the API's `MIN_JUSTIFICATION`; the hint states the same number. */
+const MIN_EXCEPTION_JUSTIFICATION = 20;
+/** The API refuses an exception longer than a quarter; the form says so before the round trip. */
+const MAX_EXCEPTION_DAYS = 90;
+const DEFAULT_EXCEPTION_DAYS = 14;
+
+/**
+ * FR-1.20 / NFR-4.15 / AC-33 — filing the request half of the exception flow.
+ *
+ * The form names a product, a rule, a reason and an expiry, and nothing else. It deliberately does
+ * not take a diff: the deviation is read from the platform's own refused resolution, so a requester
+ * cannot describe one the approver would then grant.
+ */
+function RequestExceptionDialog({ onClose }: { onClose: () => void }) {
+  const catalog = useCatalog();
+  const request = useRequestPolicyException();
+  /* Minute granularity: the form decides on whole days, and a one-second tick would re-render it. */
+  const now = useNow(60_000);
+  const [entryKey, setEntryKey] = useState('');
+  /*
+   * NFR-4.16: only the waivable subset can be offered. `untrusted_registry` is a compose rule the
+   * evaluator emits, but its only remedy is a new allow-list revision — an exception request for it
+   * is refused by the API, so offering it here would be a form that cannot succeed.
+   */
+  const [rule, setRule] = useState<WaivableComposeRule>('privileged');
+  const [justification, setJustification] = useState('');
+  const [expiresOn, setExpiresOn] = useState(() =>
+    toDateInputValue(new Date(now + DEFAULT_EXCEPTION_DAYS * 24 * 60 * 60 * 1_000)),
+  );
+
+  const problem = request.error ? toProblem(request.error) : null;
+  const fieldError = (name: string) =>
+    problem?.fieldErrors.find((issue) => issue.field === name)?.message;
+
+  const expiresAt = endOfDayToIso(expiresOn);
+  const ceiling = now + MAX_EXCEPTION_DAYS * 24 * 60 * 60 * 1_000;
+  const tooLate = expiresAt !== null && Date.parse(expiresAt) > ceiling;
+  const past = expiresAt !== null && Date.parse(expiresAt) <= now;
+  const canSubmit =
+    !request.isPending &&
+    entryKey.length > 0 &&
+    justification.trim().length >= MIN_EXCEPTION_JUSTIFICATION &&
+    expiresAt !== null &&
+    !tooLate &&
+    !past;
+
+  return (
+    <Dialog
+      open
+      onOpenChange={(next) => (next ? undefined : onClose())}
+      title="Request a compose policy exception"
+      description="One rule, one product, one time box. A second party decides it, and the expiry blocks the next deployment once it passes."
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            variant="primary"
+            icon={<Plus />}
+            disabled={!canSubmit}
+            title={
+              canSubmit
+                ? undefined
+                : entryKey.length === 0
+                  ? 'Choose the product the deviation belongs to.'
+                  : justification.trim().length < MIN_EXCEPTION_JUSTIFICATION
+                    ? `A written justification of at least ${MIN_EXCEPTION_JUSTIFICATION} characters is required.`
+                    : past
+                      ? 'The expiry must be in the future; an expired exception blocks the next deployment.'
+                      : tooLate
+                        ? `At most ${MAX_EXCEPTION_DAYS} days.`
+                        : 'Complete the form.'
+            }
+            onClick={() => {
+              if (expiresAt === null) return;
+              request.mutate(
+                {
+                  entryKey,
+                  rule,
+                  justification: justification.trim(),
+                  expiresAt,
+                },
+                { onSuccess: onClose },
+              );
+            }}
+          >
+            {request.isPending ? 'Filing…' : 'Request exception'}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        {problem !== null ? (
+          <Callout tone="danger" title={problem.title}>
+            {problem.detail} {problem.remediation}
+          </Callout>
+        ) : null}
+        <Field
+          label="Product"
+          required
+          htmlFor="pe-entry"
+          error={fieldError('entryKey')}
+          hint="The exception covers this product only; its other deployments stay blocked by the same rule."
+        >
+          <Select
+            id="pe-entry"
+            value={entryKey}
+            disabled={catalog.isPending || catalog.isError}
+            onChange={(event) => setEntryKey(event.target.value)}
+          >
+            <option value="">{catalog.isError ? 'Catalog unavailable' : 'Choose a product'}</option>
+            {(catalog.data ?? []).map((entry) => (
+              <option key={entry.key} value={entry.key}>
+                {entry.key} · {entry.product}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field
+          label="Rule"
+          required
+          htmlFor="pe-rule"
+          error={fieldError('rule')}
+          hint={COMPOSE_RULE_LABELS[rule].description}
+        >
+          <Select
+            id="pe-rule"
+            value={rule}
+            onChange={(event) => setRule(event.target.value as WaivableComposeRule)}
+          >
+            {WAIVABLE_RULES.map((candidate) => (
+              <option key={candidate} value={candidate}>
+                {COMPOSE_RULE_LABELS[candidate].label}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field
+          label="Justification"
+          required
+          htmlFor="pe-justification"
+          error={fieldError('justification')}
+          hint={`Why this product needs the deviation, and when it will be gone. ${justification.trim().length}/${MIN_EXCEPTION_JUSTIFICATION} characters.`}
+        >
+          <Textarea
+            id="pe-justification"
+            value={justification}
+            rows={4}
+            onChange={(event) => setJustification(event.target.value)}
+            placeholder="The agency staging sync needs the wp-content directory on the host until the migration closes at the end of the quarter."
+          />
+        </Field>
+        <Field
+          label="Expires on"
+          required
+          htmlFor="pe-expiry"
+          error={
+            fieldError('expiresAt') ??
+            (past
+              ? 'Choose a future date.'
+              : tooLate
+                ? `At most ${MAX_EXCEPTION_DAYS} days ahead.`
+                : undefined)
+          }
+          hint={`The last second of that day. Renew before it lapses; at most ${MAX_EXCEPTION_DAYS} days.`}
+        >
+          <Input
+            id="pe-expiry"
+            type="date"
+            value={expiresOn}
+            onChange={(event) => setExpiresOn(event.target.value)}
+          />
+        </Field>
+        <InlineNote>
+          The approver is shown the deviation the platform recorded on the last refused deployment
+          of this product, not a description typed here. A second party decides it; the requester
+          never can.
+        </InlineNote>
+      </div>
+    </Dialog>
   );
 }

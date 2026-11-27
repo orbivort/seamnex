@@ -24,7 +24,7 @@ import type { RelayFailure } from './relay.contract';
 export type ProductLoginInput = {
   /** Internal origin on the instance network (`http://openproject:80`); never the public one. */
   readonly origin: string;
-  /** What a browser uses (`http://openproject.localhost:8020`), for `Host`, `Origin`, `Referer`. */
+  /** What a browser uses (`https://openproject.localhost:8443`), for `Host`, `Origin`, `Referer`. */
   readonly publicOrigin: string;
   readonly username: string;
   /** The user's product password. Read from the secret store immediately before the attempt. */
@@ -61,7 +61,8 @@ const LOGIN_FORM_MARKER = 'user-login--form';
 
 /**
  * Apache answers `200` with a placeholder page before Rails is up. Treating that as success is the
- * documented trap that once declared a healthy container unhealthy (`platform/upstream/D09-01`).
+ * documented trap that once declared a healthy container unhealthy (`upstream/D09-01` in the
+ * catalogue checkout).
  */
 const PLACEHOLDER_MARKER = 'expects to be reached on the following domain';
 
@@ -490,14 +491,28 @@ export function makeCall(
   timeoutMs: number,
   doFetch: typeof globalThis.fetch,
 ): Call {
-  return (pathOrUrl, init) =>
-    doFetch(absolute(pathOrUrl, input.origin), {
+  // Parsed per call, not once up front: a caller with a malformed origin then reaches the same
+  // try/catch that turns a transport problem into `product_unavailable`, instead of throwing out of
+  // the driver before an attempt is recorded.
+  return (pathOrUrl, init) => {
+    const browser = new URL(input.publicOrigin);
+    return doFetch(absolute(pathOrUrl, input.origin), {
       method: init.method,
       redirect: 'manual',
       headers: {
         // The product's `config.hosts` compares the header, and a bare IP request reaches Apache's
         // `_default_` vhost — which answers `200` with a placeholder page.
-        host: new URL(input.publicOrigin).host,
+        host: browser.host,
+        /*
+         * The edge terminates TLS, so the scheme the browser used reaches the product only in this
+         * header. Without it Rails sees a plain-HTTP request, computes its base URL as `http://…`,
+         * and rejects the `https://…` `Origin` we send with `422 Cross-Site Request Forgery` — every
+         * sign-in fails at the form even with a correct password (measured on 17.9.6 through the
+         * TLS-only edge: the same POST answers `422` without the header and reaches the credential
+         * check with it). `http` when the route is genuinely plain, which is what the product would
+         * have concluded anyway.
+         */
+        'x-forwarded-proto': browser.protocol.replace(':', ''),
         accept: init.accept ?? 'text/html',
         ...(init.method === 'POST'
           ? {
@@ -515,6 +530,7 @@ export function makeCall(
       ...(init.body === undefined ? {} : { body: init.body }),
       signal: AbortSignal.timeout(timeoutMs),
     });
+  };
 }
 
 async function refetchForm(

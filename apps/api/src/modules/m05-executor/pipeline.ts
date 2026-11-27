@@ -8,10 +8,12 @@ import { OUTBOX_SERVICE, type Outbox } from '../m17-audit/audit.contract';
 import { APP_CONFIG } from '../../config/config.module';
 import type { AppConfig } from '../../config/config';
 import { requireAdapters } from '../../common/adapters';
+import { digestPinVerdict } from '../../common/docker/digest-pin';
 import { AppError } from '../../common/problem/app-error';
 import { ensureDir, writeFileAtomic } from '../../common/fs/files';
-import { join } from 'node:path';
-import { existsSync } from 'node:fs';
+import { runtimeSecretsPaths } from '../../common/compose/runtime-secrets';
+import { dirname, join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
 import { AUDIT_SERVICE, type AuditService } from '../m17-audit/audit.contract';
 import { SECRETS_SERVICE, type SecretsService } from '../m15-secrets/secrets.contract';
 import { JobService } from '../../jobs/job.service';
@@ -37,13 +39,27 @@ import {
   type PlannerService,
 } from '../m04-planner/planner.contract';
 import { CAPACITY_SERVICE, type CapacityService } from '../m19-capacity/capacity.contract';
+import { IMAGE_SCAN_SERVICE, type ImageScanService } from './executor.contract';
 import {
   INTEGRATION_SERVICE,
   type IntegrationService,
 } from '../m07-integration/integration.contract';
-import { DockerEngineClient, type ComposeProject } from '../../common/docker/docker.client';
-import { instanceNetwork } from '../../common/docker/naming';
-import { describeProbe, probeProductHttp } from '../../common/exec/http-probe';
+import {
+  DockerEngineClient,
+  type ComposeProject,
+  type VolumeSummary,
+} from '../../common/docker/docker.client';
+import { instanceNetwork, projectName } from '../../common/docker/naming';
+import { engineOf } from '../../common/engine/database';
+import { writeExportArchive, type ExportArtefact } from './export-archive';
+import { composeDocumentOf, mountPathForVolume } from '../../common/compose/compose-volumes';
+import {
+  describeProbe,
+  installerReason,
+  probeProductHttp,
+  type HttpProbeResult,
+} from '../../common/exec/http-probe';
+import { productVersionOf } from '../../common/docker/image-ref';
 
 type InstanceRow = {
   id: string;
@@ -56,6 +72,8 @@ type InstanceRow = {
   source_path: 'compose' | 'dockerfile' | 'scaffold' | null;
   /** `instance_route.host`; null until the first `integrate` stage materialises the route. */
   route_host: string | null;
+  /** `instance_route.tls_mode`; null until the first `integrate` stage materialises the route. */
+  route_tls_mode: string | null;
 };
 
 type RunState = {
@@ -63,6 +81,27 @@ type RunState = {
   source?: ResolvedSource;
   renderSet?: RenderSet;
   plan?: PlanRecord;
+  /** Set by `export`; the audit record names the artefact so AC-20 has evidence, not a promise. */
+  artefact?: ExportArtefact;
+  /**
+   * Image reference → the id `build` produced in this run, or absent when the entry needs no build.
+   * `apply` proves the tag still resolves to these before and after the containers exist, which is
+   * the only claim about a local image that cannot be satisfied by a pull.
+   */
+  builds?: ReadonlyMap<string, string>;
+};
+
+/** One image a catalogue entry pins: the reference to fetch, and the digest that pin claims. */
+type PinnedImage = {
+  readonly reference: string;
+  readonly digest: string | null;
+};
+
+/** A build a vendored tree declares: what to tag, and where its context and Dockerfile live. */
+type DeclaredBuild = {
+  readonly reference: string;
+  readonly context: string;
+  readonly dockerfile: string;
 };
 
 /**
@@ -111,6 +150,7 @@ export class DeploymentPipeline implements OnModuleInit {
     @Inject(INTEGRATION_SERVICE) private readonly integration: IntegrationService,
     @Inject(PipelineRegistry) private readonly pipelines: PipelineRegistry,
     @Inject(OUTBOX_SERVICE) private readonly outbox: Outbox,
+    @Inject(IMAGE_SCAN_SERVICE) private readonly images: ImageScanService,
   ) {}
 
   onModuleInit(): void {
@@ -118,6 +158,9 @@ export class DeploymentPipeline implements OnModuleInit {
       stage('resolve', 'Resolve source', (context) => this.resolve(context)),
       stage('render', 'Render definition', (context) => this.render(context)),
       stage('plan', 'Plan and admit', (context) => this.plan(context)),
+      // After admission, so an entry the capacity check refuses never costs a build; before apply,
+      // because the definition is not startable until its images exist locally.
+      stage('build', 'Build images', (context) => this.buildImages(context)),
       stage('apply', 'Apply', (context) => this.apply(context)),
       stage('verify', 'Verify readiness', (context) => this.verify(context)),
       stage('integrate', 'Register identity and check integration', (context) =>
@@ -133,6 +176,7 @@ export class DeploymentPipeline implements OnModuleInit {
       stage('render', 'Render definition', (context) => this.render(context)),
       stage('plan', 'Plan and admit', (context) => this.plan(context)),
       stage('backup', 'Confirm pre-upgrade backup', (context) => this.requireBackup(context)),
+      stage('build', 'Build images', (context) => this.buildImages(context)),
       stage('apply', 'Apply', (context) => this.apply(context)),
       stage('verify', 'Verify readiness', (context) => this.verify(context)),
       stage('integrate', 'Register identity and check integration', (context) =>
@@ -204,6 +248,11 @@ export class DeploymentPipeline implements OnModuleInit {
     this.runs.set(context.jobId, { instance });
     await this.setState(instance.id, 'resolving');
 
+    // FR-1.7: the confirmation is re-asserted against the catalogue at job time. The dialog read the
+    // pin minutes ago; applying whatever the catalogue holds now is what made "the operator
+    // confirmed 9.2.1" unprovable.
+    await this.assertConfirmedVersion(context, instance);
+
     const source = await this.sources.resolve({
       instanceId: instance.id,
       entryKey: instance.entry_key,
@@ -216,6 +265,44 @@ export class DeploymentPipeline implements OnModuleInit {
     await context.log(
       'stdout',
       `source retained: ${source.files.map((file) => file.path).join(', ') || 'none'}`,
+    );
+  }
+
+  /**
+   * FR-1.7/AC-06: refuse an upgrade whose confirmed version is no longer the catalogue pin.
+   *
+   * The catalogue holds one pinned image per entry, so `targetVersion` is a promise about the pin
+   * rather than a selector: equality with `payload.upstream.latestVersion` is the whole check. A
+   * later multi-version catalogue changes the resolution step, not this assertion.
+   */
+  private async assertConfirmedVersion(
+    context: PipelineContext,
+    instance: InstanceRow,
+  ): Promise<void> {
+    const confirmed = context.payload.targetVersion;
+    if (context.action !== 'upgrade' || typeof confirmed !== 'string' || confirmed.length === 0) {
+      return;
+    }
+    const row = await this.pool.query<{ latest: string | null }>(
+      `SELECT payload #>> '{upstream,latestVersion}' AS latest
+         FROM catalog_entry WHERE key = $1`,
+      [instance.entry_key],
+    );
+    const latest = row.rows[0]?.latest ?? null;
+    if (latest !== confirmed) {
+      throw new AppError({
+        code: 'STATE_CONFLICT',
+        detail:
+          latest === null
+            ? `The confirmed upgrade target ${confirmed} cannot be re-asserted: ${instance.entry_key} records no upstream version.`
+            : `The catalogue now pins ${latest}, not the confirmed ${confirmed}.`,
+        remediation:
+          'Re-open the upgrade dialog and confirm the version the catalogue pins now. Nothing was changed.',
+      });
+    }
+    await context.log(
+      'stdout',
+      `confirmed upgrade target ${confirmed} still matches the catalogue pin`,
     );
   }
 
@@ -245,7 +332,25 @@ export class DeploymentPipeline implements OnModuleInit {
     if (state.source === undefined) throw new Error('render ran before resolve');
     await this.setState(state.instance.id, 'rendering');
 
-    const route = routeOf(state.instance);
+    /*
+     * 4D.1 — the identity client's secret is applied before the definition that carries it.
+     *
+     * `registerIdentity` runs in `integrate`, which is after `apply`, because the redirect URI it
+     * registers is derived from the route that stage materialises. A secret minted there could only
+     * reach a container on the *next* deployment, and ERPNext booted without one, took its documented
+     * fallback and never wrote a `Social Login Key` while every check stayed green. The value is put
+     * on the instance here instead, so the render in the next statement includes it and `apply`
+     * injects it; `registerIdentity` then registers that same value at the identity provider.
+     */
+    const secret = await this.integration.ensureIdentitySecret(state.instance.id, context.actorId);
+    if (secret.variable !== null && secret.status !== 'applied') {
+      await context.log(
+        'stdout',
+        `${secret.variable} ${secret.status === 'minted' ? 'generated and stored' : 'stored'} as the instance secret it is applied from`,
+      );
+    }
+
+    const route = routeOf(state.instance, this.config.SEAMNEX_EDGE_TLS_MODE);
     const resources = resourcesOf(state.instance);
     const renderSet = await this.renderer.render({
       instanceId: state.instance.id,
@@ -375,36 +480,61 @@ export class DeploymentPipeline implements OnModuleInit {
     }
     const project = this.composeProjectFor(state.instance.id, renderSet);
 
-    if (state.source?.path === 'dockerfile' || state.source?.path === 'scaffold') {
-      const ref = state.source.imageRef;
-      if (ref !== null) {
-        await context.log('stdout', `building ${ref}`);
-        await this.docker.build({
-          context: state.source.directory,
-          dockerfile: state.source.dockerfilePath ?? join(state.source.directory, 'Dockerfile'),
-          tag: ref,
-          labels: {
-            'seamnex.instance': state.instance.id,
-            'seamnex.entry': state.instance.entry_key,
-          },
-        });
-      }
-    }
+    /*
+     * FR-1.5 — before anything from the definition starts. Two questions, depending on how the
+     * artefact came to exist: an entry that builds (any service with a `build:` section) must be
+     * running the image this run produced, and an entry that does not is compared with the digest the
+     * catalogue records. The build ran in the previous stage, so nothing here may trigger one.
+     */
+    await this.assertPinnedImages(state, context);
 
     await this.docker.ensureNetwork(instanceNetwork(state.instance.slug), {
       'seamnex.instance': state.instance.id,
     });
-    // A service with a `build:` section is rebuilt here, every apply. `compose up` builds only when
-    // the image tag is missing, so relying on it meant a reviewed Dockerfile change was never built
-    // once the tag existed — the container was recreated from the previous image and the deployment
-    // reported success against a revision that never ran.
-    const built = servicesWithBuild(renderSet);
-    if (built.length > 0) {
-      await context.log('stdout', `building from the definition: ${built.join(', ')}`);
-      await this.docker.composeBuild(project, (line) => context.log('stdout', line));
+
+    /*
+     * NFR-4.6 / S-10 — the scan below asks the daemon about every image by name, so a sidecar nobody
+     * has fetched yet is an inspect 404 rather than a finding. `compose up` would fetch it, but `up`
+     * runs after the scan on purpose; on a host that had never pulled `mariadb:11.4.13@sha256:…` the
+     * first deployment of D01-01 died here with the daemon's `no such image` and no stage had tried.
+     */
+    await this.ensureImagesLocal(state, renderSet, context);
+
+    /*
+     * NFR-4.6 / S-10 — scan what is about to start, after every image is local and before any
+     * container exists. Placed here rather than in `prepull` because the build stage produced the
+     * images: a Dockerfile path has no image to scan until `build` has run.
+     */
+    const scanned = await this.images.scanForDeploy({
+      instanceId: state.instance.id,
+      references: imagesOf(renderSet),
+      log: (level, line) => context.log(level, line),
+    });
+    if (scanned.length > 0) {
+      /*
+       * `error` is a first-class verdict, so this line may not summarise every outcome as a pass: a
+       * deployment that continued past an unscannable image (fail-open) would otherwise read as
+       * "no blocking findings" one line after saying nothing was looked at.
+       */
+      const blocked = scanned.filter((summary) => summary.verdict === 'blocked').length;
+      const unscanned = scanned.filter((summary) => summary.verdict === 'error').length;
+      await context.log(
+        'system',
+        blocked === 0 && unscanned === 0
+          ? `${scanned.length} image(s) scanned; no blocking findings`
+          : `${scanned.length} image(s) examined: ${scanned.length - blocked - unscanned} passed, ${blocked} blocked, ${unscanned} not scanned`,
+      );
     }
+
     await this.docker.composeUp(project, (line) => context.log('stdout', line));
     await context.log('stdout', 'compose project applied');
+    // The tag was proved before `up`; this proves `up` did not change what it settled on. A rebuild
+    // between the two would be invisible in the container list, which reports the image it started.
+    await this.assertBuiltArtefactRunning(state, context);
+    // FR-1.9 / FR-1.12: `compose up` is what creates the named volumes, so this is the first moment
+    // they exist. Recorded here rather than in `record` on purpose — a deployment that fails its
+    // readiness check still holds real data, and a backup of that state must not be empty.
+    await this.recordVolumes(state.instance, renderSet, context);
   }
 
   /**
@@ -439,7 +569,26 @@ export class DeploymentPipeline implements OnModuleInit {
       const running = containers.filter((container) => container.state === 'running');
       if (containers.length > 0 && running.length === containers.length) {
         await noise.note('stdout', `${running.length} container(s) running`);
-        if (await this.httpReady(state.instance, (line) => noise.note('stdout', line))) {
+        const probe = await this.httpReady(state.instance, (line) => noise.note('stdout', line));
+        if (probe.ok && probe.installer !== null) {
+          /*
+           * Reachable and uninstalled is a state, not a failure, and not `ready`.
+           *
+           * D07-01's entrypoint starts Apache on purpose when its first-boot install refuses, so that
+           * the operator can finish in the product's own installer — that is why this stage must not
+           * throw here: `integrate` still has to materialise the route, or the installer it just
+           * pointed at would be unreachable. What it must not do is call the instance ready, which is
+           * what three screens (instance state, portal tile, integration checks) reported for a
+           * product whose `/` was its Setup Wizard.
+           */
+          await this.setState(state.instance.id, 'degraded', installerReason(probe.installer));
+          await context.log(
+            'stderr',
+            `${installerReason(probe.installer)}. The route stays published so the installation can be completed in a browser; reconfigure the instance afterwards.`,
+          );
+          return;
+        }
+        if (probe.ok) {
           await this.setState(state.instance.id, 'ready');
           return;
         }
@@ -587,6 +736,19 @@ export class DeploymentPipeline implements OnModuleInit {
           'Fix the failing check and re-run the deployment. The previous render set is retained; the instance is not marked ready.',
       });
     }
+    /*
+     * `ready` last, and not unconditionally: a product that answers with its own installer is
+     * reachable, route-complete and not usable, and this is the stage that used to overwrite the
+     * `degraded` verdict `verify` had just recorded.
+     */
+    if (verdict.installPending !== null) {
+      await this.setState(state.instance.id, 'degraded', installerReason(verdict.installPending));
+      await context.log(
+        'stderr',
+        `${installerReason(verdict.installPending)}; the instance is not marked ready`,
+      );
+      return;
+    }
     await this.setState(state.instance.id, 'ready');
     await context.log('stdout', 'integration checks passed; instance is ready');
   }
@@ -598,12 +760,13 @@ export class DeploymentPipeline implements OnModuleInit {
    *
    * `probeProductHttp` accepts any status below 500 and never follows a redirect: a product that
    * answers `302 → install/` is reachable, and `wget` used to read that relative `Location` as a host
-   * name and fail the whole stage.
+   * name and fail the whole stage. The result is returned whole rather than as a boolean because
+   * "answered" and "installed" are two facts, and the caller has to be able to tell them apart.
    */
   private async httpReady(
     instance: InstanceRow,
     note: (line: string) => Promise<void>,
-  ): Promise<boolean> {
+  ): Promise<HttpProbeResult> {
     const port = httpPortOf(instance);
     const probe = await probeProductHttp({
       runCli: (file, args, timeoutMs) => this.docker.runCli(file, args, timeoutMs),
@@ -614,22 +777,48 @@ export class DeploymentPipeline implements OnModuleInit {
     if (!probe.ok) {
       await note(`readiness probe http://${instance.slug}:${port}/ ${describeProbe(probe)}`);
     }
-    return probe.ok;
+    return probe;
   }
 
   private async record(context: PipelineContext): Promise<void> {
     const state = this.requireRun(context.jobId);
     const renderSet = state.renderSet;
 
+    /*
+     * FR-1.7: what is running, recorded from the artefact that was applied rather than from the
+     * request. `targetVersion` proves intent; `appliedVersion` proves outcome, and they are equal
+     * only because `assertConfirmedVersion` checked the pin. A Dockerfile/scaffold build records no
+     * tag, so the previous value is kept rather than replaced with a guess.
+     *
+     * The version is the *product's* image, matched by repository against the entry's declared image.
+     * Index 0 is the compose file's first service, which for D07-01 is the `mariadb:11.4` sidecar: the
+     * instance screen showed "current version 11.4 — available 5.9" for an OrangeHRM 5.9 deployment,
+     * and an upgrade confirmation would have compared the database's tag.
+     */
+    const declaredImage =
+      typeof state.instance.payload.imageRef === 'string' ? state.instance.payload.imageRef : null;
+    const appliedVersion =
+      renderSet === undefined ? null : productVersionOf(renderSet.imageRefs, declaredImage);
+
     if (renderSet !== undefined) {
       await this.recordServices(state.instance, renderSet);
       await this.pool.query(
         `UPDATE instance
-            SET payload = payload || jsonb_build_object('activeRenderSetId', $2::text),
+            SET payload = payload || jsonb_build_object('activeRenderSetId', $2::text)
+                        || CASE WHEN $4::text IS NULL THEN '{}'::jsonb
+                                ELSE jsonb_build_object('currentVersion', $4::text) END
+                        || CASE WHEN $5::text IS NULL THEN '{}'::jsonb
+                                ELSE jsonb_build_object('imageDigest', $5::text) END,
                 source_path = $3,
                 updated_at = now()
           WHERE id = $1`,
-        [state.instance.id, renderSet.id, state.source?.path ?? state.instance.source_path],
+        [
+          state.instance.id,
+          renderSet.id,
+          state.source?.path ?? state.instance.source_path,
+          appliedVersion,
+          this.builtPrimaryDigest(state, renderSet),
+        ],
       );
     }
 
@@ -660,6 +849,11 @@ export class DeploymentPipeline implements OnModuleInit {
         renderSetId: renderSet?.id ?? null,
         planId: state.plan?.planId ?? null,
         changes: state.plan?.changes.length ?? 0,
+        // FR-1.7/AC-06: the trail now names the version the operator confirmed and the version the
+        // applied artefact actually carries.
+        targetVersion:
+          typeof context.payload.targetVersion === 'string' ? context.payload.targetVersion : null,
+        appliedVersion,
       },
     });
     this.runs.delete(context.jobId);
@@ -704,7 +898,12 @@ export class DeploymentPipeline implements OnModuleInit {
       targetType: 'instance',
       targetId: instanceId,
       outcome: 'failure',
-      detail: { jobId: context.jobId, fromState: instance.state },
+      detail: {
+        jobId: context.jobId,
+        fromState: instance.state,
+        targetVersion:
+          typeof context.payload.targetVersion === 'string' ? context.payload.targetVersion : null,
+      },
     });
   }
 
@@ -781,11 +980,18 @@ export class DeploymentPipeline implements OnModuleInit {
      * says so, and the sampler promotes it to `ready` once the probe passes; that is the same
      * evidence the status page shows, not a promise the job makes.
      */
-    const ready = await this.httpReady(instance, (line) => context.log('stdout', line));
+    const probe = await this.httpReady(instance, (line) => context.log('stdout', line));
+    // An installer page answers, so it is not "did not pass"; it is a product that is up and not
+    // installed, and it must not become `ready` here either.
+    const ready = probe.ok && probe.installer === null;
     await this.setState(
       instance.id,
       ready ? 'ready' : 'degraded',
-      ready ? null : `containers started, but the readiness probe did not pass (${action})`,
+      ready
+        ? null
+        : probe.installer !== null
+          ? installerReason(probe.installer)
+          : `containers started, but the readiness probe did not pass (${action})`,
     );
     await context.log(
       ready ? 'stdout' : 'stderr',
@@ -840,42 +1046,553 @@ export class DeploymentPipeline implements OnModuleInit {
     await context.log('stdout', `project removed; data retention: ${retention}`);
   }
 
+  /**
+   * FR-1.13 / AC-20 — a full data export, not a description of one.
+   *
+   * Two refusals happen before any helper runs, because a file whose name promises a full export and
+   * whose contents are partial is the defect this stage used to be:
+   *
+   * - no applied (or latest) render set: there is no definition and no product to capture;
+   * - a declared database service while the instance is not running: a stopped product cannot be
+   *   dumped, and silently omitting its database would make the archive a lie.
+   *
+   * A failed capture therefore leaves no artefact behind — the writer removes its staging tree.
+   */
   private async export(context: PipelineContext): Promise<void> {
     const instance = await this.instance(context.instanceId);
     this.runs.set(context.jobId, { instance });
-    const renderSet = await this.renderer.applied(instance.id);
-    const directory = join(this.config.SEAMNEX_INSTANCE_DATA_DIR, instance.id, 'exports');
-    ensureDir(directory);
-    const target = join(directory, `${Date.now()}-export.json`);
-    writeFileAtomic(
-      target,
-      `${JSON.stringify(
-        {
-          exportedAt: new Date().toISOString(),
-          instance: {
-            id: instance.id,
-            slug: instance.slug,
-            entryKey: instance.entry_key,
-            state: instance.state,
-          },
-          renderSet:
-            renderSet === null ? null : { id: renderSet.id, contentHash: renderSet.contentHash },
-        },
-        null,
-        2,
-      )}\n`,
+
+    const applied = await this.renderer.applied(instance.id);
+    const renderSet = applied ?? (await this.latestRenderSet(instance.id));
+    if (renderSet === null) {
+      throw new AppError({
+        code: 'STATE_CONFLICT',
+        detail: `${instance.slug} has never been deployed, so there is no data to export.`,
+        remediation:
+          'Deploy the instance first. An export of a definition that never ran would hold no product data, which is not a full data export (FR-1.13).',
+      });
+    }
+
+    const services = await this.pool.query<{ service_name: string; image_ref: string }>(
+      `SELECT service_name, image_ref FROM instance_service WHERE instance_id = $1 ORDER BY service_name`,
+      [instance.id],
     );
-    await context.log('stdout', `export written to ${target}`);
+    const volumes = await this.pool.query<{ name: string }>(
+      `SELECT name FROM instance_volume WHERE instance_id = $1 ORDER BY name`,
+      [instance.id],
+    );
+    const environment = await this.pool.query<{
+      var_name: string;
+      value_enc: Buffer | null;
+      source: string;
+      secret_ref: string | null;
+    }>(
+      `SELECT var_name, value_enc, source, secret_ref FROM instance_env_value
+        WHERE instance_id = $1 ORDER BY var_name`,
+      [instance.id],
+    );
+
+    const datastores = services.rows.filter((service) => engineOf(service.image_ref) !== null);
+    const running = instance.state === 'ready' || instance.state === 'degraded';
+    if (datastores.length > 0 && !running) {
+      throw new AppError({
+        code: 'STATE_CONFLICT',
+        detail: `${instance.slug} is ${instance.state}: ${datastores
+          .map((service) => service.service_name)
+          .join(', ')} cannot be dumped while the instance is not running.`,
+        remediation:
+          'Start the instance and run the export again. A stopped database is not an empty database; nothing was written.',
+      });
+    }
+
+    const artefact = await writeExportArchive(
+      {
+        dataDir: this.config.SEAMNEX_INSTANCE_DATA_DIR,
+        pathMap: this.config.SEAMNEX_DOCKER_PATH_MAP,
+        docker: this.docker,
+        log: (stream, line) => context.log(stream, line),
+      },
+      {
+        instance: {
+          id: instance.id,
+          slug: instance.slug,
+          entryKey: instance.entry_key,
+          state: instance.state,
+        },
+        renderSet: {
+          id: renderSet.id,
+          contentHash: renderSet.contentHash,
+          directory: renderSet.directory,
+          applied: applied !== null,
+        },
+        services: services.rows.map((row) => ({
+          service: row.service_name,
+          imageRef: row.image_ref,
+        })),
+        volumes: volumes.rows.map((row) => row.name),
+        envRows: environment.rows,
+      },
+    );
+
+    this.requireRun(context.jobId).artefact = artefact;
+    await context.log(
+      'stdout',
+      `export ${artefact.exportId} written: ${artefact.fileName} (${artefact.bytes} bytes; ${
+        artefact.includes.join(', ') || 'no data'
+      })`,
+    );
   }
 
-  private async prepull(context: PipelineContext): Promise<void> {
-    const entryKey = typeof context.payload.entryKey === 'string' ? context.payload.entryKey : '';
-    const images = await this.imagesForEntry(entryKey);
+  /**
+   * FR-1.5 — one place an image comes into existence.
+   *
+   * Two shapes reach it: a source that *is* a Dockerfile, and a Compose definition that declares
+   * `build:` for a service — which is how a vendored tree says "this artefact is ours". Both used to
+   * be scattered: the Dockerfile build sat inside `apply`, and the Compose build was left to
+   * `compose up` unless `servicesWithBuild` happened to fire. Neither recorded what it produced, so a
+   * reviewed Dockerfile change could be invisible and a pull could pass for a build.
+   *
+   * Nothing is pushed. The ids go into the run state and are what `apply` proves against; the
+   * per-instance `instance_service.image_digest` is the record a later review reads.
+   */
+  private async buildImages(context: PipelineContext): Promise<void> {
     requireAdapters(this.config, 'docker');
-    for (const ref of images) {
-      await context.log('stdout', `pulling ${ref}`);
-      await this.docker.pull(ref, (line) => context.log('stdout', line));
+    const state = this.requireRun(context.jobId);
+    const renderSet = state.renderSet;
+    const source = state.source;
+    if (renderSet === undefined || source === undefined) {
+      throw new AppError({
+        code: 'STATE_CONFLICT',
+        detail: 'The build stage ran before the definition existed.',
+        remediation: 'Retry the deployment; resolve and render always run before build.',
+      });
     }
+
+    const builds = new Map<string, string>();
+
+    /*
+     * Before the CLI runs, not after: the mirrors are a property of this host's network, and a build
+     * that spends its minutes on a CDN the host cannot reach looks identical in the log to one that
+     * used a mirror. Naming them is what makes "the mirror was applied" checkable from evidence.
+     */
+    const mirrors = this.docker.buildMirrors();
+    if (mirrors.length > 0) {
+      await context.log(
+        'stdout',
+        `package mirrors forwarded to the build: ${mirrors.join(', ')} (host settings, never written into the image)`,
+      );
+    }
+
+    if (source.path === 'dockerfile' || source.path === 'scaffold') {
+      const ref = source.imageRef;
+      if (ref !== null) {
+        await context.log('stdout', `building ${ref} from ${source.directory}`);
+        await this.docker.build({
+          context: source.directory,
+          dockerfile: source.dockerfilePath ?? join(source.directory, 'Dockerfile'),
+          tag: ref,
+          labels: {
+            'seamnex.instance': state.instance.id,
+            'seamnex.entry': state.instance.entry_key,
+          },
+        });
+        await this.rememberBuild(builds, ref, context);
+      }
+      state.builds = builds;
+      // The renderer also writes a `build:` block for this shape, so building it again through
+      // Compose would be the same image twice; `up` reuses the tag this produced.
+      return;
+    }
+
+    const services = servicesWithBuild(renderSet);
+    if (services.length > 0) {
+      /*
+       * Compose parses *every* service before it builds any of them, and a definition is allowed to
+       * declare a credential as required (`${VAR:?…}`). The secrets override is written by `apply`,
+       * which runs after this stage, so the first real deployment of D07-01 aborted here with
+       * "error while interpolating services.orangehrm-db.environment.MARIADB_ROOT_PASSWORD: required
+       * variable ORANGEHRM_DATABASE_ROOT_PASSWORD is missing a value" — a healthy definition refused
+       * by its own build, after pre-flight had passed.
+       *
+       * The files are 0600 and outside the render set, and `apply` rewrites them, so writing them
+       * here changes nothing except the interpolation context the build needs.
+       */
+      const secrets = await this.writeSecretsFile(state.instance.id, renderSet);
+      if (secrets !== null) {
+        await context.log(
+          'stdout',
+          'secrets override written for build-time interpolation; no container is created by this step',
+        );
+      }
+      const project = this.composeProjectFor(state.instance.id, renderSet);
+      await context.log('stdout', `building from the definition: ${services.join(', ')}`);
+      await this.docker.composeBuild(project, (line) => context.log('stdout', line));
+      for (const service of services) {
+        const ref = imageOfService(renderSet, service);
+        if (ref === null) {
+          await context.log(
+            'system',
+            `${service} declares build: without image:, so the artefact has no name the platform can pin; the definition should declare both`,
+          );
+          continue;
+        }
+        await this.rememberBuild(builds, ref, context);
+      }
+    }
+    state.builds = builds;
+  }
+
+  private async rememberBuild(
+    builds: Map<string, string>,
+    ref: string,
+    context: PipelineContext,
+  ): Promise<void> {
+    const id = await this.docker.imageId(ref);
+    if (id === null) {
+      throw new AppError({
+        code: 'IMAGE_DIGEST_MISMATCH',
+        detail: `${ref} was built but the daemon holds no image under that tag afterwards.`,
+        remediation:
+          'Read the build log above; the deployment stops here rather than start an image it cannot name.',
+      });
+    }
+    builds.set(ref, id);
+    await context.log('stdout', `${ref} built as ${id}`);
+  }
+
+  /**
+   * FR-1.7 / "Prefetch images" — make the artefact local before the deployment window.
+   *
+   * For an entry whose definition declares `build:` that means *building* it. Pulling would fetch the
+   * registry's idea of the tag, which is the artefact the build exists to replace, and
+   * `pull_policy: never` would then make the deploy refuse it — a prefetch that guarantees a failure.
+   * Building is also the point of doing this early: the release archive and the base image are the
+   * slow downloads, and they leave the window with them.
+   *
+   * There is no instance here, so the tree is read from the vendored mirror rather than resolved. A
+   * mirror that is absent falls back to the pull (every registry entry has no tree); a tree that
+   * declares a build whose context or Dockerfile is missing is refused by name, because a prefetch
+   * that guesses is worse than one that stops.
+   */
+  private async prepull(context: PipelineContext): Promise<void> {
+    requireAdapters(this.config, 'docker');
+    const entryKey = typeof context.payload.entryKey === 'string' ? context.payload.entryKey : '';
+    if (entryKey.length === 0) {
+      throw new AppError({
+        code: 'VALIDATION_FAILED',
+        detail: 'A prefetch job needs the entry key it is preparing.',
+        remediation: 'Start "Prefetch images" from the catalog entry rather than as a bare job.',
+      });
+    }
+
+    const declared = this.declaredBuilds(entryKey);
+    if (declared.length > 0) {
+      for (const build of declared) {
+        await context.log('stdout', `building ${build.reference} from ${build.context}`);
+        await this.docker.build({
+          context: build.context,
+          dockerfile: build.dockerfile,
+          tag: build.reference,
+        });
+        const id = await this.docker.imageId(build.reference);
+        await context.log(
+          'stdout',
+          id === null
+            ? `${build.reference} built, but the daemon reports no id for it`
+            : `${build.reference} built as ${id}; this entry is never pulled`,
+        );
+      }
+      await context.log(
+        'system',
+        'no image was fetched from a registry; the deployment window now starts from a local artefact',
+      );
+      return;
+    }
+
+    const images = await this.imagesForEntry(entryKey);
+    for (const image of images) {
+      await context.log('stdout', `pulling ${image.reference}`);
+      await this.docker.pull(image.reference, (line) => context.log('stdout', line), {
+        expectedDigest: image.digest,
+      });
+      // The pin is checked against what the pull produced, not against what the entry asked for: a
+      // resolve job that reports "pulled" while the tag has moved is the failure this stage exists for.
+      await this.assertPinnedDigest(image.reference, image.digest, context);
+    }
+  }
+
+  /**
+   * FR-1.5 — before anything from the definition starts.
+   *
+   * A service with a `build:` section is *local*: its identity is the id this run produced, and no
+   * pull may satisfy it. Everything else keeps the registry rule, where the catalogue's digest is the
+   * claim being checked. The token is computed from the rendered definition, never from how the tag
+   * happens to be spelled: a namespace cannot tell you where an image came from.
+   */
+  private async assertPinnedImages(state: RunState, context: PipelineContext): Promise<void> {
+    const renderSet = state.renderSet;
+    const source = state.source;
+    if (renderSet === undefined) return;
+
+    if (servicesWithBuild(renderSet).length > 0) {
+      await this.assertLocalImages(state, renderSet, context);
+      return;
+    }
+
+    if (source === undefined || source.path !== 'compose') return;
+    if (source.imageRef === null || source.imageDigest === null) return;
+    // A reference that names its own digest is already exact: `image:` cannot resolve anywhere else.
+    if (source.imageRef.includes('@sha256:')) {
+      await context.log('stdout', `${source.imageRef} pins its digest in the reference`);
+      return;
+    }
+    if (!(await this.docker.imageExists(source.imageRef))) {
+      await context.log(
+        'stdout',
+        `${source.imageRef} is not present locally; pulling it to check the pin`,
+      );
+      /*
+       * The pin travels into the pull so a mirror that serves different content is refused *inside*
+       * the attempt: the next mirror, or the registry itself, is then tried instead of failing the
+       * deployment on the first mirror that answers.
+       */
+      await this.docker.pull(source.imageRef, (line) => context.log('stdout', line), {
+        expectedDigest: source.imageDigest,
+      });
+    }
+    await this.assertPinnedDigest(source.imageRef, source.imageDigest, context);
+  }
+
+  /**
+   * Every image the definition starts, present locally — before the scan asks about them.
+   *
+   * `assertPinnedImages` speaks only for the entry's own image; a sidecar such as
+   * `mariadb:11.4.13@sha256:…` is normally left to `compose up`. The scan runs before `up`, so a host
+   * that had never fetched the sidecar answered the scan with the daemon's `404 no such image`, and
+   * the deployment failed at a stage that was only supposed to look. Pulling here keeps the scan's
+   * precondition true and turns an unreachable pin into the pull's own message.
+   *
+   * Images this run built are skipped: their tag is the artefact `build` produced, and a pull would
+   * replace it with the registry's idea of the tag. `assertLocalImages` has already refused the case
+   * where such a tag is absent.
+   */
+  private async ensureImagesLocal(
+    state: RunState,
+    renderSet: RenderSet,
+    context: PipelineContext,
+  ): Promise<void> {
+    const built = new Set(state.builds?.keys() ?? []);
+    for (const ref of imagesOf(renderSet)) {
+      if (built.has(ref)) continue;
+      if (await this.docker.imageExists(ref)) continue;
+      await context.log('stdout', `${ref} is not present locally; pulling it before the scan`);
+      await this.docker.pull(ref, (line) => context.log('stdout', line), {
+        // A reference that names its own digest is already exact; the pull then checks that pin.
+        expectedDigest: digestNamedIn(ref),
+      });
+    }
+  }
+
+  /**
+   * The local pin: the tag must still resolve to the image this run built. That is the whole claim,
+   * and it is the one a pull cannot fake.
+   *
+   * The per-instance record is a trust-on-first-use baseline, reported as drift rather than refused:
+   * rebuilding an unchanged definition legitimately produces a new id when the layer cache is gone or
+   * the base image moved, so a refusal there would tie redeployment to build reproducibility the
+   * platform does not have. Refusing instead happens where substitution actually shows up — the tag
+   * and the running container — in this method and in `assertBuiltArtefactRunning`.
+   */
+  private async assertLocalImages(
+    state: RunState,
+    renderSet: RenderSet,
+    context: PipelineContext,
+  ): Promise<void> {
+    const previous = await this.recordedDigests(state.instance.id);
+    for (const service of servicesWithBuild(renderSet)) {
+      const ref = imageOfService(renderSet, service);
+      if (ref === null) continue;
+
+      const recorded = previous.get(service) ?? null;
+      const built = state.builds?.get(ref) ?? null;
+      /*
+       * A rollback starts a definition no build produced in this run; the only identity available is
+       * the one recorded when that definition was deployed. Comparing the tag with it is the same
+       * question — "is this the artefact we built for this instance?" — asked of older evidence.
+       */
+      const expected = built ?? recorded;
+      const observed = await this.docker.imageId(ref);
+      const verdict = digestPinVerdict({
+        mode: 'local',
+        reference: ref,
+        expected,
+        observed,
+      });
+      if (!verdict.ok) {
+        throw new AppError({
+          code: 'IMAGE_DIGEST_MISMATCH',
+          detail:
+            built === null && recorded !== null
+              ? `This job built nothing, so ${ref} is checked against the image recorded for this instance (${recorded}). It ${observed === null ? 'is not present on this host' : `resolves to ${observed}`}.`
+              : verdict.detail,
+          remediation: verdict.remediation,
+        });
+      }
+
+      if (built === null) {
+        await context.log(
+          'stdout',
+          `${ref} matches the image recorded for this instance (${expected})`,
+        );
+      } else if (recorded === null) {
+        await context.log(
+          'stdout',
+          `${ref} is this instance's first local build; recording ${built} as the baseline`,
+        );
+      } else if (recorded !== built) {
+        await context.log(
+          'system',
+          `${ref} was ${recorded} at the last deployment and is ${built} now: the artefact changed although the definition did not. Recorded as the new baseline`,
+        );
+      } else {
+        await context.log('stdout', `${ref} matches the recorded build ${built}`);
+      }
+    }
+  }
+
+  /** After `up`: the tag must still be the build's output, or the containers are not what was built. */
+  private async assertBuiltArtefactRunning(
+    state: RunState,
+    context: PipelineContext,
+  ): Promise<void> {
+    const builds = state.builds;
+    if (builds === undefined || builds.size === 0) return;
+    for (const [ref, built] of builds) {
+      const current = await this.docker.imageId(ref);
+      if (current === built) {
+        await context.log('stdout', `${ref} still resolves to ${built} after apply`);
+        continue;
+      }
+      throw new AppError({
+        code: 'IMAGE_DIGEST_MISMATCH',
+        detail:
+          `${ref} resolves to ${current ?? 'nothing'} after the containers started, but this run built ` +
+          `${built}. The running containers are not the artefact this deployment produced.`,
+        remediation:
+          'The containers are left running so the instance is not silently emptied. Inspect the tag, ' +
+          'then redeploy: the job failed on purpose rather than report success for an image it did ' +
+          'not build.',
+      });
+    }
+  }
+
+  /**
+   * The id this run built for the product's own image, or `null` when the deployment pulls it.
+   *
+   * ADR-BE-40 gave identity a second shape: a locally built image has no repository digest, and the
+   * id changes on every build because the build carries instance labels. The instance's *reported*
+   * identity therefore has to come from the build, not from the catalogue's reference value — the
+   * overview showed the catalogue digest (`0cc3f586…`, built once for a prefetch) while the
+   * containers ran `65959ba07e6d…`, so the two screens of one instance disagreed about what was
+   * running. A pulled image keeps the catalogue's answer: there the manifest digest is the pin, and
+   * it is the value a reader can check against the registry.
+   */
+  private builtPrimaryDigest(state: RunState, renderSet: RenderSet): string | null {
+    const builds = state.builds;
+    if (builds === undefined || builds.size === 0) return null;
+    const primary = primaryServiceOf(renderSet, httpPortOf(state.instance));
+    if (primary === null) return null;
+    const ref = imageOfService(renderSet, primary);
+    return ref === null ? null : (builds.get(ref) ?? null);
+  }
+
+  private async recordedDigests(instanceId: string): Promise<Map<string, string>> {
+    const result = await this.pool.query<{ service_name: string; image_digest: string | null }>(
+      `SELECT service_name, image_digest FROM instance_service WHERE instance_id = $1`,
+      [instanceId],
+    );
+    const digests = new Map<string, string>();
+    for (const row of result.rows) {
+      if (row.image_digest !== null) digests.set(row.service_name, row.image_digest);
+    }
+    return digests;
+  }
+
+  /**
+   * The builds a vendored tree declares, read straight from the mirror.
+   *
+   * Used by `prepull`, which has no instance and therefore no resolved tree. Relative contexts are
+   * joined to the tree here, which is the same base the renderer would pick.
+   */
+  private declaredBuilds(entryKey: string): DeclaredBuild[] {
+    const root =
+      this.config.SEAMNEX_SOURCE_MIRROR_DIR.length > 0
+        ? this.config.SEAMNEX_SOURCE_MIRROR_DIR
+        : join(this.config.SEAMNEX_CATALOG_REPO_PATH, 'upstream');
+    const tree = join(root, entryKey);
+    if (!existsSync(tree)) return [];
+
+    const composePath = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yaml', 'compose.yml']
+      .map((name) => join(tree, name))
+      .find((candidate) => existsSync(candidate));
+    if (composePath === undefined) return [];
+
+    const document = parseYaml(readFileSync(composePath, 'utf8')) as { services?: unknown } | null;
+    const services = document?.services;
+    if (typeof services !== 'object' || services === null) return [];
+
+    const builds: DeclaredBuild[] = [];
+    for (const [name, raw] of Object.entries(services as Record<string, unknown>)) {
+      const service = raw as { image?: unknown; build?: unknown } | null;
+      if (service === null || service.build === undefined) continue;
+      if (typeof service.image !== 'string' || service.image.trim().length === 0) {
+        throw new AppError({
+          code: 'VALIDATION_FAILED',
+          detail: `${entryKey}: service ${name} declares build: without image:, so the prefetch cannot name the artefact it produced.`,
+          remediation: `Declare both keys on ${name} in ${composePath}, then retry the prefetch.`,
+        });
+      }
+      const block =
+        typeof service.build === 'string'
+          ? { context: service.build }
+          : (service.build as { context?: unknown; dockerfile?: unknown });
+      const declaredContext = typeof block.context === 'string' ? block.context : '.';
+      const context = join(tree, declaredContext);
+      if (!existsSync(context)) {
+        throw new AppError({
+          code: 'VALIDATION_FAILED',
+          detail: `${entryKey}: the build context ${declaredContext} of service ${name} is not in the vendored tree at ${tree}.`,
+          remediation:
+            'Restore the tree in the catalogue mirror (or set SEAMNEX_SOURCE_MIRROR_DIR), then retry; a prefetch never clones.',
+        });
+      }
+      const dockerfileName = typeof block.dockerfile === 'string' ? block.dockerfile : 'Dockerfile';
+      builds.push({
+        reference: service.image.trim(),
+        context,
+        dockerfile: join(context, dockerfileName),
+      });
+    }
+    return builds;
+  }
+
+  private async assertPinnedDigest(
+    reference: string,
+    expected: string | null,
+    context: PipelineContext,
+  ): Promise<void> {
+    if (expected === null) return;
+    const observed = await this.docker.repoDigest(reference);
+    const verdict = digestPinVerdict({ mode: 'registry', reference, expected, observed });
+    if (verdict.ok) {
+      await context.log('stdout', `${reference} matches the pinned digest ${expected}`);
+      return;
+    }
+    throw new AppError({
+      code: 'IMAGE_DIGEST_MISMATCH',
+      detail: verdict.detail,
+      remediation: verdict.remediation,
+    });
   }
 
   private async build(context: PipelineContext): Promise<void> {
@@ -906,7 +1623,19 @@ export class DeploymentPipeline implements OnModuleInit {
       targetType: 'instance',
       targetId: state?.instance.id ?? context.instanceId,
       outcome: 'success',
-      detail: { jobId: context.jobId },
+      // The export's artefact is evidence: AC-20 asks that the data is *usable externally*, and an
+      // audit line that names the id, size and contents is what a reviewer can check later.
+      detail:
+        state?.artefact === undefined
+          ? { jobId: context.jobId }
+          : {
+              jobId: context.jobId,
+              exportId: state.artefact.exportId,
+              fileName: state.artefact.fileName,
+              bytes: state.artefact.bytes,
+              sha256: state.artefact.sha256,
+              includes: state.artefact.includes,
+            },
     });
   }
 
@@ -940,10 +1669,14 @@ export class DeploymentPipeline implements OnModuleInit {
     }
     if (Object.keys(values).length === 0) return null;
 
-    const runtimeDir = join(this.config.SEAMNEX_INSTANCE_DATA_DIR, instanceId, 'runtime');
-    ensureDir(runtimeDir);
-    const override = join(runtimeDir, `${renderSet.id}.secrets.yml`);
-    const env = join(runtimeDir, `${renderSet.id}.env`);
+    const paths = runtimeSecretsPaths({
+      dataDir: this.config.SEAMNEX_INSTANCE_DATA_DIR,
+      instanceId,
+      renderSetId: renderSet.id,
+    });
+    ensureDir(dirname(paths.override));
+    const override = paths.override;
+    const env = paths.env;
     const declared = Object.keys(parseServices(renderSet) ?? {});
     const serviceNames = declared.length > 0 ? declared : ['app'];
 
@@ -1019,9 +1752,11 @@ export class DeploymentPipeline implements OnModuleInit {
    * never brought down with a different file list than it was created with.
    */
   private composeProjectFor(instanceId: string, renderSet: RenderSet): ComposeProject {
-    const runtimeDir = join(this.config.SEAMNEX_INSTANCE_DATA_DIR, instanceId, 'runtime');
-    const secretsOverride = join(runtimeDir, `${renderSet.id}.secrets.yml`);
-    const secretsEnv = join(runtimeDir, `${renderSet.id}.env`);
+    const { override: secretsOverride, env: secretsEnv } = runtimeSecretsPaths({
+      dataDir: this.config.SEAMNEX_INSTANCE_DATA_DIR,
+      instanceId,
+      renderSetId: renderSet.id,
+    });
     const hasSecrets = existsSync(secretsOverride) && existsSync(secretsEnv);
     return {
       project: renderSet.composeProject,
@@ -1122,7 +1857,7 @@ export class DeploymentPipeline implements OnModuleInit {
     // every host-dependent value a re-render produces.
     const result = await this.pool.query<InstanceRow>(
       `SELECT i.id, i.entry_key, i.slug, i.domain_route, i.profile_key, i.state, i.payload,
-              i.source_path, r.host AS route_host
+              i.source_path, r.host AS route_host, r.tls_mode AS route_tls_mode
          FROM instance i
          LEFT JOIN instance_route r ON r.instance_id = i.id
         WHERE i.id = $1 AND i.deleted_at IS NULL`,
@@ -1212,6 +1947,142 @@ export class DeploymentPipeline implements OnModuleInit {
     }
   }
 
+  /**
+   * FR-1.9 / FR-1.12 — the instance's data volumes, as the daemon has them.
+   *
+   * Three facts decide what is written:
+   *   - **the name comes from the daemon.** Compose prefixes a named volume with `--project-name`
+   *     (`seamnex-<slug>_db-data`), and a backup that mounted the key from the file would mount
+   *     nothing. The label a Compose-created volume carries also gives the declarative key
+   *     (`com.docker.compose.volume`), which is what the catalog describes.
+   *   - **the quota comes from the declaration**, matched by that key (`VolumeSpecSchema`). A volume
+   *     the catalog does not describe is not refused — it is a definition the entry has not caught
+   *     up with — but it must not borrow a flattering default: the instance's whole disk reservation
+   *     is used and the gap is named in the job log.
+   *   - **a failed listing changes nothing.** Registration is an observation; deleting rows because
+   *     the daemon could not be asked would erase the only record of where a product's data lives.
+   */
+  private async recordVolumes(
+    instance: InstanceRow,
+    renderSet: RenderSet,
+    context: PipelineContext,
+  ): Promise<void> {
+    const project = projectName(instance.slug);
+    let listed: VolumeSummary[];
+    try {
+      listed = await this.docker.volumes([`com.docker.compose.project=${project}`]);
+    } catch (error) {
+      await context.log(
+        'system',
+        `the volumes of ${project} could not be listed (${error instanceof Error ? error.message : String(error)}); the recorded set is unchanged`,
+      );
+      return;
+    }
+
+    const declared = await this.declaredVolumes(instance.entry_key);
+    const platformFile = renderSet.files.find(
+      (file) => file.path === 'docker-compose.platform.yml',
+    );
+    const document = platformFile === undefined ? null : composeDocumentOf(platformFile.content);
+    const reservationMb = resourcesOf(instance).diskMb;
+    const registered: string[] = [];
+
+    for (const volume of listed) {
+      const key = volume.labels['com.docker.compose.volume'] ?? volume.name;
+      const spec = declared.get(key);
+      const declaredPath = spec?.mountPath;
+      const mountPath =
+        declaredPath !== undefined && declaredPath.length > 0
+          ? declaredPath
+          : document === null
+            ? null
+            : mountPathForVolume(document, key);
+      if (mountPath === null || mountPath.length === 0) {
+        // A Compose volume is only created when a service mounts it, so this is a label the platform
+        // cannot read rather than a volume with no path. Naming it is better than inventing `/`.
+        await context.log(
+          'system',
+          `volume ${volume.name} has no mount path in the render set; it is not registered and a backup will refuse while the definition still declares it`,
+        );
+        continue;
+      }
+      if (spec === undefined) {
+        await context.log(
+          'system',
+          `volume ${volume.name} is not declared by ${instance.entry_key}; its quota is the instance reservation of ${reservationMb} MB`,
+        );
+      }
+      await this.pool.query(
+        `INSERT INTO instance_volume (instance_id, name, mount_path, host_path, quota_mb)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (instance_id, name) DO UPDATE
+            SET mount_path = EXCLUDED.mount_path,
+                host_path = EXCLUDED.host_path,
+                quota_mb = EXCLUDED.quota_mb`,
+        [
+          instance.id,
+          volume.name,
+          mountPath,
+          volume.mountpoint.length > 0 ? volume.mountpoint : null,
+          spec?.quotaMb ?? reservationMb,
+        ],
+      );
+      registered.push(volume.name);
+    }
+
+    const existing = await this.pool.query<{ name: string }>(
+      `SELECT name FROM instance_volume WHERE instance_id = $1`,
+      [instance.id],
+    );
+    const stale = existing.rows.map((row) => row.name).filter((name) => !registered.includes(name));
+    if (stale.length > 0) {
+      await this.pool.query(
+        `DELETE FROM instance_volume WHERE instance_id = $1 AND name = ANY($2::text[])`,
+        [instance.id, stale],
+      );
+      await context.log(
+        'system',
+        `dropped ${stale.length} volume record(s) the daemon no longer holds: ${stale.join(', ')}`,
+      );
+    }
+
+    await context.log(
+      'stdout',
+      `${registered.length} data volume(s) registered for backup and quota checks${
+        registered.length === 0 ? ' (the definition declares none)' : `: ${registered.join(', ')}`
+      }`,
+    );
+  }
+
+  /** `catalog_entry.payload.volumes[]`, keyed by the Compose volume key. */
+  private async declaredVolumes(
+    entryKey: string,
+  ): Promise<Map<string, { mountPath: string; quotaMb: number }>> {
+    const result = await this.pool.query<{ volumes: unknown }>(
+      `SELECT payload -> 'volumes' AS volumes FROM catalog_entry WHERE key = $1`,
+      [entryKey],
+    );
+    const rows = Array.isArray(result.rows[0]?.volumes)
+      ? (result.rows[0]?.volumes as unknown[])
+      : [];
+    const declared = new Map<string, { mountPath: string; quotaMb: number }>();
+    for (const row of rows) {
+      if (typeof row !== 'object' || row === null) continue;
+      const record = row as Record<string, unknown>;
+      if (typeof record.name !== 'string' || record.name.length === 0) continue;
+      const quotaMb =
+        typeof record.quotaMb === 'number' && record.quotaMb > 0
+          ? Math.round(record.quotaMb)
+          : null;
+      if (quotaMb === null) continue;
+      declared.set(record.name, {
+        mountPath: typeof record.mountPath === 'string' ? record.mountPath : '',
+        quotaMb,
+      });
+    }
+    return declared;
+  }
+
   private async previousRenderSet(instanceId: string): Promise<string | null> {
     const result = await this.pool.query<{ id: string }>(
       `SELECT id FROM render_set
@@ -1222,14 +2093,17 @@ export class DeploymentPipeline implements OnModuleInit {
     return result.rows[0]?.id ?? null;
   }
 
-  private async imagesForEntry(entryKey: string): Promise<string[]> {
+  /** The pinned image an entry deploys, with the digest that pin claims, or nothing when it names none. */
+  private async imagesForEntry(entryKey: string): Promise<PinnedImage[]> {
     const result = await this.pool.query<{ payload: Record<string, unknown> }>(
       `SELECT payload FROM catalog_entry WHERE key = $1`,
       [entryKey],
     );
     const payload = result.rows[0]?.payload ?? {};
     const image = typeof payload.imageRef === 'string' ? payload.imageRef : null;
-    return image === null ? [] : [image];
+    if (image === null) return [];
+    const digest = typeof payload.imageDigest === 'string' ? payload.imageDigest : null;
+    return [{ reference: image, digest }];
   }
 
   private requireRun(jobId: string): RunState {
@@ -1249,7 +2123,12 @@ function stage(
   return { name, step, run };
 }
 
-function routeOf(instance: InstanceRow): RenderRoute {
+/**
+ * The edge mode is the last fallback, not a constant: an instance deployed before the route row
+ * carried a truthful `tls_mode` still renders the certificate the deployment actually serves
+ * (ISSUE-07). The relational column wins whenever it exists.
+ */
+function routeOf(instance: InstanceRow, edgeTlsMode: RenderRoute['tlsMode']): RenderRoute {
   const route = (instance.payload.route ?? {}) as Partial<RenderRoute>;
   return {
     // Relational truth first, then the deploy-time snapshot, then the column written at insert.
@@ -1258,7 +2137,10 @@ function routeOf(instance: InstanceRow): RenderRoute {
       instance.route_host ?? (typeof route.host === 'string' ? route.host : instance.domain_route),
     pathPrefix: route.pathPrefix ?? null,
     publishModel: route.publishModel ?? 'subdomain',
-    tlsMode: route.tlsMode ?? 'acme',
+    tlsMode:
+      instance.route_tls_mode === 'acme' || instance.route_tls_mode === 'internal'
+        ? instance.route_tls_mode
+        : (route.tlsMode ?? edgeTlsMode),
     authMode: route.authMode ?? 'native',
   };
 }
@@ -1298,6 +2180,46 @@ function parseServices(renderSet: RenderSet): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Every `image:` the render set names, across the base file and the platform override.
+ *
+ * Both files are read because the split varies: an entry with a vendored compose keeps its images
+ * in the base document, while a scaffold's platform file can carry them instead. Scanning only the
+ * platform file would report "nothing to scan" for every vendored product.
+ */
+function imagesOf(renderSet: RenderSet): string[] {
+  const images = new Set<string>();
+  for (const file of renderSet.files) {
+    if (!file.path.endsWith('.yml') && !file.path.endsWith('.yaml')) continue;
+    let parsed: unknown;
+    try {
+      parsed = parseYaml(file.content);
+    } catch {
+      continue;
+    }
+    const services = (parsed as { services?: unknown } | null)?.services;
+    if (typeof services !== 'object' || services === null) continue;
+    for (const raw of Object.values(services as Record<string, unknown>)) {
+      const image = (raw as { image?: unknown } | null)?.image;
+      if (typeof image === 'string' && image.trim().length > 0) images.add(image.trim());
+    }
+  }
+  return [...images];
+}
+
+/** The digest a reference names itself (`repo:tag@sha256:…`), or `null` when it names none. */
+function digestNamedIn(reference: string): string | null {
+  const index = reference.indexOf('@sha256:');
+  return index === -1 ? null : reference.slice(index + 1);
+}
+
+/** The tag a service's definition names, or `null` when it declares none. */
+function imageOfService(renderSet: RenderSet, service: string): string | null {
+  const services = parseServices(renderSet) ?? {};
+  const image = (services[service] as { image?: unknown } | undefined)?.image;
+  return typeof image === 'string' && image.trim().length > 0 ? image.trim() : null;
 }
 
 /** Services whose definition carries a `build:` section: only these need `compose build`. */

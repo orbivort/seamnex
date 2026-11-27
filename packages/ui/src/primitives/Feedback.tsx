@@ -160,8 +160,22 @@ export function ErrorState({
   onRetry?: () => void;
   compact?: boolean;
 }) {
+  /*
+   * `role="alert"`, because this is how a failed write answers: the operator pressed a button,
+   * the mutation rejected, and the panel appeared where they were not looking. Without a live
+   * region the whole event was silent to a screen reader — the same failure `Alert` had already
+   * been fixed for, on the one component every query and mutation error goes through.
+   *
+   * `Retry` stays unconditional. A 404 looks like a dead end to offer a button for, but it is the
+   * operator's only way back from a read that failed before the resource existed — a run that has
+   * not finished creating the workflow, a replica that has not caught up — and the console's own
+   * recovery test depends on it.
+   */
   return (
-    <div className={cn('rounded-md border px-4', toneBox('danger'), compact ? 'py-4' : 'py-6')}>
+    <div
+      role="alert"
+      className={cn('rounded-md border px-4', toneBox('danger'), compact ? 'py-4' : 'py-6')}
+    >
       <div className="flex items-start gap-3">
         <CircleAlert className="mt-0.5 size-4 shrink-0 text-danger" aria-hidden />
         <div className="min-w-0 flex-1">

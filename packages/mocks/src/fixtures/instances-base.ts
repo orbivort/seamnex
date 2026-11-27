@@ -49,7 +49,7 @@ export const INSTANCE_SEEDS: InstanceSeed[] = [
     source: {
       path: 'compose',
       // The application repository ships no Compose file and has no `v`-prefixed tags; the reviewed
-      // Compose definition is vendored at `platform/upstream/D01-01/docker-compose.yml`.
+      // Compose definition is at `upstream/D01-01/docker-compose.yml` in the catalogue checkout.
       sourceUrl: 'https://github.com/espocrm/espocrm@9.2.4',
       sourceRevision: '9c2f1ab',
       policyVerdict: 'compliant',
@@ -85,10 +85,12 @@ export const INSTANCE_SEEDS: InstanceSeed[] = [
       sourceUrl: 'catalog/D02-01/compose.yaml',
       sourceRevision: 'bc7d411',
       policyVerdict: 'compliant',
-      policyNotes: [
-        'Platform-scaffolded definition approved by Sofia Almeida.',
-        'Trusted registry allow-list verified.',
-      ],
+      /*
+       * The second note used to read "Trusted registry allow-list verified." — a claim no fixture
+       * backed. The allow-list is now a real control with a revision and a screen (NFR-4.16), so the
+       * assertion lives there as data instead of in a policy note nobody could check.
+       */
+      policyNotes: ['Platform-scaffolded definition approved by Sofia Almeida.'],
     },
     resources: { cpu: 1, memoryMb: 2048, diskMb: 20_480 },
     usage: { cpuPercent: 12, memoryMb: 1_486, diskMb: 6_920 },
@@ -149,7 +151,9 @@ export const INSTANCE_SEEDS: InstanceSeed[] = [
     createdDaysAgo: 88,
     currentVersion: '10.1.2',
     availableVersion: '10.2.0',
-    imageDigest: 'sha256:6b83fd21c47a90e5d1b6c8f2047a3e9d5c18b7f6a02d94e3c7b15f8a6d0239e4',
+    // NFR-4.6: the digest has to be the one the retained scan was filed under, or the instance screen
+    // reports "never scanned" for an image the platform has scanned.
+    imageDigest: 'sha256:8d0f5b2a64c31e97d5a0b8f4c1e6d29a73b5c8e0f4d1a6b9c2e7f3a0d5b8146c',
     source: {
       path: 'dockerfile',
       sourceUrl: 'https://github.com/woocommerce/woocommerce@10.1.2/Dockerfile',
@@ -185,7 +189,7 @@ export const INSTANCE_SEEDS: InstanceSeed[] = [
     createdDaysAgo: 138,
     currentVersion: '15.41.2',
     availableVersion: '15.42.0',
-    imageDigest: 'sha256:2e94b7c1d05a68f3b1e7c40a9d52f861e3b0a7c49d18f2e6b570c3a81d4f90b2',
+    imageDigest: 'sha256:3e5ba1d7c904f28a6b0e13d47c9f52a8e0b6d1f4c73a928e5d0b1c6a7f3e204d',
     source: {
       path: 'compose',
       sourceUrl: 'https://github.com/frappe/erpnext@v15.41.2/compose.yaml',
@@ -252,7 +256,7 @@ export const INSTANCE_SEEDS: InstanceSeed[] = [
     createdDaysAgo: 132,
     currentVersion: '2.18.4',
     availableVersion: '2.19.0',
-    imageDigest: 'sha256:8a40c6d1f95b23e7c0a18d4b6e5f9072a1c3d8e6b04f7a29c5d1e8b30f76a2c5',
+    imageDigest: 'sha256:1c7a04e9b25d83f6a0e1c47d92b38f50c6a1d7e4b92f038c6d51e8a04b7c3a91',
     source: {
       path: 'compose',
       sourceUrl: 'https://github.com/paperless-ngx/paperless-ngx@v2.18.4/docker-compose.yml',
@@ -319,7 +323,7 @@ export const INSTANCE_SEEDS: InstanceSeed[] = [
     createdDaysAgo: 151,
     currentVersion: '31.0.2',
     availableVersion: '31.0.4',
-    imageDigest: 'sha256:0f5b2c8d9417a3e6b0d1c47f9a28e35c6b0d7f14a92c8e30b5d6a1c47f09e2b3',
+    imageDigest: 'sha256:6b21f4a9c7e038d5b1a9046f2e83c7d15a0b96e4f3c28d710a5b9e2c64f0d8a3',
     source: {
       path: 'compose',
       sourceUrl: 'https://github.com/nextcloud/server@31.0.2/compose.yaml',

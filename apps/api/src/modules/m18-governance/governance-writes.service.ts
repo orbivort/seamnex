@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import type {
   AccessRequest,
+  ApprovalGrant,
   AuditRangeVerification,
   BreakGlassReveal,
   BreakGlassSession,
@@ -9,18 +10,32 @@ import type {
   MaintenanceWindow,
   MaintenanceWindowCreateRequest,
   MaintenanceWindowPatchRequest,
+  NativeFloorDecision,
+  NativeFloorDecisionRequest,
   PlatformRole,
   PolicyException,
+  PolicyExceptionRequest,
   PrivacyRequest,
 } from '@seamnex/domain';
-import { accessFor, breakGlassStateAt } from '@seamnex/domain';
+import {
+  WAIVABLE_RULES,
+  accessFor,
+  breakGlassApprovalRefusal,
+  breakGlassStateAt,
+  isAcceptableFloorDecision,
+  isComposeRule,
+} from '@seamnex/domain';
 import type { Pool } from 'pg';
 import { withTransaction, type Queryable } from '@seamnex/db';
 import { APP_CONFIG } from '../../config/config.module';
 import type { AppConfig } from '../../config/config';
 import { PG_POOL } from '../../database/database.module';
-import { AppError } from '../../common/problem/app-error';
+import { AppError, isAppError } from '../../common/problem/app-error';
 import { isUuid } from '../../common/http/uuid';
+import {
+  ACCESS_CONTROL_SERVICE,
+  type AccessControlService,
+} from '../m09-access-control/access-control.contract';
 import { AUDIT_SERVICE, type AuditService } from '../m17-audit/audit.contract';
 import { SECRETS_SERVICE, type SecretsService } from '../m15-secrets/secrets.contract';
 import {
@@ -28,12 +43,16 @@ import {
   type IdentitySyncService,
 } from '../m08-identity-sync/identity-sync.contract';
 import { PORTAL_BFF_SERVICE, type PortalBffService } from '../m10-portal-bff/portal-bff.contract';
+import { describePolicyDecision } from '../../common/compose/source-policy';
+import type { ComposePatchEntry, ComposeViolation } from '../../common/compose/policy-result';
 import {
   MAINTENANCE_WINDOW_SELECT,
-  policyExceptionDiff,
+  POLICY_EXCEPTION_SELECT,
   policyExceptionRequester,
   toMaintenanceWindow,
+  toPolicyException,
   type MaintenanceWindowRow,
+  type PolicyExceptionRow,
 } from './maintenance-window';
 import { PrivacyQueueService } from './privacy-queue.service';
 import type { GovernanceWrites } from './governance.contract';
@@ -57,6 +76,24 @@ const DECISIONS: ReadonlySet<string> = new Set(['approve', 'reject', 'revoke', '
 const DEFAULT_BREAK_GLASS_MINUTES = 60;
 
 /**
+ * The longest time box a policy exception may be granted for (AC-33).
+ *
+ * Break-glass caps itself in `settings` (NFR-3.9); a policy exception has no settings row, so the
+ * ceiling is a constant here. A quarter is long enough for a migration that spans one and short
+ * enough that a forgotten exception cannot quietly become the standing configuration.
+ */
+const MAX_EXCEPTION_DAYS = 90;
+
+/**
+ * What a refused approval must be able to say after the transaction that refused it has rolled back:
+ * the code the caller was answered with, and the mode it asked for. Written inside the transaction,
+ * read by `auditRefusedDecision` outside it.
+ */
+type BreakGlassRefusalMark = { code: string; accessMode: string };
+
+type BreakGlassDecisionOutcome = { refused?: BreakGlassRefusalMark };
+
+/**
  * 4F - governance, privacy and settings writes.
  *
  * Three rules that are structural rather than documentary:
@@ -71,6 +108,8 @@ const DEFAULT_BREAK_GLASS_MINUTES = 60;
  */
 @Injectable()
 export class GovernanceWritesService implements GovernanceWrites {
+  private readonly logger = new Logger('m18.governance.writes');
+
   constructor(
     @Inject(PG_POOL) private readonly pool: Pool,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
@@ -82,6 +121,8 @@ export class GovernanceWritesService implements GovernanceWrites {
     @Inject(PORTAL_BFF_SERVICE) private readonly portal: PortalBffService,
     /** Reads the DSAR back in the same shape the queue renders, so the two can never disagree. */
     @Inject(PrivacyQueueService) private readonly privacy: PrivacyQueueService,
+    /** Owns `role_binding`: approver eligibility is decided against the live grants (FR-4.11). */
+    @Inject(ACCESS_CONTROL_SERVICE) private readonly access: AccessControlService,
   ) {}
 
   // ---- break-glass ---------------------------------------------------------------------------
@@ -254,14 +295,38 @@ export class GovernanceWritesService implements GovernanceWrites {
     }
 
     /*
-     * One transaction for the decision, the row it moves, the accounts it revokes and the audit row
-     * it leaves. Three defects lived here: the read and the `UPDATE` were separate autocommit
-     * statements, so two approvers could both read `requested` and both decide; the `UPDATE` carried
-     * no state predicate, so the second decision silently overwrote `approver`; and the audit append
-     * was a third commit, so an elevation could move with no evidence. `FOR UPDATE` plus the
-     * predicate inside each `UPDATE` makes the decision single-use at the database, not at the
-     * caller — which is the only place it can be enforced.
+     * The refusal must leave evidence, and it cannot be written inside the transaction that raises
+     * it: `withTransaction` rolls back, and `auditOutcome` writes through `tx`. It is recorded after
+     * the rollback instead, best effort — an audit outage must not turn a refusal into an allow, and
+     * no `breakglass.approve` row can survive a refused decision.
      */
+    const outcome: BreakGlassDecisionOutcome = {};
+    try {
+      await this.applyDecision(id, action, actorId, role, outcome);
+    } catch (error) {
+      await this.auditRefusedDecision(id, actorId, role, outcome.refused, error);
+      throw error;
+    }
+
+    return this.breakGlass(id);
+  }
+
+  /**
+   * One transaction for the decision, the row it moves, the accounts it revokes and the audit row
+   * it leaves. Three defects lived here: the read and the `UPDATE` were separate autocommit
+   * statements, so two approvers could both read `requested` and both decide; the `UPDATE` carried
+   * no state predicate, so the second decision silently overwrote `approver`; and the audit append
+   * was a third commit, so an elevation could move with no evidence. `FOR UPDATE` plus the
+   * predicate inside each `UPDATE` makes the decision single-use at the database, not at the
+   * caller — which is the only place it can be enforced.
+   */
+  private async applyDecision(
+    id: string,
+    action: string,
+    actorId: string,
+    role: PlatformRole,
+    outcome: BreakGlassDecisionOutcome,
+  ): Promise<void> {
     await withTransaction(this.pool, async (tx) => {
       await this.audit.lockChain(tx);
 
@@ -269,9 +334,10 @@ export class GovernanceWritesService implements GovernanceWrites {
         requester: string;
         state: string;
         access_mode: string;
+        instance_id: string | null;
         expires_at: Date | null;
       }>(
-        `SELECT requester, state, access_mode, expires_at
+        `SELECT requester, state, access_mode, instance_id, expires_at
            FROM break_glass_session WHERE id = $1 FOR UPDATE`,
         [id],
       );
@@ -320,6 +386,34 @@ export class GovernanceWritesService implements GovernanceWrites {
             detail: 'The requester cannot approve their own elevation.',
             remediation:
               'Ask a second eligible approver; self-approval only applies when no second party exists.',
+          });
+        }
+        /*
+         * FR-4.11 / AC-47 / NFR-4.4 — approver eligibility follows the *request*, not the role
+         * alone: a `scoped` grant (the R2 auditor) approves read-only elevations only, and a `full`
+         * grant approves either mode but only for a domain the approver owns. `ISSUE-05` is this
+         * rule existing solely in the console: the API answered on the role's capability alone, so
+         * an auditor who skipped the screen had a read-write elevation approved and audited as
+         * legitimate.
+         *
+         * Decided on the row this transaction has locked, because `access_mode` stays mutable while
+         * the request is pending (0009 trigger) — a check before the transaction could approve a
+         * read-only request whose mode was escalated in between. Only `approve` is gated: declining
+         * a request is always safe, so `reject` stays open to every holder of the capability.
+         */
+        const refusal = breakGlassApprovalRefusal({
+          role,
+          accessMode: session.access_mode === 'read_only' ? 'read_only' : 'read_write',
+          grants: await this.approvalGrants(actorId, role),
+          target: await this.approvalTarget(tx, session.instance_id),
+        });
+        if (refusal !== null) {
+          outcome.refused = { code: refusal.code, accessMode: session.access_mode };
+          throw new AppError({
+            code: refusal.code,
+            status: 403,
+            detail: refusal.detail,
+            remediation: refusal.remediation,
           });
         }
         if (overdue) throw stateConflict('expired', 'approve');
@@ -389,8 +483,98 @@ export class GovernanceWritesService implements GovernanceWrites {
       await this.revokeProductAccounts(id, tx);
       await auditOutcome('breakglass.expire');
     });
+  }
 
-    return this.breakGlass(id);
+  /**
+   * Records an approval refused for approver eligibility (FR-4.11), after the decision transaction
+   * has rolled back.
+   *
+   * Best effort on purpose: an audit outage must not turn the refusal into an allow, and the refusal
+   * is still the answer when the row cannot be written. Nothing here is sensitive — the mode, the
+   * role and the refusing rule, never the justification.
+   */
+  private async auditRefusedDecision(
+    id: string,
+    actorId: string,
+    role: PlatformRole,
+    refused: BreakGlassRefusalMark | undefined,
+    error: unknown,
+  ): Promise<void> {
+    if (refused === undefined) return;
+    if (!isAppError(error) || error.code !== refused.code) return;
+    await this.audit
+      .denied({
+        actorType: 'user',
+        actorId,
+        targetType: 'break_glass_session',
+        targetId: id,
+        detail: {
+          policyKey: 'breakglass.approve',
+          reason: refused.code,
+          role,
+          accessMode: refused.accessMode,
+        },
+      })
+      .catch((auditError: unknown) => {
+        this.logger.error({
+          msg: 'refused break-glass approval could not be audited',
+          targetId: id,
+          reason: refused.code,
+          err: auditError instanceof Error ? auditError.message : String(auditError),
+        });
+      });
+  }
+
+  /**
+   * The approver's live grants, with the same fallback the PDP uses: a subject with no `role_binding`
+   * row keeps the role its session carries, otherwise a seeded demonstrator holds nothing.
+   *
+   * A database failure is **not** that fallback — reading "I could not check" as "platform-wide"
+   * would hand the approval to whoever asked during an outage. The decision is answered as retryable
+   * instead, and nothing is written.
+   */
+  private async approvalGrants(actorId: string, role: PlatformRole): Promise<ApprovalGrant[]> {
+    try {
+      const live = await this.access.grantsFor(actorId);
+      if (live.length > 0) {
+        return live.map((grant) => ({
+          role: grant.role,
+          scopeType: grant.scopeType,
+          scopeId: grant.scopeId,
+        }));
+      }
+    } catch (error) {
+      this.logger.error({
+        msg: 'role bindings unavailable; the break-glass decision was refused',
+        err: error instanceof Error ? error.message : String(error),
+      });
+      throw new AppError({
+        code: 'UNAVAILABLE',
+        detail: 'The approver role bindings could not be read, so no decision was taken.',
+        remediation: 'Retry shortly. The elevation is unchanged and can still be decided.',
+      });
+    }
+    return [{ role, scopeType: 'platform', scopeId: null }];
+  }
+
+  /**
+   * `catalog_entry.domain` of the instance the elevation targets. The session column is nullable and
+   * an entry may declare no domain; both are reported as `null`, which the rule refuses for an
+   * approver without a platform-scoped grant.
+   */
+  private async approvalTarget(
+    tx: Queryable,
+    instanceId: string | null,
+  ): Promise<{ instanceId: string | null; domain: string | null }> {
+    if (instanceId === null) return { instanceId: null, domain: null };
+    const result = await tx.query<{ domain: string | null }>(
+      `SELECT c.domain
+         FROM instance i
+         LEFT JOIN catalog_entry c ON c.key = i.entry_key
+        WHERE i.id = $1`,
+      [instanceId],
+    );
+    return { instanceId, domain: result.rows[0]?.domain ?? null };
   }
 
   /**
@@ -493,6 +677,165 @@ export class GovernanceWritesService implements GovernanceWrites {
 
   // ---- policy exceptions and access requests ---------------------------------------------------
 
+  /**
+   * FR-1.20 / NFR-4.15 / AC-33 — filing a policy exception.
+   *
+   * The defect this closes is that **nothing could create a row**: `policy_exception` had a decision
+   * path, a queue and a console panel, and the only way to get an exception was a hand-written
+   * `INSERT`. A control that cannot be exercised is a control that does not exist, and AC-33's
+   * "with an approved, time-boxed exception it deploys" was therefore unreachable.
+   *
+   * What the requester sends is a product, a rule, a justification and an expiry. What the platform
+   * records is the **deviation it observed** on that product's last refused resolution — read from
+   * `source_resolution` (0034), never from the request. A client that could name its own patch diff
+   * could describe a deviation that does not exist and have it approved.
+   *
+   * `approver` is `NOT NULL` and holds the creator until a decision overwrites it; the requester is
+   * recorded in `patch_diff.requestedBy`, which is the convention `policyExceptionRequester()` and
+   * the read model already resolve. `decideException` refuses a decision by that same person.
+   */
+  async requestException(
+    request: PolicyExceptionRequest,
+    actorId: string,
+  ): Promise<PolicyException> {
+    /*
+     * NFR-4.16's `untrusted_registry` is in the vocabulary but not in the waivable subset: its only
+     * remedy is adding a namespace to the allow-list, so offering it as a time-boxed exception would
+     * be the control NFR-4.16 names, disabled by paperwork.
+     */
+    if (
+      !isComposeRule(request.rule) ||
+      !(WAIVABLE_RULES as readonly string[]).includes(request.rule)
+    ) {
+      throw new AppError({
+        code: 'VALIDATION_FAILED',
+        status: 422,
+        detail: `Policy rule "${request.rule}" cannot be waived.`,
+        remediation: `Use one of: ${WAIVABLE_RULES.join(', ')}. An image outside the trusted registry is fixed by adding its namespace to the allow-list (NFR-4.16), not by an exception.`,
+        fieldErrors: [{ field: 'rule', code: 'unknown', message: 'Not a waivable policy rule.' }],
+      });
+    }
+
+    const justification = request.justification.trim();
+    if (justification.length < MIN_JUSTIFICATION) {
+      throw new AppError({
+        code: 'VALIDATION_FAILED',
+        status: 422,
+        detail: `A written justification of at least ${MIN_JUSTIFICATION} characters is required.`,
+        remediation:
+          'State what the product needs the deviation for, why the source cannot be fixed now, and when it will be.',
+        fieldErrors: [
+          {
+            field: 'justification',
+            code: 'minLength',
+            message: `At least ${MIN_JUSTIFICATION} characters.`,
+          },
+        ],
+      });
+    }
+
+    const expiresAt = this.exceptionExpiry(request.expiresAt);
+    const scope = request.entryKey.trim();
+    const entry = await this.pool.query<{ key: string }>(
+      `SELECT key FROM catalog_entry WHERE key = $1`,
+      [scope],
+    );
+    if (entry.rows[0] === undefined) {
+      throw new AppError({
+        code: 'VALIDATION_FAILED',
+        status: 422,
+        detail: `No catalog entry ${scope}.`,
+        remediation: 'Choose the product the deviation belongs to; an exception is scoped to one.',
+        fieldErrors: [{ field: 'entryKey', code: 'unknown', message: 'Product does not exist.' }],
+      });
+    }
+
+    /*
+     * The row, its evidence and the audit entry share one commit — the same rule `requestBreakGlass`
+     * learned the hard way: a row whose creation is not recorded is an authority nobody can explain.
+     */
+    const id = await withTransaction(this.pool, async (tx) => {
+      await this.audit.lockChain(tx);
+
+      /*
+       * One live exception per product and rule. Not a uniqueness constraint, because the table's
+       * history has to keep rejected and lapsed rows; and not a hard guarantee either — two
+       * simultaneous requests can both pass this read. The consequence is two rows needing two
+       * decisions that waive the same rule, which is noise rather than a hole: the second approval
+       * is still a second party's.
+       */
+      const live = await tx.query<{ id: string; state: string; expires_at: Date }>(
+        `SELECT id, state, expires_at FROM policy_exception
+          WHERE scope = $1 AND rule = $2 AND state IN ('pending', 'approved')
+          ORDER BY expires_at DESC`,
+        [scope, request.rule],
+      );
+      const covering = live.rows.find((row) => row.expires_at.getTime() > Date.now());
+      if (covering !== undefined) {
+        throw new AppError({
+          code: 'STATE_CONFLICT',
+          status: 409,
+          detail: `An exception for ${request.rule} on ${scope} is already ${covering.state === 'approved' ? 'approved' : 'awaiting a decision'}, until ${covering.expires_at.toISOString()}.`,
+          remediation:
+            'Use the existing exception, or wait for it to lapse. A second request does not widen the waiver.',
+        });
+      }
+
+      const evidence = await this.exceptionEvidence(tx, scope, request.rule);
+      const violations = evidence.violations.filter((violation) => violation.rule === request.rule);
+      const diff = describePolicyDecision({
+        rule: request.rule,
+        violations,
+        patch: evidence.patch,
+      });
+
+      const inserted = await tx.query<{ id: string }>(
+        `INSERT INTO policy_exception
+           (rule, scope, justification, approver, expires_at, patch_diff, state)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'pending')
+         RETURNING id`,
+        [
+          request.rule,
+          scope,
+          justification,
+          actorId,
+          expiresAt,
+          JSON.stringify({
+            requestedBy: actorId,
+            rule: request.rule,
+            sourceResolutionId: evidence.resolutionId,
+            violations,
+            patch: evidence.patch,
+            diff,
+          }),
+        ],
+      );
+      const created = inserted.rows[0]?.id;
+      if (created === undefined) throw internal('The policy exception was not created.');
+
+      await this.audit.append(
+        {
+          action: 'policy_exception.requested',
+          actorType: 'user',
+          actorId,
+          targetType: 'policy_exception',
+          targetId: created,
+          outcome: 'success',
+          detail: {
+            rule: request.rule,
+            scope,
+            expiresAt: expiresAt.toISOString(),
+            resolutionId: evidence.resolutionId,
+          },
+        },
+        tx,
+      );
+      return created;
+    });
+
+    return this.policyException(id);
+  }
+
   async decideException(
     id: string,
     decision: 'approve' | 'reject',
@@ -555,9 +898,13 @@ export class GovernanceWritesService implements GovernanceWrites {
       ]);
       /* The decision is echoed to a screen that names the decider, so it carries the person the
          queue shows, not the subject identifier the column stores. */
-      const naming = await tx.query<{ name: string | null }>(
-        `SELECT coalesce(display_name, username) AS name FROM idp_user WHERE idp_id = $1`,
-        [actorId],
+      const naming = await tx.query<{
+        requester_name: string | null;
+        approver_name: string | null;
+      }>(
+        `SELECT (SELECT coalesce(display_name, username) FROM idp_user WHERE idp_id = $1) AS requester_name,
+                (SELECT coalesce(display_name, username) FROM idp_user WHERE idp_id = $2) AS approver_name`,
+        [requester, actorId],
       );
       await this.audit.append(
         {
@@ -572,18 +919,15 @@ export class GovernanceWritesService implements GovernanceWrites {
         tx,
       );
 
-      return {
-        id,
-        rule: exception.rule,
-        scope: exception.scope,
-        justification: exception.justification,
-        requester,
-        approver: naming.rows[0]?.name ?? actorId,
+      /* One mapper for the queue and for both write answers: the row is returned exactly as the list
+         would render it, so a screen that shows the response and then refetches cannot see it change. */
+      return toPolicyException({
+        ...exception,
+        approver: actorId,
         state,
-        requestedAt: exception.created_at.toISOString(),
-        expiresAt: exception.expires_at.toISOString(),
-        patchDiff: policyExceptionDiff(exception.patch_diff),
-      };
+        requester_name: naming.rows[0]?.requester_name ?? null,
+        approver_name: naming.rows[0]?.approver_name ?? null,
+      });
     });
   }
 
@@ -692,6 +1036,73 @@ export class GovernanceWritesService implements GovernanceWrites {
   }
 
   // ---- maintenance windows (CL-05) -------------------------------------------------------------
+
+  /**
+   * S-2 — record an owner decision that lowers the native floor.
+   *
+   * The requirement allows a lower floor "only by a recorded owner decision", so the record is the
+   * control: this refuses a floor at or above the default (that is not a decision, it is the
+   * default), refuses a reason short enough to be a shrug, and writes the audit row in the same
+   * transaction as the decision. Nothing lowers the number implicitly.
+   */
+  async recordNativeFloorDecision(
+    request: NativeFloorDecisionRequest,
+    actorId: string,
+  ): Promise<NativeFloorDecision> {
+    const reason = request.reason.trim();
+    if (!isAcceptableFloorDecision({ floor: request.floor, reason })) {
+      throw new AppError({
+        code: 'VALIDATION_FAILED',
+        status: 422,
+        detail:
+          'A lower floor needs an integer between 0 and the baseline (12), and a reason of at least 20 characters explaining what is accepted.',
+        remediation:
+          'State the deferral and its owner. The floor may only be lowered from 6, never raised by this route.',
+        fieldErrors: [
+          { field: 'reason', code: 'custom', message: 'Record the decision in words.' },
+        ],
+      });
+    }
+
+    const inserted = await withTransaction(this.pool, async (tx) => {
+      // Lock order: audit chain first, business rows second (AD-20).
+      await this.audit.lockChain(tx);
+      const row = await tx.query<{
+        id: string;
+        floor: number;
+        reason: string;
+        recorded_by: string;
+        recorded_at: Date;
+      }>(
+        `INSERT INTO native_floor_decision (floor, reason, recorded_by)
+         VALUES ($1, $2, $3)
+         RETURNING id, floor, reason, recorded_by, recorded_at`,
+        [request.floor, reason, actorId],
+      );
+      const record = row.rows[0];
+      if (record === undefined) throw internal('The native-floor decision was not recorded.');
+      await this.audit.append(
+        {
+          action: 'posture.native_floor.decided',
+          actorType: 'user',
+          actorId,
+          targetType: 'native_floor_decision',
+          targetId: record.id,
+          outcome: 'success',
+          detail: { floor: record.floor, reason: record.reason, previousDefault: 6 },
+        },
+        tx,
+      );
+      return record;
+    });
+
+    return {
+      floor: inserted.floor,
+      reason: inserted.reason,
+      recordedBy: inserted.recorded_by,
+      recordedAt: inserted.recorded_at.toISOString(),
+    };
+  }
 
   async createWindow(
     request: MaintenanceWindowCreateRequest,
@@ -967,15 +1378,21 @@ export class GovernanceWritesService implements GovernanceWrites {
       product: string | null;
       requester_name: string;
       approver_name: string | null;
+      owner_name: string | null;
+      owner_email: string | null;
     }>(
       /* The same product label the list uses: a UUID in this field made the POST response disagree
-         with the row the screen then rendered. */
+         with the row the screen then rendered. The owner is resolved the same way the list does it,
+         so the create response and the register cannot name two different parties (FR-4.11). */
       `SELECT b.*, coalesce(i.payload->>'product', i.entry_key) AS product,
               coalesce(ru.display_name, ru.username, b.requester) AS requester_name,
               CASE WHEN b.approver IS NULL THEN NULL
-                   ELSE coalesce(au.display_name, au.username, b.approver) END AS approver_name
+                   ELSE coalesce(au.display_name, au.username, b.approver) END AS approver_name,
+              c.payload #>> '{owner,name}' AS owner_name,
+              c.payload #>> '{owner,email}' AS owner_email
          FROM break_glass_session b
          LEFT JOIN instance i ON i.id = b.instance_id
+         LEFT JOIN catalog_entry c ON c.key = i.entry_key
          LEFT JOIN idp_user ru ON ru.idp_id = b.requester
          LEFT JOIN idp_user au ON au.idp_id = b.approver
         WHERE b.id = $1`,
@@ -989,8 +1406,8 @@ export class GovernanceWritesService implements GovernanceWrites {
       requester: { id: row.requester, name: row.requester_name },
       instanceId: row.instance_id ?? '',
       product: row.product ?? 'Platform',
-      // The owner relation is not recorded on the elevation; `approver` is not the owner.
-      domainOwner: 'Platform',
+      domainOwner: row.owner_name ?? 'Platform',
+      domainOwnerEmail: row.owner_email ?? null,
       accessMode: row.access_mode as BreakGlassSession['accessMode'],
       justification: row.justification,
       approver: row.approver_name,
@@ -1002,6 +1419,112 @@ export class GovernanceWritesService implements GovernanceWrites {
       revokedAt: row.revoked_at?.toISOString() ?? null,
       createdAccounts: Array.isArray(row.created_accounts) ? row.created_accounts.length : 0,
       retentionReason: row.retention_reason,
+    };
+  }
+
+  /** The same select and mapper the list uses, so the write answer cannot disagree with the list. */
+  private async policyException(id: string): Promise<PolicyException> {
+    const result = await this.pool.query<PolicyExceptionRow>(
+      `${POLICY_EXCEPTION_SELECT} WHERE pe.id = $1`,
+      [id],
+    );
+    const row = result.rows[0];
+    if (row === undefined) throw noPolicyException(id);
+    return toPolicyException(row);
+  }
+
+  /**
+   * The time box a request may ask for (AC-33: "the exception carries an expiry").
+   *
+   * FR-4.11's rule is a *time box*, not a permanent waiver, and break-glass already caps its own
+   * window in `settings`. A policy exception has no settings row, so the ceiling is a constant: long
+   * enough for a migration that runs over a quarter, short enough that a forgotten exception cannot
+   * become the standing configuration. Anything longer is a decision to change this number, not a
+   * number to type into a form.
+   */
+  private exceptionExpiry(value: string): Date {
+    const expiresAt = new Date(value);
+    if (Number.isNaN(expiresAt.getTime())) {
+      throw new AppError({
+        code: 'VALIDATION_FAILED',
+        status: 422,
+        detail: 'The expiry is not an instant.',
+        remediation: 'Send an ISO-8601 UTC timestamp, for example 2027-02-01T00:00:00Z.',
+        fieldErrors: [{ field: 'expiresAt', code: 'invalid', message: 'Not an instant.' }],
+      });
+    }
+    const now = Date.now();
+    if (expiresAt.getTime() <= now) {
+      throw new AppError({
+        code: 'VALIDATION_FAILED',
+        status: 422,
+        detail: 'An exception must expire in the future.',
+        remediation:
+          'An expired exception blocks the next deployment by design; pick a later date.',
+        fieldErrors: [{ field: 'expiresAt', code: 'past', message: 'Must be a future instant.' }],
+      });
+    }
+    const ceiling = now + MAX_EXCEPTION_DAYS * 24 * 60 * 60 * 1_000;
+    if (expiresAt.getTime() > ceiling) {
+      throw new AppError({
+        code: 'VALIDATION_FAILED',
+        status: 422,
+        detail: `A policy exception cannot be granted for more than ${MAX_EXCEPTION_DAYS} days.`,
+        remediation:
+          'Ask for the window the work actually needs; renew it before it lapses if the work continues.',
+        fieldErrors: [
+          {
+            field: 'expiresAt',
+            code: 'max',
+            message: `At most ${MAX_EXCEPTION_DAYS} days.`,
+          },
+        ],
+      });
+    }
+    return expiresAt;
+  }
+
+  /**
+   * What the platform observed, from its own record.
+   *
+   * The last refused resolution of this product that named this rule. It is read inside the request's
+   * transaction so the evidence and the row that cites it share a commit. A product that has never
+   * been refused simply has no evidence: the exception is then a statement about the next deployment
+   * that trips the rule, and `describePolicyDecision` says exactly that instead of inventing a diff.
+   */
+  private async exceptionEvidence(
+    tx: Queryable,
+    entryKey: string,
+    rule: string,
+  ): Promise<{
+    resolutionId: string | null;
+    violations: ComposeViolation[];
+    patch: ComposePatchEntry[];
+  }> {
+    const result = await tx.query<{
+      id: string;
+      policy_violations: unknown;
+      patch_diff: unknown;
+    }>(
+      `SELECT sr.id, sr.policy_violations, sr.patch_diff
+         FROM source_resolution sr
+         JOIN instance i ON i.id = sr.instance_id
+        WHERE i.entry_key = $1
+          AND sr.policy_verdict = 'blocked'
+          AND EXISTS (
+            SELECT 1 FROM jsonb_array_elements(sr.policy_violations) AS violation
+             WHERE violation->>'rule' = $2
+          )
+        ORDER BY sr.created_at DESC
+        LIMIT 1`,
+      [entryKey, rule],
+    );
+    const row = result.rows[0];
+    if (row === undefined) return { resolutionId: null, violations: [], patch: [] };
+    return {
+      resolutionId: row.id,
+      violations: violationsOf(row.policy_violations),
+      patch: patchEntriesOf(row.patch_diff),
     };
   }
 
@@ -1153,4 +1676,40 @@ function internal(detail: string): AppError {
     detail,
     remediation: 'Retry; nothing was changed.',
   });
+}
+
+/**
+ * `jsonb` comes back as `unknown`, and these arrays were written by an older build or by hand in a
+ * recovery: every field is checked rather than cast. A malformed entry is dropped, not guessed — the
+ * exception still names the rule, and the approver is never shown a diff the platform cannot stand
+ * behind.
+ */
+function violationsOf(value: unknown): ComposeViolation[] {
+  if (!Array.isArray(value)) return [];
+  const violations: ComposeViolation[] = [];
+  for (const entry of value) {
+    if (entry === null || typeof entry !== 'object') continue;
+    const rule = (entry as { rule?: unknown }).rule;
+    const service = (entry as { service?: unknown }).service;
+    const detail = (entry as { detail?: unknown }).detail;
+    if (typeof rule !== 'string' || !isComposeRule(rule) || typeof detail !== 'string') continue;
+    violations.push({ rule, service: typeof service === 'string' ? service : null, detail });
+  }
+  return violations;
+}
+
+function patchEntriesOf(value: unknown): ComposePatchEntry[] {
+  if (!Array.isArray(value)) return [];
+  const patch: ComposePatchEntry[] = [];
+  for (const entry of value) {
+    if (entry === null || typeof entry !== 'object') continue;
+    const path = (entry as { path?: unknown }).path;
+    if (typeof path !== 'string' || path.length === 0) continue;
+    patch.push({
+      path,
+      from: (entry as { from?: unknown }).from ?? null,
+      to: (entry as { to?: unknown }).to ?? null,
+    });
+  }
+  return patch;
 }

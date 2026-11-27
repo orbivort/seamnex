@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-**Last reviewed:** 2026-11-13 · **Applies to:** the pnpm workspace at the pins recorded below · **Maintained by:** platform maintainers
+**Last reviewed:** 2026-11-25 · **Applies to:** the pnpm workspace at the pins recorded below · **Maintained by:** platform maintainers
 
 ## 1. Scope
 
@@ -9,13 +9,13 @@ open-source software written by other people. This document records what that so
 licence each component is made available under, and what each licence obliges this project to do. It
 is an inventory, not legal advice, and it does not reproduce licence texts (§8 says where they are).
 
-| Category                | Covered                                                                      | Source of truth                     |
-| ----------------------- | ---------------------------------------------------------------------------- | ----------------------------------- |
-| Direct npm dependencies | 52 packages: 26 runtime (`dependencies`), 26 development (`devDependencies`) | `catalog:` in `pnpm-workspace.yaml` |
-| Container images        | 15, all third-party and pinned to a full version                             | `docker/compose.dev.yml`            |
-| Vendored webfonts       | 3 families, committed as `.woff2`                                            | `packages/ui/src/assets/fonts/`     |
+| Category                | Covered                                                                                               | Source of truth                                                                                                         |
+| ----------------------- | ----------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Direct npm dependencies | 52 packages: 26 runtime (`dependencies`), 26 development (`devDependencies`)                          | `catalog:` in `pnpm-workspace.yaml`                                                                                     |
+| Container images        | 22: 17 the dev stack runs, 2 built here for catalogue products, 3 the control plane starts on its own | `docker/compose.dev.yml`, `apps/api/src/config/config.ts`, and the mirror's notices for the images a tag deploys (§5.1) |
+| Vendored webfonts       | 3 families, committed as `.woff2`                                                                     | `packages/ui/src/assets/fonts/`                                                                                         |
 
-**Not covered.** Three things are deliberately outside this document:
+**Not covered.** Four things are deliberately outside this document:
 
 - **First-party code.** This project's own licence is declared in [`LICENSE`](LICENSE):
   **GNU General Public License v3.0**, SPDX `GPL-3.0-only`, also stated in every `package.json` and in
@@ -34,6 +34,9 @@ is an inventory, not legal advice, and it does not reproduce licence texts (§8 
   `pnpm licenses list --prod --json > third-party-licenses.json` (production tree only) or
   `pnpm licenses list --json` (everything installed).
 
+- **The catalogue's own inventory.** The images a tag deploys and the files this project adds to one
+  are inventoried by the mirror's `THIRD-PARTY-NOTICES.md`, which travels with the checkout; §5.1
+  records the tag this file was reviewed against and the platform-side obligations only.
 - **Licence texts themselves.** §8 names the four places the canonical text lives.
 
 **Reading the tables.** Component rows are alphabetical within each table, so a package can be found
@@ -43,7 +46,10 @@ without reading the whole inventory. **Version** is the exact pin, never a range
 in practice is listed. **Copyright** is abbreviated to the holder named in the package's own
 `LICENSE` file, and long multi-party statements (RxJS, Lucide) are summarised — the full statement
 always prevails. **Used for** states the role in _this_ project, which is what tells a maintainer
-whether a removal is safe.
+whether a removal is safe. §5.1 keeps an **Evidence** column for the two images built here, because a
+product's licence can be known from its upstream repository without anyone having opened the pinned
+tag — and the difference is what a reviewer has to close before an export. The mirror's rows use the
+same three states.
 
 ## 2. Components by licence
 
@@ -51,16 +57,17 @@ The inventory grouped by licence, so a licence question can be answered without 
 Names appear only where the licence carries an obligation beyond preserving a notice, or a review
 step; MIT is a count because its obligation is uniform and its members are the bulk of §3 and §4.
 
-| Licence                         | npm packages                                                                                                                                     | Images and fonts                             |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------- |
-| MIT                             | 42 of the 52 packages in §3 and §4                                                                                                               | `axllent/mailpit`, `traefik`                 |
-| Apache-2.0                      | `@aws-sdk/client-s3`, `class-variance-authority`, `dockerode`, `prom-client`, `reflect-metadata`, `rxjs`, `eslint-plugin-security`, `typescript` | 8 images (§5)                                |
-| ISC                             | `lucide-react`, `yaml`                                                                                                                           | —                                            |
-| AGPL-3.0                        | —                                                                                                                                                | `grafana/grafana`, `grafana/loki`            |
-| SIL OFL-1.1                     | —                                                                                                                                                | the three font families in §6                |
-| PostgreSQL Licence              | —                                                                                                                                                | `postgres`                                   |
-| BSD-3-Clause / RSALv2 or SSPLv1 | —                                                                                                                                                | `redis` — depends on the resolved patch (§5) |
-| Sustainable Use Licence         | —                                                                                                                                                | `n8nio/n8n`                                  |
+| Licence                         | npm packages                                                                                                                                     | Images and fonts                                                                                                                |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| MIT                             | 42 of the 52 packages in §3 and §4                                                                                                               | `axllent/mailpit`, `traefik`, `alpine` (§5.2) — Alpine's own files; the userland it ships is `GPL-2.0` (BusyBox) and MIT (musl) |
+| Apache-2.0                      | `@aws-sdk/client-s3`, `class-variance-authority`, `dockerode`, `prom-client`, `reflect-metadata`, `rxjs`, `eslint-plugin-security`, `typescript` | 11 images (§5, §5.2)                                                                                                            |
+| ISC                             | `lucide-react`, `yaml`                                                                                                                           | —                                                                                                                               |
+| AGPL-3.0                        | —                                                                                                                                                | `grafana/grafana`, `grafana/loki` (§5)                                                                                          |
+| SIL OFL-1.1                     | —                                                                                                                                                | the three font families in §6                                                                                                   |
+| PostgreSQL Licence              | —                                                                                                                                                | `postgres`                                                                                                                      |
+| BSD-3-Clause / RSALv2 or SSPLv1 | —                                                                                                                                                | `redis` — depends on the resolved patch (§5)                                                                                    |
+| Sustainable Use Licence         | —                                                                                                                                                | `n8nio/n8n`                                                                                                                     |
+| GPL-2.0                         | —                                                                                                                                                | `busybox` (§5.2), and the BusyBox userland inside `alpine`                                                                      |
 
 ## 3. Runtime dependencies
 
@@ -126,7 +133,7 @@ in one place what the toolchain is built from and under what terms.
 | `@tailwindcss/vite`    | 4.3.5   | MIT        | Tailwind Labs, Inc.                 | Tailwind v4 compiler wired into the Vite pipeline                             | [tailwindlabs/tailwindcss](https://github.com/tailwindlabs/tailwindcss) |
 | `@vitejs/plugin-react` | 6.3.0   | MIT        | VoidZero Inc. and Vite contributors | JSX transform and Fast Refresh for both applications                          | [vitejs/vite-plugin-react](https://github.com/vitejs/vite-plugin-react) |
 | `tailwindcss`          | 4.3.5   | MIT        | Tailwind Labs, Inc.                 | Utility CSS engine and the design tokens in `packages/ui/src/styles`          | [tailwindlabs/tailwindcss](https://github.com/tailwindlabs/tailwindcss) |
-| `turbo`                | 2.11.11 | MIT        | Vercel, Inc.                        | Task graph and remote-cache-friendly orchestration for the monorepo           | [vercel/turborepo](https://github.com/vercel/turborepo)                 |
+| `turbo`                | 2.11.10 | MIT        | Vercel, Inc.                        | Task graph and remote-cache-friendly orchestration for the monorepo           | [vercel/turborepo](https://github.com/vercel/turborepo)                 |
 | `typescript`           | 6.0.3   | Apache-2.0 | Microsoft Corporation               | Type checking in strict mode, and declaration output for the shared libraries | [microsoft/TypeScript](https://github.com/microsoft/TypeScript)         |
 | `vite`                 | 8.3.8   | MIT        | VoidZero Inc. and Vite contributors | Dev server, HMR and production bundler for the portal and console             | [vitejs/vite](https://github.com/vitejs/vite)                           |
 
@@ -135,25 +142,25 @@ in one place what the toolchain is built from and under what terms.
 | Component                   | Version | Licence    | Copyright                                | Used for                                                                       | Source                                                                                                |
 | --------------------------- | ------- | ---------- | ---------------------------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
 | `@eslint/js`                | 10.0.1  | MIT        | OpenJS Foundation and other contributors | ESLint's own recommended rule set, the base of `@seamnex/config`'s flat config | [eslint/eslint](https://github.com/eslint/eslint)                                                     |
-| `eslint`                    | 10.14.0 | MIT        | OpenJS Foundation and other contributors | Linting across every workspace, with `--max-warnings=0`                        | [eslint/eslint](https://github.com/eslint/eslint)                                                     |
+| `eslint`                    | 10.15.0 | MIT        | OpenJS Foundation and other contributors | Linting across every workspace, with `--max-warnings=0`                        | [eslint/eslint](https://github.com/eslint/eslint)                                                     |
 | `eslint-plugin-jsx-a11y`    | 6.10.2  | MIT        | Ethan Cohen                              | Accessibility rules for the React surfaces                                     | [jsx-eslint/eslint-plugin-jsx-a11y](https://github.com/jsx-eslint/eslint-plugin-jsx-a11y)             |
-| `eslint-plugin-n`           | 18.5.0  | MIT        | eslint-plugin-n contributors             | Node.js correctness rules for the API and the `scripts/*.mjs` tooling          | [eslint-community/eslint-plugin-n](https://github.com/eslint-community/eslint-plugin-n)               |
+| `eslint-plugin-n`           | 18.6.0  | MIT        | eslint-plugin-n contributors             | Node.js correctness rules for the API and the `scripts/*.mjs` tooling          | [eslint-community/eslint-plugin-n](https://github.com/eslint-community/eslint-plugin-n)               |
 | `eslint-plugin-react-hooks` | 7.1.1   | MIT        | Meta Platforms, Inc. and affiliates      | Rules-of-Hooks enforcement in the UI packages                                  | [facebook/react](https://github.com/facebook/react)                                                   |
 | `eslint-plugin-security`    | 4.2.1   | Apache-2.0 | Node Security Project contributors       | Static checks for injection, ReDoS and unsafe evaluation                       | [eslint-community/eslint-plugin-security](https://github.com/eslint-community/eslint-plugin-security) |
 | `globals`                   | 17.14.0 | MIT        | Sindre Sorhus                            | Environment global definitions (`node`, `browser`) for the ESLint configs      | [sindresorhus/globals](https://github.com/sindresorhus/globals)                                       |
 | `prettier`                  | 3.10.1  | MIT        | James Long and contributors              | Formatting, enforced by `pnpm format:check`                                    | [prettier/prettier](https://github.com/prettier/prettier)                                             |
-| `stylelint`                 | 18.0.0  | MIT        | stylelint contributors                   | CSS linting for the UI layer                                                   | [stylelint/stylelint](https://github.com/stylelint/stylelint)                                         |
-| `stylelint-config-standard` | 41.0.0  | MIT        | stylelint contributors                   | Baseline CSS rules shared through `@seamnex/config`                            | [stylelint/stylelint-config-standard](https://github.com/stylelint/stylelint-config-standard)         |
-| `typescript-eslint`         | 8.72.2  | MIT        | typescript-eslint contributors           | TypeScript parser and type-aware rules for ESLint                              | [typescript-eslint/typescript-eslint](https://github.com/typescript-eslint/typescript-eslint)         |
+| `stylelint`                 | 18.1.0  | MIT        | stylelint contributors                   | CSS linting for the UI layer                                                   | [stylelint/stylelint](https://github.com/stylelint/stylelint)                                         |
+| `stylelint-config-standard` | 41.1.0  | MIT        | stylelint contributors                   | Baseline CSS rules shared through `@seamnex/config`                            | [stylelint/stylelint-config-standard](https://github.com/stylelint/stylelint-config-standard)         |
+| `typescript-eslint`         | 8.74.0  | MIT        | typescript-eslint contributors           | TypeScript parser and type-aware rules for ESLint                              | [typescript-eslint/typescript-eslint](https://github.com/typescript-eslint/typescript-eslint)         |
 
 ### 4.3 Testing
 
 | Component                | Version | Licence | Copyright                             | Used for                                                                        | Source                                                                                            |
 | ------------------------ | ------- | ------- | ------------------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | `@testing-library/react` | 16.3.3  | MIT     | Kent C. Dodds and contributors        | Component tests for `packages/ui`, `packages/shell`, the portal and the console | [testing-library/react-testing-library](https://github.com/testing-library/react-testing-library) |
-| `@vitest/coverage-v8`    | 5.1.0   | MIT     | VoidZero Inc. and Vitest contributors | V8 coverage provider behind `pnpm test:coverage`                                | [vitest-dev/vitest](https://github.com/vitest-dev/vitest)                                         |
+| `@vitest/coverage-v8`    | 5.1.2   | MIT     | VoidZero Inc. and Vitest contributors | V8 coverage provider behind `pnpm test:coverage`                                | [vitest-dev/vitest](https://github.com/vitest-dev/vitest)                                         |
 | `jsdom`                  | 31.0.1  | MIT     | jsdom contributors                    | DOM environment for the component and integration tests                         | [jsdom/jsdom](https://github.com/jsdom/jsdom)                                                     |
-| `vitest`                 | 5.1.0   | MIT     | VoidZero Inc. and Vitest contributors | Unit, integration and workspace test runner, configured in `vitest.config.ts`   | [vitest-dev/vitest](https://github.com/vitest-dev/vitest)                                         |
+| `vitest`                 | 5.1.2   | MIT     | VoidZero Inc. and Vitest contributors | Unit, integration and workspace test runner, configured in `vitest.config.ts`   | [vitest-dev/vitest](https://github.com/vitest-dev/vitest)                                         |
 
 ### 4.4 Type definitions
 
@@ -167,41 +174,109 @@ in one place what the toolchain is built from and under what terms.
 
 ## 5. Container images
 
-Every image below is referenced by `docker/compose.dev.yml` and pinned to a full version, never to a
-bare major or `latest` — a floating tag makes "it worked yesterday" unreproducible. `pnpm
-check:images` resolves each reference against its registry before a pin change is merged, so a
-version here is verifiable rather than asserted.
+The table immediately below is the dev stack: every row is a reference `docker/images.json` lists
+under `devStack`, and `docker/compose.dev.yml` is checked against that file rather than being the
+authority itself. Every reference that carries a digest names its version in the tag and holds it
+still in the manifest index it pinned on 2026-11-25, so a row below is both what the manifest says and
+what runs; the digests live in `docker/images.json` rather than in this table, which stays readable.
 
-| Image                           | Version      | Licence                                                     | Maintainer                          | Role in this project                                                                                                                                  | Source                                                                            |
-| ------------------------------- | ------------ | ----------------------------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| `adorsys/keycloak-config-cli`   | 6.4.0-26.0.5 | Apache-2.0                                                  | adorsys                             | Applies `platform/realm/*.json` so the realm is reviewed code rather than a console click. Its suffix must match the Keycloak server version exactly. | [adorsys/keycloak-config-cli](https://github.com/adorsys/keycloak-config-cli)     |
-| `axllent/mailpit`               | v1.32.0      | MIT                                                         | Ralph Slooten (axllent)             | Mail catcher for outbound-email flows during development                                                                                              | [axllent/mailpit](https://github.com/axllent/mailpit)                             |
-| `grafana/alloy`                 | v1.6.1       | Apache-2.0                                                  | Grafana Labs                        | Log and metric collector feeding Loki (observability profile)                                                                                         | [grafana/alloy](https://github.com/grafana/alloy)                                 |
-| `grafana/grafana`               | 11.5.1       | AGPL-3.0                                                    | Grafana Labs                        | Dashboards over Prometheus and Loki (observability profile)                                                                                           | [grafana/grafana](https://github.com/grafana/grafana)                             |
-| `grafana/loki`                  | 3.4.2        | AGPL-3.0                                                    | Grafana Labs                        | Log aggregation store (observability profile)                                                                                                         | [grafana/loki](https://github.com/grafana/loki)                                   |
-| `n8nio/n8n`                     | 1.123.87     | Sustainable Use Licence                                     | n8n GmbH                            | Workflow runtime; runs in queue mode with two workers                                                                                                 | [n8n-io/n8n](https://github.com/n8n-io/n8n)                                       |
-| `postgres`                      | 18-alpine    | PostgreSQL Licence                                          | PostgreSQL Global Development Group | Primary datastore: platform, Keycloak and n8n databases in one cluster with separate roles                                                            | [docker-library/postgres](https://github.com/docker-library/postgres)             |
-| `prom/alertmanager`             | v0.28.0      | Apache-2.0                                                  | Prometheus authors                  | Routes alerts raised by `docker/observability/alerts.yml`                                                                                             | [prometheus/alertmanager](https://github.com/prometheus/alertmanager)             |
-| `prom/node-exporter`            | v1.8.2       | Apache-2.0                                                  | Prometheus authors                  | Host CPU, memory and disk metrics for the admission verdict                                                                                           | [prometheus/node_exporter](https://github.com/prometheus/node_exporter)           |
-| `prom/prometheus`               | v3.1.0       | Apache-2.0                                                  | Prometheus authors                  | Metric store scraped from the API's `/metrics`                                                                                                        | [prometheus/prometheus](https://github.com/prometheus/prometheus)                 |
-| `quay.io/keycloak/keycloak`     | 26.0.5       | Apache-2.0                                                  | Red Hat                             | Identity provider: OIDC issuer, realm `seamnex`, group-to-entitlement source                                                                          | [keycloak/keycloak](https://github.com/keycloak/keycloak)                         |
-| `redis`                         | 7-alpine     | BSD-3-Clause for 7.2 and earlier; RSALv2 or SSPLv1 from 7.4 | Redis Ltd.                          | BullMQ broker, session store and rate-limit counters                                                                                                  | [redis/redis](https://github.com/redis/redis)                                     |
-| `tecnativa/docker-socket-proxy` | 0.3.0        | Apache-2.0                                                  | Tecnativa                           | The only container that sees the Docker socket; exposes an allow-listed Engine API to the control plane                                               | [Tecnativa/docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy) |
-| `traefik`                       | v3.3         | MIT                                                         | Traefik Labs                        | Edge router: one entry point, per-product routers, forward-auth middleware                                                                            | [traefik/traefik](https://github.com/traefik/traefik)                             |
-| `versity/versitygw`             | v1.10.0      | Apache-2.0                                                  | Versity                             | S3-compatible target for backups in the dev stack (replaced MinIO, see ADR-BE-11)                                                                     | [versity/versitygw](https://github.com/versity/versitygw)                         |
+One gap remains. The six `observability` images name a full version but carry no digest yet, because
+no index for them was on the host that recorded the others. Record one with
+`docker buildx imagetools inspect <ref>` before bumping it (§9.2). Until then read those rows as "the
+tag the compose file names", not "the version that runs".
+
+| Image                           | Version       | Licence                                                       | Maintainer                          | Role in this project                                                                                                                                                                                                                                  | Source                                                                            |
+| ------------------------------- | ------------- | ------------------------------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `adorsys/keycloak-config-cli`   | 6.6.0-26.8.1  | Apache-2.0                                                    | adorsys                             | Applies `platform/realm/*.json` so the realm is reviewed code rather than a console click. Its suffix names the Keycloak release it was built against — 26.8.1, one patch behind the server above, which the CLI's major-only start-up check accepts. | [adorsys/keycloak-config-cli](https://github.com/adorsys/keycloak-config-cli)     |
+| `axllent/mailpit`               | v1.32.0       | MIT                                                           | Ralph Slooten (axllent)             | Mail catcher for outbound-email flows during development                                                                                                                                                                                              | [axllent/mailpit](https://github.com/axllent/mailpit)                             |
+| `coredns/coredns`               | 1.15.0        | Apache-2.0                                                    | The CoreDNS Authors                 | Answers the `seamnex.localhost` zone for the clients that do not apply RFC 6761 themselves (Node, `curl`, Playwright), bound to loopback and only the zone                                                                                            | [coredns/coredns](https://github.com/coredns/coredns)                             |
+| `grafana/alloy`                 | v1.22.0       | Apache-2.0                                                    | Grafana Labs                        | Log and metric collector feeding Loki (observability profile)                                                                                                                                                                                         | [grafana/alloy](https://github.com/grafana/alloy)                                 |
+| `grafana/grafana`               | 13.3.2        | AGPL-3.0                                                      | Grafana Labs                        | Dashboards over Prometheus and Loki (observability profile)                                                                                                                                                                                           | [grafana/grafana](https://github.com/grafana/grafana)                             |
+| `grafana/loki`                  | 3.7.10        | AGPL-3.0                                                      | Grafana Labs                        | Log aggregation store (observability profile)                                                                                                                                                                                                         | [grafana/loki](https://github.com/grafana/loki)                                   |
+| `moby/buildkit`                 | v0.34.2       | Apache-2.0                                                    | Docker, Inc. and the Moby project   | The builder a product's `build` stage talks to, over its own gRPC endpoint: the socket proxy refuses a hijacked build session before a Dockerfile is read (ADR-BE-40 §7). Privileged, and never given the Engine socket                               | [moby/buildkit](https://github.com/moby/buildkit)                                 |
+| `n8nio/n8n`                     | 1.123.87      | Sustainable Use Licence                                       | n8n GmbH                            | Workflow runtime; runs in queue mode with two workers                                                                                                                                                                                                 | [n8n-io/n8n](https://github.com/n8n-io/n8n)                                       |
+| `postgres`                      | 18.7-alpine   | PostgreSQL Licence                                            | PostgreSQL Global Development Group | Primary datastore: platform, Keycloak and n8n databases in one cluster with separate roles                                                                                                                                                            | [docker-library/postgres](https://github.com/docker-library/postgres)             |
+| `prom/alertmanager`             | v0.35.1       | Apache-2.0                                                    | Prometheus authors                  | Routes alerts raised by `docker/observability/alerts.yml`                                                                                                                                                                                             | [prometheus/alertmanager](https://github.com/prometheus/alertmanager)             |
+| `prom/node-exporter`            | v1.13.1       | Apache-2.0                                                    | Prometheus authors                  | Host CPU, memory and disk metrics for the admission verdict                                                                                                                                                                                           | [prometheus/node_exporter](https://github.com/prometheus/node_exporter)           |
+| `prom/prometheus`               | v3.16.0       | Apache-2.0                                                    | Prometheus authors                  | Metric store scraped from the API's `/metrics`                                                                                                                                                                                                        | [prometheus/prometheus](https://github.com/prometheus/prometheus)                 |
+| `quay.io/keycloak/keycloak`     | 26.8.2        | Apache-2.0                                                    | Red Hat                             | Identity provider: OIDC issuer, realm `seamnex`, group-to-entitlement source                                                                                                                                                                          | [keycloak/keycloak](https://github.com/keycloak/keycloak)                         |
+| `redis`                         | 7.4.12-alpine | RSALv2 or SSPLv1 (7.4 and later); BSD-3-Clause only up to 7.2 | Redis Ltd.                          | BullMQ broker, session store and rate-limit counters                                                                                                                                                                                                  | [redis/redis](https://github.com/redis/redis)                                     |
+| `tecnativa/docker-socket-proxy` | 3.4           | Apache-2.0                                                    | Tecnativa                           | The only container that sees the Docker socket; exposes an allow-listed Engine API to the control plane                                                                                                                                               | [Tecnativa/docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy) |
+| `traefik`                       | v3.7.20       | MIT                                                           | Traefik Labs                        | Edge router: one entry point, per-product routers, forward-auth middleware                                                                                                                                                                            | [traefik/traefik](https://github.com/traefik/traefik)                             |
+| `versity/versitygw`             | v1.10.0       | Apache-2.0                                                    | Versity                             | S3-compatible target for backups in the dev stack (replaced MinIO, see ADR-BE-11)                                                                                                                                                                     | [versity/versitygw](https://github.com/versity/versitygw)                         |
 
 **Notes for reviewers**
 
-- `redis:7-alpine` is the one pin whose licence depends on the resolved patch version: Redis moved
-  from BSD-3-Clause to a source-available licence at 7.4, and the floating `7` tag can cross that
-  boundary on a rebuild. Treat a Redis bump as a licence review, not a routine tag change, and record
-  the resolved patch version here when the pin is tightened.
+- `redis:7.4.12-alpine` is the one pin whose licence depends on the resolved patch version, and the
+  question is now settled rather than floating: Redis moved from BSD-3-Clause to RSALv2-or-SSPLv1 at
+  7.4, and 7.4.12 sits on the source-available side, so the row above states that licence and the
+  digest keeps it there until someone bumps it deliberately. Treat a Redis bump as a licence review,
+  not a routine tag change — the previous `7-alpine` pin had already crossed that boundary by itself.
+  The same tag is a dependency of the `D06-01` render set, so the review covers every product
+  deployment, not only this stack; that side is in the mirror's notices (§5.1).
 - `n8nio/n8n` is not OSI-approved. It runs as a separate service the platform calls over HTTP and is
   never linked into first-party code, which is what keeps it acceptable under §7.
 - `grafana/grafana`, `grafana/loki` and `n8nio/n8n` are optional: Grafana and Loki sit behind the
   `observability` profile, and n8n is only required by workflow features.
-- `apps/api/Dockerfile` builds `FROM node:24-alpine` — Node.js (MIT, plus the licences of its bundled
-  dependencies) on Alpine Linux (mixed, predominantly MIT and BSD-2-Clause).
+- `apps/api/Dockerfile` builds `FROM node:24.22.1-alpine@sha256:06d7adf3…` — Node.js (MIT, plus the
+  licences of its bundled dependencies) on Alpine Linux (mixed, predominantly MIT and BSD-2-Clause).
+  The tag names the patch `.nvmrc` pins, and the digest is the manifest index for every architecture:
+  the previous `24-alpine` moved to 24.22.3 on 2026-11-25 while CI still tested 24.22.1, which is not
+  a licence change but is the drift a rebuild cannot be audited for.
+
+### 5.1 Images the catalogue deploys — the platform's half
+
+The images a catalogue deployment runs are decided by the tag the platform serves, not by this
+repository, so their inventory lives in that repository's own notices file: a row for every `imageRef`,
+for every `build:` base and for the digest pins (ADR-BE-42; the design's §4 tree and §6 make that file
+part of the mirror). It reaches an operator with the content, at
+`<SEAMNEX_CATALOG_REPO_PATH>/THIRD-PARTY-NOTICES.md`.
+
+**The tag this file was reviewed against is `catalog-2026.11.0`** — the default in `.env.example` and in
+the CI checkout, so a move of `SEAMNEX_CATALOG_SOURCE_REF` moves this line in the same commit. A tag
+whose notices file is missing is not releasable: this section keeps no inventory of its own to fall
+back on.
+
+### 5.2 Images the control plane pulls (`alpine`, `aquasec/trivy`, `busybox`)
+
+The control plane starts containers that no compose file declares: a scanner, a probe, a tar helper.
+Each is pulled by the operator's daemon at runtime and never bundled, so all three are reference rows —
+`repo` evidence, no obligation to ship a licence text. They are the same kind of row the mirror keeps
+for the catalogue it publishes, and they are separated from §5 because nothing in the dev stack or the
+catalogue names them, and because two of the three are easy to miss: `busybox` and `alpine` are `const`s
+in the modules that use them, not entries in a manifest.
+`SEAMNEX_SCANNER_IMAGE` is a default in `apps/api/src/config/config.ts` that `.env` overrides, so the
+row below names the default and not a guarantee — a host pointed at an internal mirror runs a
+different image.
+
+Each of the three is pinned `tag@sha256:…` in `docker/images.json`, and the API takes the value from
+the module generated from it (`apps/api/src/common/docker/images.generated.ts`) instead of carrying a
+literal — so a re-push of `3.24.4`, `1.38.0` or `0.76.2` is a pull error rather than different bytes
+producing a scan verdict, a probe answer or a backup archive. Those digests live in the manifest, not
+in this table, which stays readable. The `pg_dump`/`pg_restore` helper (`remote-database.ts` and
+`scripts/restore-platform-db.mjs`) runs §5's `postgres` pin unchanged — one entry, two consumers —
+which is why it has no row of its own.
+
+| Image           | Version | Licence                                                                                             | Maintainer               | Role in this project                                                                                                                                                                           | Source                                                                    |
+| --------------- | ------- | --------------------------------------------------------------------------------------------------- | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `alpine`        | 3.24.4  | MIT for Alpine's own files; the userland it ships is predominantly GPL-2.0 (BusyBox) and MIT (musl) | Alpine Linux maintainers | Archive and measurement helper: `pg_dump`/`tar` for the backup runner and the export action, `du` for volume measurement (`backup-runner.service.ts`, `export-archive.ts`, `docker.client.ts`) | [alpinelinux/docker-alpine](https://github.com/alpinelinux/docker-alpine) |
+| `aquasec/trivy` | 0.76.2  | Apache-2.0                                                                                          | Aqua Security            | The scanner `SEAMNEX_SCANNER_IMAGE` names: a sibling `docker run` for every `scan` step (NFR-4.6), reading the advisory database from `SEAMNEX_SCAN_CACHE_DIR`                                 | [aquasec/trivy](https://github.com/aquasecurity/trivy)                    |
+| `busybox`       | 1.38.0  | GPL-2.0                                                                                             | The BusyBox project      | Probe and HTTP-call container for the sign-in, IdP and reachability checks (`common/exec/http-probe.ts`, `idp-probe.ts`, `sign-in-probe.ts`, `http-call.ts`)                                   | [busybox.net](https://busybox.net)                                        |
+
+- `busybox` is `GPL-2.0`, which §7 lists as **not permitted in first-party code**, and it is permitted
+  here for a reason the policy table does not spell out: executing a binary in a helper container
+  neither links it into the platform nor conveys a copy of it, so no GPLv2 obligation arises on either
+  side. The row exists so that reading §7 alone does not make the codebase look as though it violates
+  the rule on every probe. `alpine` is the same shape with a mixed licence, and its row states the mix
+  rather than a single identifier, because the image ships a BusyBox userland whose terms are not
+  Alpine's.
+- None of the three is a compose tag: they are `controlPlane` entries in `docker/images.json`, so both
+  gate halves see them (§9.2) and a bump is a manifest edit, `pnpm images:generate`, and a row edit in
+  the same commit.
+- The advisory database is the second thing the scanner pulls, and it has no row because it is data
+  rather than software: `ghcr.io/aquasec/trivy-db`, defaulted by `SEAMNEX_SCAN_DB_REPOSITORY` and
+  refreshed by `pnpm scan:db:update`. It is named here because a stale copy is what lets a scan pass
+  quietly on a vulnerable image — a supply-chain question even though it is not a licence one.
 
 ## 6. Vendored webfonts
 
@@ -239,7 +314,7 @@ artefacts must satisfy.
 | MPL-2.0                                             | **Allowed with a check**              | File-level copyleft: a modified MPL file must be published under the MPL.                                                                                |
 | LGPL-2.1, LGPL-3.0                                  | **Review required**                   | Permitted only as an unmodified dynamic dependency; no static linking into a distributed artefact.                                                       |
 | GPL-2.0, GPL-3.0                                    | **Not permitted in first-party code** | Acceptable only for a separately deployed product that communicates over a network boundary.                                                             |
-| AGPL-3.0                                            | **Review required**                   | Only as an independent service (Grafana, Loki), never linked into the platform; network users of a modified copy must be offered its source.             |
+| AGPL-3.0                                            | **Review required**                   | Only as an independent service (Grafana, Loki, Metabase), never linked into the platform; network users of a modified copy must be offered its source.   |
 | SSPL-1.0, RSALv2, BUSL-1.1, Sustainable Use Licence | **Review required; never bundled**    | Source-available, not open source. Permitted only as an unmodified service the platform calls over HTTP — which is how n8n and Redis 7.4+ would be used. |
 | No licence / unknown / `UNLICENSED`                 | **Not permitted**                     | A package without a licence grants no rights, regardless of whether it is published.                                                                     |
 
@@ -267,7 +342,7 @@ one of these, in descending order of authority for this repository:
 3. **SPDX** — [spdx.org/licenses](https://spdx.org/licenses/) for the standard text of an identifier
    used in the tables, when a package ships no file of its own.
 4. **Container images** — inside the image at `/licenses` or alongside the project's own repository;
-   the upstream link in §5 is the entry point.
+   the upstream links in §5 and the mirror's notices at §5.1's tag are the entry points.
 
 To read a licence without leaving the terminal:
 
@@ -295,9 +370,12 @@ Follow these in order; the pull request is not ready until all of them are done.
 3. **Confirm what was resolved**, rather than what was requested: `pnpm licenses list --prod | grep
 <package>`, then read `node_modules/<package>/LICENSE`.
 4. **Add a row** to the correct table — §3.1 or §3.2 for anything that ships, §4.1–4.4 for tooling,
-   §5 for an image, §6 for an asset — in alphabetical order, with the row template below, and add the
-   name to its licence row in §2. Fill the **Used for** column with the role in _this_ project, not
-   the package's tagline.
+   §5 for an image the dev stack runs, §5.2 for one the control plane pulls on its own, §6 for an
+   asset — in alphabetical order, with the row template below, and add the name to its licence row in
+   §2. Fill the **Used for** column with the role in _this_ project, not the package's tagline. A
+   product image also needs its base image, because the tag it is built `FROM` is a second licence —
+   but only the two images the platform builds are rows here: an image a catalogue tag deploys is a row
+   in the mirror's notices, and the change on this side is §5.1's tag line.
 5. **Record the change** in §10 with the date and one line of context, then run the checks:
    `pnpm install --frozen-lockfile`, `pnpm typecheck`, `pnpm lint`, `pnpm format:check`.
 
@@ -316,8 +394,12 @@ Follow these in order; the pull request is not ready until all of them are done.
   new licence is not in §7.
 - **A removal** deletes the row and the name from §2. If the package was the last user of a table,
   remove the heading with it.
-- **A new container image** needs the licence of the image _and_ of its base image, plus a
-  `pnpm check:images` run to prove the tag resolves.
+- **A new container image** needs the licence of the image _and_ of its base image, an entry in
+  `docker/images.json`, and a row here — `pnpm check:images:offline` fails when the row is missing,
+  and `pnpm check:images` proves the tag resolves where a registry is reachable. The API `Dockerfile`
+  base is the one reference outside that file, so its bump stays a manual check of the tag; a tag like
+  `18-alpine` or `24-alpine` is refused for the same reason (§5). A catalogue image is a change in the
+  mirror first: its row belongs in that repository's notices, and what changes here is §5.1's tag line.
 
 ### 9.3 Review gate
 
@@ -328,18 +410,36 @@ A pull request that touches any of the following **must** touch this document in
 - the `catalog:` block of `pnpm-workspace.yaml`
 - `docker/compose.dev.yml` or a `Dockerfile`
 - `packages/ui/src/assets/fonts/`
+- **a catalogue release this platform starts serving** — a render set decides which images a product
+  deployment runs and which files this project adds to someone else's image, and `imageRef` /
+  `imageDigest` in an entry document are the pin an operator reviews. Both arrive from the mirror
+  (ADR-BE-42), so the tree cannot be reviewed in this diff. What is reviewable here is the tag
+  `SEAMNEX_CATALOG_SOURCE_REF` names: open the mirror's `THIRD-PARTY-NOTICES.md` at that tag, confirm it
+  has a row for every `imageRef` and every `build:` base the tag declares, then move §5.1's tag line in
+  the same commit. The mirror carries the inventory and its own `check:notices`; this file keeps the tag
+  and the two combined works the platform builds.
+- `docker/images.json` — every reference it adds or moves. `controlPlane` holds the images the control
+  plane pulls at runtime (`alpine`, `busybox`, `postgres`, `aquasec/trivy`); no compose file names
+  three of them, and §5.2 is their only row. A digest bump is such a change: move the pin, not only
+  the tag.
 
 A reviewer should treat "manifest changed, notices unchanged" as a blocking comment. That single rule
 is what keeps this file honest.
 
+**What backs that rule.** Half of it is mechanical. `pnpm check:images:offline` fails when a repository
+in `docker/images.json` has no backticked row here, so adding an image and forgetting §5 is a build
+failure rather than a reviewer's catch — which is how `coredns/coredns`, `moby/buildkit` and
+`aquasec/trivy` stayed out of this inventory while every gate passed, before the manifest existed. The
+catalogue's half is still a reviewer's discipline: it arrives from the mirror (ADR-BE-42), and the tag
+line in §5.1 is the only thing this repository can diff. `scripts/check-license.mjs` still asserts only
+that `GPL-3.0-only` appears in this document; nothing yet checks a licence claim against a manifest.
+
 ## 10. Review record
 
-| Date       | Change                                                                                                                                                                                                                                                                                      | Reviewer             |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
-| 2026-11-06 | Initial inventory: 52 direct npm packages (26 runtime, 26 development), 15 container images, 3 vendored font families, 7 deployed product definitions.                                                                                                                                      | Platform maintainers |
-| 2026-11-13 | Major bumps: `dockerode` 4.0.7 → 5.0.1 (Apache-2.0; drops its `uuid` dependent, so the advisory override is gone), `@types/dockerode` 3.3.31 → 4.0.2, `jsdom` 30.1.3 → 31.0.0. Licences unchanged.                                                                                          | Platform maintainers |
-| 2026-11-13 | Consolidated the inventory: one licence summary (§2), one policy-and-obligations table (§7), transitive and text-location policy folded into §1 and §8. Versions reconciled with the `catalog:` block, `jsdom` 31.0.0 → 31.0.1, product rows keyed by their `platform/upstream/` directory. | Platform maintainers |
-| 2026-11-13 | Removed the deployed product definitions section: the inventory now covers npm packages, container images and vendored fonts only. Sections after it renumbered, and `platform/upstream/` dropped from the review gate.                                                                     | Platform maintainers |
+| Date       | Change                                                                                                                 | Reviewer             |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------- | -------------------- |
+| 2026-11-06 | Initial inventory                                                                                                      | Platform maintainers |
+| 2026-11-25 | §5.1 reduced to the platform's half: these third-party images are inventoried by the mirror's `THIRD-PARTY-NOTICES.md` | Platform maintainers |
 
 Add a row whenever the inventory changes materially. One line is enough; the tables carry the detail.
 

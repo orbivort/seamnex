@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { PLATFORM_ROLES } from '../enums';
+import { ENTITLEMENT_SYNC_STATES, PLATFORM_ROLES } from '../enums';
 import { IdSchema, TimestampSchema } from './common';
 
 export const IdpUserSchema = z.object({
@@ -23,6 +23,12 @@ export const GroupMappingSchema = z.object({
   scopeType: z.enum(['platform', 'domain', 'instance']),
   scopeId: z.string().nullable(),
   scopeLabel: z.string().min(1),
+  /**
+   * FR-2.4: the role the *product* applies for a subject in this group. It is deliberately separate
+   * from the platform role — a domain owner (R3) is not `admin` inside every product — and it is
+   * what `entitlement.product_role` records.
+   */
+  productRole: z.string().min(1),
   propagateToProduct: z.boolean(),
 });
 
@@ -43,7 +49,15 @@ export const SyncRunSchema = z.object({
   users: z.number().int().nonnegative(),
   groups: z.number().int().nonnegative(),
   changes: z.number().int().nonnegative(),
+  /** Mirror-write p95: how long the directory upserts took. Not a propagation figure. */
   p95LatencyMs: z.number().int().nonnegative(),
+  /**
+   * FR-2.4 / AC-48: p95 of the membership change → applied entitlement interval, over the changes
+   * this run recorded. `null` means nothing was measured, which is different from 0 ms.
+   */
+  p95PropagationMs: z.number().int().nonnegative().nullable(),
+  /** How many changes the propagation p95 covers; a figure without it is not evidence. */
+  propagationSamples: z.number().int().nonnegative(),
   errors: z.array(z.string()),
   state: z.enum(['succeeded', 'partial', 'failed']),
 });
@@ -74,7 +88,9 @@ export const UserEntitlementsSchema = z.object({
       product: z.string().min(1),
       entryKey: z.string().min(1),
       productRole: z.string().min(1),
-      syncState: z.string().min(1),
+      syncState: z.enum(ENTITLEMENT_SYNC_STATES),
+      /** FR-2.4: when the grant reached the product; null while pending or unsupported. */
+      appliedAt: TimestampSchema.nullable(),
     }),
   ),
 });
@@ -97,7 +113,21 @@ export const PlatformSettingsSchema = z.object({
   sessionIdleMinutes: z.number().int().positive(),
   sessionAbsoluteHours: z.number().int().positive(),
   metadataReviewDays: z.number().int().positive(),
-  auditRetentionDays: z.number().int().positive(),
+  /**
+   * NFR-4.10 requires audit records to be retained for at least twelve months, so the floor is a
+   * validation rule rather than a default: a setting that cannot satisfy the requirement must not be
+   * storable. The cap stops a typo (`4200`) from pinning every partition a deployment will ever
+   * create.
+   */
+  auditRetentionDays: z.number().int().min(365).max(3650),
+  /**
+   * FR-4.5 alerting thresholds, as a percentage of the declared shape (CPU, memory) or of the volume
+   * quota (disk). They are settings rather than environment constants because the requirement says
+   * "configurable", and the capacity board renders the same three numbers the alert pass enforces.
+   */
+  capacityCpuAlertPercent: z.number().int().min(50).max(99),
+  capacityMemoryAlertPercent: z.number().int().min(50).max(99),
+  capacityDiskAlertPercent: z.number().int().min(50).max(99),
   updatedAt: TimestampSchema,
   updatedBy: z.string().min(1),
 });

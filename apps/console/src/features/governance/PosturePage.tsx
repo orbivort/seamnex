@@ -4,7 +4,6 @@ import { usePosture } from '@seamnex/api-client';
 import type { PostureSummary } from '@seamnex/domain';
 import {
   Badge,
-  Callout,
   DefinitionList,
   Page,
   PageHeader,
@@ -16,13 +15,8 @@ import {
 } from '@seamnex/ui';
 import { formatDate, formatDateTime } from '@seamnex/utils';
 import { AsyncPanel } from '@seamnex/shell';
-
-/**
- * S-2 defines the floor per deployment, not per catalog entry: D5 and D6 share one ERPNext
- * deployment, so an entry count would credit that single deployment twice.
- */
-const NATIVE_FLOOR_DEPLOYMENTS = 6;
-const NATIVE_BASELINE_DEPLOYMENTS = 12;
+import { NativeFloorPanel } from './NativeFloorPanel';
+import { TrustedRegistryPanel } from './TrustedRegistryPanel';
 
 type UnverifiedRestore = PostureSummary['unverifiedRestores'][number];
 
@@ -119,7 +113,6 @@ export function PosturePage() {
           );
           const restoresVerified = summary.totalInstances - summary.unverifiedRestores.length;
           const covered = summary.sso.native + summary.sso.forwardAuth;
-          const floorMet = summary.sso.native >= NATIVE_FLOOR_DEPLOYMENTS;
           /*
            * ADR-BE-22: a gated deployment whose credential the platform holds is still `fa_gate`,
            * so it must not be reported as "credential provisioned outside the platform". The count
@@ -164,6 +157,9 @@ export function PosturePage() {
                   />
                 </Panel>
               </div>
+
+              {/* S-2: the floor in force, the shortfall by deployment and any recorded decision. */}
+              <NativeFloorPanel sso={summary.sso} />
 
               {/* `items-start`, for the same reason as the overview: a one-line panel was being
                   stretched to the height of the panel beside it. */}
@@ -344,17 +340,11 @@ export function PosturePage() {
                         </ul>
                       </div>
                     ) : null}
-                    <Callout
-                      tone={floorMet ? 'positive' : 'caution'}
-                      title={`Native floor (S-2): ${summary.sso.native} of ${NATIVE_FLOOR_DEPLOYMENTS} required`}
-                      className="mt-3"
-                    >
-                      At least {NATIVE_FLOOR_DEPLOYMENTS} of the {NATIVE_BASELINE_DEPLOYMENTS}{' '}
-                      baseline deployments must authenticate natively, counted per deployment so the
-                      shared ERPNext instance is not counted twice. This fleet has{' '}
-                      {summary.totalInstances} deployments, {summary.sso.native} of them native. A
-                      failure becomes a recorded owner decision, never a silent re-baseline.
-                    </Callout>
+                    {/*
+                      The floor used to be a literal in this caption, so a decision that lowered it
+                      would still render as a shortfall. It is a served number now and lives in its
+                      own panel above; this block only reports what the counts prove.
+                    */}
                     <div className="mt-3 flex items-start gap-2 text-meta leading-relaxed text-muted">
                       {summary.sso.signInRequired > 0 ? (
                         <ShieldAlert
@@ -373,6 +363,9 @@ export function PosturePage() {
                   </div>
                 </Panel>
               </SplitLayout>
+
+              {/* NFR-4.16: the allow-list as a control with a revision, not a sentence. */}
+              <TrustedRegistryPanel />
             </div>
           );
         }}

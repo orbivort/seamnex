@@ -146,3 +146,6 @@ $RECYCLE.BIN/
 
 # Legacy Subversion metadata still present in some checkouts of this tree.
 .svn/
+
+# Development folders.
+docs/dev-reference/

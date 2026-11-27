@@ -16,7 +16,11 @@ function setup(overrides: Record<string, unknown> = {}) {
     ...overrides,
   } as unknown as AppConfig;
   const status = { sample: vi.fn(async () => ({ instances: 2, ready: 1, degraded: 1 })) };
-  const executor = { recordCapacitySample: vi.fn(async () => undefined) };
+  const executor = {
+    recordCapacitySample: vi.fn(async () => undefined),
+    recordVolumeUsage: vi.fn(async () => undefined),
+    recordInstanceUsage: vi.fn(async () => ({ sampled: 0 })),
+  };
   const service = new SamplerService(config, status as never, executor as never);
   return { status, executor, service };
 }
@@ -150,5 +154,55 @@ describe('tick', () => {
     executor.recordCapacitySample.mockRejectedValue('cannot measure');
 
     await expect(service.tick()).resolves.toBeUndefined();
+  });
+
+  it('measures volume usage on the capacity cadence, not on every status tick', async () => {
+    const { executor, service } = setup();
+
+    await service.tick();
+    await service.tick();
+
+    expect(executor.recordVolumeUsage).toHaveBeenCalledOnce();
+
+    vi.advanceTimersByTime(300_000);
+    await service.tick();
+    expect(executor.recordVolumeUsage).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the cycle alive when a volume cannot be measured', async () => {
+    const { executor, status, service } = setup();
+    executor.recordVolumeUsage.mockRejectedValue(new Error('daemon down'));
+
+    await expect(service.tick()).resolves.toBeUndefined();
+    await service.tick();
+
+    expect(status.sample).toHaveBeenCalledTimes(2);
+  });
+
+  it('measures instance consumption after the volume walk, on the same cadence', async () => {
+    const { executor, service } = setup();
+
+    await service.tick();
+    await service.tick();
+
+    // FR-4.5: disk is summed from `instance_volume`, so the volume sample must be taken first.
+    expect(executor.recordVolumeUsage.mock.invocationCallOrder[0]).toBeLessThan(
+      executor.recordInstanceUsage.mock.invocationCallOrder[0] as number,
+    );
+    expect(executor.recordInstanceUsage).toHaveBeenCalledOnce();
+
+    vi.advanceTimersByTime(300_000);
+    await service.tick();
+    expect(executor.recordInstanceUsage).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the cycle alive when consumption cannot be measured', async () => {
+    const { executor, status, service } = setup();
+    executor.recordInstanceUsage.mockRejectedValue(new Error('daemon down'));
+
+    await expect(service.tick()).resolves.toBeUndefined();
+    await service.tick();
+
+    expect(status.sample).toHaveBeenCalledTimes(2);
   });
 });

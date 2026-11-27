@@ -31,6 +31,10 @@
     "./vite/app": {
       "types": "./vite/app.ts",
       "import": "./vite/app.ts"
+    },
+    "./vite/dev-cert": {
+      "types": "./vite/dev-cert.ts",
+      "import": "./vite/dev-cert.ts"
     }
   },
   "scripts": {

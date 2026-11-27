@@ -19,6 +19,7 @@ export type PipelineStageName =
   | 'policy'
   | 'render'
   | 'plan'
+  | 'build'
   | 'apply'
   | 'verify'
   | 'integrate'

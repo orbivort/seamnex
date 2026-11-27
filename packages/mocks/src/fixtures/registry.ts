@@ -1,7 +1,17 @@
-import type { RegistryEntry } from '@seamnex/domain';
-import { isWorkflowEligible, isWriteEligible } from '@seamnex/domain';
+import { VERIFIED_FACT_KEYS, isWorkflowEligible, isWriteEligible } from '@seamnex/domain';
+import type { RegistryEntry, VerifiedFactKey } from '@seamnex/domain';
 import { CATALOG_BY_KEY } from './catalog';
 import { INSTANCES } from './instances';
+
+/**
+ * Entries whose integration facts are still catalogue assumptions.
+ *
+ * FR-2.14 requires verification at onboarding, and AC-41 requires the registry to say which facts
+ * were actually checked. Two products in the demo never went through it, so they carry no verified
+ * facts and the console labels their values "catalog assumption" instead of stamping a verification
+ * date over them — the surface AC-41 is about.
+ */
+const CATALOG_ASSUMED_ENTRIES = new Set(['D12-01', 'D13-01']);
 
 /**
  * The registry is a projection of each instance's verified facts, so the eligibility flags are
@@ -12,6 +22,7 @@ import { INSTANCES } from './instances';
 export const REGISTRY: RegistryEntry[] = INSTANCES.flatMap((instance) => {
   const entry = CATALOG_BY_KEY[instance.entryKey];
   if (!entry) return [];
+  const assumed = CATALOG_ASSUMED_ENTRIES.has(entry.key);
   return [
     {
       instanceId: instance.id,
@@ -26,6 +37,8 @@ export const REGISTRY: RegistryEntry[] = INSTANCES.flatMap((instance) => {
       operations: entry.integration.operationInventory,
       eventModes: entry.integration.eventModes,
       credentialGranularity: entry.integration.credentialGranularity,
+      sloSupported: entry.integration.sloSupported,
+      verifiedFacts: assumed ? [] : ([...VERIFIED_FACT_KEYS] as VerifiedFactKey[]),
       writeEligible: isWriteEligible(entry.integration.credentialGranularity),
       workflowEligible: isWorkflowEligible(entry.integration.credentialGranularity),
       owner: entry.owner.name,

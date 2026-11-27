@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import {
   CatalogEntrySchema,
+  computeCatalogCoverage,
   isComposedEntryKey,
   isCredentialGranularity,
   isWriteEligible,
@@ -249,6 +250,31 @@ export class PostgresCatalogService implements CatalogService {
       .map((document) => document.key)
       .filter((key) => !isComposedEntryKey(key));
 
+    /*
+     * S-1 / S-2 / AC-01 — the verdict the reload serves.
+     *
+     * A declaration whose entry document is absent from the tree is *refused*, not tolerated: there
+     * is no row to attach it to, so the product it describes can never be deployed and calling the
+     * catalogue healthy would be a claim the tree does not support. The counts and the floor come
+     * from `computeCatalogCoverage`, the same function `GET /posture` and `pnpm check:catalog` use,
+     * so three surfaces cannot disagree about "6 of 12".
+     */
+    const documented = new Set(tree.documents.map((document) => document.key));
+    const coverage = computeCatalogCoverage({
+      entries: tree.documents.map((document) => ({
+        key: document.key,
+        guaranteeClass: document.guaranteeClass,
+        primaryInstanceId: document.primaryInstanceId,
+      })),
+      declaredEnvironments: tree.envSchemas.length,
+      refused: tree.envSchemas
+        .filter((file) => !documented.has(file.entryKey))
+        .map((file) => ({
+          key: file.entryKey,
+          reason: `catalog/env/${file.entryKey}.json declares an environment with no catalog/${file.entryKey}.json entry document in the working tree.`,
+        })),
+    });
+
     return {
       reloadedAt: new Date().toISOString(),
       revision: tree.revision,
@@ -259,6 +285,7 @@ export class PostgresCatalogService implements CatalogService {
       reconciled,
       invalid: [...tree.invalid],
       deprecated,
+      coverage,
     };
   }
 
@@ -308,6 +335,25 @@ export class PostgresCatalogService implements CatalogService {
       });
     }
 
+    /*
+     * FR-2.15: a verification with no fact in it would re-stamp the review clock on nothing.
+     *
+     * The route schema refuses an empty body, and so does the service — a job or another module
+     * reaches this method without the route, and "recorded a review" must never mean "the clock
+     * moved because somebody pressed save".
+     */
+    if (verifiedFactNames(patch).length === 0) {
+      throw new AppError({
+        code: 'VALIDATION_FAILED',
+        status: 422,
+        detail: 'A verification must record at least one fact.',
+        fieldErrors: [
+          { field: 'body', code: 'required', message: 'Send at least one verified fact.' },
+        ],
+        remediation: 'Change at least one fact before recording the review.',
+      });
+    }
+
     const previousGranularity: CredentialGranularity = entry.integration.credentialGranularity;
     const nextGranularity: CredentialGranularity =
       patch.credentialGranularity ?? previousGranularity;
@@ -315,13 +361,26 @@ export class PostgresCatalogService implements CatalogService {
     // contract, the button label and the audit detail all claim the clock restarts, so it does.
     const verifiedAt = new Date();
     const nextReviewAt = new Date(verifiedAt.getTime() + REVIEW_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+    // FR-2.14: the record names a person, not a subject identifier. Resolved once, before the
+    // transaction, and reused for both the entry document and the per-instance record.
+    const verifierName = await this.verifierName(actorId);
     const integration = {
       ...entry.integration,
       credentialGranularity: nextGranularity,
       ...(patch.sessionMaxMinutes === undefined
         ? {}
         : { sessionMaxMinutes: patch.sessionMaxMinutes }),
-      verifiedBy: actorId,
+      ...(patch.apiBaseUrl === undefined ? {} : { apiBaseUrl: patch.apiBaseUrl }),
+      ...(patch.authMethod === undefined ? {} : { authMethod: patch.authMethod }),
+      ...(patch.guaranteeClass === undefined
+        ? {}
+        : { guaranteeClassVerified: patch.guaranteeClass }),
+      ...(patch.operationInventory === undefined
+        ? {}
+        : { operationInventory: patch.operationInventory }),
+      ...(patch.eventModes === undefined ? {} : { eventModes: patch.eventModes }),
+      ...(patch.sloSupported === undefined ? {} : { sloSupported: patch.sloSupported }),
+      verifiedBy: verifierName,
       verifiedAt: verifiedAt.toISOString(),
       nextReviewAt: nextReviewAt.toISOString(),
       stale: false,
@@ -331,6 +390,10 @@ export class PostgresCatalogService implements CatalogService {
     // exist, and the trigger in 0017 revokes them in this same transaction.
     const revokesLiveWriteScopes =
       isWriteEligible(previousGranularity) && !isWriteEligible(nextGranularity);
+    const facts = verifiedFactNames(patch);
+    // AC-41: the audit row records what changed, per field — a verification that says only "saved"
+    // leaves the reviewer to diff two documents to learn what the operator asserted.
+    const changes = changedFacts(entry.integration, patch);
 
     await withTransaction(this.pool, async (tx) => {
       await this.audit.lockChain(tx);
@@ -338,23 +401,77 @@ export class PostgresCatalogService implements CatalogService {
         `UPDATE catalog_entry SET payload = $2::jsonb, updated_at = now() WHERE key = $1`,
         [key, JSON.stringify(next)],
       );
-      // The per-instance record the enforcement points read. `verified_by/at` and `next_review_at`
-      // travel with it, because the registry's staleness flag and the governance review queue are
-      // queries over these columns, not over the catalog document.
-      await tx.query(
-        `INSERT INTO integration_metadata
-           (instance_id, entry_key, credential_granularity, session_max_minutes, verified_by, verified_at, next_review_at)
-         SELECT i.id, i.entry_key, $2, $3, $4, $5, $6
-           FROM instance i
-          WHERE i.entry_key = $1 AND i.deleted_at IS NULL
-         ON CONFLICT (instance_id) DO UPDATE
-            SET credential_granularity = EXCLUDED.credential_granularity,
-                session_max_minutes = EXCLUDED.session_max_minutes,
-                verified_by = EXCLUDED.verified_by,
-                verified_at = EXCLUDED.verified_at,
-                next_review_at = EXCLUDED.next_review_at`,
-        [key, nextGranularity, integration.sessionMaxMinutes, actorId, verifiedAt, nextReviewAt],
+      /*
+       * The per-instance record the enforcement points read. Every column is written, not just the
+       * two the old statement carried, and each instance's previous values seed the ones the patch
+       * omitted — an omitted field means "unchanged", never "clear".
+       *
+       * `verified_facts` accumulates: a fact once verified stays verified until it is re-reviewed,
+       * which is what FR-2.15's quarterly clock is for.
+       */
+      const existing = await tx.query<{
+        instance_id: string;
+        api_base_url: string | null;
+        auth_method: string | null;
+        guarantee_class_verified: string | null;
+        operation_inventory: unknown;
+        event_modes: unknown;
+        session_max_minutes: number | null;
+        slo_supported: boolean | null;
+        verified_facts: string[] | null;
+      }>(
+        `SELECT instance_id, api_base_url, auth_method, guarantee_class_verified,
+                operation_inventory, event_modes, session_max_minutes, slo_supported, verified_facts
+           FROM integration_metadata WHERE entry_key = $1`,
+        [key],
       );
+      const byInstance = new Map(existing.rows.map((row) => [row.instance_id, row]));
+      const instances = await tx.query<{ id: string }>(
+        `SELECT id FROM instance WHERE entry_key = $1 AND deleted_at IS NULL`,
+        [key],
+      );
+
+      for (const instance of instances.rows) {
+        const before = byInstance.get(instance.id);
+        const verifiedFacts = [...new Set([...(before?.verified_facts ?? []), ...facts])].sort();
+        await tx.query(
+          `INSERT INTO integration_metadata
+             (instance_id, entry_key, api_base_url, auth_method, guarantee_class_verified,
+              operation_inventory, event_modes, credential_granularity, session_max_minutes,
+              slo_supported, verified_facts, verified_by, verified_at, next_review_at)
+           VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10, $11::text[], $12, $13, $14)
+           ON CONFLICT (instance_id) DO UPDATE
+              SET api_base_url = EXCLUDED.api_base_url,
+                  auth_method = EXCLUDED.auth_method,
+                  guarantee_class_verified = EXCLUDED.guarantee_class_verified,
+                  operation_inventory = EXCLUDED.operation_inventory,
+                  event_modes = EXCLUDED.event_modes,
+                  credential_granularity = EXCLUDED.credential_granularity,
+                  session_max_minutes = EXCLUDED.session_max_minutes,
+                  slo_supported = EXCLUDED.slo_supported,
+                  verified_facts = EXCLUDED.verified_facts,
+                  verified_by = EXCLUDED.verified_by,
+                  verified_at = EXCLUDED.verified_at,
+                  next_review_at = EXCLUDED.next_review_at`,
+          [
+            instance.id,
+            key,
+            patch.apiBaseUrl ?? before?.api_base_url ?? null,
+            patch.authMethod ?? before?.auth_method ?? null,
+            patch.guaranteeClass ?? before?.guarantee_class_verified ?? null,
+            JSON.stringify(patch.operationInventory ?? before?.operation_inventory ?? []),
+            JSON.stringify(patch.eventModes ?? before?.event_modes ?? []),
+            nextGranularity,
+            patch.sessionMaxMinutes ?? before?.session_max_minutes ?? null,
+            patch.sloSupported ?? before?.slo_supported ?? null,
+            verifiedFacts,
+            verifierName,
+            verifiedAt,
+            nextReviewAt,
+          ],
+        );
+      }
+
       await this.audit.append(
         {
           action: 'catalog.integration_metadata.updated',
@@ -371,6 +488,8 @@ export class PostgresCatalogService implements CatalogService {
             revokesLiveWriteScopes,
             sessionMaxMinutes: integration.sessionMaxMinutes,
             nextReviewAt: integration.nextReviewAt,
+            verifiedFacts: facts,
+            changes,
           },
         },
         tx,
@@ -386,6 +505,21 @@ export class PostgresCatalogService implements CatalogService {
     });
 
     return next;
+  }
+
+  /**
+   * FR-2.14 — `verified_by` is the person who recorded the review, in the same spelling the rest of
+   * the platform shows (`M10`, `M18` resolve names from the identity mirror). Feeding the column the
+   * subject id made the receipt read "recorded by 8412fc5d-…" while a seeded document read
+   * "Platform Administrator". The audit trail keeps the id; this record keeps the name. A subject
+   * with no mirror row (a job, a service account) keeps its id rather than inventing a person.
+   */
+  private async verifierName(actorId: string): Promise<string> {
+    const result = await this.pool.query<{ name: string | null }>(
+      `SELECT coalesce(display_name, username) AS name FROM idp_user WHERE idp_id = $1`,
+      [actorId],
+    );
+    return result.rows[0]?.name ?? actorId;
   }
 
   private async find(key: string): Promise<EntryRow | undefined> {
@@ -502,6 +636,68 @@ export class PostgresCatalogService implements CatalogService {
   }
 }
 
+/** The `verified_facts` names a patch asserts (FR-2.14). */
+type VerifiedFactName =
+  | 'apiBaseUrl'
+  | 'authMethod'
+  | 'guaranteeClass'
+  | 'operations'
+  | 'eventModes'
+  | 'credentialGranularity'
+  | 'sessionMaxMinutes'
+  | 'sloSupported';
+
+function verifiedFactNames(patch: IntegrationMetadataPatch): VerifiedFactName[] {
+  const names: VerifiedFactName[] = [];
+  if (patch.apiBaseUrl !== undefined) names.push('apiBaseUrl');
+  if (patch.authMethod !== undefined) names.push('authMethod');
+  if (patch.guaranteeClass !== undefined) names.push('guaranteeClass');
+  // The column and the verified-fact vocabulary differ: the contract calls the inventory by its
+  // product name, the registry by the fact it serves operations from.
+  if (patch.operationInventory !== undefined) names.push('operations');
+  if (patch.eventModes !== undefined) names.push('eventModes');
+  if (patch.credentialGranularity !== undefined) names.push('credentialGranularity');
+  if (patch.sessionMaxMinutes !== undefined) names.push('sessionMaxMinutes');
+  if (patch.sloSupported !== undefined) names.push('sloSupported');
+  return names;
+}
+
+/**
+ * AC-41: the before/after of every fact the request touched.
+ *
+ * Arrays are summarised by size, not copied: an operation inventory is a document, and an audit row
+ * that embeds two of them is unreadable and grows the chain for no evidence. The count plus the
+ * previous count is what a reviewer checks.
+ */
+function changedFacts(
+  before: CatalogEntry['integration'],
+  patch: IntegrationMetadataPatch,
+): Record<string, { from: string; to: string }> {
+  const changes: Record<string, { from: string; to: string }> = {};
+  const record = (field: string, from: unknown, to: unknown): void => {
+    if (to === undefined) return;
+    const beforeText = summarise(from);
+    const afterText = summarise(to);
+    if (beforeText !== afterText) changes[field] = { from: beforeText, to: afterText };
+  };
+
+  record('apiBaseUrl', before.apiBaseUrl, patch.apiBaseUrl);
+  record('authMethod', before.authMethod, patch.authMethod);
+  record('guaranteeClass', before.guaranteeClassVerified, patch.guaranteeClass);
+  record('operationInventory', before.operationInventory, patch.operationInventory);
+  record('eventModes', before.eventModes, patch.eventModes);
+  record('credentialGranularity', before.credentialGranularity, patch.credentialGranularity);
+  record('sessionMaxMinutes', before.sessionMaxMinutes, patch.sessionMaxMinutes);
+  record('sloSupported', before.sloSupported, patch.sloSupported);
+  return changes;
+}
+
+function summarise(value: unknown): string {
+  if (Array.isArray(value)) return `${value.length} item${value.length === 1 ? '' : 's'}`;
+  if (value === undefined || value === null) return '(none)';
+  return String(value);
+}
+
 function notFound(key: string): AppError {
   return new AppError({
     code: 'NOT_FOUND',
@@ -519,6 +715,6 @@ function incompleteProjection(key: string): AppError {
     code: 'INTERNAL_ERROR',
     detail: `Catalog entry ${key} is projected without the fields its contract requires.`,
     remediation:
-      'Run POST /catalog/reload to re-read the catalog repository, or reseed the development database.',
+      'Run POST /catalog/reload to re-read the catalogue checkout. If no checkout is present, acquire one first (pnpm catalog:sync --ref <tag>) — reseeding projects existing documents and cannot produce a missing one.',
   });
 }

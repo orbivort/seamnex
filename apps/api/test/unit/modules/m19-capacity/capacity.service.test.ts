@@ -1,6 +1,7 @@
 import type * as NodeFs from 'node:fs';
 import type * as NodeOs from 'node:os';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { CapacitySnapshot, CollectionScope } from '@seamnex/domain';
 import { fakeDb } from '../../../support/fakes';
 import type { AppConfig } from '../../../../src/config/config';
 import {
@@ -66,12 +67,46 @@ function setup(routes: Parameters<typeof fakeDb>[0] = []) {
   );
   const service = new PostgresCapacityService(db.pool, {
     SEAMNEX_INSTANCE_DATA_DIR: '/var/lib/seamnex',
+    // FR-4.5: a sample is fresh for two sampling intervals.
+    SEAMNEX_CAPACITY_SAMPLE_INTERVAL_MS: 60_000,
   } as unknown as AppConfig);
   return { db, service };
 }
 
 const SNAPSHOT_SELECT = 'FROM capacity_snapshot ORDER BY ts DESC LIMIT 1';
 const LEDGER = 'WITH declared';
+/** The ADR-BE-44 visibility query — the one statement that turns a scope into instance ids. */
+const VISIBILITY = 'JOIN catalog_entry c ON c.key = i.entry_key';
+
+const SCOPED: CollectionScope = {
+  kind: 'scoped',
+  domains: ['CRM & Sales Pipeline'],
+  instanceIds: ['4c3f0a66-0000-4000-8000-000000000001'],
+};
+
+function usage(instanceId: string): CapacitySnapshot['instanceUsage'][number] {
+  return {
+    instanceId,
+    entryKey: 'D01-01',
+    product: 'EspoCRM',
+    slug: instanceId,
+    state: 'ready',
+    cpuCores: 2,
+    memoryMb: 4_096,
+    diskMb: 20_480,
+    diskQuotaMb: 20_480,
+    measuredAt: null,
+  };
+}
+
+function persisted(instanceUsage: CapacitySnapshot['instanceUsage']) {
+  return [
+    {
+      ts: new Date('2026-03-04T05:06:07.000Z'),
+      per_instance: { ...SNAPSHOT, instanceUsage },
+    },
+  ];
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -96,10 +131,40 @@ describe('snapshot', () => {
     });
   });
 
+  it('confines the per-instance table to a scoped caller and keeps the host figures', async () => {
+    const { db, service } = setup([
+      [SNAPSHOT_SELECT, persisted([usage('inst-1'), usage('inst-2')])],
+      [VISIBILITY, [{ id: 'inst-2' }]],
+    ]);
+
+    const snapshot = await service.snapshot(SCOPED);
+
+    // ADR-BE-44: only the table is filtered; the totals and the verdict still describe the machine.
+    expect(snapshot.instanceUsage.map((row) => row.instanceId)).toEqual(['inst-2']);
+    expect(snapshot.host).toEqual(SNAPSHOT.host);
+    expect(snapshot.verdict).toEqual(SNAPSHOT.verdict);
+
+    const visibility = db.calls.find((call) => call.sql.includes(VISIBILITY));
+    // Both halves of the grant are bound: domain membership and individually granted instances.
+    expect(visibility?.params).toEqual([SCOPED.domains, SCOPED.instanceIds]);
+  });
+
+  it('does not filter the table for a platform-wide scope', async () => {
+    const { db, service } = setup([
+      [SNAPSHOT_SELECT, persisted([usage('inst-1'), usage('inst-2')])],
+    ]);
+
+    const snapshot = await service.snapshot({ kind: 'platform' });
+
+    expect(snapshot.instanceUsage).toHaveLength(2);
+    // "Unrestricted" is expressed by not asking, never by a query that binds an empty scope.
+    expect(db.calls.some((call) => call.sql.includes(VISIBILITY))).toBe(false);
+  });
+
   it('measures and records one when nothing has been recorded yet', async () => {
     const { db, service } = setup([
       [SNAPSHOT_SELECT, []],
-      ['FROM settings WHERE key', [{ value: 2 }]],
+      ['FROM settings', [{ key: 'oversubscription_factor', value: 2 }]],
       [LEDGER, [{ cpu_milli: '2000', memory_mb: '4096', disk_mb: '20480' }]],
       [
         'FROM instance i',
@@ -131,6 +196,9 @@ describe('snapshot', () => {
     // The ledger, not the host total, is what "allocated" means.
     expect(snapshot.allocated).toEqual({ cpuCores: 2, memoryMb: 4_096, diskMb: 20_480 });
     expect(snapshot.oversubscriptionFactor).toBe(2);
+    // FR-4.5: the thresholds are echoed in the snapshot so the board can draw the bands an R3 holder
+    // cannot read from `settings`.
+    expect(snapshot.thresholds).toEqual({ cpuPercent: 75, memoryPercent: 90, diskPercent: 85 });
     expect(snapshot.instanceUsage).toEqual([
       {
         instanceId: 'inst-1',
@@ -142,6 +210,8 @@ describe('snapshot', () => {
         memoryMb: 4_096,
         diskMb: 20_480,
         diskQuotaMb: 20_480,
+        // No sample exists, so the consumed figures are absent and `measuredAt` is null — never 0.
+        measuredAt: null,
       },
       {
         // An instance that has not been given a shape yet is listed at zero, labelled by its entry
@@ -155,6 +225,7 @@ describe('snapshot', () => {
         memoryMb: 0,
         diskMb: 0,
         diskQuotaMb: 0,
+        measuredAt: null,
       },
     ]);
     expect(snapshot.forecast).toHaveLength(14);
@@ -186,7 +257,7 @@ describe('record', () => {
 
   it('measures the instance-data volume before falling back to the working directory', async () => {
     const { db, service } = setup([
-      ['FROM settings WHERE key', []],
+      ['FROM settings', []],
       [LEDGER, []],
       ['FROM instance i', []],
       ['INSERT INTO capacity_snapshot', []],
@@ -202,6 +273,130 @@ describe('record', () => {
     expect(db.calls.some((call) => call.sql.includes('INSERT INTO capacity_snapshot'))).toBe(true);
   });
 
+  it('reports measured consumption beside the declared shape, and drops a stale sample', async () => {
+    const now = Date.now();
+    const { service } = setup([
+      ['FROM settings', []],
+      [LEDGER, []],
+      [
+        'FROM instance i',
+        [
+          {
+            id: 'inst-1',
+            entry_key: 'D01-01',
+            product: 'EspoCRM',
+            slug: 'crm',
+            state: 'ready',
+            resources: { cpu: 2, memoryMb: 4_096, diskMb: 20_480 },
+            sampled_at: new Date(now - 30_000),
+            cpu_milli: 480,
+            memory_mb: 1_200,
+            disk_mb: 3_000,
+            containers: 2,
+          },
+          {
+            id: 'inst-2',
+            entry_key: 'D01-01',
+            product: 'EspoCRM',
+            slug: 'stale',
+            state: 'ready',
+            resources: { cpu: 2, memoryMb: 4_096, diskMb: 20_480 },
+            sampled_at: new Date(now - 60 * 60_000),
+            cpu_milli: 1_900,
+            memory_mb: 3_900,
+            disk_mb: 19_000,
+            containers: 2,
+          },
+        ],
+      ],
+      ['INSERT INTO capacity_snapshot', []],
+    ]);
+
+    const snapshot = await service.record();
+
+    expect(snapshot?.instanceUsage[0]).toMatchObject({
+      cpuCores: 2,
+      cpuConsumedMilli: 480,
+      memoryConsumedMb: 1_200,
+      diskConsumedMb: 3_000,
+      measuredAt: new Date(now - 30_000).toISOString(),
+    });
+    // A two-hour-old sample is not "current usage"; the board must show nothing rather than a figure
+    // that stopped being true.
+    expect(snapshot?.instanceUsage[1]?.cpuConsumedMilli).toBeUndefined();
+    expect(snapshot?.instanceUsage[1]?.measuredAt).toBeNull();
+  });
+
+  it('treats a fresh sample with no containers as absent rather than as zero usage', async () => {
+    const { service } = setup([
+      ['FROM settings', []],
+      [LEDGER, []],
+      [
+        'FROM instance i',
+        [
+          {
+            id: 'inst-1',
+            entry_key: 'D01-01',
+            product: 'EspoCRM',
+            slug: 'crm',
+            state: 'ready',
+            resources: { cpu: 2, memoryMb: 4_096, diskMb: 20_480 },
+            sampled_at: new Date(Date.now() - 30_000),
+            cpu_milli: 480,
+            memory_mb: 1_200,
+            disk_mb: 3_000,
+            containers: 0,
+          },
+        ],
+      ],
+      ['INSERT INTO capacity_snapshot', []],
+    ]);
+
+    const snapshot = await service.record();
+
+    // A recent timestamp alone is not a reading: with nothing running there is nothing measured.
+    expect(snapshot?.instanceUsage[0]?.measuredAt).toBeNull();
+    expect(snapshot?.instanceUsage[0]?.cpuConsumedMilli).toBeUndefined();
+  });
+
+  it('reports a fresh sample whose figures are null as zero consumed', async () => {
+    const sampledAt = new Date(Date.now() - 30_000);
+    const { service } = setup([
+      ['FROM settings', []],
+      [LEDGER, []],
+      [
+        'FROM instance i',
+        [
+          {
+            id: 'inst-1',
+            entry_key: 'D01-01',
+            product: 'EspoCRM',
+            slug: 'crm',
+            state: 'ready',
+            resources: { cpu: 2, memoryMb: 4_096, diskMb: 20_480 },
+            sampled_at: sampledAt,
+            cpu_milli: null,
+            memory_mb: null,
+            disk_mb: null,
+            containers: 1,
+          },
+        ],
+      ],
+      ['INSERT INTO capacity_snapshot', []],
+    ]);
+
+    const snapshot = await service.record();
+
+    // Containers are up and the sample is current, so a missing figure is zero usage with a
+    // timestamp — not the "dash" a stale or container-less sample earns.
+    expect(snapshot?.instanceUsage[0]).toMatchObject({
+      cpuConsumedMilli: 0,
+      memoryConsumedMb: 0,
+      diskConsumedMb: 0,
+      measuredAt: sampledAt.toISOString(),
+    });
+  });
+
   it('returns null when no filesystem can be measured', async () => {
     const { service } = setup();
     h.statfsSync.mockImplementation(() => {
@@ -213,7 +408,7 @@ describe('record', () => {
 
   it('accepts a numeric oversubscription factor stored as text, and refuses an unusable one', async () => {
     const { service } = setup([
-      ['FROM settings WHERE key', [{ value: '1.5' }]],
+      ['FROM settings', [{ key: 'oversubscription_factor', value: '1.5' }]],
       [LEDGER, []],
       ['FROM instance i', []],
       ['INSERT INTO capacity_snapshot', []],
@@ -225,7 +420,7 @@ describe('record', () => {
   it('falls back to the documented factor when the stored value is nonsense', async () => {
     for (const value of ['lots', 0.5, null]) {
       const { service } = setup([
-        ['FROM settings WHERE key', [{ value }]],
+        ['FROM settings', [{ key: 'oversubscription_factor', value }]],
         [LEDGER, []],
         ['FROM instance i', []],
         ['INSERT INTO capacity_snapshot', []],
@@ -295,7 +490,7 @@ describe('admit', () => {
   it('probes the host when no snapshot has been recorded', async () => {
     const { service } = setup([
       [SNAPSHOT_SELECT, []],
-      ['FROM settings WHERE key', []],
+      ['FROM settings', []],
       [LEDGER, []],
     ]);
 

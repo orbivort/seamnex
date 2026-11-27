@@ -15,6 +15,31 @@ export type EnvUpdateResponse = z.infer<typeof EnvUpdateResponseSchema>;
 
 export const RENDERER_SERVICE = Symbol('seamnex.m03.renderer');
 
+/** FR-1.26: the shape a profile write takes; validation lives in the service, not the handler. */
+export type EnvProfileCreateInput = {
+  readonly key: string;
+  readonly name: string;
+  readonly target: 'production' | 'staging';
+};
+
+export type EnvProfilePatchInput = {
+  readonly name?: string;
+  readonly target?: 'production' | 'staging';
+};
+
+export type EnvProfileValueInput = {
+  readonly varName: string;
+  readonly value?: string | null;
+  readonly secretRef?: string | null;
+};
+
+/** FR-1.11: a profile value that points at a secret the store cannot open. */
+export type UnresolvedSecret = {
+  readonly varName: string;
+  readonly secretRef: string;
+  readonly reason: string;
+};
+
 /** Owns `env_schema_var`, `env_schema_revision`, `env_profile`, `env_profile_value`, `instance_env_value`, `render_set`. */
 export interface RendererService {
   schema(entryKey: string): Promise<EnvSchemaVar[]>;
@@ -24,6 +49,22 @@ export interface RendererService {
     profileKey?: string;
     overrides: Record<string, string>;
   }): Promise<EnvPlan>;
+  /** FR-1.26 / AC-51: R1 manages the profiles the deploy wizard selects from. */
+  createProfile(input: EnvProfileCreateInput, actorId: string): Promise<EnvProfile>;
+  patchProfile(key: string, input: EnvProfilePatchInput, actorId: string): Promise<EnvProfile>;
+  replaceProfileValues(
+    key: string,
+    values: readonly EnvProfileValueInput[],
+    actorId: string,
+  ): Promise<EnvProfile>;
+  deleteProfile(key: string, actorId: string): Promise<{ key: string; deleted: boolean }>;
+  /**
+   * FR-1.11: profile secret references that would fail at apply time.
+   *
+   * Runs before a job exists, so a `secret_ref` pointing at a deleted secret is a field error on the
+   * wizard rather than a failed deployment fifteen minutes later.
+   */
+  unresolvedSecrets(input: { entryKey: string; profileKey?: string }): Promise<UnresolvedSecret[]>;
   importEnv(
     input: { entryKey: string; source: 'dotenv' | 'compose'; content: string },
     actorId: string,

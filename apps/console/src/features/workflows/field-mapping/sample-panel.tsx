@@ -176,7 +176,15 @@ export function SamplePanel({
         <div className="flex items-center justify-between gap-2">
           <p className="font-mono text-faint label-caps">Fields</p>
           <span className="text-micro text-faint">
-            {parsed.length === 0 ? 'none' : `${mapped.size} of ${parsed.length} mapped`}
+            {/*
+              Sample fields a mapping reads — not mapping rows.
+              The caption divided rows by fields, so four mappings against a one-field sample read
+              "4 of 1 mapped": a ratio that cannot exist, on the one screen where "mapped" was the
+              thing that turned out to be wrong.
+            */}
+            {parsed.length === 0
+              ? 'none'
+              : `${parsed.filter((field) => mapped.has(field.path)).length} of ${parsed.length} used`}
           </span>
         </div>
         <Input

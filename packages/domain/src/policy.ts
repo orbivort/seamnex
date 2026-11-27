@@ -8,16 +8,19 @@ import type { Capability } from './capabilities';
  * resolves each operation through this table at module load and throws when one is missing
  * (`scripts/check-route-policy.ts` turns the same check into a CI gate).
  *
- * `auth.sign_in` and `auth.session.read` are reserved keys rather than capabilities: they describe
- * the two operations that establish or describe a session, which no role matrix can grant.
+ * `auth.sign_in`, `auth.session.read` and `trigger.delivery` are reserved keys rather than
+ * capabilities: they describe the operations that establish a session or admit a machine delivery,
+ * none of which a role matrix can grant. A delivery is authenticated by the endpoint's HMAC, not by
+ * a role — no human holds it and no role may be given it.
  */
-export type ReservedPolicyKey = 'auth.sign_in' | 'auth.session.read';
+export type ReservedPolicyKey = 'auth.sign_in' | 'auth.session.read' | 'trigger.delivery';
 
 export type PolicyKey = Capability | ReservedPolicyKey;
 
 export const RESERVED_POLICY_KEYS: readonly ReservedPolicyKey[] = [
   'auth.sign_in',
   'auth.session.read',
+  'trigger.delivery',
 ];
 
 export function isReservedPolicyKey(key: PolicyKey): key is ReservedPolicyKey {
@@ -27,8 +30,16 @@ export function isReservedPolicyKey(key: PolicyKey): key is ReservedPolicyKey {
 /**
  * The only operations that may be reached without a session. The route-policy check asserts this
  * list is exactly the set of `anonymous` operations, so it cannot grow silently.
+ *
+ * `POST /trigger/:token` belongs here for the same reason as sign-in: the caller has no session to
+ * present. Its authentication is the per-endpoint HMAC over the raw body, verified before anything
+ * is written, and a refusal is a single indistinguishable 401.
  */
-export const ANONYMOUS_OPERATIONS: readonly string[] = ['POST /auth/session', 'GET /auth/session'];
+export const ANONYMOUS_OPERATIONS: readonly string[] = [
+  'POST /auth/session',
+  'GET /auth/session',
+  'POST /trigger/:token',
+];
 
 /**
  * Resources a scoped grant may be resolved against. `self` covers a member acting on their own
@@ -36,8 +47,14 @@ export const ANONYMOUS_OPERATIONS: readonly string[] = ['POST /auth/session', 'G
  */
 export type ScopeRule = 'platform' | 'self' | 'domain' | 'instance' | 'request';
 
-/** Which scope a capability is resolved against when the matrix says `scoped`. */
-const SCOPE_RULES: Partial<Record<Capability, ScopeRule>> = {
+/**
+ * Which scope a capability is resolved against when the matrix says `scoped`.
+ *
+ * Exported as data because the compiled policy fingerprint covers it (ADR-BE-44): a change to how
+ * a scope resolves changes what a version means, and a denial must stay attributable to the rules
+ * that produced it.
+ */
+export const SCOPE_RULES: Partial<Record<Capability, ScopeRule>> = {
   'catalog.browse': 'self',
   'catalog.read_metadata': 'self',
   'instance.configure': 'instance',
@@ -51,25 +68,40 @@ const SCOPE_RULES: Partial<Record<Capability, ScopeRule>> = {
   'audit.view': 'domain',
   'capacity.view': 'domain',
   'metadata.manage': 'domain',
+  'profile.manage': 'platform',
+  'profile.request': 'request',
   'workflow.author': 'instance',
   'workflow.run': 'instance',
   'workflow.view_runs': 'instance',
   'workflow.credentials': 'instance',
   'workflow.approve': 'request',
   'breakglass.request': 'request',
+  'exception.request': 'request',
+  /*
+   * Role-level only. Whether *this* approver may decide *this* request depends on the elevation's
+   * access mode and target domain, which are row facts a policy decision never sees (every
+   * `/break-glass-sessions*` path resolves to `{type:'request'}`). FR-4.11's eligibility rule lives
+   * in `break-glass-approval.ts` and is enforced by m18 on the row it locks for the decision.
+   */
   'breakglass.approve': 'self',
   'recovery.view': 'domain',
   'license.manage': 'instance',
   'patch.view': 'domain',
   'posture.view': 'domain',
   'portal.sign_in': 'self',
+  /*
+   * The launch routes are addressable (`:instanceId`), so the rule stays `instance`. The launcher and
+   * the product deep link resolve to `self` instead: they are the caller's own surface, and the PDP
+   * resolves a `self` resource from an instance-bound session (R6) to that session's instance. That
+   * keeps §5.2's "one product" a *scoped* grant rather than a weaker yes.
+   */
   'portal.launch': 'instance',
   'portal.view_status': 'self',
   'access.request': 'self',
 };
 
 export function scopeRuleFor(key: PolicyKey): ScopeRule {
-  if (key === 'auth.session.read' || key === 'auth.sign_in') return 'self';
+  if (isReservedPolicyKey(key)) return 'self';
   return SCOPE_RULES[key] ?? 'platform';
 }
 
@@ -96,23 +128,47 @@ export const POLICY_KEYS: Readonly<Record<string, PolicyKey>> = {
   // Portal and own session
   'GET /me': 'auth.session.read',
   'GET /me/entitlements': 'portal.view_entitlements',
-  'GET /me/launcher': 'portal.view_entitlements',
+  /*
+   * §5.2 gives "view own entitlements" to R1–R5 only (`➖` for R6) and "launch entitled products" to
+   * R6 as one product. The launcher is the launch surface: binding it to `portal.view_entitlements`
+   * locked the guest — the one role whose only surface this is — out of it in live mode. What stays
+   * closed is the entitlement *inventory* (`/me/entitlements`), which is the row the matrix denies.
+   */
+  'GET /me/launcher': 'portal.launch',
   'POST /me/logout': 'auth.session.read',
   'GET /portal/status-banner': 'portal.view_status',
   'GET /portal/launch-targets/:instanceId': 'portal.launch',
   'POST /portal/launch-tickets/:instanceId': 'portal.launch',
   'POST /portal/launch-events/:instanceId': 'portal.launch',
   'GET /portal/requestable': 'access.request',
-  'GET /portal/products/:slug': 'portal.view_entitlements',
+  /*
+   * One tile, resolved from the caller's own entitlement — `portal.product` answers not-found for a
+   * slug the caller does not hold. It is the same surface as the launcher, so it carries the same
+   * key; `portal.view_entitlements` would again deny the guest its single product.
+   */
+  'GET /portal/products/:slug': 'portal.launch',
 
   // Catalog
   'GET /catalog': 'catalog.browse',
+  /*
+   * ADR-BE-42: reading the checkout's state is the same reach as browsing its projection, and
+   * fetching a new revision is the same reach the reload already takes. A dedicated capability would
+   * split one operator's job in two with no separation-of-duties argument: the write is to the
+   * catalogue tree, which `metadata.manage` already owns.
+   */
+  'GET /catalog/repository': 'catalog.browse',
+  'POST /catalog/sync': 'metadata.manage',
   'POST /catalog/reload': 'metadata.manage',
   'GET /catalog/:key': 'catalog.read_metadata',
   'GET /catalog/:key/env-schema': 'catalog.read_metadata',
   'GET /catalog/:key/env-plan': 'catalog.read_metadata',
   'POST /catalog/:key/env-import': 'catalog.read_metadata',
   'GET /env-profiles': 'catalog.browse',
+  'POST /env-profiles': 'profile.manage',
+  'PATCH /env-profiles/:key': 'profile.manage',
+  'PUT /env-profiles/:key/values': 'profile.manage',
+  'DELETE /env-profiles/:key': 'profile.manage',
+  'POST /env-profiles/:key/requests': 'profile.request',
   'PATCH /catalog/:key/integration-metadata': 'metadata.manage',
   'GET /catalog/:key/scaffold': 'catalog.read_metadata',
   'POST /catalog/:key/scaffold/:draftId/confirm': 'metadata.manage',
@@ -142,12 +198,27 @@ export const POLICY_KEYS: Readonly<Record<string, PolicyKey>> = {
   'POST /instances/:id/relay/provision': 'instance.env',
   'GET /instances/:id/drift': 'instance.configure',
   'GET /instances/:id/backups': 'instance.backup',
+  /*
+   * FR-1.13: an export is a plaintext copy of *everything* the product holds, so it is readable only
+   * by the role that may produce one — `instance.lifecycle` is R1-only (capabilities §5.2). Using
+   * `instance.backup` here would hand R3, who may take a scoped backup, the whole dataset instead.
+   */
+  'GET /instances/:id/exports': 'instance.lifecycle',
+  'GET /instances/:id/exports/:exportId/archive': 'instance.lifecycle',
   'GET /instances/:id/containers/:cid/logs': 'instance.view_logs',
+  /*
+   * FR-2.6 / FR-4.6: reading what the platform observes about an instance is the same reach as
+   * reading its logs — an operator who may see the log lines may see the profile that describes
+   * them. No new matrix row, so §5.2 is untouched.
+   */
+  'GET /instances/:id/observability': 'instance.view_logs',
+  'GET /instances/:id/logs': 'instance.view_logs',
   'POST /instances/:id/backups': 'instance.backup',
   'PUT /instances/:id/backup-schedule': 'instance.backup',
   'POST /backups/:id/verify': 'instance.backup',
   'POST /backups/:id/restore': 'instance.backup',
   'GET /instances/:id/images': 'instance.view_logs',
+  'GET /instances/:id/image-scan': 'instance.view_logs',
   'GET /instances/:id/plan': 'instance.lifecycle',
   'POST /instances': 'instance.deploy',
   'POST /instances/:id/:action': 'instance.lifecycle',
@@ -203,8 +274,21 @@ export const POLICY_KEYS: Readonly<Record<string, PolicyKey>> = {
    * hosted-service mode.
    */
   'PUT /licenses/:instanceId/hosted-service': 'license.manage',
+  /**
+   * ADR-BE-25: recording the review is the auditor's act, not the operator's. R2 attests the
+   * terms; R1 decides whether the reviewed configuration may be offered. Sharing one key would
+   * let a single person both justify and grant hosted-service mode.
+   */
+  'PUT /licenses/:instanceId/review': 'license.review',
   'GET /patch-register': 'patch.view',
+  /*
+   * FR-2.12: observing upstream is a platform-owner action (it prompts outbound calls and writes
+   * `patch_record`), so it takes the R1-only settings capability rather than the register's read key.
+   */
+  'POST /patch-register/observe': 'settings.manage',
   'GET /posture': 'posture.view',
+  /* S-2: lowering the floor is an owner decision, recorded and audited; R1 only. */
+  'POST /posture/native-floor/decision': 'settings.manage',
   /*
    * The register is read by all three parties to an elevation: the requester (R1), the auditor who
    * approves read-only grants (R2) and the domain owner who approves read-write grants (R3). No
@@ -237,6 +321,9 @@ export const POLICY_KEYS: Readonly<Record<string, PolicyKey>> = {
   'GET /admin/settings/alerts': 'settings.view',
   'PUT /admin/settings/alerts': 'alert.configure',
   'POST /admin/settings/alerts/:id/test': 'alert.configure',
+  /* NFR-4.16: the allow-list is platform-owner configuration; R2 reads it, only R1 changes it. */
+  'GET /security/trusted-registries': 'settings.view',
+  'POST /security/trusted-registries': 'settings.manage',
   'GET /admin/access-requests': 'entitlement.grant',
   'POST /admin/access-requests': 'access.request',
   'POST /admin/access-requests/:id/:decision': 'entitlement.grant',
@@ -245,6 +332,7 @@ export const POLICY_KEYS: Readonly<Record<string, PolicyKey>> = {
   'PATCH /admin/maintenance-windows/:id': 'maintenance.configure',
   'DELETE /admin/maintenance-windows/:id': 'maintenance.configure',
   'GET /admin/policy-exceptions': 'exception.decide',
+  'POST /admin/policy-exceptions': 'exception.request',
   'POST /admin/policy-exceptions/:id/:decision': 'exception.decide',
   'GET /admin/dsar': 'privacy.view',
 
@@ -269,6 +357,8 @@ export const POLICY_KEYS: Readonly<Record<string, PolicyKey>> = {
   // Session surface (anonymous by declaration; the reserved keys never resolve through the matrix)
   'GET /auth/session': 'auth.session.read',
   'POST /auth/session': 'auth.sign_in',
+  // Machine surface: authenticated by the endpoint's HMAC, admitted by `ANONYMOUS_OPERATIONS`.
+  'POST /trigger/:token': 'trigger.delivery',
 };
 
 /**
@@ -295,17 +385,94 @@ export const ANY_OF_POLICY_KEYS: Readonly<Record<string, readonly PolicyKey[]>> 
 };
 
 /**
+ * The rows a collection read is confined to (ADR-BE-44).
+ *
+ * A collection has no id, so there is nothing for `domainOf` or the instance branch to resolve
+ * against and a scoped grant used to be refused outright. The grant *is* the scope: a domain
+ * binding reaches its domain's rows, an instance binding its instance, a platform binding
+ * everything. The decision carries it so an allow can never be separated from the predicate it
+ * implies — a collection allow with no scope is a leak, not a wider grant.
+ */
+export type CollectionScope =
+  | { readonly kind: 'platform' }
+  | {
+      readonly kind: 'scoped';
+      readonly domains: readonly string[];
+      readonly instanceIds: readonly string[];
+    };
+
+/**
+ * The unaddressed reads whose rows are confined to the caller's scope.
+ *
+ * Exact declared paths, checked before the prefix branches of `resourceForRequest`: `/instances/:id`
+ * is an addressed read and keeps its own resolution. `/capacity/forecast` is listed beside
+ * `/capacity` because one screen reads both — a fixed board next to a refused sparkline is worse
+ * than either answer on its own.
+ */
+export const COLLECTION_PATHS: readonly string[] = [
+  '/instances',
+  '/jobs',
+  '/capacity',
+  '/capacity/forecast',
+];
+
+export function isCollectionPath(path: string): boolean {
+  return COLLECTION_PATHS.includes(path);
+}
+
+/**
+ * The narrower half of `CollectionScope` — what a list query must be confined to.
+ *
+ * A caller that resolves this to instance ids cannot do it for `platform`, and should not try: the
+ * absence of a filter is expressed by not asking, not by asking for "everything".
+ */
+export type ScopedCollectionScope = Extract<CollectionScope, { readonly kind: 'scoped' }>;
+
+/**
+ * The scope in the shape a list query binds.
+ *
+ * `unrestricted` is a SQL parameter rather than a second statement shape, so one query serves both
+ * answers and a scoped read cannot silently fall into the unfiltered branch of a `WHERE`.
+ */
+export type CollectionScopeArrays = {
+  readonly unrestricted: boolean;
+  readonly domains: readonly string[];
+  readonly instanceIds: readonly string[];
+};
+
+export function collectionScopeArrays(scope: CollectionScope): CollectionScopeArrays {
+  return scope.kind === 'platform'
+    ? { unrestricted: true, domains: [], instanceIds: [] }
+    : { unrestricted: false, domains: scope.domains, instanceIds: scope.instanceIds };
+}
+
+/**
  * Derives the resource a decision is about from the matched path and its parameters. The route
  * table passes this to the PDP; without a resolvable instance or domain the scope rules deny.
  */
 export type PolicyResource = {
-  type: 'platform' | 'self' | 'instance' | 'domain' | 'user' | 'catalog' | 'workflow' | 'request';
+  type:
+    | 'platform'
+    | 'self'
+    | 'instance'
+    | 'domain'
+    | 'user'
+    | 'catalog'
+    | 'workflow'
+    | 'request'
+    | 'collection';
   id: string;
 };
 
 export function resourceForRequest(path: string, params: Record<string, string>): PolicyResource {
   const id =
     params.id ?? params.instanceId ?? params.key ?? params.slug ?? params.runId ?? params.seq ?? '';
+  /*
+   * Before the prefix branches: a collection is not an instance with an empty id. Answering
+   * `{type:'instance', id:''}` sent `scopeCovers` looking for a domain to join on and denied every
+   * scoped grant; answering `collection` makes the grant itself the answer.
+   */
+  if (isCollectionPath(path)) return { type: 'collection', id: '' };
   if (path.includes('instanceId')) return { type: 'instance', id };
   if (path.startsWith('/instances') || path.startsWith('/backups')) return { type: 'instance', id };
   if (path.startsWith('/jobs')) return { type: 'instance', id };
@@ -314,6 +481,12 @@ export function resourceForRequest(path: string, params: Record<string, string>)
   if (path.startsWith('/workflows') || path.startsWith('/workflow-runs'))
     return { type: 'workflow', id };
   if (path.startsWith('/me')) return { type: 'self', id: '' };
+  /*
+   * A product deep link resolves one tile the caller already holds, so the question is about the
+   * caller rather than about a platform resource. The default `platform` resource would refuse every
+   * scoped grant — including the guest's, whose entitlement is exactly what the slug names.
+   */
+  if (path.startsWith('/portal/products/')) return { type: 'self', id: '' };
   if (path.startsWith('/break-glass-sessions') || path.startsWith('/admin/access-requests')) {
     return { type: 'request', id };
   }

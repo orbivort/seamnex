@@ -5,7 +5,7 @@ import { CAPACITY_HOST, CAPACITY_RESERVE } from '../fixtures/capacity';
 import { at } from '../fixtures/context';
 import { resolveEnv } from '../fixtures/env-plan';
 import { provisionInstance } from '../fixtures/provision';
-import { appendAudit, getState, refreshCapacity } from '../store';
+import { appendAudit, getState, imageScanSummaries, refreshCapacity } from '../store';
 import { BACKUP_STEPS, DEPLOY_STEPS, LIFECYCLE_STEPS, enqueueJob } from './job-factory';
 import { actorFor, deny, problem, readBody, requireCapability, roleOf } from './utils';
 
@@ -178,17 +178,24 @@ export const instanceHandlers = [
       outcome: 'success',
       detail:
         diff.length > 0
-          ? `${diff.map((item) => item.name).join(', ')} changed; ${requiresRecreate ? 'recreate' : 'restart'} required to apply.`
+          ? `${diff.map((item) => item.name).join(', ')} changed; reconfigure required to apply.`
           : 'Environment submitted with no effective change.',
       actor: actorFor(role),
     });
+    /*
+     * Mirror of the real handler: a save with a diff is queued as a reconfigure job, and a save with
+     * no diff changed nothing. The demo used to answer "Changes apply on the next restart", which no
+     * deployment can deliver — a restart keeps the environment the container was created with — and
+     * a console that prints the API's note showed that advice verbatim.
+     */
     return HttpResponse.json({
       diff,
       requiresRecreate,
-      applied: false,
-      note: requiresRecreate
-        ? 'Changes apply only after the instance is recreated. A restart is not sufficient.'
-        : 'Changes apply on the next restart.',
+      applied: diff.length > 0,
+      note:
+        diff.length > 0
+          ? 'Stored and queued as a reconfigure job: the containers are recreated with these values.'
+          : 'Stored; no value changed, so nothing was re-rendered.',
     });
   }),
 
@@ -588,20 +595,28 @@ export const instanceHandlers = [
         'Refresh the list.',
       );
     }
+    /*
+     * NFR-4.6: the verdict travels with the digest. `null` — not omitted — means "this digest was
+     * never scanned", which the security tab renders as such rather than as a pass.
+     */
+    const scans = imageScanSummaries(instance.id);
     return HttpResponse.json([
       {
         digest: instance.imageDigest,
         version: instance.currentVersion,
-        state: 'running',
+        state: 'current',
         builtAt: instance.createdAt,
         artefact: instance.source.path === 'dockerfile' ? 'retained' : 'not-applicable',
+        scan: scans[instance.imageDigest] ?? null,
       },
       {
         digest: 'sha256:1c7a04e9b25d83f6a0e1c47d92b38f50c6a1d7e4b92f038c6d51e8a04b7c3a91',
         version: instance.availableVersion ?? instance.currentVersion,
-        state: 'retained',
+        state: 'previous',
         builtAt: at(-14 * 24 * 60),
         artefact: instance.source.path === 'dockerfile' ? 'retained' : 'not-applicable',
+        scan:
+          scans['sha256:1c7a04e9b25d83f6a0e1c47d92b38f50c6a1d7e4b92f038c6d51e8a04b7c3a91'] ?? null,
       },
     ]);
   }),
@@ -838,13 +853,40 @@ export const instanceHandlers = [
         'Refresh the instance list.',
       );
     }
-    const body =
-      action === 'delete'
-        ? await readBody<{ dataRetention?: DataRetention }>(request).catch(
-            () => ({}) as { dataRetention?: DataRetention },
-          )
-        : {};
+    // The upgrade carries the version the operator confirmed; the delete carries its retention.
+    const body = await readBody<{ dataRetention?: DataRetention; version?: string }>(request).catch(
+      () => ({}) as { dataRetention?: DataRetention; version?: string },
+    );
     const retention: DataRetention = body.dataRetention ?? 'keep';
+    if (action === 'upgrade') {
+      /**
+       * FR-1.7 / AC-06: the catalogue pins one image per entry, so "the version" is a promise about
+       * that pin. The API refuses an upgrade whose confirmed version no longer matches it; a demo
+       * that accepted any string would show an upgrade the platform would have rejected.
+       */
+      const expected =
+        getState().catalog.find((item) => item.key === instance.entryKey)?.upstream.latestVersion ??
+        null;
+      if (body.version === undefined || body.version.trim() === '') {
+        return problem(
+          422,
+          'VALIDATION_FAILED',
+          'The upgrade needs the version you confirmed',
+          'The dialog must send the version it showed; the job records what was confirmed.',
+          'Re-open the upgrade dialog and confirm the version it offers.',
+          [{ field: 'version', code: 'required', message: 'Required.' }],
+        );
+      }
+      if (expected !== null && body.version.trim() !== expected) {
+        return problem(
+          409,
+          'STATE_CONFLICT',
+          'The catalogue pin moved',
+          `You confirmed ${body.version.trim()}, but the catalogue now pins ${expected}.`,
+          'Re-open the upgrade dialog: the version and the render set have changed.',
+        );
+      }
+    }
     const running = instance.state === 'ready' || instance.state === 'degraded';
     const invalid =
       (action === 'stop' || action === 'restart' || action === 'upgrade') && !running
@@ -853,7 +895,11 @@ export const instanceHandlers = [
           ? 'Only a stopped instance can be started.'
           : action === 'reconfigure' && instance.state === 'requested'
             ? 'The definition has not been rendered yet; deploy the instance first.'
-            : null;
+            : // The pipeline refuses an export that cannot dump the database, so the mock must too:
+              // a demo that "exports" a stopped instance would contradict the archive it serves.
+              action === 'export' && !running
+              ? 'Export needs a running instance: a stopped database cannot be dumped.'
+              : null;
     if (invalid) {
       return problem(
         409,
@@ -877,7 +923,10 @@ export const instanceHandlers = [
                 ? 'deploying'
                 : action === 'delete'
                   ? 'deleting'
-                  : 'restarting';
+                  : action === 'export'
+                    ? // An export reads; it must not park a healthy instance in a transition.
+                      instance.state
+                    : 'restarting';
     instance.state = nextState;
     const status = getState().statuses[instance.id];
     if (status) status.state = instance.state;

@@ -43,6 +43,15 @@ export interface CredentialBrokerService {
     mode: 'read' | 'write';
     ttlSeconds: number;
     idempotencyKey?: string;
+    /**
+     * NFR-4.14 — mint a **new** token even though a live scope already exists for this key.
+     *
+     * Rotation is the one caller that must not reuse: the point is to replace a token before it
+     * expires, and the reuse path exists precisely to keep the previous token alive. The caller pairs
+     * this with a per-generation `idempotencyKey`, because the unique index on that column rejects a
+     * second row for the same key.
+     */
+    rotate?: boolean;
   }): Promise<{
     scopeId: string;
     secretRef: string;

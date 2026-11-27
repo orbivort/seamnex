@@ -1,5 +1,5 @@
-import type { CatalogEntry, PolicyException } from '@seamnex/domain';
-import { PACKAGING_LABELS } from '@seamnex/domain';
+import type { CatalogEntry, PolicyException, PreviewBlocker } from '@seamnex/domain';
+import { PACKAGING_LABELS, composeRuleLabel } from '@seamnex/domain';
 import {
   Badge,
   Callout,
@@ -14,9 +14,15 @@ import { cn } from '@seamnex/utils';
 export function SourceStep({
   entry,
   exception,
+  blockers,
 }: {
   entry: CatalogEntry;
   exception?: PolicyException | null;
+  /**
+   * FR-1.11 — the blockers this step owns: the pin, the resolvability of the source, the scaffold
+   * approval and a policy verdict that refuses. They were only reported by the job, after a clone.
+   */
+  blockers?: PreviewBlocker[];
 }) {
   const pathLabel = PACKAGING_LABELS[entry.packaging];
   const approved = exception?.state === 'approved';
@@ -105,7 +111,7 @@ export function SourceStep({
           {exception ? (
             <div className="px-4 pb-4">
               <InlineNote>
-                {exception.id} · {exception.rule} ·{' '}
+                {exception.id} · {composeRuleLabel(exception.rule)} ·{' '}
                 {exception.state === 'approved'
                   ? `approved by ${exception.approver}`
                   : 'awaiting a second party'}
@@ -113,6 +119,22 @@ export function SourceStep({
             </div>
           ) : null}
         </Panel>
+
+        {(blockers ?? []).length > 0 ? (
+          <Callout
+            tone={(blockers ?? []).some((blocker) => blocker.blocking) ? 'danger' : 'caution'}
+            title="The source pre-flight refuses this entry"
+          >
+            <ul className="list-disc space-y-1 pl-4">
+              {(blockers ?? []).map((blocker) => (
+                <li key={`${blocker.code}-${blocker.field ?? '—'}`}>{blocker.message}</li>
+              ))}
+            </ul>
+            <p className="mt-1.5 text-meta">
+              Fix the catalogue entry, not the wizard: nothing was cloned, rendered or applied.
+            </p>
+          </Callout>
+        ) : null}
 
         {entry.packaging === 'none' ? (
           <Callout tone="caution" title="Scaffolded entries require an approved draft">

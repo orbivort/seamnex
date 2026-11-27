@@ -44,7 +44,8 @@ describe('security posture (FR-4.8)', () => {
     expect(screen.getByText('Restores 0/6')).toBeDefined();
     // The restore ratio may not be presented as generic "coverage" next to an SSO promise.
     expect(screen.queryByText('0% coverage')).toBeNull();
-    expect(screen.getByText(/Native floor \(S-2\): 2 of 6 required/)).toBeDefined();
+    // S-2: the target comes from the payload; the old caption hard-coded it in the screen.
+    expect(screen.getByText('2 of 6 required')).toBeDefined();
   });
 
   it('does not describe an empty certificate list as proof of health', async () => {

@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import { admissionVerdict } from '@seamnex/domain';
+import { admissionVerdict, cronExpressionProblem } from '@seamnex/domain';
 import type {
   BreakGlassReveal,
   CredentialScopeMintResult,
@@ -13,6 +13,7 @@ import type {
 } from '@seamnex/domain';
 import { at, PLATFORM_DOMAIN } from '../fixtures/context';
 import { fieldFixture, sampleItemFor } from '../fixtures/field-snapshots';
+import { exportArchiveBody, instanceExportsFor } from '../fixtures/instance-exports';
 import { appendAudit, getState } from '../store';
 import { DEPLOY_STEPS, enqueueJob } from './job-factory';
 import { actorFor, problem, readBody, requireCapability, roleOf } from './utils';
@@ -43,6 +44,32 @@ function fileVersion(workflow: Workflow): void {
 
 export const phase4Handlers = [
   // ---- 4A ------------------------------------------------------------------------------------
+  /*
+   * FR-1.13 / AC-20 — the export list and archive, registered here so the static `exports`
+   * segment is matched before any `:id/:action` handler.
+   *
+   * The read is `instance.lifecycle` (R1 only), exactly like the action that produces the archive;
+   * a seeded domain owner therefore gets the same refusal the API would send.
+   */
+  http.get('/api/v1/instances/:id/exports', ({ params, request }) => {
+    const guard = requireCapability(roleOf(request), 'instance.lifecycle');
+    if (guard) return guard;
+    return HttpResponse.json(instanceExportsFor(String(params.id)));
+  }),
+
+  http.get('/api/v1/instances/:id/exports/:exportId/archive', ({ params, request }) => {
+    const guard = requireCapability(roleOf(request), 'instance.lifecycle');
+    if (guard) return guard;
+    const exportId = String(params.exportId);
+    return new HttpResponse(exportArchiveBody(String(params.id), exportId), {
+      headers: {
+        'content-type': 'application/gzip',
+        'content-disposition': `attachment; filename="${exportId}.tar.gz"`,
+        'cache-control': 'no-store',
+      },
+    });
+  }),
+
   http.post('/api/v1/instances/preview', async ({ request }) => {
     const guard = requireCapability(roleOf(request), 'instance.deploy');
     if (guard) return guard;
@@ -86,10 +113,42 @@ export const phase4Handlers = [
       diskMb: Math.round(outcome.used.diskMb),
     };
 
+    const slugAvailable = !state.instances.some((instance) => instance.slug === body.slug);
+    /*
+     * FR-1.11: the demo data answers with the same blocker list the API computes, not only a
+     * capacity verdict. A preview that reports `admissible: false` without naming the fact that
+     * failed is a progress bar; the wizard renders these rows on the step that can fix them.
+     */
+    const blockers: DeployPreview['blockers'] = [
+      ...(slugAvailable
+        ? []
+        : [
+            {
+              code: 'route_conflict' as const,
+              field: 'slug',
+              message: `The slug "${body.slug ?? ''}" is already published by another deployment.`,
+              blocking: true,
+            },
+          ]),
+      ...(outcome.admissible
+        ? []
+        : [
+            {
+              code: 'capacity' as const,
+              field: 'resources',
+              message: `${outcome.headline} ${outcome.detail}`.trim(),
+              blocking: true,
+            },
+          ]),
+    ];
+
+    const admissible = blockers.length === 0;
     const preview: DeployPreview = {
-      admissible: outcome.admissible,
-      headline: outcome.headline,
-      detail: outcome.detail,
+      admissible,
+      headline: admissible ? 'Ready to deploy' : (blockers[0]?.message ?? outcome.headline),
+      detail: admissible
+        ? 'Capacity, route, variables, secrets and policy were checked.'
+        : (blockers[0]?.message ?? outcome.detail),
       shortfall: {
         cpuMilli: Math.max(0, Math.round((outcome.used.cpu - outcome.limits.cpu) * 1000)),
         memoryMb: Math.max(0, usedMb.memoryMb - limitsMb.memoryMb),
@@ -102,8 +161,11 @@ export const phase4Handlers = [
        * `espocrm.seamnex.local` — two different hosts for the one action being confirmed.
        */
       routeHost: `${body.slug ?? 'new-instance'}.${PLATFORM_DOMAIN}`,
-      slugAvailable: !state.instances.some((instance) => instance.slug === body.slug),
+      slugAvailable,
       policyVerdict: 'allowed',
+      policyEvaluatedAt: at(0),
+      policySource: 'local_evaluation',
+      blockers,
       warnings: [],
       evaluatedAt: at(0),
     };
@@ -157,6 +219,33 @@ export const phase4Handlers = [
     const guard = requireCapability(roleOf(request), 'workflow.credentials');
     if (guard) return guard;
     return new HttpResponse(null, { status: 204 });
+  }),
+
+  /**
+   * FR-5.4 delivery ingress. The prototype has no endpoint table and no secret store, so the mock
+   * cannot verify an HMAC — it demonstrates the *shape* of the exchange instead: an unsigned request
+   * is refused with the same single message the API uses, and a signed one produces a receipt naming
+   * the run it would have started. Never a `200 accepted` without a signature: that would teach a
+   * reader the opposite of what the endpoint requires.
+   */
+  http.post('/api/v1/trigger/:token', async ({ request }) => {
+    const signature = request.headers.get('x-seamnex-signature');
+    const bound = getState().workflows.find((workflow) => workflow.state === 'active');
+    if (signature === null) {
+      return problem(
+        401,
+        'UNAUTHORIZED',
+        'The delivery could not be authenticated',
+        'The delivery could not be authenticated.',
+        'Sign the exact request body with the endpoint secret, in `x-seamnex-signature`.',
+      );
+    }
+    return HttpResponse.json({
+      accepted: true,
+      reason: 'accepted',
+      workflowId: bound?.id ?? null,
+      runId: bound === undefined ? null : `run-${getState().workflowRuns.length + 1}`,
+    });
   }),
 
   http.post('/api/v1/instances/:id/credential-scopes', async ({ params, request }) => {
@@ -338,9 +427,114 @@ export const phase4Handlers = [
     });
   }),
 
-  http.put('/api/v1/workflows/:id/trigger', ({ params, request }) => {
+  /**
+   * FR-5.4: the trigger is a definition write, so the prototype cannot answer it with the unchanged
+   * definition — the trigger panel would report a save that changed nothing. It applies the change
+   * and files a version, exactly as `mutate` does on the API side, which is what makes the "validate,
+   * then re-activate" notice the panel prints true.
+   *
+   * The refusals mirror `validate()`: a polling workflow without an interval, a scheduled one without
+   * a cron, and a scheduled one whose cron the engine cannot compile all fail there, and inventing a
+   * default or accepting the third here would teach the opposite of what the platform does.
+   */
+  http.put('/api/v1/workflows/:id/trigger', async ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'workflow.author');
     if (guard) return guard;
+    const workflow = getState().workflows.find((item) => item.id === String(params.id));
+    if (!workflow) return workflowResponse(String(params.id));
+
+    const body = await readBody<{
+      type?: Workflow['trigger']['type'];
+      cron?: string | null;
+      timezone?: string | null;
+      minimumIntervalMinutes?: number | null;
+    }>(request);
+    const type = body.type;
+    if (type === undefined) {
+      return problem(
+        422,
+        'TRIGGER_TYPE_MISSING',
+        'The trigger type is required',
+        'A trigger update must name webhook, schedule, poll or manual.',
+        'Choose a trigger type on the Trigger tab.',
+        [{ field: 'type', code: 'required', message: 'A trigger type is required.' }],
+      );
+    }
+
+    const cron = type === 'schedule' ? (body.cron ?? workflow.trigger.cron ?? null) : null;
+    if (type === 'schedule' && (cron ?? '').trim().length === 0) {
+      return problem(
+        422,
+        'TRIGGER_CRON_MISSING',
+        'A scheduled workflow needs a cron expression',
+        'There is no default: the schedule the operator expects is the one they state.',
+        'Enter a cron expression, for example "0 2 * * *".',
+        [{ field: 'cron', code: 'required', message: 'A cron expression is required.' }],
+      );
+    }
+    if (type === 'schedule' && cron !== null) {
+      const cronProblem = cronExpressionProblem(cron);
+      if (cronProblem !== null) {
+        return problem(
+          422,
+          'TRIGGER_CRON_INVALID',
+          'A scheduled workflow needs an expression the engine can compile',
+          cronProblem,
+          'Correct the expression, for example "0 2 * * *" for 02:00 daily.',
+          [{ field: 'cron', code: 'invalid', message: cronProblem }],
+        );
+      }
+    }
+    const interval = type === 'poll' ? (body.minimumIntervalMinutes ?? null) : null;
+    if (type === 'poll' && (interval ?? 0) < 1) {
+      return problem(
+        422,
+        'TRIGGER_INTERVAL_MISSING',
+        'A polling workflow needs a minimum interval',
+        'A product with no event mechanism is read on a cadence; without one nothing starts the workflow.',
+        'Enter the polling interval in minutes.',
+        [
+          {
+            field: 'minimumIntervalMinutes',
+            code: 'required',
+            message: 'A positive interval in minutes is required.',
+          },
+        ],
+      );
+    }
+
+    workflow.trigger = {
+      type,
+      label:
+        type === 'schedule'
+          ? 'Scheduled run'
+          : type === 'poll'
+            ? 'Poll on an interval'
+            : type === 'webhook'
+              ? 'On webhook delivery'
+              : 'Manual run',
+      config:
+        type === 'schedule'
+          ? `cron ${cron ?? ''}`
+          : type === 'poll'
+            ? `every ${interval ?? 0} minute(s)`
+            : type === 'webhook'
+              ? `/hooks/${workflow.id}`
+              : 'run from the console',
+      timezone: type === 'schedule' ? (body.timezone ?? 'UTC') : null,
+      ...(cron === null ? {} : { cron }),
+      ...(interval === null ? {} : { minimumIntervalMinutes: interval }),
+    };
+    fileVersion(workflow);
+    appendAudit({
+      action: 'workflow.trigger.updated',
+      targetType: 'workflow',
+      targetId: workflow.id,
+      targetLabel: workflow.name,
+      outcome: 'success',
+      detail: `Trigger set to ${workflow.trigger.config}; version ${workflow.version} needs validating again.`,
+      actor: actorFor(roleOf(request)),
+    });
     return workflowResponse(String(params.id));
   }),
 

@@ -12,13 +12,22 @@ import { APP_CONFIG } from '../config/config.module';
 import type { AppConfig } from '../config/config';
 import { OutboxService } from '../modules/m17-audit/outbox';
 import { AuditAnchorJob } from '../modules/m17-audit/audit-anchor.job';
+import { JobRetryService } from './job-retry.service';
 import { JobService } from './job.service';
+import {
+  dropExpiredAuditEventPartitions,
+  dropExpiredJobLogPartitions,
+  ensurePlatformPartitions,
+} from '../common/db/partitions';
+import { lastClosedUtcDay } from '../modules/m17-audit/audit-anchor.job';
 import { METRICS } from '../common/metrics/metrics';
 import type { Metrics } from '../common/metrics/metrics';
 import { AUDIT_SERVICE, type AuditService } from '../modules/m17-audit/audit.contract';
 import {
   GOVERNANCE_WRITES,
+  UPSTREAM_OBSERVER,
   type GovernanceWrites,
+  type UpstreamObserver,
 } from '../modules/m18-governance/governance.contract';
 import {
   NOTIFICATION_SERVICE,
@@ -36,7 +45,26 @@ import {
   PRODUCT_ACCOUNT_SERVICE,
   type ProductAccountService,
 } from '../modules/m24-sign-in-relay/relay.contract';
+import {
+  ENVIRONMENT_DRIFT,
+  type EnvironmentDriftService,
+} from '../modules/m22-catalog-repository/environment-drift.contract';
+import {
+  OBSERVABILITY_SERVICE,
+  type ObservabilityService,
+} from '../modules/m21-observability/observability.contract';
+import {
+  ACCESS_CONTROL_SERVICE,
+  type AccessControlService,
+} from '../modules/m09-access-control/access-control.contract';
+import {
+  IMAGE_SCAN_SERVICE,
+  type ImageScanService,
+} from '../modules/m05-executor/executor.contract';
+import { AppError } from '../common/problem/app-error';
 import { RunMirrorService } from '../modules/m13-workflow/run-mirror.service';
+import { WorkflowAuthoringService } from '../modules/m13-workflow/authoring.service';
+import { PipelineRegistry } from './pipeline-registry';
 
 /**
  * The scheduler role (deliverable 1.4/1.5): the only place that runs repeatable platform work.
@@ -54,12 +82,25 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
   private lastNotificationAt = 0;
   private lastIdentityReconcileAt = 0;
   private lastRelaySweepAt = 0;
+  private lastDriftSweepAt = 0;
+  private lastCredentialSweepAt = 0;
+  private lastScrapeReconcileAt = 0;
+  private lastUpstreamPassAt = 0;
+  /** `instanceId → epoch ms` of the last repair request, so one drift cannot queue a loop of jobs. */
+  private readonly driftRepairs = new Map<string, number>();
 
   constructor(
     @Inject(PG_POOL) private readonly pool: Pool,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     @Inject(METRICS) private readonly metrics: Metrics,
     @Inject(JobService) private readonly jobs: JobService,
+    /**
+     * NFR-6.5 — the retry and abandonment pass. Same module, always present: a process that creates
+     * jobs must also be able to say which failed ones deserve another attempt.
+     */
+    @Inject(JobRetryService) private readonly retries: JobRetryService,
+    /** The stage list of each kind; a drift repair queues the same `reconfigure` an operator would. */
+    @Inject(PipelineRegistry) private readonly pipelines: PipelineRegistry,
     @Inject(OutboxService) private readonly outbox: OutboxService,
     @Inject(AuditAnchorJob) private readonly anchor: AuditAnchorJob,
     /**
@@ -113,6 +154,52 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
     @Optional()
     @Inject(RunMirrorService)
     private readonly runMirror?: RunMirrorService,
+    /**
+     * FR-1.29 / NFR-3.6. `drift_record` is M22's table, so the producer lives there and the cadence
+     * — and the decision to repair — lives here. Optional for the same reason as the others: a graph
+     * without the catalog repository still has jobs to schedule.
+     */
+    @Optional()
+    @Inject(ENVIRONMENT_DRIFT)
+    private readonly drift?: EnvironmentDriftService,
+    /**
+     * NFR-4.14 — a live workflow's credential must not expire under it. M13 owns the mint, n8n and the
+     * compiled definition; this pass owns only the cadence, exactly as the backup schedule does.
+     * Optional: a process without the workflow module still has jobs to schedule.
+     */
+    @Optional()
+    @Inject(WorkflowAuthoringService)
+    private readonly workflows?: WorkflowAuthoringService,
+    /**
+     * FR-2.6 / AC-45 — the scrape-target projection. A target is a file Prometheus watches, so the
+     * thing that must be repeated is keeping that directory equal to the set of live instances:
+     * published after a deploy, removed after a delete. Optional like the other passes.
+     */
+    @Optional()
+    @Inject(OBSERVABILITY_SERVICE)
+    private readonly observability?: ObservabilityService,
+    /**
+     * NFR-4.10 — `audit_retention_days` has to reach the partition drop, and M09 owns settings.
+     * Optional for the same reason as the others: an unreadable or absent settings source must skip
+     * the pass, never fall back to a default that deletes audit data nobody asked it to delete.
+     */
+    @Optional()
+    @Inject(ACCESS_CONTROL_SERVICE)
+    private readonly access?: AccessControlService,
+    /**
+     * S-10 — `image_scan_result` retention. M05 owns the table, so the delete lives there and only
+     * the cadence lives here, exactly like the audit-partition drop.
+     */
+    @Optional()
+    @Inject(IMAGE_SCAN_SERVICE)
+    private readonly imageScans?: ImageScanService,
+    /**
+     * FR-2.12 / NFR-4.7 — the patch register's observation pass. Optional like the rest: a process
+     * without M18 still schedules jobs, and the register then keeps whatever it last observed.
+     */
+    @Optional()
+    @Inject(UPSTREAM_OBSERVER)
+    private readonly upstream?: UpstreamObserver,
   ) {}
 
   /**
@@ -129,11 +216,17 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
      */
     const absent = [
       ['audit', this.audit],
+      ['audit retention', this.access],
       ['notification', this.notifications],
       ['backup', this.backups],
       ['integration', this.integration],
       ['sign-in relay', this.relayAccounts],
       ['workflow mirror', this.runMirror],
+      ['workflow credentials', this.workflows],
+      ['environment drift', this.drift],
+      ['observability scrapes', this.observability],
+      ['upstream tracking', this.upstream],
+      ['image scan retention', this.imageScans],
     ]
       .filter(([, dependency]) => dependency === undefined)
       .map(([name]) => name);
@@ -189,15 +282,20 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
     try {
       await this.outbox.dispatchBatch();
       await this.jobs.redispatchQueued();
+      await this.retryFailedJobs();
       await this.jobs.reapIdempotencyKeys();
       await this.anchorOncePerDay();
       await this.ensurePartitions();
       await this.sampleQueueDepth();
       await this.expireBreakGlass();
       await this.evaluateNotifications();
+      await this.reconcileScrapeTargets();
       await this.tickBackupSchedules();
       await this.reconcileIdentityNetworks();
       await this.sweepRelayAccounts();
+      await this.rotateWorkflowCredentials();
+      await this.reconcileDrift();
+      await this.observeUpstream();
     } catch (error) {
       this.logger.error(
         { err: error instanceof Error ? error.message : String(error) },
@@ -208,11 +306,20 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
     }
   }
 
+  /**
+   * NFR-4.10 — one signed anchor per *closed* day.
+   *
+   * The day is marked anchored only after `run` returns, so a failed off-host copy is retried on the
+   * next pass: the anchor row is already immutable, and re-running it is a no-op that only repeats
+   * the copy. Marking first would have turned one transient object-store outage into a day with no
+   * off-host evidence.
+   */
   private async anchorOncePerDay(): Promise<void> {
-    const today = new Date().toISOString().slice(0, 10);
-    if (this.lastAnchorDay === today) return;
-    await this.anchor.run(new Date(`${today}T00:00:00.000Z`));
-    this.lastAnchorDay = today;
+    const closed = lastClosedUtcDay(new Date());
+    const day = closed.toISOString().slice(0, 10);
+    if (this.lastAnchorDay === day) return;
+    await this.anchor.run(closed);
+    this.lastAnchorDay = day;
   }
 
   /**
@@ -253,34 +360,141 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
   /**
    * Partition upkeep. A missing partition is an audit append failure, which refuses a mutation
    * (AD-20) — so this must run ahead of the window, not in reaction to an error.
+   *
+   * The SQL lives in `common/db/partitions` because a platform restore has to repeat it: the restored
+   * database carries only the partitions the dump was taken with.
    */
   async ensurePartitions(): Promise<void> {
-    const today = utcDayStart(new Date());
+    await ensurePlatformPartitions(this.pool, this.config.SEAMNEX_PARTITION_LOOKAHEAD_DAYS);
+    const dropped = await dropExpiredJobLogPartitions(
+      this.pool,
+      this.config.SEAMNEX_JOB_LOG_RETENTION_DAYS,
+    );
+    for (const partition of dropped) {
+      this.logger.log({ partition }, 'dropped expired job_log partition');
+    }
+    await this.applyAuditRetention();
+    await this.sweepImageScans();
+  }
 
-    for (let offset = 0; offset <= this.config.SEAMNEX_PARTITION_LOOKAHEAD_DAYS; offset += 1) {
-      const from = addDays(today, offset);
-      // The casts are required: an untyped parameter cannot resolve the function overload.
-      await this.pool.query(
-        'SELECT seamnex_ensure_partition($1::text, $2::text, $3::timestamptz, $4::timestamptz)',
-        ['job_log', `job_log_p${formatDay(from)}`, from, addDays(today, offset + 1)],
+  /**
+   * S-10 — the retained scan reports are evidence, not a permanent archive.
+   *
+   * Kept for `SEAMNEX_SCAN_RETENTION_DAYS` so an operator can answer "what did we know on the day
+   * we deployed this?" without the table growing for the life of the platform. A failed delete is
+   * logged and retried on the next pass; it never fails the upkeep run that also drops partitions.
+   */
+  private async sweepImageScans(): Promise<void> {
+    if (this.imageScans === undefined) return;
+    const days = this.config.SEAMNEX_SCAN_RETENTION_DAYS;
+    try {
+      const deleted = await this.imageScans.prune(days);
+      if (deleted > 0) this.logger.log({ deleted, days }, 'pruned expired image scan reports');
+    } catch (error) {
+      this.logger.warn(
+        { err: error instanceof Error ? error.message : String(error), days },
+        'image scan retention failed; the reports are kept and the pass retries',
       );
     }
+  }
 
-    // Audit partitions are monthly; three months of lookahead is the design's floor.
-    for (let offset = 0; offset <= 2; offset += 1) {
-      const from = addMonths(today, offset);
-      await this.pool.query(
-        'SELECT seamnex_ensure_partition($1::text, $2::text, $3::timestamptz, $4::timestamptz)',
-        [
-          'audit_event',
-          `audit_event_p${from.getUTCFullYear()}${String(from.getUTCMonth() + 1).padStart(2, '0')}`,
-          from,
-          addMonths(today, offset + 1),
-        ],
+  /**
+   * FR-2.12 / NFR-4.7 — one observation pass, guarded by a cadence floor.
+   *
+   * The interval lives here rather than in the service so an operator-triggered pass from the console
+   * is never silently skipped: the operator asked, the scheduler asked, and only the second is
+   * repeatable without a human. The guard is also what keeps a restart loop from turning every boot
+   * into an outbound burst against two public APIs.
+   *
+   * A failed pass is logged and never thrown: the register keeps its last observation rather than
+   * losing it because GitHub was slow, and the next tick retries.
+   */
+  private async observeUpstream(): Promise<void> {
+    const upstream = this.upstream;
+    if (upstream === undefined || !this.config.SEAMNEX_UPSTREAM_TRACKING_ENABLED) return;
+    const now = Date.now();
+    if (now - this.lastUpstreamPassAt < this.config.SEAMNEX_UPSTREAM_INTERVAL_MS) return;
+    this.lastUpstreamPassAt = now;
+
+    try {
+      const result = await upstream.observe({ type: 'system', id: 'scheduler' });
+      this.logger.log(
+        {
+          entries: result.entries,
+          releases: result.releases,
+          advisories: result.advisories,
+          skipped: result.skipped,
+          failed: result.failed,
+          instances: result.instancesUpdated,
+        },
+        'upstream observation pass completed',
+      );
+    } catch (error) {
+      this.logger.warn(
+        { err: error instanceof Error ? error.message : String(error) },
+        'upstream observation failed; the register keeps its previous observation',
       );
     }
+  }
 
-    await this.dropExpiredJobLogPartitions();
+  /**
+   * NFR-4.10 — apply `audit_retention_days` to `audit_event`.
+   *
+   * The setting existed and had no consumer: the console displayed it, an operator could change it,
+   * and audit partitions were kept forever. Two guards, both in the honest direction. An unreadable
+   * setting means the pass does not run — never "assume the default and delete". A value below the
+   * twelve-month floor is refused by the same function, so a row seeded before the schema floor
+   * cannot shorten retention either.
+   *
+   * The drop is DDL on a partition the API role does not own (the definer function handles it), and
+   * it is audited: an auditor has to be able to tell "nothing was old enough" from "nobody ran it".
+   */
+  private async applyAuditRetention(): Promise<void> {
+    if (this.access === undefined) return;
+    const chain = this.audit;
+
+    let retentionDays: number;
+    try {
+      retentionDays = (await this.access.settings()).settings.auditRetentionDays;
+    } catch (error) {
+      this.logger.warn(
+        { err: error instanceof Error ? error.message : String(error) },
+        'audit retention skipped: settings are unreadable, so nothing is dropped',
+      );
+      return;
+    }
+
+    let dropped: string[];
+    try {
+      dropped = await dropExpiredAuditEventPartitions(this.pool, retentionDays);
+    } catch (error) {
+      this.logger.error(
+        { err: error instanceof Error ? error.message : String(error) },
+        'audit retention failed; expired partitions were not dropped',
+      );
+      return;
+    }
+    if (dropped.length === 0) return;
+
+    for (const partition of dropped) {
+      this.logger.log({ partition, retentionDays }, 'dropped expired audit_event partition');
+    }
+    await chain
+      ?.append({
+        action: 'audit.retention.enforced',
+        actorType: 'system',
+        actorId: 'scheduler',
+        targetType: 'audit_event',
+        targetId: dropped.join(','),
+        outcome: 'success',
+        detail: { retentionDays, partitions: dropped },
+      })
+      .catch((error: unknown) => {
+        this.logger.error(
+          { err: error instanceof Error ? error.message : String(error) },
+          'audit partitions were dropped but the retention row could not be appended',
+        );
+      });
   }
 
   /**
@@ -299,6 +513,27 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
       this.logger.log(
         { sent: result.sent, suppressed: result.suppressed },
         'notifications evaluated',
+      );
+    }
+  }
+
+  /**
+   * FR-2.6 — the scrape targets, reconciled against the live portfolio.
+   *
+   * A minute is the cadence because the alternative is a target that outlives its instance: a
+   * deleted instance's file would keep Prometheus scraping a 404 and reporting the platform's own
+   * series as down. `writeTarget` skips unchanged content, so the usual pass costs N reads.
+   */
+  private async reconcileScrapeTargets(): Promise<void> {
+    if (this.observability === undefined) return;
+    const now = Date.now();
+    if (now - this.lastScrapeReconcileAt < 60_000) return;
+    this.lastScrapeReconcileAt = now;
+    const result = await this.observability.reconcile();
+    if (result.written > 0 || result.removed > 0) {
+      this.logger.log(
+        { written: result.written, removed: result.removed },
+        'scrape targets reconciled',
       );
     }
   }
@@ -346,6 +581,186 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
     });
   }
 
+  /**
+   * NFR-4.14 — re-issue workflow credentials before they expire.
+   *
+   * Its own interval rather than the scheduler pass: a rotation is a mint, an n8n credential, a push
+   * and a commit per workflow, and doing that every minute would put several network round trips on
+   * the platform's most frequent timer for a change that is due once a quarter.
+   */
+  private async rotateWorkflowCredentials(): Promise<void> {
+    const workflows = this.workflows;
+    if (workflows === undefined) return;
+    const now = Date.now();
+    if (
+      now - this.lastCredentialSweepAt <
+      this.config.SEAMNEX_WORKFLOW_CREDENTIAL_SWEEP_INTERVAL_MS
+    ) {
+      return;
+    }
+    this.lastCredentialSweepAt = now;
+    const result = await workflows.rotateDueCredentials().catch((error: unknown) => {
+      this.logger.error(
+        { err: error instanceof Error ? error.message : String(error) },
+        'workflow credential rotation pass failed',
+      );
+      return { rotated: 0, skipped: 0 };
+    });
+    if (result.rotated > 0 || result.skipped > 0) {
+      this.logger.log(
+        { rotated: result.rotated, skipped: result.skipped },
+        'workflow credentials rotated',
+      );
+    }
+  }
+
+  /**
+   * FR-1.29 / NFR-3.6 — observe, then repair only what the repository can repair.
+   *
+   * The pass records what the running containers actually carry, audits only what is *new* (a
+   * permanent drift must not write an audit row every interval), and repairs declarative drift in
+   * the one direction the state-authority rule allows:
+   *
+   *   - `repo_ahead` — the declaration moved after the last apply, so a `reconfigure` re-renders it
+   *     from the repository and the next scan proves the repair;
+   *   - `runtime_ahead` — someone changed the container outside the platform. Reverting that
+   *     silently would erase the only trace of the change, so the finding stays open for an
+   *     operator, which is what AC-43 requires ("reported as drift, not applied silently").
+   *
+   * Definition drift is repaired by re-committing the recorded projection; a tree that cannot be
+   * written keeps the flag and keeps blocking `start`.
+   */
+  private async reconcileDrift(): Promise<void> {
+    const drift = this.drift;
+    if (drift === undefined) return;
+    const now = Date.now();
+    if (now - this.lastDriftSweepAt < this.config.SEAMNEX_DRIFT_INTERVAL_MS) return;
+    this.lastDriftSweepAt = now;
+
+    for (const instanceId of await drift.scannable()) {
+      let result: Awaited<ReturnType<EnvironmentDriftService['scan']>>;
+      try {
+        result = await drift.scan(instanceId);
+      } catch (error) {
+        this.logger.warn(
+          { instanceId, err: error instanceof Error ? error.message : String(error) },
+          'drift scan failed; the instance keeps its previous findings',
+        );
+        continue;
+      }
+      if (!result.observed) continue;
+
+      if (result.created.length > 0) {
+        await this.appendDriftAudit('instance.drift.detected', instanceId, {
+          variables: result.created,
+        });
+      }
+      const repairable = result.detected.filter((finding) => finding.direction === 'repo_ahead');
+      if (repairable.length === 0) continue;
+      await this.requestDriftRepair(
+        instanceId,
+        repairable.map((finding) => finding.varName),
+      );
+    }
+
+    for (const instanceId of await drift.definitionDrift()) {
+      try {
+        const written = await drift.reconcileDefinition(instanceId, 'system');
+        if (written === null) continue;
+        await this.appendDriftAudit('instance.definition.reconciled', instanceId, {
+          path: written.path,
+          contentHash: written.contentHash,
+        });
+      } catch (error) {
+        this.logger.warn(
+          { instanceId, err: error instanceof Error ? error.message : String(error) },
+          'definition drift could not be reconciled; start keeps refusing until it is',
+        );
+      }
+    }
+  }
+
+  /**
+   * Queue the same `reconfigure` an operator would, from the registered stage list.
+   *
+   * `INSTANCE_BUSY` is expected, not exceptional: `deployment_job_one_active_per_instance` is the
+   * real guard against two repairs, and the cooldown keeps this pass from asking again immediately.
+   */
+  private async requestDriftRepair(
+    instanceId: string,
+    variables: readonly string[],
+  ): Promise<void> {
+    const last = this.driftRepairs.get(instanceId);
+    if (last !== undefined && Date.now() - last < this.config.SEAMNEX_DRIFT_REPAIR_COOLDOWN_MS) {
+      return;
+    }
+    const steps = this.pipelines.stepsFor('reconfigure');
+    if (steps.length === 0) return;
+
+    try {
+      const created = await this.jobs.create({
+        kind: 'reconfigure',
+        instanceId,
+        requestedBy: 'system',
+        payload: { action: 'reconfigure', reason: 'environment-drift', variables },
+        steps,
+      });
+      this.driftRepairs.set(instanceId, Date.now());
+      await this.appendDriftAudit('instance.drift.repair_requested', instanceId, {
+        jobId: created.job.id,
+        variables,
+      });
+      this.logger.log({ instanceId, jobId: created.job.id, variables }, 'drift repair queued');
+    } catch (error) {
+      if (error instanceof AppError && error.code === 'INSTANCE_BUSY') {
+        this.logger.debug({ instanceId }, 'drift repair skipped: another job holds the instance');
+        return;
+      }
+      this.logger.error(
+        { instanceId, err: error instanceof Error ? error.message : String(error) },
+        'drift repair could not be queued',
+      );
+    }
+  }
+
+  /** Drift evidence names variables, never values. */
+  private async appendDriftAudit(
+    action: string,
+    instanceId: string,
+    detail: Record<string, unknown>,
+  ): Promise<void> {
+    if (this.audit === undefined) return;
+    await this.audit.append({
+      action,
+      actorType: 'system',
+      actorId: 'm22-environment-drift',
+      targetType: 'instance',
+      targetId: instanceId,
+      outcome: 'success',
+      detail,
+    });
+  }
+
+  /**
+   * NFR-6.5 — one retry pass per tick.
+   *
+   * Guarded like the other optional passes: the retry policy is important, but a failure inside it
+   * must never cost the partition upkeep that follows, which is what keeps audited mutations alive.
+   */
+  private async retryFailedJobs(): Promise<void> {
+    try {
+      const result = await this.retries.tick();
+      if (result.scheduled > 0 || result.abandoned > 0) {
+        this.logger.log(result, 'job retry pass settled failures');
+      }
+    } catch (error) {
+      this.logger.error(
+        { err: error instanceof Error ? error.message : String(error) },
+        'job retry pass failed; failed jobs keep their state',
+      );
+    }
+  }
+
   /** 4C.1: due backups are started by the runner, on the scheduler's cadence. */
   private async tickBackupSchedules(): Promise<void> {
     if (this.backups === undefined) return;
@@ -366,49 +781,4 @@ export class SchedulerService implements OnApplicationShutdown, OnModuleInit {
       this.metrics.queueDepth.labels('seamnex-jobs', row.state).set(Number(row.count));
     }
   }
-
-  private async dropExpiredJobLogPartitions(): Promise<void> {
-    const result = await this.pool.query<{ partition: string }>(
-      `SELECT child.relname AS partition
-         FROM pg_inherits
-         JOIN pg_class parent ON parent.oid = pg_inherits.inhparent
-         JOIN pg_class child ON child.oid = pg_inherits.inhrelid
-        WHERE parent.relname = 'job_log'`,
-    );
-
-    const cutoff = addDays(utcDayStart(new Date()), -this.config.SEAMNEX_JOB_LOG_RETENTION_DAYS);
-
-    for (const { partition } of result.rows) {
-      const match = /^job_log_p(\d{4})(\d{2})(\d{2})$/.exec(partition);
-      if (match === null) continue;
-      const [, year, month, day] = match;
-      const partitionDate = new Date(`${year}-${month}-${day}T00:00:00.000Z`);
-      if (partitionDate >= cutoff) continue;
-      // Dropped through the definer function: the API role does not own the partition, and must
-      // not hold DDL rights over the log just to enforce retention.
-      await this.pool.query('SELECT seamnex_drop_partition($1::text, $2::text)', [
-        'job_log',
-        partition,
-      ]);
-      this.logger.log({ partition }, 'dropped expired job_log partition');
-    }
-  }
-}
-
-function utcDayStart(date: Date): Date {
-  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
-}
-
-function addDays(date: Date, days: number): Date {
-  return new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
-}
-
-function addMonths(date: Date, months: number): Date {
-  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + months, 1));
-}
-
-function formatDay(date: Date): string {
-  return `${date.getUTCFullYear()}${String(date.getUTCMonth() + 1).padStart(2, '0')}${String(
-    date.getUTCDate(),
-  ).padStart(2, '0')}`;
 }

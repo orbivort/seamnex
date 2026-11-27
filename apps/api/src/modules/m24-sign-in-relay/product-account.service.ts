@@ -203,6 +203,35 @@ export class PostgresProductAccountService implements ProductAccountService {
   }
 
   /**
+   * When the administrator bootstrap reopens, or `null` when it is not deferred.
+   *
+   * The quiet period exists so the seeded administrator's password is not spent on a product that
+   * has not finished booting, but it is not a reason to forget that someone asked for provisioning:
+   * a deployment records its route and asks immediately, and when the product is still starting
+   * that ask lands seconds before the window opens. The trigger re-runs the pass when it does.
+   *
+   * An unreadable window answers `null`, which leaves the retry to the sweep — the same fallback
+   * the caller had before, so a read failure costs nothing beyond the delay it already had.
+   */
+  async deferredUntil(instanceId: string): Promise<string | null> {
+    if (!isUuid(instanceId)) return null;
+    const result = await this.pool
+      .query<{ retry_after: Date }>(
+        `SELECT retry_after FROM relay_retry_window
+          WHERE instance_id = $1 AND subject_idp_id = '' AND reason = $2 AND retry_after > now()`,
+        [instanceId, ADMIN_BOOTSTRAP_REASON],
+      )
+      .catch((error: unknown) => {
+        this.logger.warn(
+          `the bootstrap window for ${instanceId} could not be read: ${messageOf(error)}`,
+        );
+        return null;
+      });
+    const retryAfter = result?.rows[0]?.retry_after;
+    return retryAfter === undefined ? null : new Date(retryAfter).toISOString();
+  }
+
+  /**
    * Offboarding. Best-effort against the product, unconditional in the platform: the mapping and the
    * secret go even when the product cannot be reached, because "we could not disable the account" is
    * not a reason to keep holding its password.

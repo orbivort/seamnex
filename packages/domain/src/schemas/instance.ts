@@ -10,6 +10,7 @@ import {
 import { EntryKeySchema, IdSchema, NamedRefSchema, SlugSchema, TimestampSchema } from './common';
 import { JobLogLineSchema } from './job';
 import { EventModeSchema, ResourceShapeSchema } from './catalog';
+import { ImageScanSummarySchema } from './security';
 
 export const SourceResolutionSchema = z.object({
   path: z.enum(['compose', 'dockerfile', 'scaffold']),
@@ -85,6 +86,34 @@ export const LifecycleActionRequestSchema = z.object({
   version: z.string().min(1).optional(),
   justification: z.string().min(1).optional(),
 });
+
+/**
+ * FR-1.13 / AC-20 — one portable export, described by what it actually holds.
+ *
+ * `includes` is written at capture time from the files that were produced, so a reader never has to
+ * trust the name of the action: an archive without a database says so. `excluded` names what was
+ * deliberately left out and why (`secrets`, a volume the daemon no longer holds).
+ */
+export const InstanceExportIncludeSchema = z.enum([
+  'database',
+  'volumes',
+  'definition',
+  'environment',
+]);
+
+export const InstanceExportSchema = z.object({
+  exportId: z.string().min(1),
+  exportedAt: TimestampSchema,
+  /** Name the archive must be saved under; the server sets the same value in Content-Disposition. */
+  fileName: z.string().min(1),
+  bytes: z.number().int().nonnegative(),
+  sha256: z.string().min(1),
+  includes: z.array(InstanceExportIncludeSchema),
+  excluded: z.array(z.object({ item: z.string().min(1), reason: z.string().min(1) })),
+  renderSetId: IdSchema.nullable(),
+});
+
+export const InstanceExportListSchema = z.array(InstanceExportSchema);
 
 export const InstanceSchema = z.object({
   id: IdSchema,
@@ -205,6 +234,12 @@ export const ImageSchema = z.object({
   state: z.enum(['current', 'previous', 'available', 'pinned']),
   builtAt: TimestampSchema,
   artefact: z.string().min(1),
+  /**
+   * NFR-4.6 / S-10 — the newest retained scan of this digest. `null` is "not scanned yet" and is
+   * shown as such: an image with no report must not read as a passing one. Optional so a stored or
+   * mocked list written before scans existed still parses.
+   */
+  scan: ImageScanSummarySchema.nullable().optional(),
 });
 
 export const InstancePlanSchema = z.object({
@@ -313,6 +348,43 @@ export const ResourceShortfallSchema = z.object({
   diskMb: z.number().int().nonnegative(),
 });
 
+/**
+ * FR-1.11: one fact that stops a deployment, named well enough that the operator knows where to fix
+ * it. `field` is a form field (`env.SMTP_HOST`, `slug`, `entryKey`) or null when the blocker is not
+ * field-scoped (a policy verdict, a capacity shortfall).
+ *
+ * `blocking` exists because the same list also carries advisory entries: a warning that is shown on
+ * the step but does not refuse admission. Keeping one shape means the wizard renders one list.
+ */
+export const PREVIEW_BLOCKER_CODES = [
+  'unknown_entry',
+  'source_unresolved',
+  'image_unpinned',
+  /*
+   * NFR-4.16: the image is not from a trusted registry/namespace. A separate code from
+   * `policy_blocked` because the remedy is specific — a missing allow-list entry — and the wizard
+   * links to the screen that adds it.
+   */
+  'image_untrusted_registry',
+  'env_invalid',
+  'secret_unresolved',
+  'capacity',
+  'route_conflict',
+  'policy_blocked',
+  'policy_unknown',
+  'scaffold_unapproved',
+] as const;
+
+export type PreviewBlockerCode = (typeof PREVIEW_BLOCKER_CODES)[number];
+
+export const PreviewBlockerSchema = z.object({
+  code: z.enum(PREVIEW_BLOCKER_CODES),
+  /** Form field the operator must change, or null when the blocker is not field-scoped. */
+  field: z.string().nullable(),
+  message: z.string().min(1),
+  blocking: z.boolean(),
+});
+
 export const DeployPreviewSchema = z.object({
   admissible: z.boolean(),
   headline: z.string().min(1),
@@ -322,7 +394,16 @@ export const DeployPreviewSchema = z.object({
   capacitySource: z.enum(['measured', 'snapshot', 'unknown']),
   routeHost: z.string().min(1),
   slugAvailable: z.boolean(),
-  policyVerdict: z.enum(['allowed', 'blocked', 'unsafe_approved']),
+  /**
+   * FR-1.20/FR-1.23: `unknown` is a state of its own. The verdict used to be hard-coded `allowed`
+   * before the policy had run, which reported an unevaluated attempt as a permitted one.
+   */
+  policyVerdict: z.enum(['allowed', 'blocked', 'unsafe_approved', 'unknown']),
+  /** When the policy verdict behind `policyVerdict` was produced; null when it is `unknown`. */
+  policyEvaluatedAt: TimestampSchema.nullable(),
+  /** The evidence the verdict came from, so "allowed" is attributable rather than asserted. */
+  policySource: z.enum(['local_evaluation', 'source_resolution', 'none']),
+  blockers: z.array(PreviewBlockerSchema),
   warnings: z.array(z.string().min(1)),
   evaluatedAt: TimestampSchema,
 });
@@ -340,8 +421,10 @@ export type IntegrationCheck = z.infer<typeof IntegrationCheckSchema>;
 export type InstanceService = z.infer<typeof InstanceServiceSchema>;
 export type InstanceVolume = z.infer<typeof InstanceVolumeSchema>;
 export type InstancePlan = z.infer<typeof InstancePlanSchema>;
+export type InstanceExport = z.infer<typeof InstanceExportSchema>;
 export type BackupPosture = z.infer<typeof BackupPostureSchema>;
 export type MaintenanceState = z.infer<typeof MaintenanceStateSchema>;
 export type DeployPreview = z.infer<typeof DeployPreviewSchema>;
 export type DeployPreviewRequest = z.infer<typeof DeployPreviewRequestSchema>;
+export type PreviewBlocker = z.infer<typeof PreviewBlockerSchema>;
 export type ResourceShortfall = z.infer<typeof ResourceShortfallSchema>;

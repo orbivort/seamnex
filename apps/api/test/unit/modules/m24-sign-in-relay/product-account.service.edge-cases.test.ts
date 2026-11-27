@@ -74,6 +74,31 @@ type Options = {
   override?: (sql: string, params: readonly unknown[]) => unknown | undefined;
 };
 
+const ADMIN_BOOTSTRAP = {
+  login: 'admin',
+  passwordVariable: 'OPENPROJECT_SEED__ADMIN__USER__PASSWORD',
+};
+
+/**
+ * A redeployed product: the relay's token is gone, the seed administrator's credential is not.
+ *
+ * The bootstrap path is only reachable in this state, so every scenario below starts from it and
+ * fails exactly one further step.
+ */
+function seedCredentialOnly(secrets: { find: ReturnType<typeof vi.fn> }): void {
+  secrets.find.mockImplementation((async (_scope: string, _owner: string, name: string) =>
+    name === 'product_api_token'
+      ? null
+      : {
+          id: 'seed-secret',
+          scope: 'instance',
+          ownerId: 'instance-1',
+          name,
+          version: 1,
+          masked: '••••',
+        }) as never);
+}
+
 /** A `QueryResult`-shaped answer, for the statements the override intercepts. */
 function rowsOf(rows: unknown[]) {
   return { rows, rowCount: rows.length, command: '', oid: 0, fields: [] };
@@ -114,6 +139,10 @@ function build(options: Options = {}) {
     [
       'SELECT 1 FROM relay_retry_window',
       () => (Date.now() < retryAfter ? [{ '?column?': 1 }] : []),
+    ],
+    [
+      'SELECT retry_after FROM relay_retry_window',
+      () => (Date.now() < retryAfter ? [{ retry_after: new Date(retryAfter) }] : []),
     ],
     [
       'DELETE FROM relay_retry_window',
@@ -804,6 +833,204 @@ describe('the failure quiet period', () => {
     expect(claim?.sql).toContain('WHERE relay_retry_window.retry_after <= now()');
     expect(claim?.sql).toContain('ON CONFLICT (instance_id, subject_idp_id, reason) DO UPDATE');
   });
+
+  /*
+   * "Record it twice" is a recoverable annoyance; "record it never" is the repudiation gap the
+   * chain exists to prevent. A window that cannot be claimed must therefore let the evidence
+   * through rather than silence it.
+   */
+  it('still records the failure when the window cannot be claimed', async () => {
+    const { service, adapters, audit } = build({
+      override: (sql) => {
+        if (
+          sql.includes('INSERT INTO relay_retry_window') &&
+          sql.includes('relay_retry_window.retry_after <= now()')
+        ) {
+          throw new Error('row is locked');
+        }
+        return undefined;
+      },
+    });
+    adapters.for.mockReturnValue(null);
+
+    await service.sweep();
+
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'relay.account.provision_failed',
+        detail: expect.objectContaining({ reason: 'adapter_missing' }),
+      }),
+    );
+  });
+});
+
+/**
+ * The administrator bootstrap, one failure at a time.
+ *
+ * Its whole purpose is to keep the seeded administrator's password away from a product that has not
+ * finished booting, so every one of these paths must end in "no submission" — never in a second
+ * attempt the window did not sanction.
+ */
+describe('the administrator bootstrap window', () => {
+  it('does not submit the password when the window cannot be read', async () => {
+    mintAdminToken.mockClear();
+    const { service, product, secrets, audit } = build({
+      override: (sql) => {
+        if (sql.includes('SELECT 1 FROM relay_retry_window')) {
+          throw new Error('database unavailable');
+        }
+        return undefined;
+      },
+    });
+    product.credentialKind = 'bearer';
+    product.adminBootstrap = ADMIN_BOOTSTRAP;
+    seedCredentialOnly(secrets);
+
+    await service.sweep();
+
+    // Unreadable is treated as "still deferred": one skipped pass beats one spent password.
+    expect(mintAdminToken).not.toHaveBeenCalled();
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        detail: expect.objectContaining({ reason: 'admin_credential_missing' }),
+      }),
+    );
+  });
+
+  it('treats an unreadable seed credential as absent', async () => {
+    mintAdminToken.mockClear();
+    const { service, product, secrets, audit } = build();
+    product.credentialKind = 'bearer';
+    product.adminBootstrap = ADMIN_BOOTSTRAP;
+    secrets.find.mockImplementation((async (_scope: string, _owner: string, name: string) => {
+      if (name === 'product_api_token') return null;
+      throw new Error('root key unavailable');
+    }) as never);
+
+    await service.sweep();
+
+    expect(mintAdminToken).not.toHaveBeenCalled();
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        detail: expect.objectContaining({ reason: 'admin_credential_missing' }),
+      }),
+    );
+  });
+
+  it('treats a seed password that cannot be opened as absent', async () => {
+    mintAdminToken.mockClear();
+    const { service, product, secrets } = build();
+    product.credentialKind = 'bearer';
+    product.adminBootstrap = ADMIN_BOOTSTRAP;
+    seedCredentialOnly(secrets);
+    secrets.open.mockRejectedValueOnce(new Error('SCOPE_MISMATCH'));
+
+    await service.sweep();
+
+    expect(mintAdminToken).not.toHaveBeenCalled();
+  });
+
+  it('keeps the pass alive when the refusal cannot be audited', async () => {
+    mintAdminToken.mockClear();
+    const { service, product, secrets, audit } = build();
+    product.credentialKind = 'bearer';
+    product.adminBootstrap = ADMIN_BOOTSTRAP;
+    seedCredentialOnly(secrets);
+    mintAdminToken.mockResolvedValueOnce({
+      ok: false,
+      reason: 'password_rejected',
+      detail: 'the product refused the seeded administrator password',
+    });
+    audit.append.mockRejectedValueOnce(new Error('chain down'));
+
+    await expect(service.sweep()).resolves.toBeUndefined();
+
+    // The submission happened once and was not repeated: a lost audit row never authorises a retry.
+    expect(mintAdminToken).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the pass alive when the deferral cannot be stored', async () => {
+    mintAdminToken.mockClear();
+    const { service, product, secrets, audit } = build({
+      override: (sql) => {
+        // The bootstrap write is the instance-wide one; the claim writes a subject.
+        if (sql.includes('INSERT INTO relay_retry_window') && sql.includes("VALUES ($1, '', $2")) {
+          throw new Error('row is locked');
+        }
+        return undefined;
+      },
+    });
+    product.credentialKind = 'bearer';
+    product.adminBootstrap = ADMIN_BOOTSTRAP;
+    seedCredentialOnly(secrets);
+    mintAdminToken.mockResolvedValueOnce({
+      ok: false,
+      reason: 'product_unavailable',
+      detail: 'the login page answered 503',
+    });
+
+    await expect(service.sweep()).resolves.toBeUndefined();
+
+    // The failure is on the record even though the quiet period is not; the next sweep tries again
+    // one pass earlier than the policy says rather than not at all.
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'relay.admin_credential.bootstrap_failed',
+        detail: expect.objectContaining({ reason: 'product_unavailable' }),
+      }),
+    );
+  });
+});
+
+describe('deferredUntil', () => {
+  it('answers the instant the bootstrap window reopens', async () => {
+    vi.useFakeTimers();
+    try {
+      const id = '11111111-1111-4111-8111-111111111111';
+      const { service, db } = build();
+      expect(await service.deferredUntil(id)).toBeNull();
+
+      await db.pool.query(
+        `INSERT INTO relay_retry_window (instance_id, subject_idp_id, reason, retry_after)
+         VALUES ($1, '', $2, now() + ($3::text || ' milliseconds')::interval)`,
+        [id, 'admin_bootstrap', 60_000],
+      );
+
+      // The trigger schedules its re-run from this value; an instant, not a duration, so the two
+      // clocks (PostgreSQL's and this process's) never have to agree.
+      expect(await service.deferredUntil(id)).toBe(new Date(Date.now() + 60_000).toISOString());
+
+      vi.advanceTimersByTime(60_001);
+      expect(await service.deferredUntil(id)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('refuses an id that is not an instance id without asking the database', async () => {
+    const { service, db } = build();
+
+    expect(await service.deferredUntil('all')).toBeNull();
+    expect(db.calls.some((call) => call.sql.includes('SELECT retry_after'))).toBe(false);
+  });
+
+  /*
+   * An unreadable window answers `null`, not an error: the caller's fallback is the sweep, which is
+   * exactly what it had before the trigger existed. Failing the pass instead would turn a database
+   * hiccup into a lost provisioning request.
+   */
+  it('answers "not deferred" when the window cannot be read', async () => {
+    const { service } = build({
+      override: (sql) => {
+        if (sql.includes('SELECT retry_after FROM relay_retry_window')) {
+          throw new Error('database unavailable');
+        }
+        return undefined;
+      },
+    });
+
+    expect(await service.deferredUntil('11111111-1111-4111-8111-111111111111')).toBeNull();
+  });
 });
 
 describe('rotation', () => {
@@ -995,6 +1222,33 @@ describe('offboarding', () => {
     expect(product.disableUser).not.toHaveBeenCalled();
     expect(audit.append).toHaveBeenCalledWith(
       expect.objectContaining({
+        detail: expect.objectContaining({ disabledInProduct: false }),
+      }),
+    );
+  });
+
+  /*
+   * The product side is best-effort; the platform side is not. A lookup that throws must not take
+   * the credential and the mapping with it — "we could not disable the account" is not a reason to
+   * keep holding its password.
+   */
+  it('still stops holding the credential when the product lookup throws', async () => {
+    const { service, secrets, audit } = build({
+      override: (sql) => {
+        if (sql.includes('FROM product_account WHERE subject_idp_id')) return rowsOf(MAPPING);
+        if (sql.includes('LEFT JOIN instance_route r ON r.instance_id = i.id')) {
+          throw new Error('database unavailable');
+        }
+        return undefined;
+      },
+    });
+
+    await expect(service.deprovision('subject-1')).resolves.toBeUndefined();
+
+    expect(secrets.remove).toHaveBeenCalledOnce();
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'relay.account.deprovisioned',
         detail: expect.objectContaining({ disabledInProduct: false }),
       }),
     );

@@ -1,28 +1,30 @@
 import type { PoolClient } from 'pg';
 import { createPool } from '../client';
+import { catalogRepoRoot } from '../catalog-root';
 import { loadRootEnv } from '../env';
 import {
-  applyDefaultCatalogPlan,
-  catalogRepoRoot,
   contentHashOf,
   parseCatalogDocument,
-  planDefaultCatalog,
+  planTreeProjection,
   projectionColumns,
-  requireCompleteDefaultSet,
-} from './default-catalog';
+  requireProjectableTree,
+} from './catalog-tree';
 
 /**
- * Deterministic development data: the identity mirror and the default catalogue.
+ * Deterministic development data: the identity mirror and the catalogue projection.
  *
  * Scope: the `idp_user` directory mirror, the `idp_group` tree those users are members of, the
- * `role_binding` grants that hang off them, and the three products defined in `default-catalog.ts` —
- * written as `catalog/<KEY>.json` + `catalog/env/<KEY>.json` in the working tree and then projected
- * once, so a fresh stack can list and deploy a product without a network or an operator checkout.
+ * `role_binding` grants that hang off them, and the entries the catalogue checkout already declares.
  *
- * Everything else — a catalogue beyond that default set, environment profiles, instances, routes,
+ * The catalogue half used to *write* content: six documents and six declarations vendored under
+ * `platform/`. They are deployable product content and now live in the catalogue repository, so this
+ * seed projects what `<root>/catalog` holds and writes no file (ADR-BE-42 §9.3). Acquisition is
+ * `pnpm catalog:sync --ref <tag>`, or a tag placed in the root by hand on an air-gapped host.
+ *
+ * Everything else — a catalogue beyond the checkout, environment profiles, instances, routes,
  * entitlements, deployment jobs and the audit chain — is owned by `POST /catalog/reload` (`m22`) and
- * by the deployment that creates them. The default set is projected only into a database that holds
- * no catalog entries at all, so this file never becomes a second author of an operator's catalogue.
+ * by the deployment that creates them. Rows are inserted only into a database that holds no catalog
+ * entries at all, so this file never becomes a second author of an operator's catalogue.
  *
  * It is idempotent, so `pnpm dev` can run it on every boot.
  */
@@ -170,7 +172,13 @@ const DEV_SUBJECTS: readonly DevSubject[] = [
   {
     username: 'dev-owner',
     role: 'R3',
-    scope: { type: 'domain', id: 'Revenue & Customer' },
+    /**
+     * A **domain**, not a cluster. The PDP and FR-5.9 compare `role_binding.scope_id` with
+     * `catalog_entry.domain`, whose values are the specific domains (`CRM & Sales Pipeline`);
+     * "Revenue & Customer" is the cluster that groups D1-D4, so a binding to it resolved to no
+     * product at all and the seeded domain owner could not author or read anything.
+     */
+    scope: { type: 'domain', id: 'CRM & Sales Pipeline' },
     groups: ['/seamnex-domain-owners', '/seamnex-domains/revenue-customer'],
     mfa: false,
   },
@@ -229,45 +237,48 @@ async function seedGroupPath(client: PoolClient, path: string, done: Set<string>
 }
 
 /**
- * Writes the default catalogue into the working tree, then projects it.
+ * Projects the catalogue checkout. It writes no file.
  *
- * Only into an empty projection: an operator's catalogue is authoritative, and a seed that "topped
- * up" would be a second author of the same rows — the reload's `removeMissing` would then delete
- * whatever the tree does not declare, which is the failure mode this whole module exists to avoid.
+ * Three outcomes, and each one is a decision rather than a shrug:
  *
- * Files are written before rows, so a failure between the two leaves a tree a reload can project,
- * never a row whose document is absent (`removeMissing` would read that as a deletion).
+ *   - **No checkout** — exit 0 with a sentence naming `catalog:sync`. A host that has never fetched
+ *     a tag is a supported state (air-gapped installs place one by hand), and `pnpm dev` must still
+ *     boot; failing here would make an empty catalogue look like a broken seed.
+ *   - **A checkout that declares nothing** — fail. Silently projecting nothing is indistinguishable
+ *     from a database nobody seeded, and that confusion once shipped a stack serving zero products.
+ *   - **Documents** — insert what is parseable and report the rest per file. Rows are inserted only
+ *     into an empty projection: an operator's catalogue is authoritative, and a seed that "topped
+ *     up" would be a second author of the same rows.
  */
-async function seedDefaultCatalog(client: PoolClient): Promise<void> {
+async function projectCatalog(client: PoolClient): Promise<void> {
   const root = catalogRepoRoot(process.env.SEAMNEX_CATALOG_REPO_PATH);
   const existing = await client.query<{ total: number }>(
     `SELECT count(*)::int AS total FROM catalog_entry`,
   );
   const total = existing.rows[0]?.total ?? 0;
   if (total > 0) {
-    console.log(`default catalog not seeded: ${total} entries are already projected`);
+    console.log(`catalog not projected: ${total} entries are already projected`);
     return;
   }
 
-  const plan = planDefaultCatalog({ root });
+  const projection = planTreeProjection({ root });
+  if (projection.kind === 'absent') {
+    console.log(
+      `catalog not projected: no checkout at ${root}. ` +
+        'Run `pnpm catalog:sync --ref <tag>` (or place a catalogue tag there) and reload.',
+    );
+    return;
+  }
+  // Throws for a checkout that exists and declares nothing (AC-8).
+  requireProjectableTree(projection);
 
-  // Before anything is written: an incomplete default set is a broken checkout, and a seed that
-  // wrote the half it could find would leave a tree nobody can distinguish from a complete one.
-  requireCompleteDefaultSet(plan);
-
-  const written = applyDefaultCatalogPlan(plan);
-  for (const skip of plan.skipped) {
-    console.warn(`default catalog: ${skip.scope} ${skip.key} skipped — ${skip.reason}`);
+  for (const item of projection.invalid) {
+    console.warn(`catalog: ${item.path} skipped — ${item.reason}`);
   }
 
-  /*
-   * Rows come from the *projections*, not from the writes: a tree that already declares the three
-   * documents writes nothing and still owes `catalog_entry` three rows. The previous loop read the
-   * write list, so a reset database with an intact tree inserted zero rows and reported success.
-   */
   let inserted = 0;
-  for (const projection of plan.projections) {
-    const document = parseCatalogDocument(projection.text, projection.path);
+  for (const item of projection.documents) {
+    const document = parseCatalogDocument(item.text, item.path);
     const columns = projectionColumns(document);
     const result = await client.query(
       `INSERT INTO catalog_entry (key, domain, product, cluster, packaging, guarantee_class, repo_url, license_id, payload)
@@ -288,14 +299,12 @@ async function seedDefaultCatalog(client: PoolClient): Promise<void> {
     // `ON CONFLICT DO NOTHING` makes `rowCount` the number of rows this statement actually added.
     inserted += result.rowCount ?? 0;
     /*
-     * The revision label follows the documented scheme rather than inventing a third kind
-     * (`docs/catalog-repo-format.md` §2.1: `git rev-parse HEAD`, or `content-<16 hex>` when the tree
-     * has no `.git`). This tree has no `.git`, so the label is `content-…` — the same kind the loader
-     * writes, over a per-file hash instead of the whole document set. The first `POST /catalog/reload`
-     * therefore reports these entries as updated, which is the truth: they were seeded, not read from
-     * a revision.
+     * A per-file `content-<16 hex>` label, which is the documented fallback for a tree with no `.git`
+     * (`docs/operations/catalog-repo-format.md`). A fetched checkout *does* have one, so the first
+     * reload reports these rows as updated — true, because they were seeded from a file rather than
+     * read from that revision.
      */
-    const contentHash = contentHashOf(projection.text);
+    const contentHash = contentHashOf(item.text);
     await client.query(
       `INSERT INTO catalog_entry_revision (entry_key, git_sha, content_hash, payload)
        VALUES ($1, $2, $3, $4::jsonb)
@@ -305,26 +314,21 @@ async function seedDefaultCatalog(client: PoolClient): Promise<void> {
   }
 
   /*
-   * Report the projection, not the writes. "seeded (none): 0 entries" was true of the files and
-   * false of the database: it read as success while `catalog_entry` stayed empty, and the next step
-   * then failed about a tree nobody could explain. Rows and files are counted separately because
-   * they legitimately differ — a warm tree writes nothing and still projects.
+   * Report the projection, not the writes, because there are no writes any more: "0 entries" has to
+   * be visibly different from "0 documents".
    */
   console.log(
-    plan.projections.length === 0
-      ? `default catalog: no entry document is declared in ${root}; nothing to project`
-      : `default catalog: ${plan.projections.length} entries declared, ${inserted} rows inserted into ` +
-          `catalog_entry (${written.length} files written in ${root})`,
+    `catalog: ${projection.documents.length} entries declared in ${root}, ${inserted} rows inserted into ` +
+      `catalog_entry${projection.invalid.length === 0 ? '' : `, ${projection.invalid.length} file(s) skipped`}`,
   );
   /*
    * The declarations are files at this point, not rows: `env_schema_var` is M03's and is written by
    * `applySchemas` alone. Naming the next step here is what turns "the console shows 0" into a
-   * self-explaining log, and `pnpm dev` runs it immediately after this process. The count is read
-   * from the tree rather than from the writes, so a warm tree still advertises the step.
+   * self-explaining log, and `pnpm dev` runs it immediately after this process.
    */
-  if (plan.declarationsPresent > 0) {
+  if (projection.declarations > 0) {
     console.log(
-      `catalog declarations are not projected yet — run \`pnpm catalog:project\` (pnpm dev does this)`,
+      'catalog declarations are not projected yet — run `pnpm catalog:project` (pnpm dev does this)',
     );
   }
 }
@@ -404,6 +408,20 @@ async function main(): Promise<number> {
         // Instance-scoped roles have no referent in a user-only seed; see `DevSubject.scope`.
         if (subject.scope === null) continue;
 
+        /*
+         * A development grant may move scope between releases: R3 was seeded against the cluster
+         * "Revenue & Customer", which matches no `catalog_entry.domain`, so the operator held no
+         * authority at all. Keeping the old row would also keep a grant that resolves to nothing;
+         * this block is the only place that knows the two spellings are the same person. Only the
+         * six development subjects are touched, and only for the scope shape being reconciled.
+         */
+        await client.query(
+          `DELETE FROM role_binding
+            WHERE subject_idp_id = $1 AND role = $2 AND scope_type = $3
+              AND scope_id IS DISTINCT FROM $4`,
+          [sub, subject.role, subject.scope.type, subject.scope.id],
+        );
+
         // A platform grant has a NULL scope_id, and NULL never conflicts in a unique index, so
         // `ON CONFLICT` would add a duplicate binding on every seed run. The NOT EXISTS guard makes
         // the row idempotent for both shapes.
@@ -418,7 +436,7 @@ async function main(): Promise<number> {
         );
       }
 
-      await seedDefaultCatalog(client);
+      await projectCatalog(client);
 
       await client.query('COMMIT');
       console.log(`development identity data seeded (${DEV_SUBJECTS.length} users)`);

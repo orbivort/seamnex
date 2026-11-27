@@ -11,6 +11,7 @@ export default {
     '**/node_modules/**',
     '**/coverage/**',
     '**/temp/**',
+    '**/dev-reference/**',
     '**/.turbo/**',
     '**/.codex/**',
     '**/.claude/**',

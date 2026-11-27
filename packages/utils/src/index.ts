@@ -16,4 +16,4 @@ export {
   type FormattingConfig,
 } from './format';
 export { sliceByCursor, type CursorPage } from './pagination';
-export { downloadJson } from './download';
+export { downloadJson, saveBlob } from './download';

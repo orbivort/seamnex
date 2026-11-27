@@ -7,6 +7,7 @@ type AuditExport = z.infer<typeof AuditExportSchema>;
 import type { Pool } from 'pg';
 import { PG_POOL } from '../../database/database.module';
 import { AppError } from '../../common/problem/app-error';
+import { AnchorSigner } from './anchor-signer';
 import { AUDIT_SERVICE, type AuditService } from './audit.contract';
 
 type AuditRow = {
@@ -45,6 +46,7 @@ export class AuditQueryService {
   constructor(
     @Inject(PG_POOL) private readonly pool: Pool,
     @Inject(AUDIT_SERVICE) private readonly audit: AuditService,
+    @Inject(AnchorSigner) private readonly signer: AnchorSigner,
   ) {}
 
   /** Keyset pagination on `seq` descending: stable while rows are appended underneath the reader. */
@@ -141,10 +143,27 @@ export class AuditQueryService {
     // `audit_anchor` is keyed on `day`. This read used `anchor_day`, a column that has never
     // existed, and a `.catch()` turned the resulting error into "not anchored yet" — so the drawer
     // reported an unanchored chain even on a day that was anchored.
-    const anchor = await this.pool.query<{ signature: string | null }>(
-      `SELECT signature FROM audit_anchor WHERE day = $1::date LIMIT 1`,
-      [day],
-    );
+    const anchor = await this.pool.query<{
+      signature: string | null;
+      last_seq: string;
+      last_hash: string;
+    }>(`SELECT signature, last_seq, last_hash FROM audit_anchor WHERE day = $1::date LIMIT 1`, [
+      day,
+    ]);
+    const anchored = anchor.rows[0];
+
+    /*
+     * NFR-4.10: a signature the screen merely prints is decoration. Verifying it here is what turns
+     * the stored string into evidence — `null` when the day has no anchor or the anchor predates
+     * signing, `false` when the signature does not cover the row it sits on.
+     */
+    const anchorSignatureValid =
+      anchored?.signature === undefined || anchored.signature === null
+        ? null
+        : await this.signer.verify(
+            { day, lastSeq: anchored.last_seq, lastHash: anchored.last_hash },
+            anchored.signature,
+          );
 
     return {
       seq: Number(row.seq),
@@ -154,7 +173,8 @@ export class AuditQueryService {
       chainValid: verification.valid,
       verifiedAt: new Date().toISOString(),
       anchoredDay: day,
-      anchorSignature: anchor.rows[0]?.signature ?? 'not anchored yet',
+      anchorSignature: anchored?.signature ?? 'not anchored yet',
+      anchorSignatureValid,
       path: walk.rows.map((entry) => ({ seq: Number(entry.seq), hash: entry.hash })),
     };
   }

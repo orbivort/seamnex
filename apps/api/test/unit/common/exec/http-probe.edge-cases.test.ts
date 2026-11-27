@@ -58,12 +58,12 @@ describe('the verdict comes from the exit code', () => {
       runCli: runner({ code: 1, stdout: 'HTTP 200\nbad address\n' }),
     });
 
-    expect(result).toEqual({ ok: false, statusLine: 'HTTP 200' });
+    expect(result).toEqual({ ok: false, statusLine: 'HTTP 200', installer: null });
   });
 
   it('names an answerless probe for a job log', () => {
     // A 5xx is a product answering in a broken state: it is reported, not hidden behind "no answer".
-    expect(describeProbe({ ok: false, statusLine: 'HTTP 503' })).toBe('HTTP 503');
+    expect(describeProbe({ ok: false, statusLine: 'HTTP 503', installer: null })).toBe('HTTP 503');
   });
 
   it('reads a non-zero exit other than 1 as a failure too', async () => {
@@ -75,7 +75,7 @@ describe('the verdict comes from the exit code', () => {
         runCli: runner({ code, stdout: 'HTTP 503\n' }),
       });
 
-      expect(result).toEqual({ ok: false, statusLine: 'HTTP 503' });
+      expect(result).toEqual({ ok: false, statusLine: 'HTTP 503', installer: null });
     }
   });
 });
@@ -87,7 +87,7 @@ describe('the status line is the first non-blank line the tool printed', () => {
       runCli: runner({ code: 0, stdout: 'HTTP 200 OK\r\nHTTP 200 OK\r\n' }),
     });
 
-    expect(result).toEqual({ ok: true, statusLine: 'HTTP 200 OK' });
+    expect(result).toEqual({ ok: true, statusLine: 'HTTP 200 OK', installer: null });
   });
 
   it('drops the leading blank lines wget writes before the status line', async () => {
@@ -96,7 +96,9 @@ describe('the status line is the first non-blank line the tool printed', () => {
       runCli: runner({ code: 0, stdout: '\n\nHTTP 302 Found\nLocation: install/\n' }),
     });
 
-    expect(result).toEqual({ ok: true, statusLine: 'HTTP 302 Found' });
+    // The fixture carries wget's own `Location:` header, which is *not* the script's `LOCATION`
+    // marker: the parser reads the script's protocol, not tool output.
+    expect(result).toEqual({ ok: true, statusLine: 'HTTP 302 Found', installer: null });
   });
 
   it('reports whitespace-only output as no answer rather than as a status line', async () => {
@@ -105,7 +107,7 @@ describe('the status line is the first non-blank line the tool printed', () => {
       runCli: runner({ code: 0, stdout: '  \r\n\t\n' }),
     });
 
-    expect(result).toEqual({ ok: true, statusLine: '' });
+    expect(result).toEqual({ ok: true, statusLine: '', installer: null });
     expect(describeProbe(result)).toBe('no HTTP answer');
   });
 
@@ -115,12 +117,16 @@ describe('the status line is the first non-blank line the tool printed', () => {
     // a fallback nobody has checked.
     const runCli = vi.fn<RunCli>().mockResolvedValue({
       code: 0,
-      stdout: { trim: () => ({ split: () => [] }) } as unknown as string,
+      stdout: { split: () => [] } as unknown as string,
       stderr: '',
       truncated: false,
     });
 
-    expect(await probeProductHttp({ ...INPUT, runCli })).toEqual({ ok: true, statusLine: '' });
+    expect(await probeProductHttp({ ...INPUT, runCli })).toEqual({
+      ok: true,
+      statusLine: '',
+      installer: null,
+    });
   });
 });
 
@@ -154,7 +160,11 @@ describe('a probe that cannot run is an answerless failure', () => {
   it('survives a runner that throws something that is not an Error', async () => {
     const runCli = vi.fn<RunCli>().mockRejectedValue('docker: not found');
 
-    expect(await probeProductHttp({ ...INPUT, runCli })).toEqual({ ok: false, statusLine: '' });
+    expect(await probeProductHttp({ ...INPUT, runCli })).toEqual({
+      ok: false,
+      statusLine: '',
+      installer: null,
+    });
     expect(describeProbe(await probeProductHttp({ ...INPUT, runCli }))).toBe('no HTTP answer');
   });
 
@@ -163,6 +173,10 @@ describe('a probe that cannot run is an answerless failure', () => {
       throw new Error('spawn docker ENOENT');
     });
 
-    expect(await probeProductHttp({ ...INPUT, runCli })).toEqual({ ok: false, statusLine: '' });
+    expect(await probeProductHttp({ ...INPUT, runCli })).toEqual({
+      ok: false,
+      statusLine: '',
+      installer: null,
+    });
   });
 });

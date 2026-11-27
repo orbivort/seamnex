@@ -12,6 +12,7 @@ import type {
   ExchangeCodeInput,
   IdentityClaims,
   IdentityProvider,
+  SessionEndResult,
 } from './identity-provider.contract';
 import { assertPkce } from './pkce';
 import { assertRedirectUri } from './redirect-uri';
@@ -158,6 +159,17 @@ export class StubIdentityProvider implements IdentityProvider {
     if (enabled) this.disabled.delete(sub);
     else this.disabled.add(sub);
     return Promise.resolve();
+  }
+
+  /**
+   * Nothing to end: the stub keeps no provider session and has no client that could be notified, so
+   * the sign-out statement says so instead of implying a logout happened.
+   */
+  endSessions(): Promise<SessionEndResult> {
+    return Promise.resolve({
+      ended: false,
+      reason: 'the development identity provider keeps no provider-side session',
+    });
   }
 
   logoutUrl(): string | null {

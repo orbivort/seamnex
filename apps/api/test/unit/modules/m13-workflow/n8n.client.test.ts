@@ -244,13 +244,22 @@ describe('N8nClient lifecycle calls', () => {
       // The item itself rides along: the mirror stores it (redacted) so the mapper can offer real
       // field paths. `{}` is an item with no keys — a path still has nothing to point at, and the
       // mirror writes `{}` rather than pretending the node produced data.
-      { name: 'Trigger', state: 'succeeded', durationMs: 1, records: 1, error: null, sample: {} },
+      {
+        name: 'Trigger',
+        state: 'succeeded',
+        durationMs: 1,
+        records: 1,
+        error: null,
+        tries: 1,
+        sample: {},
+      },
       {
         name: 'Read employees',
         state: 'failed',
         durationMs: 4,
         records: 0,
         error: 'Invalid URL: /employees.read.',
+        tries: 1,
         // n8n returned no items for the failed node, so there is no sample — not an empty object.
         sample: null,
       },
@@ -386,8 +395,48 @@ describe('N8nClient execution parsing', () => {
     const result = await new N8nClient(CONFIG).execution('10');
 
     expect(result.nodes).toEqual([
-      { name: 'Empty', state: 'succeeded', durationMs: 0, records: 0, error: null, sample: null },
+      {
+        name: 'Empty',
+        state: 'succeeded',
+        durationMs: 0,
+        records: 0,
+        error: null,
+        tries: 1,
+        sample: null,
+      },
     ]);
+  });
+
+  /**
+   * FR-5.7 — n8n appends one `runData` entry per try, so the array's length is the attempt count the
+   * run history reports. Reading only the last entry (which the mirror does for the outcome) threw
+   * that away, and every retried step read `attempt: 1`.
+   */
+  it('reports the attempts n8n made, not just the last one', async () => {
+    fetchMock.mockResolvedValueOnce(
+      json({
+        status: 'error',
+        data: {
+          resultData: {
+            runData: {
+              'Create contact': [
+                { executionStatus: 'error', executionTime: 5_000, error: { message: '502' } },
+                { executionStatus: 'error', executionTime: 5_000, error: { message: '502' } },
+                {
+                  executionStatus: 'error',
+                  executionTime: 40,
+                  error: { message: '502 on the third try' },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    );
+
+    const result = await new N8nClient(CONFIG).execution('13');
+
+    expect(result.nodes[0]).toMatchObject({ tries: 3, error: '502 on the third try' });
   });
 
   it('counts items but stores no sample when the item carries no json object', async () => {

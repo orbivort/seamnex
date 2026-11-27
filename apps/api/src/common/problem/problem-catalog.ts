@@ -253,12 +253,95 @@ export const PROBLEM_CATALOG = {
     remediation: 'Use an https URL on an allow-listed host, without embedded credentials.',
     slug: 'source-url-rejected',
   },
-  /** 4A.3: a compose file that the policy refuses; the diff names the offending key. */
+  /*
+   * ADR-BE-42 §10.3 — the catalogue fetch. Each code names one thing an operator can act on; a
+   * single `SOURCE_SYNC_FAILED` would send them to the wrong remedy for every one of them.
+   */
+  SOURCE_NOT_CONFIGURED: {
+    status: 503,
+    title: 'No catalogue source is configured',
+    remediation:
+      'Set SEAMNEX_CATALOG_SOURCE_URL, or place a catalogue tag in SEAMNEX_CATALOG_REPO_PATH by hand and reload. The working tree is still the authority.',
+    slug: 'source-not-configured',
+  },
+  SOURCE_REF_REQUIRED: {
+    status: 422,
+    title: 'The sync named no revision',
+    remediation:
+      'Name the tag to fetch (catalog-YYYY.MM.<patch>), or set SEAMNEX_CATALOG_SOURCE_REF to a default.',
+    slug: 'source-ref-required',
+  },
+  SOURCE_REF_REJECTED: {
+    status: 422,
+    title: 'The ref is not a tag or commit name',
+    remediation:
+      'Name an annotated tag or a full commit SHA. A branch would change the catalogue under a running installation.',
+    slug: 'source-ref-rejected',
+  },
+  SOURCE_REF_IS_BRANCH: {
+    status: 422,
+    title: 'The ref is a branch',
+    remediation:
+      'Tag the release and sync the tag; a branch tip is not a reviewed revision. Nothing was changed.',
+    slug: 'source-ref-is-branch',
+  },
+  SOURCE_REF_NOT_FOUND: {
+    status: 404,
+    title: 'The source has no such tag',
+    remediation: 'Check the tag name (catalog-YYYY.MM.<patch>), then retry. Nothing was changed.',
+    slug: 'source-ref-not-found',
+  },
+  SOURCE_CLONE_FAILED: {
+    status: 502,
+    title: 'The catalogue source could not be fetched',
+    remediation:
+      'Check the host network and the tag, then retry. Nothing in the working tree was changed.',
+    slug: 'source-clone-failed',
+  },
+  SOURCE_EMPTY_TREE: {
+    status: 422,
+    title: 'The fetched revision carries no catalogue',
+    remediation:
+      'Check the tag: a catalogue root is catalog/<KEY>.json, catalog/env/<KEY>.json and upstream/<KEY>/. Swapping an empty tree in would delete the catalogue.',
+    slug: 'source-empty-tree',
+  },
+  SOURCE_SYNC_IN_PROGRESS: {
+    status: 409,
+    title: 'Another catalogue sync is running',
+    remediation: 'Wait for the running sync to finish, then run this one again.',
+    slug: 'source-sync-in-progress',
+  },
+  SOURCE_SYNC_COOLDOWN: {
+    status: 429,
+    title: 'The previous sync was too recent',
+    remediation: 'Wait for the cooldown in the detail, then retry.',
+    slug: 'source-sync-cooldown',
+  },
+  SOURCE_ROOT_NOT_WRITABLE: {
+    status: 503,
+    title: 'The catalogue root is not writable by the platform',
+    remediation:
+      'Make the host directory writable by the API container uid/gid and let git accept it (safe.directory when the host uid differs), then retry.',
+    slug: 'source-root-not-writable',
+  },
+  SOURCE_SWAP_INCOMPLETE: {
+    status: 500,
+    title: 'The catalogue swap stopped between renames',
+    remediation:
+      'Re-run the sync at the same ref. GET /catalog/repository reports the same pending order, and the next successful sync repairs the mixed tree.',
+    slug: 'source-swap-incomplete',
+  },
+  /**
+   * 4A.3 / NFR-4.15: an ingested definition the policy refuses. The code keeps its original name
+   * because it is published, but the source may be a Compose file, a Dockerfile, or the artefacts of
+   * an approved scaffold — the detail names the offending construct and whether a covering exception
+   * has lapsed.
+   */
   COMPOSE_POLICY_BLOCKED: {
     status: 422,
-    title: 'The compose definition breaks a blocking policy rule',
+    title: 'The source definition breaks a blocking policy rule',
     remediation:
-      'Remove the offending key, or record an approved exception before the next deployment.',
+      'Remove the offending construct, or have a second party approve a time-boxed policy exception for the product before the next deployment.',
     slug: 'compose-policy-blocked',
   },
   /**
@@ -272,6 +355,32 @@ export const PROBLEM_CATALOG = {
     remediation:
       'Set the entry httpPort to the port the product listens on inside its container; the left-hand side of a ports mapping is the host port and is never used.',
     slug: 'http-port-not-exposed',
+  },
+  /**
+   * NFR-4.6 / S-10: a product image that failed its scan, or one the scanner could not inspect.
+   *
+   * `error` shares the code on purpose: "we could not look" blocks by default
+   * (`SEAMNEX_SCAN_FAIL_OPEN=false`), and the detail says which of the two happened so an operator
+   * is not sent to the wrong remedy.
+   */
+  IMAGE_SCAN_BLOCKED: {
+    status: 422,
+    title: 'The product image did not pass its vulnerability scan',
+    remediation:
+      'Upgrade the pinned image to a release that fixes the blocking findings, or (for a scanner failure) make the scanner image reachable and re-run the deployment.',
+    slug: 'image-scan-blocked',
+  },
+  /**
+   * FR-1.5 — the digest the catalogue records did not match the image the daemon would start, or
+   * there is no repository digest to compare with. Distinct from `IMAGE_SCAN_BLOCKED`: the image may
+   * be perfectly sound, it is simply not the artefact the operator reviewed.
+   */
+  IMAGE_DIGEST_MISMATCH: {
+    status: 422,
+    title: 'The image does not match the digest the catalogue pins',
+    remediation:
+      'Publish the pinned build under the reference the entry names, or record the new digest in the entry in the same commit as the version bump. Nothing was started.',
+    slug: 'image-digest-mismatch',
   },
   /** AC-07: refused before any container starts, with the shortfall stated. */
   CAPACITY_EXCEEDED: {
@@ -306,6 +415,18 @@ export const PROBLEM_CATALOG = {
     remediation: 'Resolve the per-node errors returned in `fieldErrors`, then validate again.',
     slug: 'workflow-invalid',
   },
+  /**
+   * FR-5.9 / AC-26 / NFR-4.4 — the caller lacks authority over one of the definition's write
+   * targets (design §20.1 names this code). A generic `FORBIDDEN` would tell a domain owner "you
+   * may not author workflows" when the truth is "not into that product", and the fix differs.
+   */
+  WORKFLOW_WRITE_NOT_PERMITTED: {
+    status: 403,
+    title: 'The caller has no write authority over a workflow target',
+    remediation:
+      'Remove the write target named in the detail, or ask the owner of that product for authority. The refusal was audited.',
+    slug: 'workflow-write-not-permitted',
+  },
   /** 4E.5: unknown, unsigned or stale trigger deliveries. */
   TRIGGER_REJECTED: {
     status: 401,
@@ -320,11 +441,43 @@ export const PROBLEM_CATALOG = {
       'The register records the restriction; hosted-service mode is blocked for this product.',
     slug: 'licence-restricted',
   },
+  /** ADR-BE-25: C-3 requires a review before any hosted-service offering, so this fails closed. */
+  LICENCE_UNREVIEWED: {
+    status: 409,
+    title: 'The licence has not been reviewed',
+    remediation:
+      'Ask an auditor (R2) to record the licence review, then enable hosted-service mode.',
+    slug: 'licence-unreviewed',
+  },
   APPROVAL_REQUIRED: {
     status: 409,
     title: 'A second party must decide this request',
     remediation: 'The requester may not approve their own request. Ask an eligible approver.',
     slug: 'approval-required',
+  },
+  /**
+   * FR-4.11 / AC-47 / NFR-4.4 — the approver holds `breakglass.approve` as `scoped` (an R2
+   * auditor) and the elevation asks for read-write access. Separate from `FORBIDDEN`: the role may
+   * approve, just not this mode, and the fix is a different approver rather than a different role.
+   */
+  APPROVAL_MODE_FORBIDDEN: {
+    status: 403,
+    title: 'This approver may not approve a read-write elevation',
+    remediation:
+      'Ask the owner of the affected domain to approve a read-write elevation; an auditor can decline it instead. The refusal was audited.',
+    slug: 'approval-mode-forbidden',
+  },
+  /**
+   * FR-4.11 / NFR-4.4 — the approver holds the capability, but no grant that covers the domain or
+   * instance the elevation targets. Naming the scope keeps the answer actionable: "not your
+   * domain" and "not your role" need different people.
+   */
+  APPROVAL_SCOPE_FORBIDDEN: {
+    status: 403,
+    title: 'This approver does not own the domain the elevation targets',
+    remediation:
+      'Ask an approver who owns that domain, or a platform administrator, to decide the request. The refusal was audited.',
+    slug: 'approval-scope-forbidden',
   },
   ROLE_NOT_IMPLEMENTED: {
     status: 503,

@@ -9,6 +9,7 @@ import { IntegrationModule } from '../m07-integration/integration.module';
 import { SecretsModule } from '../m15-secrets/secrets.module';
 import { DeploymentPipeline } from './pipeline';
 import { InstanceLifecycleService } from './lifecycle.service';
+import { PreflightService } from './preflight.service';
 import { EXECUTOR_SERVICE } from './executor.contract';
 import { PostgresExecutorService } from './executor.service';
 
@@ -25,8 +26,11 @@ import { PostgresExecutorService } from './executor.service';
   ],
   providers: [
     DeploymentPipeline,
+    PreflightService,
     InstanceLifecycleService,
     { provide: EXECUTOR_SERVICE, useClass: PostgresExecutorService },
+    // `IMAGE_SCAN_SERVICE` comes from `ImageScanModule` (global): the scheduler needs it too, and
+    // JobsModule must not import this module.
   ],
   // Only the executor's own service leaves this module. `DockerModule` used to be re-exported so
   // M06 and M16 could reach the client through M05; both now import it from `common/docker`, which

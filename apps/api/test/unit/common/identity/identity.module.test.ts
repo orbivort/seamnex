@@ -14,7 +14,10 @@ import { SessionIdentityResolver } from '../../../../src/common/identity/session
 type ProviderFactory = (
   config: AppConfig,
   directory: { snapshot: () => Promise<unknown> },
-  admin: { setUserEnabled: (sub: string, enabled: boolean) => Promise<void> },
+  admin: {
+    setUserEnabled: (sub: string, enabled: boolean) => Promise<void>;
+    endUserSessions: (sub: string) => Promise<void>;
+  },
 ) => unknown;
 
 function factory(): ProviderFactory {
@@ -28,7 +31,7 @@ function factory(): ProviderFactory {
 }
 
 const directory = { snapshot: vi.fn() };
-const admin = { setUserEnabled: vi.fn() };
+const admin = { setUserEnabled: vi.fn(), endUserSessions: vi.fn() };
 
 describe('IdentityModule', () => {
   it('binds the stub provider outside an OIDC deployment', () => {
@@ -80,6 +83,10 @@ describe('IdentityModule', () => {
 
     await provider.setUserEnabled('sub-1', false);
     expect(admin.setUserEnabled).toHaveBeenCalledWith('sub-1', false);
+
+    // FR-3.8: the same seam carries the session end, because both are writes only the IdP can make.
+    await provider.endSessions('sub-1');
+    expect(admin.endUserSessions).toHaveBeenCalledWith('sub-1');
   });
 
   it('resolves the resolver to the session implementation', () => {

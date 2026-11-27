@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import { toProblem, useLicenses, useSetHostedService } from '@seamnex/api-client';
@@ -19,6 +19,7 @@ import {
 import { formatDate } from '@seamnex/utils';
 import { AsyncPanel } from '@seamnex/shell';
 import { useSession } from '../../session';
+import { ReviewLicenseDialog } from './ReviewLicenseDialog';
 
 /** Resale and hosted-service limits describe the same act: offering the product to third parties. */
 function isBlocked(record: LicenseRecord): boolean {
@@ -26,6 +27,31 @@ function isBlocked(record: LicenseRecord): boolean {
 }
 
 const rowKey = (row: LicenseRecord): string => row.instanceId;
+
+/**
+ * The review evidence is a reference to something a second person can open, so a URL is a link and
+ * a contract id stays text. Rendering a bare contract id as a dead link would be worse than text.
+ */
+function EvidenceRef({ value }: { value: string }) {
+  if (/^https?:\/\//i.test(value)) {
+    return (
+      <a
+        href={value}
+        target="_blank"
+        rel="noreferrer"
+        title={value}
+        className="block max-w-[220px] truncate text-micro text-primary hover:underline"
+      >
+        {value}
+      </a>
+    );
+  }
+  return (
+    <span className="block max-w-[220px] truncate text-micro text-faint" title={value}>
+      {value}
+    </span>
+  );
+}
 
 /**
  * Every row in this register describes one deployment, and that deployment has a screen. The
@@ -52,10 +78,13 @@ function HostedServiceCell({ record, canManage }: { record: LicenseRecord; canMa
   const setHosted = useSetHostedService(record.instanceId);
   const problem = setHosted.error ? toProblem(setHosted.error) : null;
   const blocked = isBlocked(record);
+  const unreviewed = record.status === 'review_required';
   const action = record.hostedService ? 'Disable' : 'Enable';
   const explanation = record.hostedService
     ? `Records ${record.product} as internal use only again. Customers and third parties are no longer offered this instance.`
-    : `Records ${record.product} as offered to third parties as a hosted service. A licence that restricts resale or hosted-service provision refuses this change.`;
+    : unreviewed
+      ? `Records ${record.product} as offered to third parties as a hosted service. Enabling is refused until an auditor records the licence review.`
+      : `Records ${record.product} as offered to third parties as a hosted service. A licence that restricts resale or hosted-service provision refuses this change.`;
 
   return (
     <div className="flex flex-col items-end gap-1">
@@ -111,6 +140,9 @@ export function LicensesPage() {
   const licenses = useLicenses();
   const rows = licenses.data ?? [];
   const canManage = canMutate(session.role, 'license.manage');
+  // ADR-BE-25: the review is the auditor's act; the operator acts on it, never both.
+  const canReview = canMutate(session.role, 'license.review');
+  const [reviewing, setReviewing] = useState<LicenseRecord | null>(null);
 
   /**
    * Memoised, not hoisted: the hosted-service cell needs `canManage`, which comes from the session.
@@ -199,17 +231,40 @@ export function LicensesPage() {
           id: 'reviewed',
           header: 'Reviewed',
           hideBelow: 'xl',
-          cell: (row) =>
-            row.reviewedAt === null ? (
-              <span className="text-micro font-medium text-warning-strong">Not reviewed</span>
-            ) : (
-              <div className="leading-tight">
-                <span className="block text-micro text-muted">{formatDate(row.reviewedAt)}</span>
-                {row.reviewedBy === null ? null : (
-                  <span className="block text-micro text-faint">{row.reviewedBy}</span>
-                )}
-              </div>
-            ),
+          cell: (row) => (
+            <div className="leading-tight">
+              {row.reviewedAt === null ? (
+                <span className="text-micro font-medium text-warning-strong">Not reviewed</span>
+              ) : (
+                <>
+                  <span className="block text-micro text-muted">{formatDate(row.reviewedAt)}</span>
+                  {row.reviewedByName === null ? null : (
+                    <span className="block text-micro text-faint">{row.reviewedByName}</span>
+                  )}
+                  {row.upstreamRef === null ? null : <EvidenceRef value={row.upstreamRef} />}
+                  {row.reviewNote === null ? null : (
+                    <span
+                      className="block max-w-[220px] truncate text-micro text-faint"
+                      title={row.reviewNote}
+                    >
+                      {row.reviewNote}
+                    </span>
+                  )}
+                </>
+              )}
+              {canReview ? (
+                <Button
+                  size="sm"
+                  variant="quiet"
+                  className="mt-1"
+                  onClick={() => setReviewing(row)}
+                  aria-label={`${row.reviewedAt === null ? 'Record' : 'Update'} the licence review for ${row.product}`}
+                >
+                  {row.reviewedAt === null ? 'Record review' : 'Update review'}
+                </Button>
+              ) : null}
+            </div>
+          ),
         },
         {
           id: 'hosted',
@@ -219,7 +274,7 @@ export function LicensesPage() {
           cell: (row) => <HostedServiceCell record={row} canManage={canManage} />,
         },
       ]),
-    [canManage],
+    [canManage, canReview],
   );
 
   return (
@@ -248,15 +303,30 @@ export function LicensesPage() {
       />
 
       <Callout tone="info" title="Release gate, not a report" className="mb-3">
-        A licence that restricts resale or hosted-service provision blocks that configuration. The
-        refusal names the licence and the reason, and is recorded in the audit trail.
+        A licence that restricts resale or hosted-service provision blocks that configuration, and
+        so does an unreviewed one. The refusal names the licence and the reason, and is recorded in
+        the audit trail.
       </Callout>
 
       {!canManage ? (
-        <Callout tone="info" title="Read-only register" className="mb-3">
-          R2 can audit licence terms and restrictions; changing hosted-service mode needs the
-          platform administrator (the <span className="font-mono text-meta">license.manage</span>{' '}
-          capability).
+        <Callout
+          tone="info"
+          title={canReview ? 'Audit and review' : 'Read-only register'}
+          className="mb-3"
+        >
+          {canReview ? (
+            <>
+              R2 records the licence review; changing hosted-service mode needs the platform
+              administrator (the <span className="font-mono text-meta">license.manage</span>{' '}
+              capability).
+            </>
+          ) : (
+            <>
+              R2 can audit licence terms and restrictions; changing hosted-service mode needs the
+              platform administrator (the{' '}
+              <span className="font-mono text-meta">license.manage</span> capability).
+            </>
+          )}
         </Callout>
       ) : null}
 
@@ -264,7 +334,7 @@ export function LicensesPage() {
         <PanelHeader
           eyebrow="Register"
           title="Recorded licenses"
-          description="Reviewed by the auditor; licence terms are verified against the upstream LICENSE file before procurement. The hosted-service flag records whether an instance is offered to third parties as a service (C-3), not whether it is running."
+          description="Reviewed by the auditor; licence terms are verified against the upstream LICENSE file before procurement, and each cleared row carries the reference that was checked. The hosted-service flag records whether an instance is offered to third parties as a service (C-3), not whether it is running."
         />
         {/*
           A register that keeps its rows through a failed refetch: the licence terms on screen are
@@ -298,6 +368,17 @@ export function LicensesPage() {
           )}
         </AsyncPanel>
       </Panel>
+
+      {reviewing === null ? null : (
+        <ReviewLicenseDialog
+          key={reviewing.instanceId}
+          record={reviewing}
+          open
+          onOpenChange={(open) => {
+            if (!open) setReviewing(null);
+          }}
+        />
+      )}
     </Page>
   );
 }

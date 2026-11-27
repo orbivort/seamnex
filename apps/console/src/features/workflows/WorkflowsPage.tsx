@@ -1,18 +1,16 @@
-import { useMemo, useState, type ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { ArrowRight, CircleAlert, Plus, Workflow as WorkflowIcon } from 'lucide-react';
 import {
   toProblem,
   useCreateWorkflow,
   useImportWorkflow,
-  useInstances,
   useRegistry,
   useWorkflows,
 } from '@seamnex/api-client';
 import type { Workflow, WorkflowExport } from '@seamnex/domain';
-import { TRIGGER_LABELS, WORKFLOW_STATE_LABELS } from '@seamnex/domain';
+import { can, TRIGGER_LABELS, WORKFLOW_STATE_LABELS } from '@seamnex/domain';
 import {
-  Alert,
   Badge,
   Button,
   Callout,
@@ -35,13 +33,45 @@ import {
 } from '@seamnex/ui';
 import { formatRelative } from '@seamnex/utils';
 import { AsyncPanel, QueryError } from '@seamnex/shell';
+import { useSession } from '../../session';
+
+/**
+ * The validation verdict, as one badge.
+ *
+ * Three states, not two: a draft that has never been validated is neither "valid" nor "N errors" —
+ * the API reports `checkedAt: null` for exactly that case, and claiming "valid" used to enable
+ * Activate on a definition nothing had checked.
+ */
+function ValidationBadge({ validation }: { validation: Workflow['validation'] }) {
+  if (validation.valid) {
+    return (
+      <Badge tone="positive" size="sm">
+        valid
+      </Badge>
+    );
+  }
+  if (validation.checkedAt === null) {
+    return (
+      <Badge tone="neutral" size="sm">
+        not validated
+      </Badge>
+    );
+  }
+  const errors = validation.issues.filter((issue) => issue.severity === 'error').length;
+  return (
+    <Badge tone="danger" size="sm">
+      {errors} error{errors === 1 ? '' : 's'}
+    </Badge>
+  );
+}
 
 /**
  * Module scope: no cell here reads component state, so the array and its closures are built once.
  *
  * `name` is the row's identity and carries the link; the trailing "Open" cell is a second, explicit
  * affordance to the same destination in a different cell, so the two anchors are siblings and never
- * nested.
+ * nested — and it is the cell that goes first on a narrow screen, where the row link already is the
+ * affordance and the validation verdict is not.
  */
 const WORKFLOW_COLUMNS = defineColumns<Workflow>([
   {
@@ -128,39 +158,23 @@ const WORKFLOW_COLUMNS = defineColumns<Workflow>([
   },
   {
     id: 'validation',
-    header: 'Validation',
-    hideBelow: 'xl',
     /**
-     * Three states, not two: a draft that has never been validated is neither "valid" nor
-     * "N errors" — the API reports `checkedAt: null` for exactly that case, and claiming "valid"
-     * used to enable Activate on a definition nothing had checked.
+     * No `hideBelow`. This column was hidden below `xl`, so a phone showed the state (`DRAFT`) and
+     * no way to learn whether anything had ever validated it — the one column that decides whether
+     * the definition can be activated. It keeps its place at every width; the table scrolls, which
+     * is what the `edge-fade-x` wrapper exists for.
      */
-    cell: (row) => {
-      if (row.validation.valid) {
-        return (
-          <Badge tone="positive" size="sm">
-            valid
-          </Badge>
-        );
-      }
-      if (row.validation.checkedAt === null) {
-        return (
-          <Badge tone="neutral" size="sm">
-            not validated
-          </Badge>
-        );
-      }
-      const errors = row.validation.issues.filter((issue) => issue.severity === 'error').length;
-      return (
-        <Badge tone="danger" size="sm">
-          {errors} error{errors === 1 ? '' : 's'}
-        </Badge>
-      );
-    },
+    header: 'Validation',
+    cell: (row) => <ValidationBadge validation={row.validation} />,
   },
   {
     id: 'open',
-    header: '',
+    /**
+     * The header is empty on screen — the column holds one repeated word — but a `<th>` with no
+     * content gives the column no name in the table's reading order. Hidden text names it.
+     */
+    header: <span className="sr-only">Actions</span>,
+    hideBelow: 'md',
     align: 'right',
     cell: (row) => (
       <Link
@@ -182,8 +196,13 @@ const workflowRowLink = (row: Workflow, className: string, children: ReactNode) 
 );
 
 export function WorkflowsPage() {
+  const { session } = useSession();
+  /**
+   * R2 (auditor) reads every definition and may author none. Offering the two authoring actions
+   * would be an affordance that only ever answers `403`; the capability table already says so.
+   */
+  const mayAuthor = can(session.role, 'workflow.author');
   const workflows = useWorkflows();
-  const instances = useInstances();
   const registry = useRegistry();
   const create = useCreateWorkflow();
   const importer = useImportWorkflow();
@@ -202,36 +221,40 @@ export function WorkflowsPage() {
 
   const rows = workflows.data ?? [];
   const failed = rows.filter((workflow) => workflow.state === 'failed');
+  /**
+   * Every state gets a count, and a count is withheld until the list has actually answered.
+   *
+   * The header used to summarise `active`, `draft` and `failed` only, so a validated or disabled
+   * definition made the badges claim "0 active, 0 draft" beside a table that plainly listed one —
+   * and the same three zeros rendered while the query was still in flight, which reads as an empty
+   * portfolio rather than an unanswered one. The two workhorse states always show; the exceptional
+   * ones (validated, disabled, failed) appear when they exist, so a quiet portfolio is not decorated
+   * with a permanent red `0 failed`.
+   */
+  const countOf = (state: Workflow['state']) =>
+    workflows.isSuccess ? String(rows.filter((row) => row.state === state).length) : '—';
   const createProblem = create.error ? toProblem(create.error) : null;
   const fieldError = (field: string) =>
     createProblem?.fieldErrors?.find((item) => item.field === field)?.message;
 
   /**
-   * FR-5.2 / C-11: the pickers offer what the platform can actually broker.
+   * FR-5.2 / C-11: the pickers offer exactly what the platform can broker, read from the registry.
    *
-   * The target list used to contain every deployed product, and the server refused the ones that
-   * cannot issue an operation-scoped credential — a round trip to learn something the registry had
-   * already published. The registry entry carries the verdict (`writeEligible`, `workflowEligible`),
-   * computed by the same predicate the broker and invariant 4 use, so the two cannot disagree.
-   * While the registry is still loading the full list is offered: a missing answer must not read as
-   * "nothing is eligible", and the API refuses the impossible choice anyway.
+   * The list is the registry projection rather than the fleet list. Two reasons, and the second is
+   * the important one:
+   *
+   *  - the registry entry already carries the verdict (`writeEligible`, `workflowEligible`),
+   *    computed by the same predicate the broker and invariant 4 use, so the two cannot disagree;
+   *  - `GET /instances` is the *operator's* fleet view (`instance.view_logs`, fleet-wide), which a
+   *    domain owner (R3) and a product administrator (R4) are refused. Building the pickers from it
+   *    left both roles with an empty select and no way to compose the cross-product workflow FR-5.9
+   *    grants them. `GET /registry/instances` is `registry.view`, which both hold in full.
    */
-  const eligibility = useMemo(
-    () => new Map((registry.data ?? []).map((entry) => [entry.instanceId, entry])),
-    [registry.data],
-  );
-  const sourceOptions = (instances.data ?? []).filter(
-    (instance) => eligibility.get(instance.id)?.workflowEligible ?? true,
-  );
-  const targetOptions = (instances.data ?? []).filter(
-    (instance) => eligibility.get(instance.id)?.writeEligible ?? true,
-  );
-  const notWriteEligible = (instances.data ?? []).filter(
-    (instance) => eligibility.get(instance.id)?.writeEligible === false,
-  );
-  const notSourceEligible = (instances.data ?? []).filter(
-    (instance) => eligibility.get(instance.id)?.workflowEligible === false,
-  );
+  const registryEntries = registry.data ?? [];
+  const sourceOptions = registryEntries.filter((entry) => entry.workflowEligible);
+  const targetOptions = registryEntries.filter((entry) => entry.writeEligible);
+  const notWriteEligible = registryEntries.filter((entry) => !entry.writeEligible);
+  const notSourceEligible = registryEntries.filter((entry) => !entry.workflowEligible);
 
   return (
     <Page>
@@ -241,31 +264,47 @@ export function WorkflowsPage() {
         description="Connect installed products without writing glue code. Discovery comes from the integration registry; credentials are brokered and operation-scoped."
         actions={
           <>
-            <Button variant="ghost" size="sm" onClick={() => setImportOpen(true)}>
-              Import
-            </Button>
-            <Button
-              variant="primary"
-              size="sm"
-              icon={<Plus />}
-              onClick={() => setOpen(true)}
-              aria-describedby="new-workflow-note"
-            >
-              New workflow
-            </Button>
+            {mayAuthor ? (
+              <Button variant="ghost" size="sm" onClick={() => setImportOpen(true)}>
+                Import
+              </Button>
+            ) : null}
+            {mayAuthor ? (
+              <Button
+                variant="primary"
+                size="sm"
+                icon={<Plus />}
+                onClick={() => setOpen(true)}
+                aria-describedby="new-workflow-note"
+              >
+                New workflow
+              </Button>
+            ) : null}
           </>
         }
         meta={
           <>
             <Badge tone="positive" size="sm">
-              {rows.filter((workflow) => workflow.state === 'active').length} active
+              {countOf('active')} active
             </Badge>
             <Badge tone="neutral" size="sm">
-              {rows.filter((workflow) => workflow.state === 'draft').length} draft
+              {countOf('draft')} draft
             </Badge>
-            <Badge tone="danger" size="sm">
-              {failed.length} failed
-            </Badge>
+            {workflows.isSuccess && rows.some((row) => row.state === 'validated') ? (
+              <Badge tone="info" size="sm">
+                {countOf('validated')} validated
+              </Badge>
+            ) : null}
+            {workflows.isSuccess && rows.some((row) => row.state === 'disabled') ? (
+              <Badge tone="neutral" size="sm">
+                {countOf('disabled')} disabled
+              </Badge>
+            ) : null}
+            {workflows.isSuccess && failed.length > 0 ? (
+              <Badge tone="danger" size="sm">
+                {countOf('failed')} failed
+              </Badge>
+            ) : null}
           </>
         }
       />
@@ -398,6 +437,12 @@ export function WorkflowsPage() {
             label="Name"
             required
             htmlFor="wf-name"
+            /*
+             * The three-character floor is enforced by disabling the footer button, which states
+             * nothing: a two-character name left the dialog with no enabled action and no reason.
+             * The hint makes the rule visible, and the control's `aria-describedby` carries it.
+             */
+            hint="At least three characters. It names the workflow in the inventory and the audit trail."
             {...(fieldError('name') ? { error: fieldError('name') } : {})}
           >
             <Input
@@ -423,7 +468,7 @@ export function WorkflowsPage() {
             label="Trigger"
             required
             htmlFor="wf-trigger"
-            hint="The type is recorded here. The definition carries the cron, timezone or polling interval, which the platform writes and `PUT /workflows/:id/trigger` changes."
+            hint="Starting mode. The cron and timezone, or the polling interval, are set on the workflow's Trigger tab once it exists."
           >
             <Select
               id="wf-trigger"
@@ -449,9 +494,9 @@ export function WorkflowsPage() {
                 onChange={(event) => setSourceId(event.target.value)}
               >
                 <option value="">Choose a product…</option>
-                {sourceOptions.map((instance) => (
-                  <option key={instance.id} value={instance.id}>
-                    {instance.entryKey} · {instance.product}
+                {sourceOptions.map((entry) => (
+                  <option key={entry.instanceId} value={entry.instanceId}>
+                    {entry.entryKey} · {entry.product}
                   </option>
                 ))}
               </Select>
@@ -469,9 +514,9 @@ export function WorkflowsPage() {
                 onChange={(event) => setTargetId(event.target.value)}
               >
                 <option value="">Choose a product…</option>
-                {targetOptions.map((instance) => (
-                  <option key={instance.id} value={instance.id}>
-                    {instance.entryKey} · {instance.product}
+                {targetOptions.map((entry) => (
+                  <option key={entry.instanceId} value={entry.instanceId}>
+                    {entry.entryKey} · {entry.product}
                   </option>
                 ))}
               </Select>
@@ -547,18 +592,18 @@ export function WorkflowsPage() {
           </>
         }
       >
-        {importError ? (
-          <div className="mb-3">
-            <Alert tone="caution" title="The document could not be read">
-              {importError}
-            </Alert>
-          </div>
-        ) : null}
         {importer.isError ? <QueryError error={importer.error} compact /> : null}
         <div className="space-y-3">
           <Field
             label="Export document"
             htmlFor="workflow-import"
+            /*
+             * The read error belongs to the field, not to a banner above it: as a `Field` error the
+             * control owns it (`aria-invalid`, `aria-describedby`, `aria-errormessage`) and a screen
+             * reader announces it with the textarea it applies to. As a banner it was an unowned
+             * sentence that also outlived the document it described.
+             */
+            error={importError ?? undefined}
             hint="apiVersion seamnex.workflow/v1. Exported from a workflow workspace with the Export action."
           >
             <Textarea
@@ -569,7 +614,10 @@ export function WorkflowsPage() {
               placeholder={
                 '{\n "apiVersion": "seamnex.workflow/v1",\n "exportedAt": "…",\n "irHash": "…",\n "workflow": { … }\n}'
               }
-              onChange={(event) => setDocumentText(event.target.value)}
+              onChange={(event) => {
+                setImportError(null);
+                setDocumentText(event.target.value);
+              }}
             />
           </Field>
           <Callout tone="caution" title="Imported definitions are inert">

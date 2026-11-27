@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { GUARANTEE_CLASSES } from '../../src/enums';
 import {
   SYNC_STATE_BY_GUARANTEE_CLASS,
+  canApplyWithoutProductPush,
   propagatesFully,
   syncStateForGuaranteeClass,
 } from '../../src/propagation';
@@ -33,5 +34,20 @@ describe('entitlement propagation by guarantee class (FR-2.4)', () => {
     expect(syncStateForGuaranteeClass('native')).toBe('applied');
     expect(propagatesFully('native')).toBe(true);
     expect(propagatesFully('fa_gate')).toBe(false);
+  });
+
+  /**
+   * AC-11: `applied` is a claim about the product, not about the platform's intention.
+   *
+   * The predicate is what the sync worker uses to decide which pending grants a product push could
+   * ever settle. A class it excludes must stay `pending` with a reason, because either the edge
+   * enforces access (`fa_gate`) or the product keeps its own role record (`fa_delegated`).
+   */
+  it('separates the classes a product push can settle from the ones it cannot', () => {
+    expect(
+      GUARANTEE_CLASSES.filter((guaranteeClass) => canApplyWithoutProductPush(guaranteeClass)),
+    ).toEqual(['native', 'fa_header']);
+    expect(canApplyWithoutProductPush('fa_delegated')).toBe(false);
+    expect(canApplyWithoutProductPush('fa_gate')).toBe(false);
   });
 });

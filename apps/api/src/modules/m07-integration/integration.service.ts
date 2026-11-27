@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { Inject, Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import type { IntegrationCheck, InstanceRoute } from '@seamnex/domain';
 import type { Pool } from 'pg';
@@ -15,10 +16,13 @@ import { probeIdpFromNetwork } from '../../common/exec/idp-probe';
 import type {
   AdapterSummary,
   IdentityAttachment,
+  IdentitySecretState,
   IntegrationService,
   RouteInput,
 } from './integration.contract';
 import { KeycloakAdminClient } from '../../common/keycloak/keycloak-admin.client';
+import { RENDERER_SERVICE, type RendererService } from '../m03-renderer/renderer.contract';
+import { probeSignInPage } from '../../common/exec/sign-in-probe';
 import { TraefikRouteWriter } from './traefik.writer';
 import {
   backchannelLogoutUrlFor,
@@ -26,6 +30,7 @@ import {
   oidcSecretVariableFor,
   publicBaseUrl,
   redirectUriFor,
+  signInPageFor,
 } from './oidc-redirect';
 import { SsoProbe, type SsoProbeResult } from './sso.probe';
 
@@ -113,6 +118,13 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
     @Inject(KeycloakAdminClient) private readonly keycloak: KeycloakAdminClient,
     @Inject(TraefikRouteWriter) private readonly traefik: TraefikRouteWriter,
     @Inject(SsoProbe) private readonly ssoProbe: SsoProbe,
+    /**
+     * M03 owns `instance_env_value`, and the value this module mints is only real once it is applied
+     * there: the renderer and the executor resolve that table and nothing else. The write goes
+     * through the owning module rather than this one's SQL, so the validation, the audit row and the
+     * secret linkage stay single-valued.
+     */
+    @Inject(RENDERER_SERVICE) private readonly renderer: RendererService,
   ) {}
 
   async checks(instanceId: string): Promise<IntegrationCheck[]> {
@@ -202,13 +214,14 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
       operation_inventory: unknown;
       event_modes: unknown;
       slo_supported: boolean | null;
+      verified_facts: string[] | null;
       verified_by: string | null;
       verified_at: Date | null;
       next_review_at: Date | null;
     }>(
       `SELECT credential_granularity, session_max_minutes, api_base_url, auth_method,
               guarantee_class_verified, operation_inventory, event_modes, slo_supported,
-              verified_by, verified_at, next_review_at
+              verified_facts, verified_by, verified_at, next_review_at
          FROM integration_metadata
         WHERE instance_id = $1`,
       [instanceId],
@@ -224,10 +237,48 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
       operationInventory: row.operation_inventory,
       eventModes: row.event_modes,
       sloSupported: row.slo_supported,
+      /** FR-2.10: a fact that is not named here is still the catalogue assumption. */
+      verifiedFacts: row.verified_facts ?? [],
       verifiedBy: row.verified_by,
       verifiedAt: row.verified_at?.toISOString() ?? null,
       nextReviewAt: row.next_review_at?.toISOString() ?? null,
     };
+  }
+
+  /**
+   * 4D.1 — the product's copy of the client secret, written where the product is configured from.
+   *
+   * Runs before the render set is produced (`deploy`/`reconfigure`/`upgrade`), and that ordering is the
+   * whole point: `registerIdentity` cannot run until the route exists, so a value minted there is
+   * applied no earlier than the *next* deployment. ERPNext proved what that costs — the site booted
+   * without `ERPNEXT_SSO_CLIENT_SECRET`, the bootstrap took its documented fallback and wrote no
+   * `Social Login Key`, and the platform's login check passed anyway because it never asked the
+   * product.
+   *
+   * Idempotent on the applied row, not on the secret: a value the instance already stores is left
+   * alone, so a redeploy does not rotate the client secret the IdP was registered with. When M15 holds
+   * a value that was never linked to the environment, that value is reused and linked rather than
+   * replaced, for the same reason.
+   */
+  async ensureIdentitySecret(instanceId: string, actorId: string): Promise<IdentitySecretState> {
+    const instance = await this.instanceOf(instanceId);
+    const variable = oidcSecretVariableFor(instance.entryKey);
+    if (variable === null) return { variable: null, status: 'not-declared' };
+
+    const values = await this.renderer.instanceEnv(instanceId);
+    const applied = values.find((value) => value.name === variable);
+    if (applied?.source === 'secret') return { variable, status: 'applied' };
+    // The entry names a variable its projected schema does not carry, which is a disagreement for the
+    // catalog gate rather than something to paper over with a write this module's owner would refuse.
+    if (applied === undefined) return { variable, status: 'not-declared' };
+
+    const existing = await this.secrets.find('instance', instanceId, variable).catch(() => null);
+    const value =
+      existing === null
+        ? randomSecret()
+        : await this.secrets.open(existing.id, `apply identity secret ${instanceId}`);
+    await this.renderer.updateInstanceEnv(instanceId, { [variable]: value }, actorId);
+    return { variable, status: existing === null ? 'minted' : 'linked' };
   }
 
   async registerIdentity(
@@ -248,10 +299,11 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
         remediation: 'Shorten the instance slug.',
       });
     }
-    // The IdP and the product must share one client secret. When the operator has stored it as the
-    // product's OIDC secret variable, reuse that value: generating a second one here would register
-    // a client the product can never authenticate as, which is a login that fails after the redirect
-    // with no hint of why.
+    // The IdP and the product must share one client secret. When the instance already holds it as
+    // the product's OIDC secret variable, reuse that value: generating a second one here would
+    // register a client the product can never authenticate as, which is a login that fails after the
+    // redirect with no hint of why. `ensureIdentitySecret` puts it there before the definition is
+    // applied; this is the read side of the same single value.
     const secretVariable = oidcSecretVariableFor(instance.entryKey);
     const operatorSecret =
       secretVariable === null
@@ -262,15 +314,11 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
         ? randomSecret()
         : await this.secrets.open(operatorSecret.id, `register identity client ${instanceId}`);
     /**
-     * A generated secret is stored under the product's own variable name, not only as an
-     * `idp_client` secret.
-     *
-     * The renderer resolves `instance_env_value` and nothing else, so a secret parked in an
-     * `idp_client` scope never reaches the container: the client is registered at the IdP with a
-     * value the product does not have, the platform's own probe passes (it used its copy), and the
-     * product's login fails at the token exchange with `invalid_client` — which it reports as a
-     * site-URL problem. Writing it as the declared variable makes the value that was registered the
-     * value that is applied.
+     * The fallback for an entry that declares no secret variable: the value is stored under
+     * `idp_client`, where nothing applies it — there is no variable for the product to read it from,
+     * so the entry has to carry it some other way. An entry that *does* declare one is handled by
+     * `ensureIdentitySecret`, which writes the value as the declared variable and therefore as the
+     * value the executor injects.
      */
     const stored =
       operatorSecret ??
@@ -280,7 +328,7 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
         secretVariable ?? 'client_secret',
         secret,
       ));
-    // The browser-facing base URL, not an assumed one: the dev edge serves HTTP on :8020 and the
+    // The browser-facing base URL, not an assumed one: the dev edge serves HTTPS on :8443 and the
     // product derives its own redirect URI from the same site URL, so a mismatch here is a login that
     // can never complete.
     const baseUrl = publicBaseUrl(
@@ -333,7 +381,15 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
         // deployment must not fail for it: a `native` product authenticates against its own store
         // and is fully usable without an IdP client. Record the gap instead of inventing success
         // (inv. 12), and let the readiness verdict decide what it means for this guarantee class.
-        if (!(error instanceof AppError) || error.code !== 'ADAPTER_UNAVAILABLE') throw error;
+        //
+        // The exemption is narrowed to that one case on purpose. `ADAPTER_UNAVAILABLE` is also what
+        // every refusal from the IdP is reduced to, so swallowing the code wholesale reported
+        // "unsupported" — a capability statement — for a registered-but-broken client, and the
+        // deployment stayed green while the product's sign-in was dead. With an admin client
+        // configured, a refusal is a fault to raise, not a host to exempt.
+        const adminConfigured = this.config.SEAMNEX_KEYCLOAK_ADMIN_CLIENT_SECRET_FILE.length > 0;
+        if (!(error instanceof AppError) || error.code !== 'ADAPTER_UNAVAILABLE' || adminConfigured)
+          throw error;
         await this.audit.append({
           action: 'instance.idp_client.unavailable',
           actorType: 'system',
@@ -352,16 +408,22 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
 
     await withTransaction(this.pool, async (tx) => {
       await this.audit.lockChain(tx);
+      /*
+       * FR-3.8: the same endpoint value that is handed to Keycloak is stored here, because sign-out
+       * can only claim a product was notified when the provider has somewhere to notify it. One
+       * source of truth: a value that is not registered above is not recorded below.
+       */
       await tx.query(
         `INSERT INTO idp_client
-           (instance_id, client_id, client_secret_ref, protocol, redirect_uris, access_token_lifespan_seconds, offline_access_disabled)
-         VALUES ($1, $2, $3, $4, $5::text[], 300, true)
+           (instance_id, client_id, client_secret_ref, protocol, redirect_uris, access_token_lifespan_seconds, offline_access_disabled, backchannel_logout_url)
+         VALUES ($1, $2, $3, $4, $5::text[], 300, true, $6)
          ON CONFLICT (instance_id) DO UPDATE
             SET client_id = EXCLUDED.client_id, client_secret_ref = EXCLUDED.client_secret_ref,
                 protocol = EXCLUDED.protocol, redirect_uris = EXCLUDED.redirect_uris,
                 access_token_lifespan_seconds = EXCLUDED.access_token_lifespan_seconds,
-                offline_access_disabled = EXCLUDED.offline_access_disabled`,
-        [instanceId, clientId, stored.id, protocol, redirectUris],
+                offline_access_disabled = EXCLUDED.offline_access_disabled,
+                backchannel_logout_url = EXCLUDED.backchannel_logout_url`,
+        [instanceId, clientId, stored.id, protocol, redirectUris, backchannelLogoutUrl],
       );
       await this.audit.append(
         {
@@ -417,16 +479,24 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
     }
     const authMode = declared;
 
+    /*
+     * NFR-4.1 / ISSUE-07: the certificate mode is a property of the deployment's edge, not of the
+     * route. Writing the literal `'acme'` claimed a resolver that no committed asset configured, so
+     * the instance screen reported "ACME wildcard" for a host served over plain HTTP.
+     */
+    const tlsMode = this.config.SEAMNEX_EDGE_TLS_MODE;
+
     await withTransaction(this.pool, async (tx) => {
       await this.audit.lockChain(tx);
       await tx.query(
         `INSERT INTO instance_route (instance_id, host, path_prefix, publish_model, tls_mode, auth_mode, published)
-         VALUES ($1, $2, $3, $4, 'acme', $5, $6)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (instance_id) DO UPDATE
             SET host = EXCLUDED.host, path_prefix = EXCLUDED.path_prefix,
-                publish_model = EXCLUDED.publish_model, auth_mode = EXCLUDED.auth_mode,
+                publish_model = EXCLUDED.publish_model, tls_mode = EXCLUDED.tls_mode,
+                auth_mode = EXCLUDED.auth_mode,
                 published = EXCLUDED.published, updated_at = now()`,
-        [instanceId, host, pathPrefix, publishModel, authMode, input.published ?? true],
+        [instanceId, host, pathPrefix, publishModel, tlsMode, authMode, input.published ?? true],
       );
       await this.audit.append(
         {
@@ -436,7 +506,7 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
           targetType: 'instance',
           targetId: instanceId,
           outcome: 'success',
-          detail: { host, pathPrefix, publishModel, authMode },
+          detail: { host, pathPrefix, publishModel, tlsMode, authMode },
         },
         tx,
       );
@@ -449,9 +519,13 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
     return route;
   }
 
-  async runChecks(
-    instanceId: string,
-  ): Promise<{ checks: IntegrationCheck[]; ready: boolean; blocking: string[] }> {
+  async runChecks(instanceId: string): Promise<{
+    checks: IntegrationCheck[];
+    ready: boolean;
+    blocking: string[];
+    /** Set when the product answers with its own installer: reachable, and not installed. */
+    installPending: string | null;
+  }> {
     const instance = await this.instanceOf(instanceId);
     const port = Number(instance.payload.httpPort ?? 80);
     const checks: { check: IntegrationCheck['check']; ok: boolean; detail: string }[] = [];
@@ -463,12 +537,16 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
       port,
       timeoutMs: 10_000,
     });
+    const installPending = probe.ok ? probe.installer : null;
     checks.push({
       check: 'http',
-      ok: probe.ok,
-      detail: probe.ok
-        ? `HTTP answered on :${port} (${describeProbe(probe)})`
-        : `no HTTP answer on :${port}`,
+      ok: probe.ok && installPending === null,
+      detail:
+        installPending !== null
+          ? `HTTP answered on :${port} (${describeProbe(probe)}) with the product's installer at ${installPending}`
+          : probe.ok
+            ? `HTTP answered on :${port} (${describeProbe(probe)})`
+            : `no HTTP answer on :${port}`,
     });
 
     const route = await this.route(instanceId);
@@ -480,7 +558,19 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
      * browser has already been redirected back.
      */
     const attachment = await this.ensureIdentityAttachment(instanceId);
-    const sso = await this.ssoLogin(instanceId, native, attachment);
+    /*
+     * Probing the sign-in page of a product that has not been installed measures nothing: the page
+     * that answers is the installer's, and the verdict (`account_failed`) accused the identity wiring
+     * of a failure that was really an unfinished installation. Recorded as not-checked, with the
+     * reason, and kept out of `blocking` for the same reason as `http` below.
+     */
+    const sso =
+      installPending === null
+        ? await this.ssoLogin(instanceId, native, attachment)
+        : {
+            ok: false,
+            detail: `not checked: the product is serving its installer at ${installPending}, so it has no sign-in page yet`,
+          };
     checks.push({ check: 'sso_login', ok: sso.ok, detail: sso.detail });
 
     const dnsOk = route !== null;
@@ -505,13 +595,27 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
       instanceId,
     ]);
     const hookCount = hooks.rowCount ?? 0;
+    /*
+     * `event_modes` is the declaration; `trigger_endpoint` is the registration. A product that
+     * declares no events has nothing to register, and reporting that as a failed check printed a red
+     * row on every deployment of such a product, with a detail that already explained why it was not
+     * a fault.
+     */
+    const declared = await this.pool.query<{ event_modes: unknown }>(
+      `SELECT event_modes FROM integration_metadata WHERE instance_id = $1`,
+      [instanceId],
+    );
+    const modes = declared.rows[0]?.event_modes;
+    const declaresEvents = Array.isArray(modes) && modes.length > 0;
     checks.push({
       check: 'webhook_registered',
-      ok: hookCount > 0,
+      ok: hookCount > 0 || !declaresEvents,
       detail:
         hookCount > 0
           ? `${hookCount} trigger endpoint(s) registered`
-          : 'the product declares no triggers',
+          : declaresEvents
+            ? 'the product declares events but no trigger endpoint is registered'
+            : 'the product declares no triggers, so there is nothing to register',
     });
 
     const previousSso = await this.latestSsoVerdict(instanceId);
@@ -522,7 +626,9 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
       );
     }
     const ssoCheck = checks.find((check) => check.check === 'sso_login');
-    if (ssoCheck !== undefined)
+    // A "not checked" verdict is not a transition: recording one would put a failure in the audit
+    // trail for a product that was never asked.
+    if (ssoCheck !== undefined && installPending === null)
       await this.auditSsoTransition(instanceId, previousSso, ssoCheck.ok, ssoCheck.detail);
 
     // FR-2.9: the verdict, not the state. `instance` belongs to M05, so M07 reports and the
@@ -537,16 +643,26 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
     // authority is the product itself: an IdP that is not wired up yet says nothing about whether the
     // instance works, and blocking on it made every deployment of a native product fail after the
     // containers were already running.
+    //
+    // An installer page is not a failed deployment either. The render set starts the product on
+    // purpose when its first-boot install refuses, so the operator can finish in a browser; failing
+    // the job here would leave them with a screen they cannot reach. The verdict still carries the
+    // reason (`installPending`), and the executor records `degraded` rather than `ready`.
     const blocking = checks
-      .filter(
-        (check) =>
-          !check.ok &&
-          (check.check === 'http' ||
-            check.check === 'dns' ||
-            (check.check === 'sso_login' && !native)),
-      )
+      .filter((check) => {
+        if (check.ok) return false;
+        if (check.check === 'dns') return true;
+        if (check.check === 'http') return installPending === null;
+        if (check.check === 'sso_login') return !native && installPending === null;
+        return false;
+      })
       .map((check) => `${check.check}: ${check.detail}`);
-    return { checks: await this.checks(instanceId), ready: blocking.length === 0, blocking };
+    return {
+      checks: await this.checks(instanceId),
+      ready: blocking.length === 0,
+      blocking,
+      installPending,
+    };
   }
 
   /**
@@ -569,8 +685,14 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
       client_id: string;
       client_secret_ref: string | null;
       redirect_uris: string[];
+      protocol: string;
+      access_token_lifespan_seconds: number;
+      offline_access_disabled: boolean;
+      backchannel_logout_url: string | null;
     }>(
-      `SELECT client_id, client_secret_ref, redirect_uris FROM idp_client WHERE instance_id = $1`,
+      `SELECT client_id, client_secret_ref, redirect_uris, protocol,
+              access_token_lifespan_seconds, offline_access_disabled, backchannel_logout_url
+         FROM idp_client WHERE instance_id = $1`,
       [instanceId],
     );
     const row = result.rows[0];
@@ -618,6 +740,27 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
       };
     }
 
+    const instance = await this.instanceOf(instanceId);
+    const groupClaim = oidcGroupClaimFor(instance.entryKey);
+
+    /**
+     * Stage 0.25 — the registration itself, re-applied before it is checked.
+     *
+     * The IdP side of a product's identity is runtime state: it is created by `registerIdentity`
+     * during a deployment and lives in Keycloak's database, which a Keycloak upgrade migrates and a
+     * `compose up` of a fresh volume replaces. Realm-as-code does not carry it — `platform/realm/*.json`
+     * declares the platform's own clients, not one client per instance — so after the IdP comes back
+     * without it the product's next login dies at the authorization leg (`invalid_client`, the
+     * popup never closes) and nothing repairs it until the instance is deployed again. The same
+     * reasoning as `ensureIdentityAttachment` below: a step the platform can perform in one call is
+     * performed before it is measured, so the check reports the deployment that exists after the
+     * repair rather than the one that existed before it. The upsert is idempotent and reuses the
+     * stored secret, so a healthy client is rewritten with the values it already has.
+     */
+    const converged = await this.convergeIdentityClient(row, redirectUri, secret, groupClaim);
+    if (!converged.ok)
+      return { ok: false, detail: `stage 0.25 (client registration): ${converged.detail}` };
+
     /**
      * Stage 0 — the leg that was missing.
      *
@@ -627,7 +770,6 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
      * platform ran stayed green. Asking the same question from a container on the instance network
      * is the difference between checking the realm and checking the login.
      */
-    const instance = await this.instanceOf(instanceId);
     if (!attachment.ok) {
       return { ok: false, detail: `stage 0 (product network): ${attachment.detail}` };
     }
@@ -643,13 +785,104 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
       return { ok: false, detail: `stage 0 (product network): ${reach.detail}` };
     }
 
-    const groupClaim = oidcGroupClaimFor(instance.entryKey);
-    return this.ssoProbe.verify({
+    /**
+     * Stage 0.5 — the product's own half of the contract.
+     *
+     * Everything above is a statement about the identity provider and the network between them. A
+     * registered client, a matching redirect URI and a code exchanged from inside the instance network
+     * all passed for an ERPNext site that had no `Social Login Key`: the site never received the client
+     * secret, took its documented fallback, and its sign-in page offered a password form only. The
+     * platform called that single sign-on. So the credential the product needs is looked for where it
+     * would be applied, and the page the product actually serves is read for the provider entry point.
+     */
+    const secretVariable = oidcSecretVariableFor(instance.entryKey);
+    if (secretVariable !== null) {
+      const applied = (await this.renderer.instanceEnv(instanceId)).find(
+        (value) => value.name === secretVariable,
+      );
+      if (applied?.source !== 'secret')
+        return {
+          ok: false,
+          detail: `stage 0.5 (product configuration): ${secretVariable} is registered at the identity provider but was never applied to the instance, so the product cannot present the client secret`,
+        };
+    }
+
+    const page = signInPageFor(instance.entryKey);
+    if (page !== null) {
+      const signIn = await probeSignInPage({
+        runCli: (file, args, timeoutMs) => this.docker.runCli(file, args, timeoutMs),
+        network: instanceNetwork(instance.slug),
+        host: instance.slug,
+        port: Number(instance.payload.httpPort ?? 80),
+        path: page.path,
+        marker: page.marker,
+        timeoutMs: 30_000,
+      });
+      if (!signIn.ok) return { ok: false, detail: `stage 0.5 (sign-in page): ${signIn.detail}` };
+    }
+
+    const probe = await this.ssoProbe.verify({
       clientId: row.client_id,
       redirectUri,
       clientSecret: secret,
       ...(groupClaim === null ? {} : { expectedClaims: [groupClaim] }),
     });
+    if (!probe.ok) return probe;
+
+    /**
+     * The probe's own sentence names its stages ("stages 1–2 passed"), and that sentence was true of
+     * a deployment whose product had never been configured. The legs above are what makes it true of
+     * *this* deployment, so the recorded detail says which of them were established: this row is what
+     * an operator reads when deciding whether the product signs people in.
+     */
+    const established: string[] = [];
+    if (secretVariable !== null) established.push(`${secretVariable} is applied`);
+    if (page !== null) established.push(`${page.path} offers the provider`);
+    return {
+      ok: true,
+      detail:
+        established.length === 0 ? probe.detail : `${established.join(', ')}; ${probe.detail}`,
+    };
+  }
+
+  /**
+   * Re-applies the IdP-side client for an instance from what the platform already holds, without
+   * minting anything new. Used by the SSO check, which runs on every deployment and on the
+   * scheduler's reconciliation: a client that Keycloak lost with the realm is restored in one call
+   * instead of waiting for the next deployment of the instance.
+   */
+  private async convergeIdentityClient(
+    row: {
+      client_id: string;
+      protocol: string;
+      access_token_lifespan_seconds: number;
+      offline_access_disabled: boolean;
+      backchannel_logout_url: string | null;
+    },
+    redirectUri: string,
+    secret: string,
+    groupClaim: string | null,
+  ): Promise<{ ok: true } | { ok: false; detail: string }> {
+    try {
+      await this.keycloak.upsertClient({
+        clientId: row.client_id,
+        redirectUris: [redirectUri],
+        protocol: row.protocol === 'saml' ? 'saml' : 'oidc',
+        accessTokenLifespanSeconds: row.access_token_lifespan_seconds,
+        offlineAccessDisabled: row.offline_access_disabled,
+        secret,
+        ...(row.backchannel_logout_url === null
+          ? {}
+          : { backchannelLogoutUrl: row.backchannel_logout_url }),
+        ...(groupClaim === null ? {} : { groupClaim }),
+      });
+      return { ok: true };
+    } catch (error) {
+      return {
+        ok: false,
+        detail: `client ${row.client_id} could not be re-applied to the identity provider (${error instanceof Error ? error.message : String(error)}); the product's login fails at the authorization leg until it is`,
+      };
+    }
   }
 
   /**
@@ -730,8 +963,20 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
   }> {
     if (this.config.SEAMNEX_IDP_CONTAINER.length === 0)
       return { instances: 0, failed: 0, verified: 0 };
-    const result = await this.pool.query<{ id: string; last_checked: Date | null }>(
-      `SELECT i.id,
+    const result = await this.pool.query<{
+      id: string;
+      entry_key: string;
+      client_id: string;
+      client_secret_ref: string | null;
+      redirect_uris: string[];
+      protocol: string;
+      access_token_lifespan_seconds: number;
+      offline_access_disabled: boolean;
+      backchannel_logout_url: string | null;
+      last_checked: Date | null;
+    }>(
+      `SELECT i.id, i.entry_key, c.client_id, c.client_secret_ref, c.redirect_uris, c.protocol,
+              c.access_token_lifespan_seconds, c.offline_access_disabled, c.backchannel_logout_url,
               (SELECT max(ic.checked_at) FROM integration_check ic
                 WHERE ic.instance_id = i.id AND ic.check_type = 'sso_login') AS last_checked
          FROM instance i JOIN idp_client c ON c.instance_id = i.id
@@ -742,21 +987,28 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
     let verified = 0;
 
     for (const row of result.rows) {
+      /**
+       * The registration is repaired on every pass, not only when the evidence is stale.
+       *
+       * The verdict this pass reads (`last_checked`) is a statement about the *last* probe; it says
+       * nothing about whether the client still exists. A Keycloak upgrade that migrates the realm,
+       * or a `compose up` on a fresh volume, removes it and leaves the old "ok" row behind, so a
+       * staleness gate would keep a dead login advertised as working for half the freshness window.
+       * Re-applying is idempotent, and the repair is the same call the deployment makes.
+       */
+      const fault = await this.reapplyRegistration(row);
+      if (fault !== null) {
+        failed += 1;
+        this.logger.warn(fault);
+        await this.recordBrokenLogin(row.id, fault);
+        continue;
+      }
+
       const attachment = await this.ensureIdentityAttachment(row.id);
       if (!attachment.ok) {
         failed += 1;
         this.logger.warn(attachment.detail);
-        // One row per breakage, not one per pass: the same sentence is not re-recorded for five
-        // minutes, which keeps a permanently broken instance readable.
-        await this.pool.query(
-          `INSERT INTO integration_check (instance_id, check_type, ok, detail)
-           SELECT $1, 'sso_login', false, $2
-            WHERE NOT EXISTS (
-                    SELECT 1 FROM integration_check ic
-                     WHERE ic.instance_id = $1 AND ic.check_type = 'sso_login' AND ic.ok = false
-                       AND ic.detail = $2 AND ic.checked_at > now() - interval '5 minutes')`,
-          [row.id, attachment.detail],
-        );
+        await this.recordBrokenLogin(row.id, attachment.detail);
         continue;
       }
 
@@ -770,6 +1022,51 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
       if (verdict.ok) verified += 1;
     }
     return { instances: result.rowCount ?? 0, failed, verified };
+  }
+
+  /** The stored registration re-applied from the client row; `null` when it worked. */
+  private async reapplyRegistration(row: {
+    id: string;
+    entry_key: string;
+    client_id: string;
+    client_secret_ref: string | null;
+    redirect_uris: string[];
+    protocol: string;
+    access_token_lifespan_seconds: number;
+    offline_access_disabled: boolean;
+    backchannel_logout_url: string | null;
+  }): Promise<string | null> {
+    const redirectUri = row.redirect_uris[0];
+    if (row.client_secret_ref === null || redirectUri === undefined)
+      return `client ${row.client_id} has no secret or redirect URI on record; re-register it`;
+    try {
+      const secret = await this.secrets.open(row.client_secret_ref, `identity reconcile ${row.id}`);
+      const converged = await this.convergeIdentityClient(
+        row,
+        redirectUri,
+        secret,
+        oidcGroupClaimFor(row.entry_key),
+      );
+      return converged.ok ? null : converged.detail;
+    } catch (error) {
+      return `the client secret recorded for ${row.client_id} could not be opened (${error instanceof Error ? error.message : String(error)})`;
+    }
+  }
+
+  /**
+   * One row per breakage, not one per pass: the same sentence is not re-recorded for five minutes,
+   * which keeps a permanently broken instance readable.
+   */
+  private async recordBrokenLogin(instanceId: string, detail: string): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO integration_check (instance_id, check_type, ok, detail)
+       SELECT $1, 'sso_login', false, $2
+        WHERE NOT EXISTS (
+                SELECT 1 FROM integration_check ic
+                 WHERE ic.instance_id = $1 AND ic.check_type = 'sso_login' AND ic.ok = false
+                   AND ic.detail = $2 AND ic.checked_at > now() - interval '5 minutes')`,
+      [instanceId, detail],
+    );
   }
 
   /** The last recorded SSO verdict, or `undefined` when the check has never run. */
@@ -825,11 +1122,19 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
     const result = await this.pool.query<{ instance_id: string }>(
       `SELECT instance_id FROM instance_route`,
     );
-    for (const row of result.rows) await this.projectInstance(row.instance_id);
+    const kept = new Set<string>();
+    for (const row of result.rows) {
+      const slug = await this.projectInstance(row.instance_id);
+      if (slug !== null) kept.add(slug);
+    }
+    // The database is the only truth about which routes exist, so a document it does not account for
+    // is stale by definition — including the ones written before the edge terminated TLS (ISSUE-07).
+    this.traefik.prune(kept);
     return result.rowCount ?? 0;
   }
 
-  private async projectInstance(instanceId: string): Promise<void> {
+  /** Returns the slug whose document now reflects the database, or `null` when no route is published. */
+  private async projectInstance(instanceId: string): Promise<string | null> {
     const result = await this.pool.query<{
       host: string;
       path_prefix: string | null;
@@ -837,16 +1142,18 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
       published: boolean;
       gated: boolean;
       auth_mode: string;
+      tls_mode: string;
       slug: string;
       payload: Record<string, unknown>;
     }>(
-      `SELECT r.host, r.path_prefix, r.publish_model, r.published, r.gated, r.auth_mode, i.slug, i.payload
+      `SELECT r.host, r.path_prefix, r.publish_model, r.published, r.gated, r.auth_mode, r.tls_mode,
+              i.slug, i.payload
          FROM instance_route r JOIN instance i ON i.id = r.instance_id
         WHERE r.instance_id = $1`,
       [instanceId],
     );
     const row = result.rows[0];
-    if (row === undefined) return;
+    if (row === undefined) return null;
 
     // The router lives on the edge network, the product on its own instance network. A published
     // route is only real if the edge is attached to that network, so the projection joins the two
@@ -871,7 +1178,14 @@ export class PostgresIntegrationService implements IntegrationService, OnModuleI
        */
       bootstrapAddress: this.config.SEAMNEX_BOOTSTRAP_URL,
       authMode: authModeOf(row.auth_mode),
+      /*
+       * The row is the record of what this route runs behind, and the projection reproduces it. The
+       * deployment setting is only a fallback for a row written before the column was populated.
+       */
+      tlsMode: row.tls_mode === 'internal' ? 'internal' : 'acme',
     });
+
+    return row.slug;
   }
 
   /**
@@ -951,10 +1265,13 @@ function authModeOf(value: string): 'native' | 'fa_header' | 'fa_delegated' | 'f
 }
 
 function randomSecret(): string {
-  // 32 bytes of entropy, hex-encoded; the value is stored in M15 and never logged.
-  return Array.from({ length: 32 }, () =>
-    Math.floor(Math.random() * 256)
-      .toString(16)
-      .padStart(2, '0'),
-  ).join('');
+  /*
+   * 32 bytes of real entropy, hex-encoded; the value is stored in M15 and never logged.
+   *
+   * The comment said "32 bytes of entropy" while the code drew them from `Math.random()`, whose output
+   * is reproducible from a few observations — the same defect the credential broker and the trigger
+   * ingress carried (NFR-4.14). This is a secret a product's SSO client is configured with, so it is
+   * the one place where a predictable value would hand out the integration.
+   */
+  return randomBytes(32).toString('hex');
 }

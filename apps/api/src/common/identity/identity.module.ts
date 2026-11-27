@@ -39,8 +39,12 @@ import { StubIdentityProvider } from './stub-identity.provider';
           return new OidcIdentityProvider({
             config,
             directory: () => directory.snapshot(),
-            // The mirror is rebuilt from the realm, so `disable` must be written to the realm.
-            admin: { setUserEnabled: (sub, enabled) => admin.setUserEnabled(sub, enabled) },
+            // The mirror is rebuilt from the realm, so `disable` must be written to the realm; the
+            // provider session is the only place a single logout can be started (FR-3.8).
+            admin: {
+              setUserEnabled: (sub, enabled) => admin.setUserEnabled(sub, enabled),
+              endUserSessions: (sub) => admin.endUserSessions(sub),
+            },
           });
         }
         return new StubIdentityProvider(config);

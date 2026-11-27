@@ -8,6 +8,7 @@ import {
   type SessionCheck,
 } from './product-login.driver';
 import { orangeHrmLogin } from './adapters/orangehrm-login';
+import { mauticLogin } from './adapters/mautic-login';
 
 /**
  * ADR-BE-22 §"One role, one hop" — the seam between the orchestration and a product's login form.
@@ -25,7 +26,7 @@ import { orangeHrmLogin } from './adapters/orangehrm-login';
 export type SessionVerifyInput = {
   /** Internal origin on the instance network (`http://orangehrm:80`); never the public one. */
   readonly origin: string;
-  /** What a browser uses (`http://orangehrm.localhost:8020`), for `Host`, `Origin`, `Referer`. */
+  /** What a browser uses (`https://orangehrm.localhost:8443`), for `Host`, `Origin`, `Referer`. */
   readonly publicOrigin: string;
   /** The login this session is supposed to belong to. */
   readonly username: string;
@@ -59,6 +60,7 @@ const openProjectLogin: ProductLoginAdapter = {
 const ADAPTERS: Readonly<Record<string, ProductLoginAdapter>> = {
   'D09-01': openProjectLogin,
   'D07-01': orangeHrmLogin,
+  'D02-01': mauticLogin,
 };
 
 /**

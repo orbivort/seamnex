@@ -1,11 +1,11 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { HttpResponse, http } from 'msw';
 import { describe, expect, it } from 'vitest';
-import { admissionVerdict } from '@seamnex/domain';
+import { admissionVerdict, type InstanceCapacity } from '@seamnex/domain';
 import { getState } from '@seamnex/mocks';
 import { server } from '@seamnex/mocks/server';
 import { App } from '../../src/app';
-import { openAs } from '../helpers';
+import { openAs, present } from '../helpers';
 
 /**
  * The capacity board's unhappy shapes: a host that cannot admit another deployment, a snapshot
@@ -120,7 +120,7 @@ describe('capacity snapshot without live measurements', () => {
     render(<App />);
 
     // Without a measured path there is no claim to make about the disk axis.
-    expect(await screen.findByText('Allocation ledger')).toBeDefined();
+    expect(await screen.findByText('Allocation and consumption')).toBeDefined();
     expect(screen.queryByText(/Disk measured on/)).toBeNull();
     expect(screen.getByText(snapshot.verdict.headline)).toBeDefined();
   });
@@ -148,11 +148,67 @@ describe('capacity forecast', () => {
 
     expect(await screen.findByText('The capacity forecast could not be projected')).toBeDefined();
     // The snapshot is still on screen beside the failed outlook.
-    expect(screen.getByText('Allocation ledger')).toBeDefined();
+    expect(screen.getByText('Allocation and consumption')).toBeDefined();
 
     failing = false;
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
 
     expect(await screen.findByText(/Forecast is a planning aid, not a reservation/)).toBeDefined();
+  });
+});
+
+describe('capacity consumption bands', () => {
+  it('paints a figure amber at its band and red ten points past it', async () => {
+    const snapshot = getState().capacity;
+    /*
+     * One row per tone: 95 % of a 2 vCPU allocation is ten points past the 75 % CPU band, 92 % of
+     * 1 GiB is past the 90 % memory band but not ten points past it, and half the volume quota is
+     * under the 85 % disk band. The three cells are the whole reason the column pairs allocation
+     * with consumption, so each one is asserted by the colour it earns.
+     */
+    const rows: InstanceCapacity[] = [
+      {
+        instanceId: 'inst-crm',
+        entryKey: 'D01-01',
+        product: 'EspoCRM',
+        slug: 'espocrm',
+        state: 'ready',
+        cpuCores: 2,
+        memoryMb: 1024,
+        diskMb: 1000,
+        diskQuotaMb: 1000,
+        cpuConsumedMilli: 1900,
+        memoryConsumedMb: 942,
+        diskConsumedMb: 500,
+        measuredAt: snapshot.ts,
+      },
+    ];
+    server.use(
+      http.get('/api/v1/capacity', () => HttpResponse.json({ ...snapshot, instanceUsage: rows })),
+    );
+
+    openAs('R1', '/capacity');
+    render(<App />);
+
+    const link = present(await screen.findByRole('link', { name: /EspoCRM/ }), 'the EspoCRM row');
+    const cells = within(present(link.closest('tr'), 'the EspoCRM table row'));
+    expect(cells.getByText('1.90 vCPU used · 95 %').className).toContain('text-danger');
+    expect(cells.getByText('0.9 GB used · 92 %').className).toContain('text-warning-strong');
+    expect(cells.getByText('0.5 GB used · 50 %').className).toContain('text-muted');
+  });
+
+  it('falls back to the default bands when the snapshot predates the thresholds', async () => {
+    const snapshot = getState().capacity;
+    server.use(
+      http.get('/api/v1/capacity', () => HttpResponse.json({ ...snapshot, thresholds: undefined })),
+    );
+
+    openAs('R1', '/capacity');
+    render(<App />);
+
+    // A snapshot stored before the thresholds were configurable carries none. The board must draw
+    // the fallback it painted with, and say the same numbers above the table and beside the rulers.
+    expect(await screen.findByText(/Alert bands: CPU 75 %, memory 90 %, disk 85 %/)).toBeDefined();
+    expect(screen.getByText(/CPU 75 %, memory 90 % and disk 85 %/)).toBeDefined();
   });
 });

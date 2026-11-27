@@ -24,8 +24,12 @@ export const CAPABILITIES = [
   'audit.export',
   'license.view',
   'license.manage',
+  'license.review',
   'capacity.view',
   'metadata.manage',
+  'profile.manage',
+  'profile.request',
+  'exception.request',
   'exception.decide',
   'alert.configure',
   'maintenance.configure',
@@ -153,9 +157,33 @@ export const CAPABILITY_MATRIX = {
    * be able to change the configuration it certifies (AC-44).
    */
   'license.manage': { R1: 'full', R2: 'none', R3: 'none', R4: 'none', R5: 'none', R6: 'none' },
+  /**
+   * ADR-BE-25: the review is the auditor's attestation, not the operator's configuration. R2
+   * records it; R1 acts on it. Keeping the two capabilities on different roles means offering a
+   * product to third parties always takes two people, without a redundant countersignature.
+   */
+  'license.review': { R1: 'none', R2: 'full', R3: 'none', R4: 'none', R5: 'none', R6: 'none' },
   'capacity.view': { R1: 'full', R2: 'full', R3: 'scoped', R4: 'none', R5: 'none', R6: 'none' },
   'metadata.manage': { R1: 'full', R2: 'scoped', R3: 'scoped', R4: 'none', R5: 'none', R6: 'none' },
-  /** NFR-4.15: a policy exception needs a second party; the requester (R2) may not decide it. */
+  /**
+   * FR-1.26: environment profiles are managed by R1. The matrix says `none` for R3 rather than
+   * `scoped` on purpose: a `scoped` grant with a `request` rule is satisfied by the PDP, which
+   * would let a domain owner write a profile directly. R3 gets `profile.request` instead — a
+   * request the platform stores and R1 decides, the same shape as every other approval flow.
+   */
+  'profile.manage': { R1: 'full', R2: 'none', R3: 'none', R4: 'none', R5: 'none', R6: 'none' },
+  'profile.request': { R1: 'none', R2: 'none', R3: 'full', R4: 'none', R5: 'none', R6: 'none' },
+  /**
+   * NFR-4.15: "R1 request approved by a second party under the FR-4.11 rule". Filing and deciding are
+   * two capabilities so the request is visible in the matrix as an act of its own — the requester
+   * never decides, and the row, not the route, is where that is enforced (m18).
+   */
+  'exception.request': { R1: 'full', R2: 'none', R3: 'none', R4: 'none', R5: 'none', R6: 'none' },
+  /**
+   * NFR-4.15: a policy exception needs a second party. The auditor (R2) may not decide one: FR-4.11
+   * grants the auditor read-only elevations only, and a policy exception waives a rule for a
+   * deployment that writes.
+   */
   'exception.decide': { R1: 'full', R2: 'none', R3: 'full', R4: 'none', R5: 'none', R6: 'none' },
   'alert.configure': { R1: 'full', R2: 'none', R3: 'none', R4: 'none', R5: 'none', R6: 'none' },
   'maintenance.configure': {
@@ -248,6 +276,7 @@ export const MFA_REQUIRED_CAPABILITIES: readonly Capability[] = [
   'identity.manage_users',
   'identity.manage_groups',
   'license.manage',
+  'license.review',
   'metadata.manage',
   'recovery.manage',
   'privacy.manage',
@@ -258,11 +287,18 @@ export const MFA_REQUIRED_CAPABILITIES: readonly Capability[] = [
   'audit.export',
 ];
 
-/** True when this role needs a satisfied second factor to use this capability at all. */
+/**
+ * True when this role needs a satisfied second factor to use this capability at all.
+ *
+ * The capability must also be one the role can use: asking R1 to step up for `license.review`
+ * (R2-only, ADR-BE-25) would be a prompt that can never succeed. Denials stay denials; the factor
+ * is only demanded where it can open the door.
+ */
 export function requiresMfa(role: PlatformRole, capability: Capability): boolean {
   return (
     MFA_REQUIRED_ROLES.includes(role) &&
-    (MFA_REQUIRED_CAPABILITIES as readonly string[]).includes(capability)
+    (MFA_REQUIRED_CAPABILITIES as readonly string[]).includes(capability) &&
+    can(role, capability)
   );
 }
 
@@ -277,6 +313,57 @@ export function can(role: PlatformRole, capability: Capability): boolean {
 /** Mutating UI affordances are only enabled on a `full` grant; `scoped` shows a request path. */
 export function canMutate(role: PlatformRole, capability: Capability): boolean {
   return accessFor(role, capability) === 'full';
+}
+
+/**
+ * A role's capabilities as two lookups instead of two predicate calls.
+ *
+ * Both predicates answer by reading one cell of a frozen `const` matrix, so the answer cannot
+ * change while the role does not. Deriving the sets once per role turns every consumer (route
+ * guards, the navigation filter, the command palette) into a membership test against a value that
+ * comes from the same matrix, so there is no second list that could drift from the source.
+ */
+export type CapabilitySets = {
+  /**
+   * Every capability the role holds at any level: `can()` as a set. A `scoped` grant is included,
+   * because a scope still opens the screen — the screen is then responsible for stating the
+   * narrower scope. This set answers "may they read it?", never "may they change it?".
+   */
+  readonly held: ReadonlySet<Capability>;
+  /**
+   * The subset granted outright: `canMutate()` as a set. Mutating affordances are only enabled on a
+   * `full` grant, so a guard that checked `held` would put an enabled-looking control in front of
+   * an auditor.
+   */
+  readonly mutable: ReadonlySet<Capability>;
+};
+
+export function capabilitySets(role: PlatformRole): CapabilitySets {
+  const held = new Set<Capability>();
+  const mutable = new Set<Capability>();
+  for (const capability of CAPABILITIES) {
+    if (can(role, capability)) held.add(capability);
+    if (canMutate(role, capability)) mutable.add(capability);
+  }
+  return { held, mutable };
+}
+
+/**
+ * The three-valued answer for a surface that names several capabilities.
+ *
+ * `full` when any of them is granted outright, `scoped` when the best of them is narrower, `none`
+ * when the role holds none. A menu entry needs the distinction: `can()` collapses `none` and
+ * `scoped`, which is how a screen the role may only partly use came to look identical to one it may
+ * not open at all — the sidebar said "Instances" and the list answered 403.
+ */
+export function entryAccess(role: PlatformRole, capabilities: readonly Capability[]): Access {
+  let best: Access = 'none';
+  for (const capability of capabilities) {
+    const access = accessFor(role, capability);
+    if (access === 'full') return 'full';
+    if (access === 'scoped') best = 'scoped';
+  }
+  return best;
 }
 
 export function scopedReason(role: PlatformRole, capability: Capability): string {

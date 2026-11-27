@@ -1,4 +1,10 @@
 export { AsyncPanel, type AsyncPanelProps, type AsyncQuery } from './async-panel';
+export {
+  createCapabilityGates,
+  type CapabilityFallback,
+  type CapabilityGates,
+  type SessionRoleSource,
+} from './capabilities';
 export { ProductVersion } from './product-version';
 export { QueryError } from './query-error';
 export { SignInPage } from './sign-in';

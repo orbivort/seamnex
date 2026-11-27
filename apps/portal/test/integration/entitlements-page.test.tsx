@@ -55,15 +55,14 @@ describe('entitlement page', () => {
     expect(screen.getByRole('table')).toBeDefined();
   });
 
-  it('refuses to list anything for a guest and offers to end the session', async () => {
+  it('refuses the route itself for a guest instead of explaining inside the page', async () => {
+    // ADR-FE-01: the guard now refuses `/entitlements` for a guest, so the page is never rendered
+    // and its own "guest access is scoped to one product" branch is gone with it.
     openEntitlements('R6');
 
-    expect(await screen.findByText('Guest access is scoped to one product')).toBeDefined();
+    expect(await screen.findByText('This surface is not available to your role')).toBeDefined();
     expect(screen.queryByRole('table')).toBeNull();
     expect(screen.queryByText('Request access')).toBeNull();
-
-    fireEvent.click(screen.getByRole('button', { name: 'End guest session' }));
-    expect(await screen.findByRole('dialog')).toBeDefined();
   });
 
   it('opens the sign-out dialog from the account action', async () => {

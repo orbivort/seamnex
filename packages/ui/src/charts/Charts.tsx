@@ -64,6 +64,15 @@ export function Sparkline({
   );
 }
 
+/**
+ * A configured percentage as the two marks the ruler draws: the warning threshold, then the
+ * ten-point step the platform escalates at (FR-4.5). Shared with the screens so a bar cannot draw
+ * bands the alert pass does not use.
+ */
+export function rulerBands(threshold: number): [number, number] {
+  return [threshold / 100, Math.min((threshold + 10) / 100, 1)];
+}
+
 export function CapacityRuler({
   label,
   used,

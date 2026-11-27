@@ -426,7 +426,10 @@ export function auditProof(seq: number): AuditProof {
     verifiedAt: at(-8),
     // The daily anchor is the day the chain was last anchored, so it follows the fixture clock.
     anchoredDay: daysAgo(0).slice(0, 10),
-    anchorSignature: 'age1qpzry9x8gf2tvdw0s3jn54khce6mua7lqpzry9x8gf2tvdw0s3jn54khce6mu',
+    // NFR-4.10: the shape the API stores — `ed25519:<keyId>:<base64url>` — not a plausible-looking
+    // random string, and the demo reports it as verified.
+    anchorSignature: 'ed25519:0f3c9a7d21b45e68:c2lnbmV4LWFuY2hvci1zaWduYXR1cmU',
+    anchorSignatureValid: true,
     path: [
       { seq: 1, hash: hashFor(1) },
       { seq: Math.ceil(seq / 2), hash: hashFor(Math.ceil(seq / 2)) },

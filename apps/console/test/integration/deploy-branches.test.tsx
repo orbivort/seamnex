@@ -38,7 +38,12 @@ function cleanPlan(entryKey: string) {
   };
 }
 
-/** A preview the API could have produced; `warnings` and `admissible` are what a case varies. */
+/**
+ * A preview the API could have produced; `warnings` and `admissible` are what a case varies.
+ *
+ * `blockers` is part of the contract (FR-1.11), so an admissible preview must carry an empty list —
+ * a fixture without it is a response the API cannot produce, and the schema refuses it.
+ */
 function preview(patch: { admissible?: boolean; warnings?: string[] } = {}) {
   const admissible = patch.admissible ?? true;
   return {
@@ -50,6 +55,18 @@ function preview(patch: { admissible?: boolean; warnings?: string[] } = {}) {
     routeHost: 'espocrm.seamnex.local',
     slugAvailable: true,
     policyVerdict: 'allowed',
+    policyEvaluatedAt: '2026-10-22T09:00:00.000Z',
+    policySource: 'local_evaluation',
+    blockers: admissible
+      ? []
+      : [
+          {
+            code: 'capacity',
+            field: 'resources',
+            message: 'CPU shortfall against the admission rule. Reduce cpu and retry.',
+            blocking: true,
+          },
+        ],
     warnings: patch.warnings ?? [],
     evaluatedAt: '2026-10-22T09:00:00.000Z',
   };
@@ -346,6 +363,92 @@ describe('pre-flight rows that refuse the plan', () => {
     expect(await screen.findByText('step 3 / 5')).toBeDefined();
   });
 
+  it('lists every blocker on the step that can fix it, and jumps there', async () => {
+    // FR-1.11: `admissible: false` used to arrive with one headline and no field. Each blocker now
+    // names its fix, so the summary is a to-do list rather than a red badge.
+    server.use(
+      http.post('/api/v1/instances/preview', () =>
+        HttpResponse.json({
+          ...preview(),
+          admissible: false,
+          headline: '1 blocker must be fixed first',
+          detail: 'The catalogue pins "espocrm:latest", which is a floating reference.',
+          blockers: [
+            {
+              code: 'image_unpinned',
+              field: 'entryKey',
+              message: 'The catalogue pins "espocrm:latest", which is a floating reference.',
+              blocking: true,
+            },
+            {
+              code: 'policy_unknown',
+              field: null,
+              message: 'Nothing is vendored for D01-01; the source is fetched at deployment time.',
+              blocking: false,
+            },
+          ],
+        }),
+      ),
+    );
+
+    openAs('R1', '/deploy/D01-01');
+    render(<App />);
+    await toReview();
+
+    expect(await screen.findByText('Pre-flight blockers')).toBeDefined();
+    expect(screen.getAllByText(/floating reference/).length).toBeGreaterThan(0);
+    // The field the blocker belongs to, because the message alone is generic and three unanswered
+    // variables all read "A value is required."
+    expect(screen.getByText(/^entryKey:/)).toBeDefined();
+    expect(screen.getByText(/Nothing is vendored for D01-01/)).toBeDefined();
+    // The advisory entry is not a refusal, and says so.
+    expect(screen.getByText('(advisory)')).toBeDefined();
+    expect(screen.getByText('(blocking)')).toBeDefined();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Go to Source' }));
+
+    expect(await screen.findByText('step 2 / 5')).toBeDefined();
+    // The step that owns the blocker repeats it beside the fields it concerns.
+    expect(await screen.findByText('The source pre-flight refuses this entry')).toBeDefined();
+  });
+
+  it('names the field on every blocker the disabled deploy action reports', async () => {
+    // The real D07-01 plan: four unanswered variables, each arriving as the same generic sentence.
+    // The reason under the action printed the first two, named nothing, and read as one blocker.
+    const blocker = (field: string) => ({
+      code: 'env_invalid',
+      field,
+      message: 'A value is required.',
+      blocking: true,
+    });
+    server.use(
+      http.post('/api/v1/instances/preview', () =>
+        HttpResponse.json({
+          ...preview(),
+          admissible: false,
+          headline: '4 blockers must be fixed first',
+          detail: 'ORANGEHRM_ADMIN_PASSWORD: A value is required.',
+          blockers: [
+            blocker('ORANGEHRM_ADMIN_PASSWORD'),
+            blocker('ORANGEHRM_DATABASE_PASSWORD'),
+            blocker('ORANGEHRM_DATABASE_ROOT_PASSWORD'),
+            blocker('ORANGEHRM_ADMIN_EMAIL'),
+          ],
+        }),
+      ),
+    );
+
+    openAs('R1', '/deploy/D01-01');
+    render(<App />);
+
+    const reason = await screen.findByText(/pre-flight blockers?: ORANGEHRM_ADMIN_PASSWORD/);
+    expect(reason.textContent).toContain('ORANGEHRM_DATABASE_PASSWORD');
+    expect(reason.textContent).toContain('ORANGEHRM_DATABASE_ROOT_PASSWORD');
+    // The cap hides a long list, so it has to say how many it hid.
+    expect(reason.textContent).toContain('And 1 more.');
+    expect(reason.textContent).not.toContain('ORANGEHRM_ADMIN_EMAIL');
+  });
+
   it('retries the capacity read from both the panel and the pre-flight row', async () => {
     // Admission cannot be decided without a measurement, and the failure is reported twice — once
     // where the numbers would be, once in the summary. Both retries have to be wired.
@@ -427,6 +530,107 @@ describe('admission disagreements', () => {
         /The control plane refuses this plan: CPU shortfall against the admission rule\. Reduce cpu and retry\./,
       ),
     ).toBeDefined();
+  });
+});
+
+describe('field-scoped blockers', () => {
+  it('stops the step that owns a blocker instead of letting it reach review', async () => {
+    // AC-07: a blocker that names a field the wizard can edit must stop that field's step. The
+    // catalogue facts (an unpinned image, an unapproved scaffold) cannot be fixed here, so they stay
+    // advisory for navigation and keep only the deploy action closed.
+    server.use(
+      http.post('/api/v1/instances/preview', () =>
+        HttpResponse.json({
+          ...preview(),
+          admissible: false,
+          headline: '6 blockers must be fixed first',
+          blockers: [
+            {
+              code: 'env_invalid',
+              field: 'profileKey',
+              message: 'The profile "ghost" does not exist.',
+              blocking: true,
+            },
+            {
+              code: 'env_invalid',
+              field: 'SMTP_HOST',
+              message: 'SMTP_HOST is not a hostname.',
+              blocking: true,
+            },
+            {
+              code: 'secret_unresolved',
+              field: 'DB_PASSWORD',
+              message: 'DB_PASSWORD: the secret does not resolve.',
+              blocking: true,
+            },
+            {
+              code: 'route_conflict',
+              field: 'slug',
+              message: 'The slug is published by D01-01.',
+              blocking: true,
+            },
+            {
+              code: 'capacity',
+              field: 'resources',
+              message: 'CPU shortfall against the admission rule.',
+              blocking: true,
+            },
+            {
+              code: 'unknown_entry',
+              field: 'entryKey',
+              message: 'The catalogue has no such entry.',
+              blocking: true,
+            },
+          ],
+        }),
+      ),
+    );
+
+    openAs('R1', '/deploy/D01-01');
+    render(<App />);
+    await toEnvironment();
+    await supplyRequiredValues();
+    continueStep();
+
+    // The environment step owns two of the six, so it refuses to advance and keeps the reason.
+    expect(await screen.findByText('step 3 / 5')).toBeDefined();
+    expect(await screen.findByText('SMTP_HOST is not a hostname.')).toBeDefined();
+  });
+
+  it('renders an advisory source blocker as a caution rather than a refusal', async () => {
+    // The step must present whatever the contract allows: an entry-level note that names no field is
+    // a caution, and only a blocking entry is drawn as a refusal.
+    server.use(
+      http.post('/api/v1/instances/preview', () =>
+        HttpResponse.json({
+          ...preview(),
+          admissible: true,
+          blockers: [
+            {
+              code: 'image_unpinned',
+              field: null,
+              message: 'The pin could not be checked because the registry was unreachable.',
+              blocking: false,
+            },
+          ],
+        }),
+      ),
+    );
+
+    openAs('R1', '/deploy/D01-01');
+    render(<App />);
+    await toSource();
+
+    expect(await screen.findByText('The source pre-flight refuses this entry')).toBeDefined();
+    // The preview is re-asked once the debounced inputs settle, and the step drops its blocker list
+    // while the new answer is in flight: read the message by waiting for it, not once.
+    await waitFor(
+      () =>
+        expect(
+          screen.getByText('The pin could not be checked because the registry was unreachable.'),
+        ).toBeDefined(),
+      { timeout: 5_000 },
+    );
   });
 });
 

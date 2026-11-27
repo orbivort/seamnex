@@ -1,4 +1,4 @@
-import { accessSync, constants, readFileSync } from 'node:fs';
+import { accessSync, constants, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { Inject, Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { withAuditedMutation } from '@seamnex/db';
@@ -82,7 +82,15 @@ export class InstanceParamsService implements OnModuleInit {
     }
   }
 
-  async write(instanceId: string, actorId: string): Promise<{ path: string; contentHash: string }> {
+  /**
+   * `actorType` exists because the same write is also the reconciliation of drift, and a repair the
+   * scheduler performed must not be attributed to a person (NFR-4.4: the audit names who acted).
+   */
+  async write(
+    instanceId: string,
+    actorId: string,
+    options: { actorType?: 'user' | 'service' | 'system' } = {},
+  ): Promise<{ path: string; contentHash: string }> {
     const instance = await this.instance(instanceId);
     const content = stringify(
       {
@@ -124,7 +132,7 @@ export class InstanceParamsService implements OnModuleInit {
         await this.audit.append(
           {
             action: 'instance.params.committed',
-            actorType: 'user',
+            actorType: options.actorType ?? 'user',
             actorId,
             targetType: 'instance',
             targetId: instanceId,
@@ -167,8 +175,15 @@ export class InstanceParamsService implements OnModuleInit {
    *     so the only way out was deleting the instance. Verification that cannot heal is a trap.
    */
   async verifyAll(): Promise<{ checked: number; drifted: number }> {
-    const rows = await this.pool.query<{ instance_id: string; content_hash: string; slug: string }>(
-      `SELECT p.instance_id, p.content_hash, i.slug
+    const rows = await this.pool.query<{
+      instance_id: string;
+      content_hash: string;
+      slug: string;
+      read_at: Date | null;
+      drifted: boolean | null;
+    }>(
+      `SELECT p.instance_id, p.content_hash, p.read_at, i.slug,
+              COALESCE((i.payload->>'instanceParamDrift')::boolean, false) AS drifted
          FROM instance_param p JOIN instance i ON i.id = p.instance_id
         WHERE i.deleted_at IS NULL`,
     );
@@ -198,14 +213,38 @@ export class InstanceParamsService implements OnModuleInit {
             WHERE id = $1 AND payload ? 'instanceParamDrift'`,
           [row.instance_id],
         );
+        // A match closes the finding, not only the flag. Without this the partial index
+        // `drift_record_open_idx` kept a row that said "drifted" about a file that had been fixed,
+        // and a reader had no way to tell the stale row from a live one.
+        if (row.drifted === true) {
+          await this.pool.query(
+            `UPDATE drift_record SET resolved_at = now()
+              WHERE instance_id = $1 AND scope = 'instance_param' AND resolved_at IS NULL`,
+            [row.instance_id],
+          );
+        }
         continue;
       }
 
       drifted += 1;
+      // One open finding per instance: a superseded hash is closed before the new one is recorded,
+      // so a file edited three times over three restarts leaves one row rather than three.
+      await this.pool.query(
+        `UPDATE drift_record SET resolved_at = now()
+          WHERE instance_id = $1 AND scope = 'instance_param' AND resolved_at IS NULL
+            AND expected_hash IS DISTINCT FROM $2`,
+        [row.instance_id, row.content_hash],
+      );
       await this.pool.query(
         `INSERT INTO drift_record (scope, instance_id, expected_hash, observed_hash, direction, detail)
-         VALUES ('instance_param', $1, $2, $3, 'unknown', $4::jsonb)`,
-        [row.instance_id, row.content_hash, observed, JSON.stringify({ path, kind: 'mismatch' })],
+         VALUES ('instance_param', $1, $2, $3, $4, $5::jsonb)`,
+        [
+          row.instance_id,
+          row.content_hash,
+          observed,
+          definitionDirection(path, row.read_at),
+          JSON.stringify({ path, kind: 'mismatch' }),
+        ],
       );
       await this.pool.query(
         `UPDATE instance SET payload = payload || '{"instanceParamDrift":true}'::jsonb, updated_at = now()
@@ -268,4 +307,25 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+/**
+ * Which side moved for a definition file.
+ *
+ * `instance_param.read_at` is when the projection was written; the file's modification time is when
+ * the repository copy last changed. A file newer than the projection is an edit in the repository
+ * (`repo_ahead`, the platform may apply it); an older one means the platform's copy moved after the
+ * file (`runtime_ahead`); a missing file decides nothing, and `unknown` says so instead of
+ * pretending the repository was ahead.
+ */
+function definitionDirection(
+  path: string,
+  readAt: Date | null,
+): 'repo_ahead' | 'runtime_ahead' | 'unknown' {
+  if (readAt === null) return 'unknown';
+  try {
+    return statSync(path).mtime.getTime() > readAt.getTime() ? 'repo_ahead' : 'runtime_ahead';
+  } catch {
+    return 'unknown';
+  }
 }

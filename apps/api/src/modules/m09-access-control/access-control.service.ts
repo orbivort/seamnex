@@ -4,6 +4,7 @@ import type { Pool } from 'pg';
 import { PG_POOL } from '../../database/database.module';
 import { withTransaction } from '@seamnex/db';
 import { AUDIT_SERVICE, type AuditService } from '../m17-audit/audit.contract';
+import { AUDIT_RETENTION_FLOOR_DAYS } from '../../common/db/partitions';
 import { assertIfMatch, etagFor } from '../../common/http/etag';
 import type { AccessControlService } from './access-control.contract';
 import { PolicyCompiler } from './policy.compiler';
@@ -20,6 +21,9 @@ const SETTING_KEYS: Record<string, keyof PlatformSettings> = {
   session_absolute_hours: 'sessionAbsoluteHours',
   audit_retention_days: 'auditRetentionDays',
   metadata_review_days: 'metadataReviewDays',
+  capacity_cpu_alert_percent: 'capacityCpuAlertPercent',
+  capacity_memory_alert_percent: 'capacityMemoryAlertPercent',
+  capacity_disk_alert_percent: 'capacityDiskAlertPercent',
 };
 
 const FIELD_TO_KEY = new Map(Object.entries(SETTING_KEYS).map(([key, field]) => [field, key]));
@@ -32,6 +36,11 @@ const DEFAULTS = {
   sessionAbsoluteHours: 12,
   metadataReviewDays: 90,
   auditRetentionDays: 420,
+  // FR-4.5. Memory is the axis a container hits first under load, so it alerts highest; disk sits in
+  // between because a volume fills slowly enough to be acted on.
+  capacityCpuAlertPercent: 75,
+  capacityMemoryAlertPercent: 90,
+  capacityDiskAlertPercent: 85,
 } as const;
 
 @Injectable()
@@ -98,6 +107,19 @@ export class PostgresAccessControlService implements AccessControlService {
         updatedAt = row.updated_at;
         updatedBy = row.updated_by ?? 'system';
       }
+    }
+
+    /*
+     * NFR-4.10's twelve-month floor, on the read path too.
+     *
+     * A row written before the floor existed (the legacy `audit_retention_months` key converts
+     * 7 months to 210 days) must neither make settings unreadable — that would take the console and
+     * the scheduler's pass with it — nor be honoured, because honouring it deletes evidence the
+     * requirement says must exist. Reading it as the floor keeps both promises; the write path
+     * rejects anything shorter outright.
+     */
+    if (typeof values.auditRetentionDays === 'number') {
+      values.auditRetentionDays = Math.max(values.auditRetentionDays, AUDIT_RETENTION_FLOOR_DAYS);
     }
 
     const settings = PlatformSettingsSchema.parse({

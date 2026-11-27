@@ -31,16 +31,100 @@ describe('license register', () => {
     );
   });
 
-  it('states that the register is read-only for an auditor and disables the toggle', async () => {
+  it('offers the auditor the review action but not the hosted-service toggle', async () => {
     openAs('R2', '/governance/licenses');
     render(<App />);
 
-    expect(await screen.findByText('Read-only register')).toBeDefined();
+    expect(await screen.findByText('Audit and review')).toBeDefined();
     const toggles = await screen.findAllByRole('button', {
       name: /hosted-service flag for/i,
     });
     expect(toggles.length).toBeGreaterThan(0);
     for (const toggle of toggles) expect(toggle.hasAttribute('disabled')).toBe(true);
+
+    const reviews = await screen.findAllByRole('button', {
+      name: /the licence review for/i,
+    });
+    expect(reviews.length).toBe(getState().licenses.length);
+  });
+
+  it('lets the auditor record a review and shows the evidence on the row', async () => {
+    const row = present(
+      getState().licenses.find((entry) => entry.status === 'review_required'),
+      'a licence awaiting review',
+    );
+    openAs('R2', '/governance/licenses');
+    render(<App />);
+    await screen.findByRole('heading', { name: 'License register' });
+
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: new RegExp(`Record the licence review for ${row.product}`),
+      }),
+    );
+
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText(/Upstream reference/), {
+      target: { value: 'https://example.invalid/LICENSE' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Record review' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    const table = screen.getByRole('table');
+    const tableRow = present(
+      within(table).getByText(row.product).closest('tr'),
+      'the reviewed row',
+    );
+    expect(await within(tableRow).findByText('https://example.invalid/LICENSE')).toBeDefined();
+    expect(within(tableRow).queryByText('review required')).toBeNull();
+    // The reviewer is a person on screen; the identity id stays in the payload for the audit trail.
+    expect(await within(tableRow).findByText('Ruth Adler')).toBeDefined();
+    expect(within(tableRow).queryByText('usr-ruth-adler')).toBeNull();
+  });
+
+  it('refuses to submit a review without the upstream evidence', async () => {
+    const row = present(
+      getState().licenses.find((entry) => entry.status === 'review_required'),
+      'a licence awaiting review',
+    );
+    openAs('R2', '/governance/licenses');
+    render(<App />);
+    await screen.findByRole('heading', { name: 'License register' });
+
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: new RegExp(`Record the licence review for ${row.product}`),
+      }),
+    );
+
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Record review' }));
+
+    expect(
+      await within(dialog).findByText(/artefact the review was checked against/i),
+    ).toBeDefined();
+    expect(row.upstreamRef).toBeNull();
+  });
+
+  it('refuses hosted-service mode for an unreviewed licence and states why', async () => {
+    const row = present(
+      getState().licenses.find((entry) => entry.status === 'review_required'),
+      'a licence awaiting review',
+    );
+    openAs('R1', '/governance/licenses');
+    render(<App />);
+    await screen.findByRole('heading', { name: 'License register' });
+
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: new RegExp(`Enable hosted-service flag for ${row.product}`),
+      }),
+    );
+
+    expect(
+      await screen.findByText(new RegExp(`${row.licenseId} licence.*has not been reviewed`)),
+    ).toBeDefined();
+    expect(row.hostedService).toBe(false);
   });
 
   it('flips the hosted-service flag through the API and reflects the answer', async () => {

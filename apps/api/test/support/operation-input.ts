@@ -32,6 +32,13 @@ export function testContext(overrides: Partial<RequestContext> = {}): RequestCon
     sessionIdleExpiresAt: null,
     csrfToken: 'csrf-token',
     groups: [],
+    /*
+     * The policy guard publishes this after an allow (ADR-BE-44). A handler test calls the handler
+     * *after* the decision, so the fixture carries what a platform-wide grant would have produced;
+     * a test that wants a filtered read overrides it with a `scoped` value. Leaving it absent would
+     * exercise the fail-closed throw, which is a different test.
+     */
+    policyScope: { kind: 'platform' },
     ...overrides,
   } as RequestContext;
 }
@@ -46,6 +53,7 @@ export function operationInput(
     query: {},
     families: {},
     body: undefined,
+    rawBody: null,
     headers: {},
     cookies: {},
     context: testContext(),

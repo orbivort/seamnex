@@ -78,7 +78,8 @@ describe('the output cap', () => {
     child.emit('close', 1);
 
     const result = await done;
-    expect(result.stderr).toBe('abc');
+    // The tail survives the cap: that is where a failed build states its reason.
+    expect(result.stderr).toBe('def');
     expect(result.truncated).toBe(true);
   });
 
@@ -90,7 +91,9 @@ describe('the output cap', () => {
     child.emit('close', 0);
 
     const result = await done;
-    expect(result.stdout).toBe('é');
+    // Two bytes is less than 'é' plus 'x', so the window keeps 'x'. The retained text starts on a
+    // character boundary: a UTF-8 continuation byte at the cut would decode as a replacement char.
+    expect(result.stdout).toBe('x');
     expect(result.truncated).toBe(true);
   });
 });

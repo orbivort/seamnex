@@ -66,6 +66,9 @@ describe('mapping workbench aids', () => {
       within(drawer).getByText(/"emailAddress": "\{\{ \$json\.lead\.emailAddress \}\}"/),
     ).toBeDefined();
     expect(within(drawer).getByText(/2 mapped/)).toBeDefined();
+    // The sample caption counts sample fields a mapping reads — 2 of the 3 the sample carries.
+    // It used to divide mapping rows by sample fields, which is a ratio that cannot exist.
+    expect(within(drawer).getByText('2 of 3 used')).toBeDefined();
 
     fireEvent.click(within(drawer).getByRole('button', { name: 'Save mapping' }));
 

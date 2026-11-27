@@ -1,0 +1,16 @@
+{
+  "format": "trusted-registry/v1",
+  "version": 1,
+  "note": "NFR-4.16 shipped default: official/upstream namespaces the seeded products and the platform itself pull from. `docker.io/orangehrm` is absent on purpose — upstream publishes no image, so that namespace could only ever supply a third party's build under the product's own name, which is exactly what a deployment pulled when the locally built image was missing; the render set builds into `ghcr.io/seamnex` instead. The database revision is authoritative once one exists; this document is only the starting point.",
+  "entries": [
+    "docker.io/aquasec",
+    "docker.io/espocrm",
+    "docker.io/frappe",
+    "docker.io/library",
+    "docker.io/mautic",
+    "docker.io/metabase",
+    "docker.io/openproject",
+    "docker.io/seamnex",
+    "ghcr.io/seamnex"
+  ]
+}

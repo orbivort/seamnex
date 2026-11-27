@@ -1,6 +1,12 @@
 import { createHash } from 'node:crypto';
 import { Inject, Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
-import { CAPABILITY_MATRIX, POLICY_KEYS, SERVICE_SCOPES } from '@seamnex/domain';
+import {
+  CAPABILITY_MATRIX,
+  COLLECTION_PATHS,
+  POLICY_KEYS,
+  SCOPE_RULES,
+  SERVICE_SCOPES,
+} from '@seamnex/domain';
 import type { Pool } from 'pg';
 import { withTransaction } from '@seamnex/db';
 import { PG_POOL } from '../../database/database.module';
@@ -46,6 +52,8 @@ export class PolicyCompiler implements OnApplicationBootstrap {
       capabilityMatrix: CAPABILITY_MATRIX,
       policyKeys: POLICY_KEYS,
       serviceScopes: SERVICE_SCOPES,
+      scopeRules: SCOPE_RULES,
+      collectionPaths: COLLECTION_PATHS,
       sourceHash,
     };
 
@@ -101,7 +109,14 @@ async function activate(
   await tx.query(`UPDATE policy_version SET is_active = true WHERE version = $1`, [version]);
 }
 
-/** Deterministic serialisation: the matrix is data, so the hash is stable across processes. */
+/**
+ * Deterministic serialisation: the matrix is data, so the hash is stable across processes.
+ *
+ * ADR-BE-44 widened it. A version that covers only the matrix and the route keys cannot distinguish
+ * two policies that resolve scopes differently — and scope resolution decides whether a request is
+ * allowed, so a denial must be attributable to the rules that produced it. No change here, no new
+ * version; a change to a scope rule or to the collection set mints one.
+ */
 export function compileHash(): string {
   return createHash('sha256')
     .update(
@@ -109,6 +124,8 @@ export function compileHash(): string {
         capabilityMatrix: CAPABILITY_MATRIX,
         policyKeys: POLICY_KEYS,
         serviceScopes: SERVICE_SCOPES,
+        scopeRules: SCOPE_RULES,
+        collectionPaths: COLLECTION_PATHS,
       }),
     )
     .digest('hex');

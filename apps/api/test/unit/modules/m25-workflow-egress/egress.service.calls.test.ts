@@ -189,6 +189,8 @@ describe('brokered call to a product', () => {
       headers: {
         // The public name, port included: the product builds its own answers from what it was called.
         host: 'orangehrm.localhost:8020',
+        // The configured browser-facing scheme: the broker's session cookie is named from it.
+        'x-forwarded-proto': 'http',
         accept: 'application/json',
         // The driver emits the product's full `Set-Cookie`; a request carries `name=value` only.
         cookie: 'orangehrm_session=abc',
@@ -229,6 +231,41 @@ describe('brokered call to a product', () => {
     const result = await service.forward(read());
 
     expect(result.headers).toEqual({ 'content-type': 'application/json', 'x-product': 'kept' });
+  });
+
+  it('labels a JSON body as JSON when the product calls it something else', async () => {
+    /*
+     * OpenProject answers `application/hal+json`, and n8n's HTTP node only parses
+     * `application/json`: the compiled workflow received `{ data: "<json string>" }`, so every
+     * `$json.<path>` mapping resolved to nothing and the target product refused the empty body.
+     */
+    const { service } = setup({ variable: 'admin', secret: 'seed-pass' });
+    productFetchMock.mockResolvedValue(
+      new Response('{"_type":"WorkPackageCollection","total":0}', {
+        status: 200,
+        headers: { 'content-type': 'application/hal+json' },
+      }),
+    );
+
+    const result = await service.forward(read({ accept: 'application/json' }));
+
+    expect(result.headers['content-type']).toBe('application/json; charset=utf-8');
+    // The bytes are untouched: relabelling is not re-serialising.
+    expect(result.body?.toString('utf8')).toBe('{"_type":"WorkPackageCollection","total":0}');
+  });
+
+  it('keeps the product content type when the body is not JSON', async () => {
+    const { service } = setup({ variable: 'admin', secret: 'seed-pass' });
+    productFetchMock.mockResolvedValue(
+      new Response('<html>not json</html>', {
+        status: 200,
+        headers: { 'content-type': 'text/html' },
+      }),
+    );
+
+    const result = await service.forward(read({ accept: 'application/json' }));
+
+    expect(result.headers['content-type']).toBe('text/html');
   });
 
   it('answers a bodyless product response with no body of its own', async () => {

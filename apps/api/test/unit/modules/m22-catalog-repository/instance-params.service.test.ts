@@ -239,10 +239,19 @@ describe('verifyAll', () => {
         [
           'FROM instance_param p',
           {
-            rows: [{ instance_id: 'inst-1', content_hash: 'expected-hash', slug: 'shop' }],
+            rows: [
+              {
+                instance_id: 'inst-1',
+                content_hash: 'expected-hash',
+                slug: 'shop',
+                read_at: new Date('2026-01-01T00:00:00Z'),
+                drifted: false,
+              },
+            ],
             rowCount: 1,
           },
         ],
+        ['UPDATE drift_record SET resolved_at', []],
         ['INSERT INTO drift_record', []],
         ['UPDATE instance SET payload = payload ||', []],
       ],
@@ -252,25 +261,120 @@ describe('verifyAll', () => {
     await expect(service.verifyAll()).resolves.toEqual({ checked: 1, drifted: 1 });
     const drift = db.calls.find((call) => call.sql.includes('INSERT INTO drift_record'));
     expect(drift?.params.slice(0, 3)).toEqual(['inst-1', 'expected-hash', sha256('changed\n')]);
-    expect(drift?.params[3]).toContain('instance.yaml');
+    // A file newer than the projection is a repository edit, so the direction is evidence, not a
+    // constant: this row can be reconciled *toward* the repository (NFR-3.6).
+    expect(drift?.params[3]).toBe('repo_ahead');
+    expect(drift?.params[4]).toContain('instance.yaml');
     expect(db.calls.some((call) => call.sql.includes('payload ||'))).toBe(true);
   });
 
-  it('reports a missing file as drift', async () => {
+  it('supersedes a stale finding when the file changed again', async () => {
+    const root = tempRoot();
+    mkdirSync(join(root, 'instances', 'shop'), { recursive: true });
+    writeFileSync(join(root, 'instances', 'shop', 'instance.yaml'), 'third\n', 'utf8');
+
+    const { db, service } = setup(
+      [
+        [
+          'FROM instance_param p',
+          {
+            rows: [
+              {
+                instance_id: 'inst-1',
+                content_hash: 'expected-hash',
+                slug: 'shop',
+                read_at: new Date('2026-01-01T00:00:00Z'),
+                drifted: false,
+              },
+            ],
+            rowCount: 1,
+          },
+        ],
+        ['UPDATE drift_record SET resolved_at', []],
+        ['INSERT INTO drift_record', []],
+        ['UPDATE instance SET payload = payload ||', []],
+      ],
+      root,
+    );
+
+    await service.verifyAll();
+
+    const supersede = db.calls.find(
+      (call) =>
+        call.sql.includes('UPDATE drift_record SET resolved_at') &&
+        call.sql.includes('expected_hash IS DISTINCT FROM'),
+    );
+    expect(supersede?.params).toEqual(['inst-1', 'expected-hash']);
+    // One open row per instance: the previous finding is closed before the new one is written.
+    const resolveIndex = db.calls.indexOf(supersede as never);
+    const insertIndex = db.calls.findIndex((call) => call.sql.includes('INSERT INTO drift_record'));
+    expect(resolveIndex).toBeLessThan(insertIndex);
+  });
+
+  it('reports a missing file as drift it cannot attribute', async () => {
     const { db, service } = setup([
       [
         'FROM instance_param p',
-        { rows: [{ instance_id: 'inst-1', content_hash: 'h', slug: 'gone' }], rowCount: 1 },
+        {
+          rows: [
+            {
+              instance_id: 'inst-1',
+              content_hash: 'h',
+              slug: 'gone',
+              read_at: new Date('2026-01-01T00:00:00Z'),
+              drifted: false,
+            },
+          ],
+          rowCount: 1,
+        },
       ],
+      ['UPDATE drift_record SET resolved_at', []],
       ['INSERT INTO drift_record', []],
       ['UPDATE instance SET payload = payload ||', []],
     ]);
 
     await expect(service.verifyAll()).resolves.toEqual({ checked: 1, drifted: 1 });
-    expect(db.calls.find((call) => call.sql.includes('INSERT INTO drift_record'))?.params[2]).toBe(
-      'missing',
-    );
+    const drift = db.calls.find((call) => call.sql.includes('INSERT INTO drift_record'));
+    expect(drift?.params[2]).toBe('missing');
+    expect(drift?.params[3]).toBe('unknown');
   }, 15_000);
+
+  it('closes the finding when the file matches again', async () => {
+    const root = tempRoot();
+    mkdirSync(join(root, 'instances', 'shop'), { recursive: true });
+    const content = 'apiVersion: seamnex/v1\n';
+    writeFileSync(join(root, 'instances', 'shop', 'instance.yaml'), content, 'utf8');
+
+    const { db, service } = setup(
+      [
+        [
+          'FROM instance_param p',
+          {
+            rows: [
+              {
+                instance_id: 'inst-1',
+                content_hash: sha256(content),
+                slug: 'shop',
+                read_at: new Date('2026-01-01T00:00:00Z'),
+                drifted: true,
+              },
+            ],
+            rowCount: 1,
+          },
+        ],
+        ['UPDATE instance SET payload = payload -', []],
+        ['UPDATE drift_record SET resolved_at', []],
+      ],
+      root,
+    );
+
+    await service.verifyAll();
+
+    const resolve = db.calls.find((call) =>
+      call.sql.includes('UPDATE drift_record SET resolved_at'),
+    );
+    expect(resolve?.params).toEqual(['inst-1']);
+  });
 
   it('reports zero checked when no instance has a recorded definition', async () => {
     const { service } = setup([['FROM instance_param p', { rows: [], rowCount: null }]]);

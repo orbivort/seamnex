@@ -12,8 +12,15 @@ vi.mock('../../../../src/common/exec/exec', () => ({
   runOrThrow: state.runOrThrow,
 }));
 
-const { assertAllowedSourceUrl, cloneAtRevision, cloneBare, commitOf, isPrivateHost, remoteUrlOf } =
-  await import('../../../../src/common/exec/git');
+const {
+  assertAllowedSourceUrl,
+  cloneAtRevision,
+  cloneBare,
+  commitOf,
+  isPrivateHost,
+  remoteUrlOf,
+  resolveRefKind,
+} = await import('../../../../src/common/exec/git');
 
 const HOSTS = ['github.com', 'GitLab.example.test'];
 
@@ -210,5 +217,73 @@ describe('commitOf / cloneBare / remoteUrlOf', () => {
       truncated: false,
     });
     expect(await remoteUrlOf('/work/app')).toBeNull();
+  });
+});
+
+/*
+ * ADR-BE-42 §10.2 rule 5 — a ref is a tag or a commit, never a branch.
+ *
+ * `cloneAtRevision` alone cannot tell them apart: `catalog-2026.11.0` and `main` both fetch, both
+ * check out a commit. Rejecting a branch is what keeps "the catalogue" from being whatever a branch
+ * happened to point at on the day someone synced.
+ */
+describe('resolveRefKind', () => {
+  const URL = 'https://github.com/orbivort/seamnex-catalog';
+
+  it('accepts a full commit SHA without asking the remote', async () => {
+    // A SHA names one revision; a lookup would only be able to confirm it by already having it.
+    expect(await resolveRefKind({ url: URL, ref: 'a'.repeat(40), allowedHosts: HOSTS })).toBe(
+      'commit',
+    );
+    expect(state.runOrThrow).not.toHaveBeenCalled();
+  });
+
+  it('accepts the 64-hex form git uses internally', async () => {
+    expect(await resolveRefKind({ url: URL, ref: 'b'.repeat(64), allowedHosts: HOSTS })).toBe(
+      'commit',
+    );
+    expect(state.runOrThrow).not.toHaveBeenCalled();
+  });
+
+  it('reports a tag, with one round trip in the happy path', async () => {
+    expect(await resolveRefKind({ url: URL, ref: 'catalog-2026.11.0', allowedHosts: HOSTS })).toBe(
+      'tag',
+    );
+    expect(state.runOrThrow).toHaveBeenCalledOnce();
+    expect(state.runOrThrow.mock.calls[0]?.[1]).toEqual([
+      'ls-remote',
+      '--refs',
+      '--tags',
+      URL,
+      'refs/tags/catalog-2026.11.0',
+    ]);
+  });
+
+  it('names a branch as a branch only after the tag lookup found nothing', async () => {
+    state.runOrThrow
+      .mockResolvedValueOnce({ code: 0, stdout: '', stderr: '', truncated: false })
+      .mockResolvedValueOnce({
+        code: 0,
+        stdout: 'abc123\trefs/heads/main\n',
+        stderr: '',
+        truncated: false,
+      });
+
+    expect(await resolveRefKind({ url: URL, ref: 'main', allowedHosts: HOSTS })).toBe('branch');
+    expect(state.runOrThrow).toHaveBeenCalledTimes(2);
+    expect(state.runOrThrow.mock.calls[1]?.[1]).toContain('refs/heads/main');
+  });
+
+  it('reports a ref that exists as neither', async () => {
+    state.runOrThrow.mockResolvedValue({ code: 0, stdout: '', stderr: '', truncated: false });
+
+    expect(await resolveRefKind({ url: URL, ref: 'nope', allowedHosts: HOSTS })).toBe('missing');
+  });
+
+  it('applies the URL allow-list before the first lookup', async () => {
+    await expect(
+      resolveRefKind({ url: 'https://evil.example.test/x', ref: 'v1', allowedHosts: HOSTS }),
+    ).rejects.toThrow(/evil\.example\.test/);
+    expect(state.runOrThrow).not.toHaveBeenCalled();
   });
 });

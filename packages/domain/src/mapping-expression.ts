@@ -11,7 +11,18 @@
  * `FieldMappingSchema` long before this helper is reached.
  */
 export function mappingExpression(from: string): string {
+  return `{{ ${mappingPath(from)} }}`;
+}
+
+/**
+ * The dereference alone (`$json.contact["first name"]`), for expressions that compose around it.
+ *
+ * `mappedValueExpression` needs the path more than once — once to test for a missing value and once
+ * to convert the present one — so the rule that decides where the dot belongs has to be shared
+ * rather than re-derived. A second copy is how `$json.["first name"]` came back the first time.
+ */
+export function mappingPath(from: string): string {
   const path = from.trim();
-  if (path.length === 0 || path === '$') return '{{ $json }}';
-  return `{{ $json${path.startsWith('[') ? path : `.${path}`} }}`;
+  if (path.length === 0 || path === '$') return '$json';
+  return `$json${path.startsWith('[') ? path : `.${path}`}`;
 }

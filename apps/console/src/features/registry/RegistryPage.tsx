@@ -295,6 +295,52 @@ const REGISTRY_COLUMNS = defineColumns<RegistryEntry>([
     },
   },
   {
+    /**
+     * FR-2.14 / AC-41 — the API surface with its provenance.
+     *
+     * The projection coalesces a verified row with the catalogue document, so printing the URL alone
+     * presented an assumption as a measurement. The chip names which of the two the value is; the
+     * verification instant is the chip's title, and SLO support rides along because it is the one
+     * capability the workflow builder asks about by name.
+     */
+    id: 'api',
+    header: 'API surface',
+    hideBelow: 'xl',
+    cell: (row) => {
+      const verified = row.verifiedFacts.includes('apiBaseUrl');
+      return (
+        <div className="flex min-w-0 flex-col items-start gap-1">
+          <span
+            className="block max-w-44 truncate font-mono text-micro text-muted"
+            title={row.apiBaseUrl}
+          >
+            {row.apiBaseUrl}
+          </span>
+          <span className="flex flex-wrap items-center gap-1">
+            {verified ? (
+              <Badge tone="positive" size="sm">
+                verified
+              </Badge>
+            ) : (
+              <Badge tone="neutral" size="sm">
+                catalog assumption
+              </Badge>
+            )}
+            {row.verifiedFacts.length === 0 ? null : (
+              <span
+                className="text-micro text-faint"
+                title={`Verified ${formatDateTime(row.verifiedAt)}`}
+              >
+                {row.verifiedFacts.length} fact(s)
+              </span>
+            )}
+            {row.sloSupported ? <Tag mono>SLO</Tag> : null}
+          </span>
+        </div>
+      );
+    },
+  },
+  {
     id: 'operations',
     header: 'Ops',
     align: 'right',
@@ -601,8 +647,10 @@ export function RegistryPage() {
             2px seam. */}
         <footer className="px-4 py-2">
           <InlineNote>
-            Metadata older than one quarter is returned with stale=true. The rail counts down to the
-            next review; the owner re-verifies before it empties. The flag also drives AC-41.
+            A fact marked <span className="font-medium">verified</span> came from onboarding
+            verification; <span className="font-medium">catalog assumption</span> means the value is
+            still the entry document. Metadata older than one quarter is returned with stale=true,
+            and the rail counts down to the next review the owner has to perform.
           </InlineNote>
         </footer>
       </Panel>

@@ -13,10 +13,12 @@ import {
   ANONYMOUS_OPERATIONS,
   API_OPERATIONS,
   CAPABILITIES,
+  COLLECTION_PATHS,
   POLICY_KEYS,
   RESERVED_POLICY_KEYS,
   isReservedPolicyKey,
   operationKey,
+  scopeRuleFor,
 } from '@seamnex/domain';
 
 const violations: string[] = [];
@@ -53,6 +55,29 @@ for (const [key, policyKey] of Object.entries(POLICY_KEYS)) {
     violations.push(`${key}: policy entry for an operation that does not exist`);
   if (!isReservedPolicyKey(policyKey) && !capabilities.has(policyKey)) {
     violations.push(`${key}: ${policyKey} is not a declared capability`);
+  }
+}
+
+/*
+ * ADR-BE-44: a collection read is answered from the grant, so the type has to resolve to a scope
+ * rule with a narrower form. A path listed as a collection that binds `self`, `request` or a
+ * platform fallback would be admitted without a predicate, which is the leak the decision exists
+ * to make impossible — so the wiring is checked here instead of being remembered per handler.
+ */
+for (const path of COLLECTION_PATHS) {
+  const key = `GET ${path}`;
+  const policyKey = POLICY_KEYS[key];
+  if (policyKey === undefined) {
+    violations.push(`${key}: collection path is not a declared operation`);
+    continue;
+  }
+  if (isReservedPolicyKey(policyKey)) {
+    violations.push(`${key}: collection path binds the reserved key ${policyKey}`);
+    continue;
+  }
+  const rule = scopeRuleFor(policyKey);
+  if (rule !== 'instance' && rule !== 'domain') {
+    violations.push(`${key}: collection path binds ${policyKey} with scope rule ${rule}`);
   }
 }
 

@@ -48,9 +48,12 @@ function firstChoice(select: HTMLSelectElement): string {
 }
 
 describe('workflow inventory', () => {
-  it('offers a product the registry has not reported yet', async () => {
-    // `writeEligible`/`workflowEligible` come from the registry. A missing answer must not read as
-    // "nothing is eligible", so the deployed instance stays selectable and the API still judges it.
+  it('offers only what the registry reports, because the fleet list is not the authoring role’s', async () => {
+    // The pickers read the registry projection, not `GET /instances`: that route is the operator's
+    // fleet view (`instance.view_logs`, fleet-wide) and a domain owner (R3) or product administrator
+    // (R4) is refused it. Building the options from it left both roles with an empty select, so
+    // FR-5.9's "create a cross-product workflow" had no UI. A product the registry has not reported
+    // is therefore not offered — the registry is the discovery surface the dialog claims to use.
     getState().registry = getState().registry.filter((entry) => entry.instanceId !== 'inst-crm');
 
     openAs('R1', '/workflows');
@@ -64,8 +67,10 @@ describe('workflow inventory', () => {
 
     const options = (select: HTMLSelectElement) =>
       Array.from(select.options).map((option) => option.textContent ?? '');
-    expect(options(source).some((label) => label.includes('EspoCRM'))).toBe(true);
-    expect(options(target).some((label) => label.includes('EspoCRM'))).toBe(true);
+    expect(options(source).some((label) => label.includes('EspoCRM'))).toBe(false);
+    expect(options(target).some((label) => label.includes('EspoCRM'))).toBe(false);
+    // The pickers are not empty: every other reported product still offers its eligible side.
+    expect(options(source).length).toBeGreaterThan(1);
   });
 
   it('sends the description and trigger the operator chose', async () => {
@@ -205,7 +210,7 @@ describe('workflow inventory', () => {
       target: { value: 'not json' },
     });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Import draft' }));
-    expect(await within(dialog).findByText('The document could not be read')).toBeDefined();
+    expect(await within(dialog).findByText(/not valid JSON/)).toBeDefined();
 
     // Dismissing with the close control is what resets the form; the state is dropped with it.
     fireEvent.click(within(dialog).getByRole('button', { name: 'Close dialog' }));
@@ -216,7 +221,7 @@ describe('workflow inventory', () => {
     expect((within(dialog).getByLabelText(/Export document/) as HTMLTextAreaElement).value).toBe(
       '',
     );
-    expect(within(dialog).queryByText('The document could not be read')).toBeNull();
+    expect(within(dialog).queryByText(/not valid JSON/)).toBeNull();
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());

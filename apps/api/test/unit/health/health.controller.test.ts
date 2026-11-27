@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '../../../src/config/config';
+import { AppError } from '../../../src/common/problem/app-error';
 import { HealthController } from '../../../src/health/health.controller';
 
 type Reply = {
@@ -38,6 +39,8 @@ function build(
     ready?: boolean;
     metricsEnabled?: boolean;
     registryMetrics?: string;
+    metricsToken?: string;
+    exposition?: string;
   } = {},
 ) {
   const health = {
@@ -62,11 +65,21 @@ function build(
   };
   const config = {
     SEAMNEX_METRICS_ENABLED: options.metricsEnabled ?? true,
+    SEAMNEX_METRICS_TOKEN: options.metricsToken ?? '',
   } as unknown as AppConfig;
+  const observability = {
+    exposition: vi.fn().mockResolvedValue(options.exposition ?? '# instance metrics\n'),
+  };
   return {
     health,
     metrics,
-    controller: new HealthController(health as never, config, metrics as never),
+    observability,
+    controller: new HealthController(
+      health as never,
+      config,
+      metrics as never,
+      observability as never,
+    ),
   };
 }
 
@@ -175,5 +188,90 @@ describe('GET /metrics', () => {
     await controller.prometheus(reply as never);
 
     expect(reply.headers['x-request-id']).toBe('rid-header');
+  });
+});
+
+describe('GET /metrics/instances/:id', () => {
+  it('serves one instance s exposition as Prometheus text', async () => {
+    const { controller, observability } = build({ exposition: '# HELP seamnex_instance_up\n' });
+    const reply = replyDouble();
+
+    await controller.instanceMetrics('i1', undefined, reply as never);
+
+    expect(observability.exposition).toHaveBeenCalledWith('i1');
+    expect(reply.statuses).toEqual([200]);
+    expect(reply.headers['content-type']).toContain('text/plain');
+    expect(reply.sent[0]).toContain('seamnex_instance_up');
+  });
+
+  it('answers NOT_FOUND when metrics are disabled', async () => {
+    const { controller, observability } = build({ metricsEnabled: false });
+    const reply = replyDouble();
+
+    await controller.instanceMetrics('i1', undefined, reply as never);
+
+    expect(observability.exposition).not.toHaveBeenCalled();
+    expect(reply.statuses).toEqual([404]);
+    expect(reply.sent[0]).toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('requires the shared token when the deployment configured one', async () => {
+    const { controller, observability } = build({ metricsToken: 'scrape-secret' });
+    const reply = replyDouble();
+
+    await controller.instanceMetrics('i1', 'Bearer wrong', reply as never);
+
+    expect(observability.exposition).not.toHaveBeenCalled();
+    expect(reply.statuses).toEqual([404]);
+  });
+
+  it('accepts the shared token when it matches', async () => {
+    const { controller } = build({ metricsToken: 'scrape-secret' });
+    const reply = replyDouble();
+
+    await controller.instanceMetrics('i1', 'Bearer scrape-secret', reply as never);
+
+    expect(reply.statuses).toEqual([200]);
+  });
+
+  it('does not treat a non-Bearer credential as a supplied token', async () => {
+    const { controller, observability } = build({ metricsToken: 'scrape-secret' });
+    const reply = replyDouble();
+    delete reply.request;
+
+    await controller.instanceMetrics('i1', 'Basic c2NyYXBl', reply as never);
+
+    // The scheme is part of the contract: a Basic header is not the bearer the scraper was given.
+    expect(observability.exposition).not.toHaveBeenCalled();
+    expect(reply.statuses).toEqual([404]);
+    expect(reply.headers['x-request-id']).toBe('unknown');
+  });
+
+  it('answers the not-found for an instance the platform does not know', async () => {
+    const { controller, observability } = build();
+    // The controller recognises a deliberate not-found by its status, so this double carries one.
+    observability.exposition.mockRejectedValueOnce(
+      new AppError({ code: 'NOT_FOUND', status: 404, detail: 'No instance i9.' }),
+    );
+    const reply = replyDouble();
+    delete reply.request;
+
+    await controller.instanceMetrics('i9', undefined, reply as never);
+
+    // A scrape of a deleted instance is a failed scrape, not a 500: the body still says why.
+    expect(reply.statuses).toEqual([404]);
+    expect(reply.sent[0]).toMatchObject({ code: 'NOT_FOUND', detail: 'No instance i9.' });
+    expect(reply.headers['x-request-id']).toBe('unknown');
+  });
+
+  it('rethrows a failure that is not a deliberate not-found', async () => {
+    const { controller, observability } = build();
+    observability.exposition.mockRejectedValueOnce(new Error('database unavailable'));
+    const reply = replyDouble();
+
+    await expect(controller.instanceMetrics('i1', undefined, reply as never)).rejects.toThrow(
+      'database unavailable',
+    );
+    expect(reply.statuses).toEqual([]);
   });
 });

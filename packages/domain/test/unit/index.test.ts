@@ -1,33 +1,46 @@
 import { describe, expect, it } from 'vitest';
 import * as barrel from '../../src/index';
+import * as breakGlassApproval from '../../src/break-glass-approval';
 import * as capabilities from '../../src/capabilities';
 import * as capacity from '../../src/capacity';
+import * as composeRules from '../../src/compose-rules';
 import * as contract from '../../src/contract';
+import * as cron from '../../src/cron';
 import * as credentialGranularity from '../../src/credential-granularity';
 import * as enums from '../../src/enums';
 import * as envRules from '../../src/env-rules';
+import * as catalogCoverage from '../../src/catalog-coverage';
+import * as imageRegistry from '../../src/image-registry';
 import * as labels from '../../src/labels';
+import * as licenseGate from '../../src/license-gate';
 import * as licenseTerms from '../../src/license-terms';
 import * as mappingExpression from '../../src/mapping-expression';
+import * as mappingTransform from '../../src/mapping-transform';
 import * as policy from '../../src/policy';
+import * as posture from '../../src/posture';
 import * as propagation from '../../src/propagation';
 import * as routes from '../../src/routes';
+import * as samplePath from '../../src/sample-path';
 import * as signInCopy from '../../src/sign-in-copy';
 import * as stateMachines from '../../src/state-machines';
 import * as version from '../../src/version';
+import * as workflowAuthority from '../../src/workflow-authority';
 import * as authSchema from '../../src/schemas/auth';
 import * as backupSchema from '../../src/schemas/backup';
 import * as capacitySchema from '../../src/schemas/capacity';
 import * as catalogSchema from '../../src/schemas/catalog';
+import * as catalogRepositorySchema from '../../src/schemas/catalog-repository';
 import * as commonSchema from '../../src/schemas/common';
 import * as governanceSchema from '../../src/schemas/governance';
 import * as identitySchema from '../../src/schemas/identity';
 import * as instanceSchema from '../../src/schemas/instance';
 import * as jobSchema from '../../src/schemas/job';
+import * as observabilitySchema from '../../src/schemas/observability';
 import * as portalSchema from '../../src/schemas/portal';
 import * as privacySchema from '../../src/schemas/privacy';
 import * as recoverySchema from '../../src/schemas/recovery';
 import * as registrySchema from '../../src/schemas/registry';
+import * as securitySchema from '../../src/schemas/security';
 import * as fieldDiscoverySchema from '../../src/schemas/field-discovery';
 import * as workflowSchema from '../../src/schemas/workflow';
 
@@ -42,35 +55,54 @@ import * as workflowSchema from '../../src/schemas/workflow';
  * which the second test catches.
  */
 const MODULES = [
+  ['break-glass-approval', breakGlassApproval],
   ['capabilities', capabilities],
   ['capacity', capacity],
+  ['compose-rules', composeRules],
   ['contract', contract],
+  // FR-5.4: the cron grammar the schedule trigger is checked against by the panel and by validation.
+  ['cron', cron],
+  ['catalog-coverage', catalogCoverage],
   ['credential-granularity', credentialGranularity],
   ['enums', enums],
   ['env-rules', envRules],
+  // NFR-4.16: the one image-reference parser the API, the gates and the console share.
+  ['image-registry', imageRegistry],
   ['labels', labels],
+  ['license-gate', licenseGate],
   ['license-terms', licenseTerms],
   ['mapping-expression', mappingExpression],
+  ['mapping-transform', mappingTransform],
   ['policy', policy],
+  // S-2: the floor as data, plus the pure status function every surface calls.
+  ['posture', posture],
   ['propagation', propagation],
   ['routes', routes],
+  // FR-5.5: the resolver validation uses to ask whether a mapped path exists in a stored item.
+  ['sample-path', samplePath],
   ['sign-in-copy', signInCopy],
   ['state-machines', stateMachines],
   ['version', version],
+  ['workflow-authority', workflowAuthority],
   ['schemas/auth', authSchema],
   ['schemas/backup', backupSchema],
   ['schemas/capacity', capacitySchema],
   ['schemas/catalog', catalogSchema],
+  // ADR-BE-42: the checkout's state and the fetch that replaces it.
+  ['schemas/catalog-repository', catalogRepositorySchema],
   ['schemas/common', commonSchema],
   ['schemas/field-discovery', fieldDiscoverySchema],
   ['schemas/governance', governanceSchema],
   ['schemas/identity', identitySchema],
   ['schemas/instance', instanceSchema],
   ['schemas/job', jobSchema],
+  ['schemas/observability', observabilitySchema],
   ['schemas/portal', portalSchema],
   ['schemas/privacy', privacySchema],
   ['schemas/recovery', recoverySchema],
   ['schemas/registry', registrySchema],
+  // NFR-4.16 / NFR-4.6: the allow-list state and the retained scan report.
+  ['schemas/security', securitySchema],
   ['schemas/workflow', workflowSchema],
 ] as const satisfies readonly (readonly [string, Record<string, unknown>])[];
 

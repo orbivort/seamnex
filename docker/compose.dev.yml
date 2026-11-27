@@ -12,14 +12,34 @@
 #
 # Every port is published on localhost only.
 #
-# Every image is pinned to a full version, never a bare major and never `latest`: a floating tag
-# makes "it worked yesterday" unreproducible, and NFR-4.15 rejects unpinned tags in anything the
-# platform runs. Bumping a pin is a reviewed diff, and `pnpm check:images` proves every reference
-# resolves before the diff is merged (it asks each registry for the manifest and prints the digest).
+# Every image names a version, never a bare major and never `latest`: a floating tag makes "it worked
+# yesterday" unreproducible, and NFR-4.15 rejects unpinned tags in anything the platform runs. The
+# socket proxy is the one reference that names a line rather than a release — upstream retired its
+# per-release tags in v0.6.0 — and its digest, not the tag, is what holds it still. Bumping a pin is a
+# reviewed diff, and `pnpm check:images` proves every reference resolves before the diff is merged (it
+# asks each registry for the manifest and prints the digest).
 #
-# Pins below were verified against their registries on 2026-10-23. Two of them are paired: Keycloak
-# and keycloak-config-cli must stay on the same Keycloak patch, because the CLI is compiled against
-# one and refuses a mismatch at start-up. Bump them in the same commit, never one alone.
+# `docker/images.json` is the authority for these references: `pnpm check:images:offline` fails when a
+# literal here disagrees with it, and the online pass resolves them from that file.
+#
+# Most references also carry `@sha256:` — the digest of the multi-platform manifest index each one
+# resolved to on 2026-11-25. The digest is the pin that counts: a re-push of the tag cannot change
+# what the stack runs, and it is what lets a tag name a version for the reader without floating for
+# the container runtime. The six `observability` images are tag-only because their indexes were not
+# on the host that recorded the rest; record one with `docker buildx imagetools inspect <ref>` before
+# bumping them (THIRD-PARTY-NOTICES §5).
+#
+# `seamnex-dev-api` is the one reference this file builds rather than pulls, and it is published
+# nowhere. Every service that runs it therefore declares `pull_policy: never`. The default policy asks
+# the daemon for a missing image *before* building, and a daemon whose `daemon.json` points
+# `registry-mirrors` at an allow-listed mirror (DaoCloud's is) answers
+# `this image is not in the allowlist` — printed as `✘ Image seamnex-dev-api Error …` on the first `up`
+# of any machine that has no image yet, for a pull that could never succeed. `never` does not skip the
+# build: an absent image is built by the `api` service, which is the only way this one ever exists.
+#
+# Two pins are paired: Keycloak and keycloak-config-cli must stay on the same Keycloak patch,
+# because the CLI is compiled against one and refuses a mismatch at start-up. Bump them in the same
+# commit, never one alone.
 
 name: seamnex-dev
 
@@ -53,7 +73,13 @@ x-api-environment: &api-environment
   AUTH_INTERNAL_URL: ${AUTH_INTERNAL_URL:-http://keycloak:8080/realms/seamnex}
   AUTH_CLIENT_ID: ${AUTH_CLIENT_ID:-seamnex-platform-ui}
   AUTH_SCOPES: ${AUTH_SCOPES:-openid profile email groups}
-  APP_ORIGINS: http://localhost:5173,http://localhost:5174,http://localhost:8080
+  # ADR-BE-39: both SPAs are served over TLS (`https://localhost:5173`, `https://localhost:5174`), so
+  # the `https` origins are the ones a browser actually sends. Listing only the `http` pair made the
+  # origin allowlist reject every unsafe request from the console — sign-in and the CSRF guard both
+  # answer ORIGIN_REJECTED — while Keycloak's realm already registered the `https` redirect URIs. The
+  # `http` entries stay for a tab opened before the switch and for a host without OpenSSL, where Vite
+  # falls back to plain HTTP.
+  APP_ORIGINS: ${APP_ORIGINS:-https://localhost:5173,https://localhost:5174,http://localhost:5173,http://localhost:5174,http://localhost:8080}
   SESSION_COOKIE_SECURE: '0'
   # Traefik is the only way into these containers on the dev network, so the edge is a trusted
   # proxy and `request.ip` is the client's address (which is what the sign-in rate limit keys on).
@@ -70,21 +96,59 @@ x-api-environment: &api-environment
   SEAMNEX_ADAPTERS_MODE: real
   DOCKER_HOST: tcp://docker-socket-proxy:2375
   SEAMNEX_DOCKER_HOST: tcp://docker-socket-proxy:2375
+  # ADR-BE-40 §7. A build session is a hijacked connection (`Upgrade: tcp`), and the proxy above
+  # forwards allow-listed HTTP paths only — it answers a build `403` before a Dockerfile is read.
+  # Builds therefore go to the `buildkit` service, which speaks its own gRPC protocol and never sees
+  # the Engine socket. Empty keeps the daemon's own builder, for a host without the proxy.
+  SEAMNEX_BUILDKIT_ADDR: ${SEAMNEX_BUILDKIT_ADDR:-tcp://buildkit:1234}
+  # Package-manager mirrors the `build` stage forwards to a *product* image as `--build-arg` (the
+  # Dockerfile declares the argument; `docker/compose.dev.yml`'s own `api` build takes the first two
+  # for the platform image). Empty is upstream and is what CI uses. They are build-host properties:
+  # no image carries one, and a value in the render set would follow the instance to another host.
+  APK_MIRROR: ${APK_MIRROR:-}
+  APT_MIRROR: ${APT_MIRROR:-}
+  NPM_REGISTRY: ${NPM_REGISTRY:-}
+  # Registry mirrors the *Engine* pulls through, fastest first. The `buildkit` service's list (see
+  # below) only covers a build's `FROM`; a deployment's own `pull` and `compose up --quiet-pull` go to
+  # the daemon, whose `daemon.json` this stack does not own. Empty pulls from the registry the
+  # definition names, which is what CI does.
+  SEAMNEX_PULL_MIRROR: ${SEAMNEX_PULL_MIRROR:-}
+  # One pull attempt's budget before the next mirror (or the registry) is tried. Supplied here as well
+  # as in the schema because an empty value would coerce to `0` and fail configuration at boot.
+  SEAMNEX_PULL_TIMEOUT_MS: ${SEAMNEX_PULL_TIMEOUT_MS:-3600000}
   # How long `verify` waits for containers *and* an HTTP answer. The 300 s default fits a product
   # that starts in seconds; a first ERPNext install migrates a few hundred doctypes and does not.
-  # Global until the catalog can carry a per-entry override (docs/catalog-and-deployment-operations.md
+  # Global until the catalog can carry a per-entry override (
   # §8.2 O9), so it is a deployment-wide setting, not a per-product one.
   SEAMNEX_VERIFY_TIMEOUT_MS: ${SEAMNEX_VERIFY_TIMEOUT_MS:-300000}
   SEAMNEX_INSTANCE_DATA_DIR: /var/lib/seamnex/instances
-  # `localhost` is the only suffix a browser resolves to loopback without a hosts entry
-  # (`<slug>.localhost`, RFC 6761), so a fresh checkout reaches a deployed product with no setup step.
-  SEAMNEX_INGRESS_DOMAIN: ${SEAMNEX_INGRESS_DOMAIN:-localhost}
-  # The dev edge terminates plain HTTP on 127.0.0.1:8020 — there is no ACME certificate on a
-  # laptop — so the launch links the portal renders have to say exactly that. A hardcoded
-  # `https://<host>` pointed the browser at 443, where nothing is listening.
-  SEAMNEX_PRODUCT_URL_SCHEME: ${SEAMNEX_PRODUCT_URL_SCHEME:-http}
-  SEAMNEX_PRODUCT_URL_PORT: ${SEAMNEX_PRODUCT_URL_PORT:-8020}
+  # Two labels under the RFC 6761 name, not `<slug>.localhost`: a browser resolves either shape with no
+  # hosts entry, but the edge's certificate cannot cover the one-label form. `*.<domain>` is matched by
+  # OpenSSL and Chromium only when at least two labels follow the wildcard, so `*.localhost` would leave
+  # every product URL with `ERR_CERT_COMMON_NAME_INVALID`. The operating system resolver does not know
+  # `.localhost` at all; `docker/dns` answers this zone and `pnpm dev:dns` points the host at it.
+  SEAMNEX_INGRESS_DOMAIN: ${SEAMNEX_INGRESS_DOMAIN:-seamnex.localhost}
+  # The dev edge terminates TLS on 127.0.0.1:8443 with its own internal certificate: no public DNS
+  # name on a laptop can satisfy ACME. The launch links the portal renders, the OIDC redirect URIs
+  # and the relay origin therefore have to say exactly that, or the browser is pointed at a port
+  # nothing listens on.
+  SEAMNEX_PRODUCT_URL_SCHEME: ${SEAMNEX_PRODUCT_URL_SCHEME:-https}
+  SEAMNEX_PRODUCT_URL_PORT: ${SEAMNEX_PRODUCT_URL_PORT:-8443}
+  # NFR-4.1 / ISSUE-07: which certificate mode the edge actually runs. It is written onto every
+  # `instance_route` row, so "acme" means a resolver issued that host's certificate and "internal"
+  # means the edge's own. The dev edge has no ACME resolver in play, and saying so is the point.
+  SEAMNEX_EDGE_TLS_MODE: ${SEAMNEX_EDGE_TLS_MODE:-internal}
   SEAMNEX_TRAEFIK_DYNAMIC_DIR: /etc/traefik/dynamic
+  # FR-2.6 / AC-45. M21 writes one `file_sd` target per instance here; Prometheus mounts the same
+  # directory read-only. The scrape address is the API's compose name, not `localhost`: Prometheus
+  # resolves it on `seamnex-control`, which is the only network both services share.
+  SEAMNEX_PROMETHEUS_TARGETS_DIR: /var/lib/seamnex/prometheus-targets
+  SEAMNEX_PROMETHEUS_SCRAPE_TARGET: ${SEAMNEX_PROMETHEUS_SCRAPE_TARGET:-api:8080}
+  SEAMNEX_PROMETHEUS_URL: ${SEAMNEX_PROMETHEUS_URL:-http://prometheus:9090}
+  # FR-4.6. Pointing at the in-network Loki is what makes the platform log query real; with the
+  # `observability` profile down the query answers 503 and the console says so, rather than showing
+  # an empty log that reads as "the product is quiet".
+  SEAMNEX_LOKI_URL: ${SEAMNEX_LOKI_URL:-http://loki:3100}
   # The edge joins each instance network when a route is published, so `http://<slug>:<port>` in the
   # router resolves. The name is the compose container name, which is stable for this file.
   SEAMNEX_EDGE_CONTAINER: ${SEAMNEX_EDGE_CONTAINER:-seamnex-dev-traefik-1}
@@ -129,12 +193,14 @@ x-api-environment: &api-environment
   # that name as an alias.
   SEAMNEX_IDP_ALIAS: ${SEAMNEX_IDP_ALIAS:-keycloak}
   SEAMNEX_CATALOG_REPO_PATH: /var/lib/seamnex/catalog-repo
-  # Vendored upstream trees. An entry with `<SEAMNEX_SOURCE_MIRROR_DIR>/<entryKey>/` deploys without a
-  # clone, which is the only way a host with no route to the git server can deploy at all.
-  #
-  # Literal, not `${SEAMNEX_SOURCE_MIRROR_DIR}`: the root `.env` carries the *host* path
-  # (`./platform/upstream`) for `pnpm dev`, and that path does not exist inside this container.
-  SEAMNEX_SOURCE_MIRROR_DIR: /var/lib/seamnex/upstream
+  # Upstream trees live inside the checkout (`<root>/upstream/<entryKey>/`), so this is empty on
+  # purpose: a synced tag puts them where the resolver already looks (ADR-BE-42 §8.1). It used to
+  # name a second mount of `platform/upstream`; the platform ships no catalogue content now.
+  SEAMNEX_SOURCE_MIRROR_DIR: ''
+  # The mirror a sync fetches from. Configuration, never a request field: the console sends a ref.
+  SEAMNEX_CATALOG_SOURCE_URL: ${SEAMNEX_CATALOG_SOURCE_URL:-https://github.com/orbivort/seamnex-catalog}
+  SEAMNEX_CATALOG_SOURCE_REF: ${SEAMNEX_CATALOG_SOURCE_REF:-}
+  SEAMNEX_CATALOG_SYNC_COOLDOWN_MS: ${SEAMNEX_CATALOG_SYNC_COOLDOWN_MS:-60000}
   SEAMNEX_KEYCLOAK_ADMIN_URL: http://keycloak:8080
   # `${SEAMNEX_…}` and not the bare name: this is what `.env.example` documents and what the seed
   # and `pnpm kc:admin` read, so one spelling reaches the container *and* the host scripts.
@@ -147,6 +213,14 @@ x-api-environment: &api-environment
   # authorization request and says so in its detail line.
   SEAMNEX_SSO_PROBE_USERNAME: ${SEAMNEX_SSO_PROBE_USERNAME:-dev-user}
   SEAMNEX_SSO_PROBE_PASSWORD_FILE: /run/seamnex/sso-probe-password
+  # FR-1.35 — the platform database as the dump helper reaches it. `DATABASE_URL` above names the
+  # server `postgres`, which does not resolve on the helper's host network; the published port does.
+  SEAMNEX_PLATFORM_DB_URL: ${SEAMNEX_PLATFORM_DB_URL:-postgres://${POSTGRES_USER:-seamnex}:${POSTGRES_PASSWORD:-seamnex_dev_password}@127.0.0.1:${SEAMNEX_PG_HOST_PORT:-5432}/${POSTGRES_DB:-seamnex_dev}}
+  # FR-1.35 — the identity provider's own database is part of a platform backup, and the dump runs
+  # in a helper container on the host network, so the address is the *published* port: `postgres`
+  # does not resolve there, and the runner refuses it by name rather than surfacing a psql error.
+  # One cluster, three databases and three roles (design §4.2); Keycloak keeps its own.
+  SEAMNEX_KEYCLOAK_DB_URL: ${SEAMNEX_KEYCLOAK_DB_URL:-postgres://keycloak:${KEYCLOAK_DB_PASSWORD:-keycloak_dev_password}@127.0.0.1:${SEAMNEX_PG_HOST_PORT:-5432}/seamnex_keycloak}
   SEAMNEX_N8N_URL: http://n8n:5678
   SEAMNEX_N8N_API_KEY: ${SEAMNEX_N8N_API_KEY:-}
   # Literal, not `${SEAMNEX_MAILPIT_URL}`: the root `.env` carries the *host* address
@@ -159,6 +233,39 @@ x-api-environment: &api-environment
   S3_BUCKET: ${S3_BUCKET:-seamnex-backups}
   S3_REGION: ${S3_REGION:-us-east-1}
   SEAMNEX_BACKUP_TMP_DIR: /var/lib/seamnex/backups
+  # A backup helper is started by the daemon, which resolves a bind source on the *host* filesystem,
+  # while this container knows only `/var/lib/seamnex/backups`. Those are two different paths here
+  # (`temp/backups` on the host), so `.env` carries the mapping; without it the helper mounts an
+  # empty directory and the dump lands where the API cannot read it.
+  SEAMNEX_DOCKER_PATH_MAP: ${SEAMNEX_DOCKER_PATH_MAP:-}
+  # NFR-4.6 / S-10. Literal, not `${SEAMNEX_SCAN_TMP_DIR}`: the root `.env` names the *host* tree
+  # (`./temp/scans`) for `pnpm dev`, and inside this container that relative path resolved against
+  # `/app` — which `WORKDIR` creates as root, so the first `mkdir` failed with EACCES and the job
+  # stopped at "Apply" with IMAGE_SCAN_BLOCKED. The scan tree is also what the daemon binds into the
+  # scanner container, so the `.env` path map needs the matching pair (see `.env.example`).
+  SEAMNEX_SCAN_TMP_DIR: /var/lib/seamnex/scans
+  # The advisory cache, literal for the same reason as the scratch tree above: the root `.env` names
+  # the *host* tree (`./temp/trivy-cache`) and the daemon binds it into the scanner, so the container
+  # path and the `.env` path map have to agree with this mount.
+  SEAMNEX_SCAN_CACHE_DIR: /var/lib/seamnex/trivy-cache
+  # The scan policy, forwarded rather than restated so `.env` is authoritative: a scan setting named
+  # there that never reached the process was indistinguishable from its default. `cached` is the
+  # shipped posture — the scanner keeps no route and reads the database `pnpm scan:db:update` seeds —
+  # so the dev stopgap of `SEAMNEX_SCAN_FAIL_OPEN=true` is no longer the way past a failed scan.
+  SEAMNEX_SCAN_ENABLED: ${SEAMNEX_SCAN_ENABLED:-true}
+  SEAMNEX_SCANNER_IMAGE: ${SEAMNEX_SCANNER_IMAGE:-aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb}
+  SEAMNEX_SCAN_DB_MODE: ${SEAMNEX_SCAN_DB_MODE:-cached}
+  SEAMNEX_SCAN_DB_REPOSITORY: ${SEAMNEX_SCAN_DB_REPOSITORY:-ghcr.io/aquasec/trivy-db}
+  SEAMNEX_SCAN_DB_MAX_AGE_HOURS: ${SEAMNEX_SCAN_DB_MAX_AGE_HOURS:-168}
+  SEAMNEX_SCAN_NETWORK: ${SEAMNEX_SCAN_NETWORK:-}
+  SEAMNEX_SCAN_BLOCK_SEVERITIES: ${SEAMNEX_SCAN_BLOCK_SEVERITIES:-CRITICAL}
+  SEAMNEX_SCAN_FAIL_OPEN: ${SEAMNEX_SCAN_FAIL_OPEN:-false}
+  # The ceiling a single scan may take. Forwarded for the reason the block above gives, and this is
+  # the setting whose absence was invisible: `SEAMNEX_SCAN_TIMEOUT_MS` in `.env` changed nothing
+  # because the name never reached the process, and the default `300000` killed the scan of the
+  # 3.4 GB image this platform builds itself — recorded as "not scanned", not as a failure.
+  SEAMNEX_SCAN_TIMEOUT_MS: ${SEAMNEX_SCAN_TIMEOUT_MS:-300000}
+  SEAMNEX_SCAN_RETENTION_DAYS: ${SEAMNEX_SCAN_RETENTION_DAYS:-90}
   SEAMNEX_AGE_RECIPIENT: ${SEAMNEX_AGE_RECIPIENT:-}
   SEAMNEX_AGE_IDENTITY_FILE: /var/lib/seamnex/age/identity
 
@@ -171,16 +278,27 @@ x-api-volumes: &api-volumes
   - ../temp/instances:/var/lib/seamnex/instances
   - ../temp/backups:/var/lib/seamnex/backups
   - ../temp/age:/var/lib/seamnex/age
+  # FR-2.6: shared with Prometheus, which mounts it read-only. Created by `ensureRuntimeDirs`.
+  - ../temp/prometheus-targets:/var/lib/seamnex/prometheus-targets
+  # NFR-4.6: the image tar and Trivy report. It has to be a host-mounted tree, not the image's own
+  # filesystem: the scanner container is a sibling `docker run` and the daemon resolves the bind
+  # source on the *host*, so an unmounted path gave the scanner an empty directory.
+  - ../temp/scans:/var/lib/seamnex/scans
+  # NFR-4.6: the advisory database the scanner reads offline. It has to be the host tree too — the
+  # scanner is a sibling `docker run` and the daemon resolves the bind source on the host — and it is
+  # written by `pnpm scan:db:update`, not by the API.
+  - ../temp/trivy-cache:/var/lib/seamnex/trivy-cache
   # Read-write: 4A.8 commits `instances/<slug>/instance.yaml` here before a job may apply. The
   # container runs as `node` (uid 1000) while the mount root is owned by the host, so the
   # `instances/` subdirectory is created by `scripts/dev.mjs` and `scripts/compose.mjs`
   # (`scripts/lib/runtime-dirs.mjs`) — creating it from inside the container fails with EACCES and
   # the deployment is refused with REPOSITORY_UNAVAILABLE. The same preparation covers `instances`,
-  # `backups`, `age` and `traefik/dynamic`, which the deploy job and the route projection write to.
+  # `backups`, `age`, `scans` and `traefik/dynamic`, which the deploy job and the route projection
+  # write to.
+  # Read-write, and the only catalogue mount: `catalog/`, `catalog/env/` and `upstream/` all live
+  # under this root, and a sync renames them into place from a staging directory inside it
+  # (ADR-BE-42 §10.2 rule 2). A second mount of vendored trees was removed with the content.
   - ../temp/catalog-repo:/var/lib/seamnex/catalog-repo
-  # Vendored upstream trees are reviewed content, so they are mounted read-only: the resolver copies
-  # from them and never writes to them.
-  - ../platform/upstream:/var/lib/seamnex/upstream:ro
   # Read-write: the route projection is the only writer of generated router files (4D.2).
   - ./traefik/dynamic:/etc/traefik/dynamic
 
@@ -199,10 +317,17 @@ volumes:
   grafanadata:
   lokidata:
   promdata:
+  # The edge's ACME store (`acme.json`). Losing it forces re-issue on the next start rather than
+  # losing a route, but a restore that cannot re-issue during an outage keeps the old file, so it is
+  # part of the platform backup set (FR-1.35).
+  acmedata:
 
 services:
   postgres:
-    image: postgres:18-alpine
+    # The tag names the version for a reader; the digest is what compose obeys, so both move in the
+    # same commit. Re-check the pair with `docker buildx imagetools inspect postgres:18.7-alpine`
+    # before a bump: a digest from a different patch would run that patch under this tag.
+    image: postgres:18.7-alpine@sha256:0115267ab5a509022df9319c77be365cef335adb71556c75f60f5360ee247e71
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-seamnex}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-seamnex_dev_password}
@@ -233,7 +358,11 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:7-alpine
+    # 7.4.12 is the patch `7-alpine` resolved to when the digest was recorded, and the pin is a
+    # licence statement as much as a version one: 7.4 moved Redis to RSALv2/SSPLv1, so a floating
+    # `7-alpine` would move the licence on a rebuild without this file changing
+    # (THIRD-PARTY-NOTICES §5).
+    image: redis:7.4.12-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
     command: ['redis-server', '--appendonly', 'yes', '--maxmemory-policy', 'noeviction']
     ports:
       - '127.0.0.1:6379:6379'
@@ -253,10 +382,20 @@ services:
     restart: unless-stopped
 
   keycloak:
-    # 26.0.5, matched to the CLI tag below. Realm-as-code is applied by keycloak-config-cli
-    # (deliverable 3.1); `--import-realm` is deliberately not used, because it imports once and then
-    # silently ignores later edits. The CLI is compiled against one Keycloak version and checks it at
-    # start-up, so these two pins move together or not at all.
+    # 26.8.2, the current stable line and the release that carries the 26.8 security fixes (~35 CVEs:
+    # SAML parser DoS/OOM, stored XSS on the login page, IdP email auto-linking, DCR/CIBA/UMA token
+    # handling, plus a Quarkus bump).
+    #
+    # Realm-as-code is applied by keycloak-config-cli (deliverable 3.1); `--import-realm` is
+    # deliberately not used, because it imports once and then silently ignores later edits. The CLI is
+    # built against 26.8.1 — the newest Keycloak target 6.6.0 ships — and its start-up check
+    # (`KeycloakProvider.checkServerVersion`) compares the major segment only, so a server one patch
+    # ahead of the build is accepted; the CLI service below records why the two tags still travel
+    # together.
+    #
+    # 26.8.2 validates the Admin API audience, so a custom client calling `/admin/...` must carry the
+    # `kc-admin-api` client scope. `seamnex-platform-admin` is exactly that client, so
+    # `platform/realm/realm.json` assigns the scope; without it every admin call answers 401.
     #
     # The realm import now exits 0. Two defects were fixed together (ADR-BE-14):
     #   - sub-flow references carried `flowAlias` without `authenticatorFlow: true`, which is not
@@ -265,7 +404,7 @@ services:
     #   - `realm-dev-users.json` sorted *before* `realm.json`, so users referencing `/seamnex-admins`
     #     were applied before the group existed and the whole import aborted. The users file is now
     #     `users-dev.json`, which sorts after the realm.
-    image: quay.io/keycloak/keycloak:26.0.5
+    image: quay.io/keycloak/keycloak:26.8.2@sha256:7e66a96e4739239070aeaf72e4c5decf0f7f682cfc725b9f7ea2b336eaba38b3
     command: ['start-dev', '--http-port=8080']
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
@@ -305,10 +444,13 @@ services:
   keycloak-config-cli:
     # Applies platform/realm/*.json on every `compose up`, so a realm change is a reviewed diff
     # rather than a click in the admin console (deliverable 3.1).
-    # Tag grammar is <cli version>-<full Keycloak version>, and the suffix must be a Keycloak version
-    # the CLI was actually built against: 6.4.0 shipped 26.0.5 and 26.1.0 only, so `-26.0.0` (the
-    # previous reference) never resolved. 26.0.5 matches the server above exactly.
-    image: adorsys/keycloak-config-cli:6.4.0-26.0.5
+    # Tag grammar is <cli version>-<full Keycloak version>, and the suffix must name a Keycloak
+    # version the CLI was actually built against: 6.4.0 shipped 26.0.5 and 26.1.0 only, so `-26.0.0`
+    # (an earlier reference) never resolved. 6.6.0 tops out at 26.8.1, one patch behind the server
+    # above, so the suffix names the build target rather than the running server: the start-up check
+    # is major-only (see the Keycloak service), which 26.8.2 satisfies. Move both when a 6.6.x build
+    # with a 26.8.2 target ships.
+    image: adorsys/keycloak-config-cli:6.6.0-26.8.1@sha256:1fafe0823820981c5d33d0e7682a27a817f4a178ab6933387a5c2fca366f92f2
     environment:
       KEYCLOAK_URL: http://keycloak:8080
       KEYCLOAK_USER: ${KEYCLOAK_ADMIN:-admin}
@@ -328,16 +470,78 @@ services:
     # One-shot job: a retry loop would hide a realm that fails to apply.
     restart: 'no'
 
+  # NFR-4.1 / ISSUE-07 — wildcard DNS for product routes.
+  #
+  # A browser resolves `<slug>.<SEAMNEX_INGRESS_DOMAIN>` to loopback by itself (RFC 6761), so Chrome,
+  # Edge and Firefox need nothing from this service. Node, `curl` and Playwright's API context ask the
+  # operating system, which implements no such rule for subdomains of `localhost`, and get NXDOMAIN.
+  # This answers the zone — and only the zone — with loopback for them.
+  #
+  # Bound to 127.0.0.1 on purpose. On a Docker Desktop host `SharedAccess` (Internet Connection
+  # Sharing) already holds `0.0.0.0:53`; Windows still allows this more specific bind, and the service
+  # must never be reachable from another machine.
+  #
+  # The host sends only the zone here: `pnpm dev:dns --apply` adds a Windows NRPT rule for it. The
+  # adapter's own resolvers are left alone — replacing them would send every other lookup back into
+  # this container's `forward` line.
+  dns:
+    # 1.12.0 — the pin until 2026-11-25 — predated the listener fixes that shipped in 1.14.7 and was
+    # built on a 2024 Go toolchain; 1.15.0 has been current since 2026-10-21. The zone's
+    # `template`/`forward`/`errors` configuration is unaffected — `forward` names a file, not an
+    # upstream hostname. The digest is the manifest index the tag resolves to, on both architectures.
+    image: coredns/coredns:1.15.0@sha256:0a9d8c8ddf34347eb59aad9a8784f0710de88d6d112726d11d271f9bc6daca26
+    command: ['-conf', '/etc/coredns/Corefile']
+    environment:
+      # Substituted into the Corefile's `{$SEAMNEX_DNS_ZONE}` by CoreDNS, which reads the rendered
+      # text — distinct from compose's own `${...}` interpolation above it.
+      SEAMNEX_DNS_ZONE: ${SEAMNEX_INGRESS_DOMAIN:-seamnex.localhost}
+    ports:
+      - '127.0.0.1:53:53/udp'
+      - '127.0.0.1:53:53/tcp'
+    volumes:
+      - ./dns/Corefile:/etc/coredns/Corefile:ro
+    networks: [seamnex-control]
+    security_opt: [no-new-privileges:true]
+    logging: *default-logging
+
   traefik:
-    image: traefik:v3.3
+    # v3.3 — the line this pin named until 2026-11-25 — ended support on 2025-05-05 and has taken no
+    # fix since, which for an edge that terminates TLS is the difference between a CVE being patched
+    # and being permanent. v3.7.20 is the line still receiving security fixes; v3.8.0 shipped two days
+    # before this pin and has no patch history yet. The digest is the manifest index the tag resolves
+    # to, so a re-push of the tag cannot change what a developer runs.
+    image: traefik:v3.7.20@sha256:8301d6f60957a422f98918aacf2b01482abde3e74ead3719aabdb7c64045fe28
     command:
       - --configFile=/etc/traefik/traefik.yml
+      # NFR-4.1 / ISSUE-07. The ACME contact address cannot be interpolated into the static YAML
+      # file, so it travels as a static flag. The resolver is declared in that file and only
+      # referenced by routers whose `tls_mode` is `acme`; the dev stack routes with the internal
+      # certificate, so an empty address here requests no certificate and no DNS name is needed.
+      - --certificatesresolvers.seamnex.acme.email=${SEAMNEX_TRAEFIK_ACME_EMAIL:-}
     ports:
-      - '127.0.0.1:8020:80'
+      # TLS only. Port 80 is deliberately not published: it exists inside the edge for the ACME
+      # HTTP-01 challenge and for the redirect to `websecure`, and that redirect resolves to the
+      # target entrypoint's port (443) — so publishing 80 on any other host port would produce a
+      # redirect to a port nothing listens on.
+      - '127.0.0.1:8443:443'
       - '127.0.0.1:8081:8080'
     volumes:
       - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
       - ./traefik/dynamic:/etc/traefik/dynamic:ro
+      # NFR-4.1 / ISSUE-07: the certificate every `internal` route terminates with, named by
+      # `traefik/dynamic/tls.yml`. It is the leaf the dev servers already serve, so a product at
+      # `https://<slug>.localhost:8443` validates against the development CA trusted for
+      # `https://localhost:5173`; without it Traefik answers with its own `CN=TRAEFIK DEFAULT CERT`.
+      # The *directory* is mounted rather than the two files: Docker creates a directory at a missing
+      # bind-mount source, and `temp/certs/dev.crt` as a directory breaks the next mint as well as the
+      # edge. Read-only, and `dev-ca.key` sits in it — the edge never reads that file, and the pair has
+      # to be produced by exactly one mechanism (`packages/config/vite/dev-cert.ts`), which
+      # `scripts/compose.mjs` runs before `up`.
+      - ../temp/certs:/certs:ro
+      # The certificate store is a named volume, not a bind mount under `temp/`: Traefik refuses a
+      # store that is not mode 0600, and a Docker Desktop bind mount reports 0777 for a file that is
+      # 0600 on disk. A volume keeps the mode the edge set.
+      - acmedata:/acme
     networks: [seamnex-control]
     healthcheck:
       # `traefik healthcheck` asks the API for /ping, so the router tree is proven to be loaded;
@@ -357,7 +561,7 @@ services:
     # `n8nio/n8n:1` failed the pull outright. 1.x is still receiving releases, and the design
     # baseline names n8n 1.x, so this stays on the 1 line rather than jumping to 2.x — that is a
     # migration decision (workflow format, queue mode), not a tag bump.
-    image: n8nio/n8n:1.123.87
+    image: n8nio/n8n:1.123.87@sha256:624a1f10f37119a73eca34c0cbd358668aebf0068d320ad5eae584f9d35aa314
     environment:
       DB_TYPE: postgresdb
       DB_POSTGRESDB_HOST: postgres
@@ -402,7 +606,7 @@ services:
   n8n-worker:
     # Two workers, matching design §6.3's execution concurrency budget. Same image and env as the
     # main process, different command: a worker never serves HTTP and never runs a migration.
-    image: n8nio/n8n:1.123.87
+    image: n8nio/n8n:1.123.87@sha256:624a1f10f37119a73eca34c0cbd358668aebf0068d320ad5eae584f9d35aa314
     command: ['worker', '--concurrency=2']
     environment:
       DB_TYPE: postgresdb
@@ -440,7 +644,7 @@ services:
     # Credentials come from the environment, not a mounted config file, so there is one source of
     # truth for them (.env.example) and none of the drift a second config file invites. The gateway
     # rejects anonymous requests: a public backup bucket is not a dev convenience worth having.
-    image: versity/versitygw:v1.10.0
+    image: versity/versitygw:v1.10.0@sha256:89cad13cc981986ee284cbafea4613f9533ce6fd5f37a2c96c4c4fb8adb3a316
     # POSIX backend on the named volume; the endpoint keeps MinIO's port so host tooling, the
     # README and any future `S3_ENDPOINT` value did not have to move.
     command: ['--port', ':9000', 'posix', '/data']
@@ -469,7 +673,7 @@ services:
   mailpit:
     # Versioned, not `latest`: a mail catcher that changes under the stack is a debugging variable
     # nobody needs, and `/readyz` is version-dependent surface.
-    image: axllent/mailpit:v1.32.0
+    image: axllent/mailpit:v1.32.0@sha256:0790692be935ea4420d085694f7985b1f692ca6a8771ab0e0bd8ba75ac180498
     ports:
       - '127.0.0.1:8025:8025'
       - '127.0.0.1:1025:1025'
@@ -489,9 +693,15 @@ services:
     # this allow-list: containers, images, networks and volumes, POST for mutation, EXEC off.
     #
     # `EXEC=0` is not a convenience: container logs are read from the logs endpoint, never by running
-    # a shell inside a product. `BUILD=1` is required because BuildKit is driven by the CLI, which
-    # reaches the daemon through the same proxy.
-    image: tecnativa/docker-socket-proxy:0.3.0
+    # a shell inside a product. `BUILD=1` allows the plain `POST /build` request; it does **not** make
+    # a BuildKit build work, because that needs a hijacked session the allow-list refuses with `403`
+    # (see `buildkit` below and ADR-BE-40 §7).
+    #
+    # `3.4` is upstream's HAProxy line, not a release number: v0.6.0 retired the per-release tags
+    # (`:vX.Y.Z`, `:edge`), `lts` will move to 3.6, and the retired `0.3.0` ran HAProxy 2.2, which
+    # upstream stopped maintaining in 2025-Q2. The digest is the pin; a rebuild of the tag needs a
+    # deliberate bump.
+    image: tecnativa/docker-socket-proxy:3.4@sha256:027f9fa5ee70be5836eeaa10ce889d7a83f34a8db16a7f412818b92997e0beab
     environment:
       CONTAINERS: '1'
       IMAGES: '1'
@@ -520,6 +730,63 @@ services:
     logging: *default-logging
     restart: unless-stopped
 
+  buildkit:
+    # ADR-BE-40 §7 — the builder a deployment's `build` stage talks to.
+    #
+    # The proxy above cannot carry a build: BuildKit drives a hijacked connection (`Upgrade: tcp`)
+    # and the allow-list answers it `403`, which is how a `build` stage used to fail with
+    # `unable to upgrade to tcp, received 403` having read no Dockerfile at all. BuildKit's gRPC
+    # endpoint is its own protocol, so it needs no Engine session and no proxy in the middle.
+    #
+    # It is reached only from `seamnex-control` (nothing is published) and it never sees the Engine
+    # socket. An image reaches the host daemon through the CLI's `--load`, over the allow-listed
+    # image endpoints, so nothing is mounted into this container.
+    #
+    # `privileged` is what an OCI worker needs for the mount namespaces a `RUN` step uses. The
+    # version is pinned: a floating `buildx-stable-1` would make "the build that succeeded
+    # yesterday" unreproducible, and `pnpm check:images` would have nothing to verify.
+    image: moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        # BuildKit takes registry mirrors from a config file only, and `registry-mirrors` in the
+        # Engine's daemon.json is not read here. A network that reaches Docker Hub through a mirror
+        # therefore needs it rendered into the daemon's config; the value stays out of the
+        # repository because it is a property of the host, not of the platform.
+        #
+        # `SEAMNEX_REGISTRY_MIRROR` is therefore a comma-separated list,
+        # rendered as BuildKit's own array: they are tried in the order given and the next one is
+        # used when a mirror errors. Order is the operator's ranking, fastest first.
+        : > /etc/buildkit/buildkitd.toml
+        if [ -n "$${SEAMNEX_REGISTRY_MIRROR}" ]; then
+          list=''
+          for mirror in $$(printf '%s' "$${SEAMNEX_REGISTRY_MIRROR}" | tr ',' ' '); do
+            if [ -z "$${list}" ]; then
+              list="\"$${mirror}\""
+            else
+              list="$${list}, \"$${mirror}\""
+            fi
+          done
+          printf '[registry."docker.io"]\n  mirrors = [%s]\n' "$${list}" \
+            > /etc/buildkit/buildkitd.toml
+        fi
+        exec buildkitd --addr tcp://0.0.0.0:1234 --config /etc/buildkit/buildkitd.toml
+    environment:
+      SEAMNEX_REGISTRY_MIRROR: ${SEAMNEX_REGISTRY_MIRROR:-}
+    privileged: true
+    networks: [seamnex-control]
+    healthcheck:
+      # `debug workers` is the only endpoint that proves a worker is actually usable; a listening
+      # port reports healthy for a daemon whose worker failed to start.
+      test: ['CMD', 'buildctl', '--addr', 'tcp://127.0.0.1:1234', 'debug', 'workers']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging: *default-logging
+    restart: unless-stopped
+
   # The control plane runs as nine process roles over one module graph, so every role needs the same
   # environment and the same mounts. Declaring that once here is what keeps `deploy-worker` and
   # `status-sampler` from drifting away from `api`: an anchor is a single source, a copy is a bug
@@ -530,6 +797,7 @@ services:
   # the HTTP surface is.
   api:
     image: seamnex-dev-api
+    pull_policy: never
     build:
       context: ..
       dockerfile: apps/api/Dockerfile
@@ -575,6 +843,7 @@ services:
   # never moves — which looks like a UI defect and is really a missing process.
   deploy-worker:
     image: seamnex-dev-api
+    pull_policy: never
     # The image's default CMD is `main-api.ts`; a non-HTTP role enters through `roles/start.ts`,
     # which resolves `SEAMNEX_ROLE` and starts only the work that role owns (ADR-BE-03). Without this
     # override the "worker" was a second API that listened on a port and consumed nothing, and every
@@ -589,6 +858,11 @@ services:
       api:
         condition: service_healthy
       docker-socket-proxy:
+        condition: service_healthy
+      # The `build` stage of every deploy, reconfigure and upgrade lands here (ADR-BE-40 §7); a
+      # worker that starts first would register its builder against a daemon still coming up and
+      # report the first build as a failed one.
+      buildkit:
         condition: service_healthy
     # No HTTP probe, and the image's built-in check is disabled rather than inherited: it exits 0 for
     # every non-api role, so it would report "healthy" for a worker that consumes nothing. A green
@@ -608,6 +882,7 @@ services:
   # be stranded the same way.
   scheduler:
     image: seamnex-dev-api
+    pull_policy: never
     command: ['node', '--import', 'tsx', 'src/roles/start.ts']
     environment:
       <<: *api-environment
@@ -630,6 +905,7 @@ services:
   # instance's derived state never leaves its last writer, and `GET /capacity` has no history.
   status-sampler:
     image: seamnex-dev-api
+    pull_policy: never
     command: ['node', '--import', 'tsx', 'src/roles/start.ts']
     environment:
       <<: *api-environment
@@ -655,6 +931,7 @@ services:
   # `SEAMNEX_SYNC_INTERVAL_MS`, so a deployment becomes visible within one cycle of being ready.
   sync-worker:
     image: seamnex-dev-api
+    pull_policy: never
     command: ['node', '--import', 'tsx', 'src/roles/start.ts']
     environment:
       <<: *api-environment
@@ -681,6 +958,7 @@ services:
   # it is a listener, never an `/api/v1` surface.
   auth-gateway:
     image: seamnex-dev-api
+    pull_policy: never
     command: ['node', '--import', 'tsx', 'src/roles/start.ts']
     environment:
       <<: *api-environment
@@ -710,6 +988,7 @@ services:
   # a place to put a form login.
   relay:
     image: seamnex-dev-api
+    pull_policy: never
     command: ['node', '--import', 'tsx', 'src/roles/start.ts']
     environment:
       <<: *api-environment
@@ -741,6 +1020,7 @@ services:
   # first use (the relay's `ensureInstanceJoined`), so it must be able to reach the Docker API.
   broker-proxy:
     image: seamnex-dev-api
+    pull_policy: never
     command: ['node', '--import', 'tsx', 'src/roles/start.ts']
     environment:
       <<: *api-environment
@@ -769,16 +1049,20 @@ services:
 
   # --- Observability (opt-in: --profile observability) -----------------------------------
   prometheus:
-    image: prom/prometheus:v3.1.0
+    image: prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06
     profiles: [observability]
     command:
       - --config.file=/etc/prometheus/prometheus.yml
-      - --storage.tsdb.retention.time=15d
+      # 30 days, matching the log retention the platform promises (NFR-6.7 / AC-45). 15 days made
+      # "queryable per instance" expire half-way through the promised window.
+      - --storage.tsdb.retention.time=30d
     ports:
       - '127.0.0.1:9090:9090'
     volumes:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      # The `file_sd` directory M21 writes. Read-only here: Prometheus never writes a target.
+      - ../temp/prometheus-targets:/etc/prometheus/targets:ro
       - promdata:/prometheus
     networks: [seamnex-control, seamnex-obs]
     healthcheck:
@@ -793,7 +1077,7 @@ services:
     restart: unless-stopped
 
   node-exporter:
-    image: prom/node-exporter:v1.8.2
+    image: prom/node-exporter:v1.13.1@sha256:7296504d4ada44b7d7ab4431e27e9f9900d8488f8d55842f4b12ae2704e16dfe
     profiles: [observability]
     command:
       - --path.rootfs=/host
@@ -806,7 +1090,7 @@ services:
     restart: unless-stopped
 
   alertmanager:
-    image: prom/alertmanager:v0.28.0
+    image: prom/alertmanager:v0.35.1@sha256:4e3d029e69c7f61dd53a2b31a3dc427a2b81736cffca185c0854075e07969e36
     profiles: [observability]
     command: ['--config.file=/etc/alertmanager/alertmanager.yml']
     ports:
@@ -825,7 +1109,7 @@ services:
     restart: unless-stopped
 
   loki:
-    image: grafana/loki:3.4.2
+    image: grafana/loki:3.7.10@sha256:b43c257ccfc925d4a50b8717cac61a3b51df8c48d01847936057e5c4075a24a7
     profiles: [observability]
     command: ['-config.file=/etc/loki/loki-config.yml']
     ports:
@@ -847,7 +1131,7 @@ services:
     restart: unless-stopped
 
   alloy:
-    image: grafana/alloy:v1.6.1
+    image: grafana/alloy:v1.22.0@sha256:9acc2529bc1edb7f5b2bd801dd8334ebc80c158e3a9e5526ecd7c9a273d43189
     profiles: [observability]
     command:
       - run
@@ -867,7 +1151,7 @@ services:
     restart: unless-stopped
 
   grafana:
-    image: grafana/grafana:11.5.1
+    image: grafana/grafana:13.3.2@sha256:81556409ba48b2b922e0adb69a2511337d8ba7578f11962eefa6149a2d815101
     profiles: [observability]
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
