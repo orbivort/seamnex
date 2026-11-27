@@ -15,6 +15,16 @@ import { securityHandlers } from './security';
 import { workflowHandlers } from './workflows';
 import { problem } from './utils';
 
+/**
+ * Every path below carries a leading wildcard before its `/api/v1` segment.
+ *
+ * A handler path that starts with a slash is resolved against the current document, so it only
+ * matches the origin root. The same bundle is also served from a deployment base — GitHub Pages
+ * publishes a project site at `/<repository>/`, and the transport then asks for `<base>api/v1/...`
+ * so the request stays inside the service worker's scope. The wildcard matches the base (and, in
+ * development, the bare origin), so one handler list serves both without knowing which prefix it
+ * is mounted under. MSW documents this form as "match any origin".
+ */
 export const handlers = [
   ...authHandlers,
   /**
@@ -37,7 +47,7 @@ export const handlers = [
   ...registryHandlers,
   ...recoveryHandlers,
   ...privacyHandlers,
-  http.all('/api/v1/*', ({ request }) => {
+  http.all('*/api/v1/*', ({ request }) => {
     const url = new URL(request.url);
     return problem(
       404,

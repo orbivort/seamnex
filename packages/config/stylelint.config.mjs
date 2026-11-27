@@ -8,6 +8,7 @@ export default {
   ignoreFiles: [
     '**/dist/**',
     '**/dist-demo/**',
+    '**/dist-pages/**',
     '**/node_modules/**',
     '**/coverage/**',
     '**/temp/**',

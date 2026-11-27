@@ -52,6 +52,13 @@ export function createPrototypeTransport(options: PrototypeTransportOptions): Tr
   const { role, scenario, latencyMs = 180 } = options;
 
   const base = createFetchTransport({
+    /**
+     * The mock platform runs in a service worker, and a worker only sees requests inside its own
+     * scope — the deployment base. A root-relative `/api/v1` leaves that scope on a host that
+     * mounts the app under a prefix (GitHub Pages: `/seamnex/`), so the request would reach the
+     * network instead of a handler.
+     */
+    baseUrl: `${import.meta.env.BASE_URL}api/v1`,
     headers: () => ({ 'x-seamnex-role': role, 'x-seamnex-scenario': scenario }),
   });
 

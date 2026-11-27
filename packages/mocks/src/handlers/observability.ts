@@ -133,7 +133,7 @@ function logsFor(instanceId: string, limit: number, filter: string): InstanceLog
 }
 
 export const observabilityHandlers = [
-  http.get('/api/v1/instances/:id/observability', ({ params, request }) => {
+  http.get('*/api/v1/instances/:id/observability', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'instance.view_logs');
     if (guard) return guard;
     const report = reportFor(String(params.id));
@@ -149,7 +149,7 @@ export const observabilityHandlers = [
     return HttpResponse.json(report);
   }),
 
-  http.get('/api/v1/instances/:id/logs', ({ params, request }) => {
+  http.get('*/api/v1/instances/:id/logs', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'instance.view_logs');
     if (guard) return guard;
     const url = new URL(request.url);

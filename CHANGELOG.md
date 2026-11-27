@@ -21,6 +21,14 @@ symbol that implements it, and cites the requirement and decision ids (`FR-*`, `
 
 ## [Unreleased]
 
+### Added
+
+- **Subpath deployments** — `VITE_BASE_PATH` mounts a built SPA under a prefix instead of the origin
+  root; the asset URLs, the router basename, the mock worker URL and the mock API prefix all follow
+  it, so the app is reachable at `/seamnex/` rather than only at the root. The new `pages` workflow
+  publishes the mock-driven console and portal to GitHub Pages on every push to `main`, with the
+  portal mounted under `/seamnex/portal/` and linked from the console.
+
 ## [0.2.0] - 2026-11-27
 
 ### Summary

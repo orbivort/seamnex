@@ -12,3 +12,18 @@
  * builds and disabled in production, where the API performs the same validation.
  */
 declare const __SEAMNEX_CONTRACT_CHECKS__: boolean;
+
+/**
+ * Vite's deployment base, always trailing-slashed (`/`, `/seamnex/`, …).
+ *
+ * Declared here because this package is compiled as source inside the app that imports it and does
+ * not depend on `vite/client` itself. The prototype transport prefixes its requests with it so mock
+ * traffic stays inside the service worker's scope.
+ */
+interface ImportMetaEnv {
+  readonly BASE_URL: string;
+}
+
+interface ImportMeta {
+  readonly env: ImportMetaEnv;
+}

@@ -23,6 +23,8 @@ node_modules/
 
 dist/
 dist-demo/
+# The Pages artifact assembled from both apps' demo bundles (`.github/workflows/pages.yml`).
+dist-pages/
 build/
 *.tsbuildinfo
 

@@ -13,13 +13,13 @@ import { actorFor, problem, readBody, requireCapability, roleOf } from './utils'
  * is refused because it would block every image on the platform — including the scanner's own.
  */
 export const securityHandlers = [
-  http.get('/api/v1/security/trusted-registries', ({ request }) => {
+  http.get('*/api/v1/security/trusted-registries', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'settings.view');
     if (guard) return guard;
     return HttpResponse.json(trustedRegistryState());
   }),
 
-  http.post('/api/v1/security/trusted-registries', async ({ request }) => {
+  http.post('*/api/v1/security/trusted-registries', async ({ request }) => {
     const role = roleOf(request);
     const guard = requireCapability(role, 'settings.manage');
     if (guard) return guard;
@@ -115,7 +115,7 @@ export const securityHandlers = [
    * A digest with no row is a 404, not an empty pass: "we never scanned this image" and "we scanned it
    * and found nothing" are different answers, and the screen says so.
    */
-  http.get('/api/v1/instances/:id/image-scan', ({ params, request }) => {
+  http.get('*/api/v1/instances/:id/image-scan', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'instance.view_logs');
     if (guard) return guard;
     const url = new URL(request.url);

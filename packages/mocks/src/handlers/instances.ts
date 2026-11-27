@@ -25,7 +25,7 @@ function provisioningKind(entryKey: string): 'bearer' | 'password' | 'none' {
 }
 
 export const instanceHandlers = [
-  http.get('/api/v1/instances', ({ request }) => {
+  http.get('*/api/v1/instances', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'instance.view_logs');
     if (guard) return guard;
     const url = new URL(request.url);
@@ -45,7 +45,7 @@ export const instanceHandlers = [
     return HttpResponse.json(items);
   }),
 
-  http.get('/api/v1/instances/:id', ({ params, request }) => {
+  http.get('*/api/v1/instances/:id', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'instance.view_logs');
     if (guard) return guard;
     const id = String(params.id);
@@ -64,7 +64,7 @@ export const instanceHandlers = [
     return HttpResponse.json({ ...detail, ...instance });
   }),
 
-  http.get('/api/v1/instances/:id/status', ({ params, request }) => {
+  http.get('*/api/v1/instances/:id/status', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'instance.view_logs');
     if (guard) return guard;
     const id = String(params.id);
@@ -89,7 +89,7 @@ export const instanceHandlers = [
     return HttpResponse.json(status);
   }),
 
-  http.get('/api/v1/instances/:id/containers', ({ params, request }) => {
+  http.get('*/api/v1/instances/:id/containers', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'instance.view_logs');
     if (guard) return guard;
     const instance = getState().instances.find((item) => item.id === String(params.id));
@@ -105,7 +105,7 @@ export const instanceHandlers = [
     return HttpResponse.json(getState().containers[instance.id] ?? []);
   }),
 
-  http.get('/api/v1/instances/:id/env', ({ params, request }) => {
+  http.get('*/api/v1/instances/:id/env', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'instance.env');
     if (guard) return guard;
     const instance = getState().instances.find((item) => item.id === String(params.id));
@@ -121,7 +121,7 @@ export const instanceHandlers = [
     return HttpResponse.json(getState().envValues[instance.id] ?? []);
   }),
 
-  http.put('/api/v1/instances/:id/env', async ({ params, request }) => {
+  http.put('*/api/v1/instances/:id/env', async ({ params, request }) => {
     const role = roleOf(request);
     const guard = requireCapability(role, 'instance.env');
     if (guard) return guard;
@@ -203,7 +203,7 @@ export const instanceHandlers = [
    * ADR-BE-22 §Credentials. The token is never part of a response: the demo mirrors the API's
    * write-only contract, so a screen that expected the value back would fail here too.
    */
-  http.get('/api/v1/instances/:id/admin-credential', ({ params, request }) => {
+  http.get('*/api/v1/instances/:id/admin-credential', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'instance.env');
     if (guard) return guard;
     const instance = getState().instances.find((item) => item.id === String(params.id));
@@ -227,7 +227,7 @@ export const instanceHandlers = [
     });
   }),
 
-  http.put('/api/v1/instances/:id/admin-credential', async ({ params, request }) => {
+  http.put('*/api/v1/instances/:id/admin-credential', async ({ params, request }) => {
     const role = roleOf(request);
     const guard = requireCapability(role, 'instance.env');
     if (guard) return guard;
@@ -286,7 +286,7 @@ export const instanceHandlers = [
    * what a healthy deployment would — one person, provisioned — and records the click, because a
    * button whose only effect is a count with no evidence is the thing this route replaced.
    */
-  http.post('/api/v1/instances/:id/relay/provision', ({ params, request }) => {
+  http.post('*/api/v1/instances/:id/relay/provision', ({ params, request }) => {
     const role = roleOf(request);
     const guard = requireCapability(role, 'instance.env');
     if (guard) return guard;
@@ -323,7 +323,7 @@ export const instanceHandlers = [
     });
   }),
 
-  http.get('/api/v1/instances/:id/drift', ({ params, request }) => {
+  http.get('*/api/v1/instances/:id/drift', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'instance.view_logs');
     if (guard) return guard;
     const instance = getState().instances.find((item) => item.id === String(params.id));
@@ -339,7 +339,7 @@ export const instanceHandlers = [
     return HttpResponse.json(getState().drift[instance.id] ?? []);
   }),
 
-  http.get('/api/v1/instances/:id/backups', ({ params, request }) => {
+  http.get('*/api/v1/instances/:id/backups', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'instance.view_logs');
     if (guard) return guard;
     const instance = getState().instances.find((item) => item.id === String(params.id));
@@ -357,7 +357,7 @@ export const instanceHandlers = [
     );
   }),
 
-  http.get('/api/v1/instances/:id/containers/:cid/logs', ({ params, request }) => {
+  http.get('*/api/v1/instances/:id/containers/:cid/logs', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'instance.view_logs');
     if (guard) return guard;
     const instance = getState().instances.find((item) => item.id === String(params.id));
@@ -389,7 +389,7 @@ export const instanceHandlers = [
     );
   }),
 
-  http.post('/api/v1/instances/:id/backups', ({ params, request }) => {
+  http.post('*/api/v1/instances/:id/backups', ({ params, request }) => {
     const role = roleOf(request);
     const guard = requireCapability(role, 'instance.backup');
     if (guard) return guard;
@@ -441,7 +441,7 @@ export const instanceHandlers = [
   }),
 
   /** FR-1.12: the schedule is editable; the change is audited like any other configuration. */
-  http.put('/api/v1/instances/:id/backup-schedule', async ({ params, request }) => {
+  http.put('*/api/v1/instances/:id/backup-schedule', async ({ params, request }) => {
     const role = roleOf(request);
     const guard = deny(role, ['R1'], 'backup schedule');
     if (guard) return guard;
@@ -508,7 +508,7 @@ export const instanceHandlers = [
     return HttpResponse.json(instance.backup);
   }),
 
-  http.post('/api/v1/backups/:id/verify', ({ params, request }) => {
+  http.post('*/api/v1/backups/:id/verify', ({ params, request }) => {
     const role = roleOf(request);
     const guard = deny(role, ['R1'], 'instance.backup verify');
     if (guard) return guard;
@@ -547,7 +547,7 @@ export const instanceHandlers = [
     return HttpResponse.json(accepted, { status: 202 });
   }),
 
-  http.post('/api/v1/backups/:id/restore', ({ params, request }) => {
+  http.post('*/api/v1/backups/:id/restore', ({ params, request }) => {
     const role = roleOf(request);
     const guard = deny(role, ['R1'], 'instance.restore');
     if (guard) return guard;
@@ -582,7 +582,7 @@ export const instanceHandlers = [
     return HttpResponse.json(accepted, { status: 202 });
   }),
 
-  http.get('/api/v1/instances/:id/images', ({ params, request }) => {
+  http.get('*/api/v1/instances/:id/images', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'instance.view_logs');
     if (guard) return guard;
     const instance = getState().instances.find((item) => item.id === String(params.id));
@@ -621,7 +621,7 @@ export const instanceHandlers = [
     ]);
   }),
 
-  http.get('/api/v1/instances/:id/plan', ({ params, request }) => {
+  http.get('*/api/v1/instances/:id/plan', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'instance.deploy');
     if (guard) return guard;
     const instance = getState().instances.find((item) => item.id === String(params.id));
@@ -658,7 +658,7 @@ export const instanceHandlers = [
     });
   }),
 
-  http.post('/api/v1/instances', async ({ request }) => {
+  http.post('*/api/v1/instances', async ({ request }) => {
     const role = roleOf(request);
     const guard = deny(role, ['R1'], 'instance.deploy');
     if (guard) return guard;
@@ -817,7 +817,7 @@ export const instanceHandlers = [
     return HttpResponse.json(accepted, { status: 202 });
   }),
 
-  http.post('/api/v1/instances/:id/:action', async ({ params, request }) => {
+  http.post('*/api/v1/instances/:id/:action', async ({ params, request }) => {
     const role = roleOf(request);
     const guard = deny(role, ['R1'], 'instance.lifecycle');
     if (guard) return guard;

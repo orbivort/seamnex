@@ -5,13 +5,13 @@ import { getState, entitlements, launcher, logout, meFor } from '../store';
 import { problem, roleOf } from './utils';
 
 export const portalHandlers = [
-  http.get('/api/v1/me', ({ request }) => {
+  http.get('*/api/v1/me', ({ request }) => {
     const role = roleOf(request);
     const me = meFor(role);
     return HttpResponse.json(me);
   }),
 
-  http.get('/api/v1/me/entitlements', ({ request }) => {
+  http.get('*/api/v1/me/entitlements', ({ request }) => {
     const role = roleOf(request);
     if (!can(role, 'portal.view_entitlements')) {
       return problem(
@@ -25,23 +25,23 @@ export const portalHandlers = [
     return HttpResponse.json(entitlements(role));
   }),
 
-  http.get('/api/v1/me/launcher', ({ request }) => {
+  http.get('*/api/v1/me/launcher', ({ request }) => {
     const role = roleOf(request);
     return HttpResponse.json(launcher(role));
   }),
 
-  http.post('/api/v1/me/logout', ({ request }) => {
+  http.post('*/api/v1/me/logout', ({ request }) => {
     const role = roleOf(request);
     return HttpResponse.json(logout(role));
   }),
 
-  http.get('/api/v1/portal/status-banner', () => {
+  http.get('*/api/v1/portal/status-banner', () => {
     const banner = getState().banners.find((item) => item.active) ?? null;
     return HttpResponse.json(banner);
   }),
 
   /** Deep links resolve one tile directly, without downloading the whole launcher. */
-  http.get('/api/v1/portal/products/:slug', ({ params, request }) => {
+  http.get('*/api/v1/portal/products/:slug', ({ params, request }) => {
     const role = roleOf(request);
     const slug = String(params.slug);
     const tile = launcher(role).tiles.find((item) => item.slug === slug);
@@ -60,7 +60,7 @@ export const portalHandlers = [
   }),
 
   /** FR-3.13: products the caller may ask for. Unentitled tiles stay off the launcher (FR-3.5). */
-  http.get('/api/v1/portal/requestable', ({ request }) => {
+  http.get('*/api/v1/portal/requestable', ({ request }) => {
     const role = roleOf(request);
     if (!can(role, 'portal.view_entitlements')) {
       return problem(
@@ -99,7 +99,7 @@ export const portalHandlers = [
     );
   }),
 
-  http.get('/api/v1/portal/launch-targets/:instanceId', ({ params, request }) => {
+  http.get('*/api/v1/portal/launch-targets/:instanceId', ({ params, request }) => {
     const role = roleOf(request);
     const instanceId = String(params.instanceId);
     const instance = getState().instances.find((item) => item.id === instanceId);
@@ -152,7 +152,7 @@ export const portalHandlers = [
    * The demo has no edge to redeem a ticket, so the mock answers with the bootstrap URL the real
    * API would return. Modelling the shape keeps the dialog's code path identical in both modes.
    */
-  http.post('/api/v1/portal/launch-tickets/:instanceId', ({ params, request }) => {
+  http.post('*/api/v1/portal/launch-tickets/:instanceId', ({ params, request }) => {
     const role = roleOf(request);
     const instanceId = String(params.instanceId);
     const instance = getState().instances.find((item) => item.id === instanceId);
@@ -184,7 +184,7 @@ export const portalHandlers = [
    * The launch record. The demo has no audit chain to append to, so it answers with the shape the
    * real service returns; the dialog calls this in both modes, which keeps one code path.
    */
-  http.post('/api/v1/portal/launch-events/:instanceId', ({ params, request }) => {
+  http.post('*/api/v1/portal/launch-events/:instanceId', ({ params, request }) => {
     const role = roleOf(request);
     const instanceId = String(params.instanceId);
     const instance = getState().instances.find((item) => item.id === instanceId);

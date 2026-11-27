@@ -25,6 +25,12 @@ import {
 import { defaultRouteFor } from './navigation';
 import { CONSOLE_ROUTES, type ConsoleRoute } from './routes';
 
+/**
+ * The router mounts under the deployment base, not the origin root — see the same constant in the
+ * portal, which shares this rule. The trailing slash is dropped because the router adds its own.
+ */
+const ROUTER_BASENAME = import.meta.env.BASE_URL.replace(/\/$/, '');
+
 function RouteFallback() {
   return (
     <Panel className="m-4">
@@ -171,7 +177,7 @@ export function App() {
           through `useSearchParams` instead of subscribing to the platform location. The cache
           scope stays inside the provider, because it depends on the resolved role.
         */}
-        <BrowserRouter>
+        <BrowserRouter basename={ROUTER_BASENAME}>
           <SessionProvider>
             <Shell />
           </SessionProvider>

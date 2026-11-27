@@ -17,7 +17,7 @@ import { appendAudit, envProfiles, meFor, scaffoldFor, getState } from '../store
 import { actorFor, readBody, deny, problem, requireCapability, roleOf } from './utils';
 
 export const catalogHandlers = [
-  http.get('/api/v1/catalog', ({ request }) => {
+  http.get('*/api/v1/catalog', ({ request }) => {
     const role = roleOf(request);
     const guard = requireCapability(role, 'catalog.browse');
     if (guard) return guard;
@@ -43,14 +43,14 @@ export const catalogHandlers = [
    * `:key` would otherwise capture `repository` and answer with an entry-not-found problem. The
    * console test would then pass against the wrong shape, which is worse than failing.
    */
-  http.get('/api/v1/catalog/repository', ({ request }) => {
+  http.get('*/api/v1/catalog/repository', ({ request }) => {
     const guard = requireCapability(roleOf(request), 'catalog.browse');
     if (guard) return guard;
     return HttpResponse.json(getState().catalogRepository);
   }),
 
   /** ADR-BE-42 §10.3: fetch, swap and reconcile. The mock has one tag, so an unknown ref refuses. */
-  http.post('/api/v1/catalog/sync', async ({ request }) => {
+  http.post('*/api/v1/catalog/sync', async ({ request }) => {
     const role = roleOf(request);
     const guard = deny(role, ['R1'], 'catalog sync');
     if (guard) return guard;
@@ -132,7 +132,7 @@ export const catalogHandlers = [
     });
   }),
 
-  http.get('/api/v1/catalog/:key', ({ params, request }) => {
+  http.get('*/api/v1/catalog/:key', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'catalog.read_metadata');
     if (guard) return guard;
     const entry = getState().catalog.find((item) => item.key === String(params.key));
@@ -148,7 +148,7 @@ export const catalogHandlers = [
     return HttpResponse.json(entry);
   }),
 
-  http.get('/api/v1/catalog/:key/env-schema', ({ params, request }) => {
+  http.get('*/api/v1/catalog/:key/env-schema', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'catalog.read_metadata');
     if (guard) return guard;
     const key = String(params.key);
@@ -168,7 +168,7 @@ export const catalogHandlers = [
   }),
 
   /** Resolved environment preview: default → profile → instance → secret, ceilings enforced. */
-  http.get('/api/v1/catalog/:key/env-plan', ({ params, request }) => {
+  http.get('*/api/v1/catalog/:key/env-plan', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'catalog.read_metadata');
     if (guard) return guard;
     const key = String(params.key);
@@ -191,7 +191,7 @@ export const catalogHandlers = [
     return HttpResponse.json(resolveEnv(key, profileKey, overrides));
   }),
 
-  http.get('/api/v1/env-profiles', ({ request }) => {
+  http.get('*/api/v1/env-profiles', ({ request }) => {
     // The route's policy key is `catalog.browse` (a read); the guard used to ask for
     // `instance.configure`, which is a different question and refused a role the API admits.
     const guard = requireCapability(roleOf(request), 'catalog.browse');
@@ -205,7 +205,7 @@ export const catalogHandlers = [
    * The request is an ordinary access request so the same governance queue and second-party rule
    * apply; nothing about a profile bypasses the decision that a write needs.
    */
-  http.post('/api/v1/env-profiles/:key/requests', async ({ params, request }) => {
+  http.post('*/api/v1/env-profiles/:key/requests', async ({ params, request }) => {
     const role = roleOf(request);
     const guard = requireCapability(role, 'profile.request');
     if (guard) return guard;
@@ -268,7 +268,7 @@ export const catalogHandlers = [
    * server check (shape, unknown variable, `none`-only ceiling, secret source, profile in use), so a
    * console test cannot pass against a rule the API does not have.
    */
-  http.post('/api/v1/env-profiles', async ({ request }) => {
+  http.post('*/api/v1/env-profiles', async ({ request }) => {
     const guard = requireCapability(roleOf(request), 'profile.manage');
     if (guard) return guard;
     const body = (await readBody(request)) as {
@@ -330,7 +330,7 @@ export const catalogHandlers = [
     return HttpResponse.json(created);
   }),
 
-  http.patch('/api/v1/env-profiles/:key', async ({ params, request }) => {
+  http.patch('*/api/v1/env-profiles/:key', async ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'profile.manage');
     if (guard) return guard;
     const key = String(params.key);
@@ -362,7 +362,7 @@ export const catalogHandlers = [
     return HttpResponse.json(profile);
   }),
 
-  http.put('/api/v1/env-profiles/:key/values', async ({ params, request }) => {
+  http.put('*/api/v1/env-profiles/:key/values', async ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'profile.manage');
     if (guard) return guard;
     const key = String(params.key);
@@ -432,7 +432,7 @@ export const catalogHandlers = [
     return HttpResponse.json(profile);
   }),
 
-  http.delete('/api/v1/env-profiles/:key', ({ params, request }) => {
+  http.delete('*/api/v1/env-profiles/:key', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'profile.manage');
     if (guard) return guard;
     const key = String(params.key);
@@ -465,7 +465,7 @@ export const catalogHandlers = [
     return HttpResponse.json({ key, deleted: true });
   }),
 
-  http.patch('/api/v1/catalog/:key/integration-metadata', async ({ params, request }) => {
+  http.patch('*/api/v1/catalog/:key/integration-metadata', async ({ params, request }) => {
     const role = roleOf(request);
     const guard = deny(role, ['R1', 'R3'], 'metadata.manage');
     if (guard) return guard;
@@ -597,7 +597,7 @@ export const catalogHandlers = [
     return HttpResponse.json(entry);
   }),
 
-  http.get('/api/v1/catalog/:key/scaffold', ({ params, request }) => {
+  http.get('*/api/v1/catalog/:key/scaffold', ({ params, request }) => {
     const guard = requireCapability(roleOf(request), 'catalog.read_metadata');
     if (guard) return guard;
     const draft = scaffoldFor(String(params.key));
@@ -613,7 +613,7 @@ export const catalogHandlers = [
     return HttpResponse.json(draft);
   }),
 
-  http.post('/api/v1/catalog/:key/scaffold/:draftId/confirm', ({ params, request }) => {
+  http.post('*/api/v1/catalog/:key/scaffold/:draftId/confirm', ({ params, request }) => {
     const role = roleOf(request);
     const guard = deny(role, ['R1'], 'scaffold confirm');
     if (guard) return guard;
@@ -640,7 +640,7 @@ export const catalogHandlers = [
   }),
 
   /** FR-1.18 / DD-07: re-read the declarative source and reconcile the projection. */
-  http.post('/api/v1/catalog/reload', ({ request }) => {
+  http.post('*/api/v1/catalog/reload', ({ request }) => {
     const role = roleOf(request);
     const guard = deny(role, ['R1'], 'catalog reload');
     if (guard) return guard;
@@ -690,7 +690,7 @@ export const catalogHandlers = [
   }),
 
   /** FR-1.30: map a pasted .env or Compose environment into the declared schema. */
-  http.post('/api/v1/catalog/:key/env-import', async ({ params, request }) => {
+  http.post('*/api/v1/catalog/:key/env-import', async ({ params, request }) => {
     const role = roleOf(request);
     const guard = deny(role, ['R1', 'R3'], 'environment import');
     if (guard) return guard;
