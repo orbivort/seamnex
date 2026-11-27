@@ -75,6 +75,11 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
+      # Whether this run was started by a pushed tag. Stated here, from the shell value the gate
+      # already branches on, because `tag` and `publish` cannot read `github.ref_type` across the
+      # `uses:` boundary: on release-auto run 45962531183 that context skipped `tag` on a
+      # `refs/heads/main` push, and `publish` published nothing.
+      tagged: ${{ steps.version.outputs.tagged }}
     steps:
       - name: checkout
         uses: actions/checkout@v7
@@ -147,6 +152,7 @@ jobs:
             echo "tag=$tag"
             echo "version=$version"
             echo "prerelease=$([[ "$version" == *-* ]] && echo true || echo false)"
+            echo "tagged=$([[ "${GITHUB_REF_TYPE}" == 'tag' ]] && echo true || echo false)"
           } >> "$GITHUB_OUTPUT"
           echo "Releasing $tag from ${GITHUB_REF_NAME}@${GITHUB_SHA:0:7}."
       - name: summarise the request
@@ -356,8 +362,10 @@ jobs:
     name: create and push the version tag
     needs: [resolve, package]
     # A run started by a pushed tag is already tagged, and a dry run tags nothing: in both cases this
-    # job has no work, and `publish` below reads the skipped result rather than inheriting it.
-    if: inputs.dry_run != true && github.ref_type != 'tag'
+    # job has no work, and `publish` below reads the skipped result rather than inheriting it. The
+    # tag-start fact comes from `resolve` rather than from `github.ref_type`, which does not carry the
+    # caller's ref type here (see the note on that output).
+    if: inputs.dry_run != true && needs.resolve.outputs.tagged != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -389,13 +397,14 @@ jobs:
   publish:
     name: publish GitHub release
     needs: [resolve, package, tag]
-    # `tag` is skipped on the pushed-tag path, where the release is due and the tag already exists; the
-    # skipped result is read explicitly so that path still publishes. `--verify-tag` and the commit
-    # comparison below are what make the tag's presence a fact rather than an assumption.
+    # `tag` is skipped only on the pushed-tag path — `resolve` states that as `tagged`, so it is read
+    # rather than inferred — where the release is due and the tag already exists. A skipped `tag` on
+    # any other path means nothing tagged this commit and there is nothing to publish.
     if: >-
       !cancelled() && inputs.dry_run != true && needs.resolve.result == 'success' &&
       needs.package.result == 'success' &&
-      (needs.tag.result == 'success' || needs.tag.result == 'skipped')
+      (needs.tag.result == 'success' ||
+      (needs.tag.result == 'skipped' && needs.resolve.outputs.tagged == 'true'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # The one other write, scoped to the job that needs it.
@@ -434,8 +443,12 @@ jobs:
         run: |
           set -euo pipefail
           # `checkout` does not promise a tag pushed by an earlier job in the same run, so ask for
-          # exactly the one this release names before inspecting it.
-          git fetch --force origin "+refs/tags/${TAG}:refs/tags/${TAG}"
+          # exactly the one this release names before inspecting it. A tag that is missing here is
+          # this pipeline's own failure, so it is reported as one instead of as a fetch to retry.
+          if ! git fetch --force origin "+refs/tags/${TAG}:refs/tags/${TAG}"; then
+            echo "::error::$TAG is not on the remote, so nothing tagged this commit; refusing to publish an untagged release."
+            exit 1
+          fi
           # The tag must still point at the commit this run built and packaged.
           if [[ "$(git rev-parse "${TAG}^{commit}")" != "$GITHUB_SHA" ]]; then
             echo "::error::$TAG does not point at $GITHUB_SHA; refusing to publish the wrong commit."
