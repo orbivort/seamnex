@@ -118,7 +118,7 @@ x-api-environment: &api-environment
   SEAMNEX_PULL_TIMEOUT_MS: ${SEAMNEX_PULL_TIMEOUT_MS:-3600000}
   # How long `verify` waits for containers *and* an HTTP answer. The 300 s default fits a product
   # that starts in seconds; a first ERPNext install migrates a few hundred doctypes and does not.
-  # Global until the catalog can carry a per-entry override (docs/catalog-and-deployment-operations.md
+  # Global until the catalog can carry a per-entry override (
   # §8.2 O9), so it is a deployment-wide setting, not a per-product one.
   SEAMNEX_VERIFY_TIMEOUT_MS: ${SEAMNEX_VERIFY_TIMEOUT_MS:-300000}
   SEAMNEX_INSTANCE_DATA_DIR: /var/lib/seamnex/instances

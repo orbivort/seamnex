@@ -436,14 +436,10 @@ that `GPL-3.0-only` appears in this document; nothing yet checks a licence claim
 
 ## 10. Review record
 
-| Date       | Change                                                                                                                                                                                                                                                    | Reviewer                  |
-| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
-| 2026-11-06 | Initial inventory                                                                                                                                                                                                                                         | Platform maintainers      |
-| 2026-11-25 | §5.1 reduced to the platform's half: these third-party images are inventoried by the mirror's `THIRD-PARTY-NOTICES.md`                                                                                                                                    |
-| 2026-11-25 | §5: dev-stack references carry the digest of their manifest index; `redis` pinned to 7.4.12-alpine (RSALv2/SSPLv1, no longer floating), `traefik` to v3.3.7 and `postgres` to 18.7-alpine                                                                 | Pending maintainer review |
-| 2026-11-26 | §5 / §5.2 / §9.3: `docker/images.json` is the authority for every reference the platform starts; `check:images:offline` compares this file, the compose stack, the scanner defaults and the generated module, and fails when a repository here has no row | Pending maintainer review |
-| 2026-11-25 | §5: `traefik` to v3.7.20 — the v3.3 line this pin named ended support on 2025-05-05 and receives no fix, while v3.7 still takes security fixes. Licence unchanged (MIT)                                                                                   | Pending maintainer review |
-| 2026-11-25 | §5: `coredns/coredns` to 1.15.0 — the 1.12.0 pin was two years old and predated the listener fixes that shipped in 1.14.7. Licence unchanged (Apache-2.0)                                                                                                 | Pending maintainer review |
+| Date       | Change                                                                                                                 | Reviewer             |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------- | -------------------- |
+| 2026-11-06 | Initial inventory                                                                                                      | Platform maintainers |
+| 2026-11-25 | §5.1 reduced to the platform's half: these third-party images are inventoried by the mirror's `THIRD-PARTY-NOTICES.md` | Platform maintainers |
 
 Add a row whenever the inventory changes materially. One line is enough; the tables carry the detail.
 

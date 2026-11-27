@@ -8,8 +8,7 @@
  * hosted-service mode) has a term to quote instead of an empty cell.
  *
  * A product with a negotiated commercial licence is represented by its review record, which wins
- * over this table. A licence id that appears in neither is unknown, and the gate refuses it
- * (`docs/mvp-platform-requirements.md` C-3).
+ * over this table. A licence id that appears in neither is unknown, and the gate refuses it.
  */
 export type LicenseTerms = {
   /** SPDX identifier, or the vendor's licence name when the licence is not SPDX-listed. */

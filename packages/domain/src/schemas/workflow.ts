@@ -11,7 +11,7 @@ import { EntryKeySchema, IdSchema, TimestampSchema } from './common';
 /**
  * FR-5.5 mapping entry. `transform` covers value/type conversion and date or unit
  * normalization; `required`/`onMissing` are the explicit handling of a missing required
- * field. Authoring is descoped for the MVP (see docs/mvp-platform-exceptions.md); the
+ * field. Authoring is descoped for the MVP; the
  * shape is contractual so the backend can implement it without a further schema change.
  */
 export const FieldMappingSchema = z.object({

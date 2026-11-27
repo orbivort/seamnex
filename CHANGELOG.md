@@ -9,45 +9,17 @@ version is the git tag (`vX.Y.Z`). The entries under `## [Unreleased]` become th
 in the `release-prepare` pull request, which leaves a fresh empty `## [Unreleased]` above it and moves
 the same number through every manifest and the link definitions at the foot of this file.
 
+Two sections precede Keep a Changelog's types: `Summary` states in one paragraph what the release does,
+and `Upgrade notes` lists what an existing host must do before or after it. The `0.1.0` section is
+grouped by area and carries no requirement ids, which was the first release's shape; every section
+after it gives one outcome per bullet, states it for the operator who reads it rather than by the
+symbol that implements it, and cites the requirement and decision ids (`FR-*`, `NFR-*`, `AC-*`,
+`ADR-*`, `S-*`, `DA-*`) whose behaviour moved.
+
 [Repository](https://github.com/orbivort/seamnex) · [Issues](https://github.com/orbivort/seamnex/issues) ·
 [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 
 ## [Unreleased]
-
-### Upgrade notes
-
-Action required when upgrading an existing install; everything else is additive.
-
-- Every catalogue entry: record the digest of the artefact actually published, in the same commit as
-  the tag. A pin the registry no longer matches now blocks the deployment, as does a locally built
-  image with no repository digest.
-- Existing `.env`: point the product URL at the TLS edge and set `SEAMNEX_EDGE_TLS_MODE`. `pnpm dev`
-  refuses to start until they agree, and the API refuses under `NODE_ENV=production`.
-- A platform restore without `SEAMNEX_PLATFORM_RESTORE_DB_URL` records `pnpm restore:platform-db` as
-  an outstanding operator step, and the run cannot end `complete`.
-- Audit retention has a 365-day floor: a shorter stored `audit_retention_days` is read as the floor.
-- Policy exceptions are scoped to one product: a row whose `scope` is not a catalogue entry key waives
-  nothing, so re-file an exception approved before this upgrade, naming the product it belongs to.
-- Image scanning now reads a seeded advisory database: run `pnpm scan:db:update` before the first
-  deployment after upgrading, and on a schedule so the cache stays inside
-  `SEAMNEX_SCAN_DB_MAX_AGE_HOURS` (a week by default). A missing or expired cache blocks the
-  deployment; `SEAMNEX_SCAN_FAIL_OPEN=true` records it as unscanned rather than clean, and
-  `SEAMNEX_SCAN_DB_MODE=online` lets the scanner fetch advisories itself.
-- The catalogue now comes from `orbivort/seamnex-catalog` (ADR-BE-42). An existing install keeps the
-  checkout it already has; to move it to a reviewed tag, set `SEAMNEX_CATALOG_SOURCE_URL` (it defaults
-  to the mirror), run one `pnpm catalog:sync --ref <tag>` — or Catalog → "Sync from source" — and
-  reload. Leave `SEAMNEX_SOURCE_MIRROR_DIR` empty: a tag puts render sets under `<root>/upstream/`.
-  `pnpm catalog:restore` is gone, and `pnpm db:seed` no longer writes documents, so a host with no
-  checkout starts with an empty catalogue until one is fetched.
-- The first boot after upgrading stores one new `policy_version` row: its source hash now covers the
-  scope rules and the collection set (ADR-BE-44). No action is required, and a denial recorded before
-  the upgrade keeps the version it named.
-- Keycloak moves from 26.0.5 to 26.8.2. The schema migrates in place on the first start and does not
-  migrate back, so a host that must stay on 26.0.5 recreates the `seamnex_keycloak` database rather
-  than downgrading. Re-apply the realm with `pnpm kc:admin` after upgrading: 26.8.2 validates the
-  Admin API audience — `seamnex-platform-admin` now carries the `kc-admin-api` client scope, without
-  which every `/admin/...` call answers `401` — and requires `manage-realm` for the `groups` scope,
-  which `platform/realm/realm.json` now owns.
 
 ### Summary
 
@@ -55,7 +27,44 @@ This release makes the platform build the image it runs and start only that dige
 to TLS on one zone. Around that it closes the operational gaps: registry trust and image scanning, a
 restorable catalogue with one coverage number, observed instances and measured capacity, a patch
 register fed by upstream releases, environment profiles reconciled against the running container, and
-an export, backup and restore path that proves what it holds.
+an export, backup and restore path that proves what it holds. It also narrows authorization to what a
+grant reaches — collection reads filter rows, and the console marks the surfaces a narrower scope can
+serve — and makes workflow triggers, mappings and retries things the engine compiles and the screens
+describe.
+
+### Upgrade notes
+
+Action required when upgrading an existing install; everything else is additive.
+
+- **Catalogue entries** — record the digest of the artefact actually published, in the same commit as
+  the tag. A pin the registry no longer matches now blocks the deployment, as does a locally built
+  image with no repository digest.
+- **Existing `.env`** — point the product URL at the TLS edge and set `SEAMNEX_EDGE_TLS_MODE`;
+  `pnpm dev` refuses to start until they agree, and the API refuses under `NODE_ENV=production`.
+- **Platform restore** — without `SEAMNEX_PLATFORM_RESTORE_DB_URL`, `pnpm restore:platform-db` is
+  recorded as an outstanding operator step, and the run cannot end `complete`.
+- **Audit retention** — 365 days is a floor: a shorter stored `audit_retention_days` is read as the
+  floor.
+- **Policy exceptions** — scoped to one product: a row whose `scope` is not a catalogue entry key
+  waives nothing, so re-file an exception approved before this upgrade, naming the product it belongs
+  to.
+- **Image scanning** — reads a seeded advisory database: run `pnpm scan:db:update` before the first
+  deployment after upgrading, and on a schedule so the cache stays inside
+  `SEAMNEX_SCAN_DB_MAX_AGE_HOURS` (a week by default). A missing or expired cache blocks the
+  deployment; `SEAMNEX_SCAN_FAIL_OPEN=true` records it as unscanned rather than clean, and
+  `SEAMNEX_SCAN_DB_MODE=online` lets the scanner fetch advisories itself.
+- **Catalogue source** — the catalogue now comes from `orbivort/seamnex-catalog` (ADR-BE-42). An
+  existing install keeps the checkout it already has; to move it to a reviewed tag, set
+  `SEAMNEX_CATALOG_SOURCE_URL` (it defaults to the mirror), run one `pnpm catalog:sync --ref <tag>` —
+  or Catalog → "Sync from source" — and reload. Leave `SEAMNEX_SOURCE_MIRROR_DIR` empty: a tag puts
+  render sets under `<root>/upstream/`, and a host with no checkout starts with an empty catalogue
+  until one is fetched.
+- **Keycloak 26.8.2** — moves from 26.0.5. The schema migrates in place on the first start and does
+  not migrate back, so a host that must stay on 26.0.5 recreates the `seamnex_keycloak` database
+  rather than downgrading. Re-apply the realm with `pnpm kc:admin` after upgrading: 26.8.2 validates
+  the Admin API audience — `seamnex-platform-admin` now carries the `kc-admin-api` client scope,
+  without which every `/admin/...` call answers `401` — and requires `manage-realm` for the `groups`
+  scope, which `platform/realm/realm.json` now owns.
 
 ### Added
 
@@ -69,12 +78,9 @@ an export, backup and restore path that proves what it holds.
   carries deployable product content. `GET /catalog/repository` reports the revision being served and
   the configured source; `POST /catalog/sync` fetches a tag, swaps the tree into place and reconciles
   the projection; the console gains "Sync from source" beside Reload; and one
-  `pnpm catalog:sync --ref <tag>` performs the same request from a script. `pnpm db:seed` projects a
-  checkout and writes no file — it skips with exit 0 naming `catalog:sync` when none exists, and fails
-  when a checkout yields no parseable document.
-- **Catalogue coverage is counted once** (`FR-2.6`, `FR-2.16`, `ADR-BE-37`) — Mautic, ERPNext and
-  Metabase have entry documents, a declared deployment without one is refused, and the console, the API
-  and the floor gate read one number.
+  `pnpm catalog:sync --ref <tag>` performs the same request from a script. `pnpm db:seed` skips with
+  exit 0 naming `catalog:sync` when no checkout exists, and fails when one yields no parseable
+  document.
 - **Environment profiles are staff-owned** (`FR-1.26`, `AC-51`) — edited through the API behind a new
   capability, validated against the catalogue, audited by variable name and never by value, and refused
   for deletion while a live instance depends on them.
@@ -164,14 +170,8 @@ an export, backup and restore path that proves what it holds.
 - **Every image the platform starts names its digest** (`NFR-4.6`, `NFR-4.15`, `S-10`) — the
   `SEAMNEX_SCANNER_IMAGE` default, the `alpine` and `busybox` helpers, and the `pg_dump`/`pg_restore`
   helper are `tag@sha256:…`, and `docker/images.json` is the single authority those pins come from.
-  The tag stays in front of the digest because `scannerVersionOf` reads it and a retained report has to
-  say which scanner produced it; a host that overrides `SEAMNEX_SCANNER_IMAGE` with a bare tag keeps
-  its own pin.
-- **The identity provider runs a Keycloak line that still receives security fixes** (`NFR-4.15`) —
-  26.0.5 predates 26.8.2, whose notes list roughly 35 CVEs (SAML parser DoS/OOM, stored XSS on the
-  login page, IdP email auto-linking, DCR/CIBA/UMA token handling). The realm-as-code CLI moves to
-  `6.6.0-26.8.1`, and `seamnex-platform-admin` gains the `kc-admin-api` scope 26.8.2 requires before
-  it accepts an Admin API token from a custom client.
+  The tag stays in front of the digest so a retained report names the scanner that produced it; a host
+  that overrides `SEAMNEX_SCANNER_IMAGE` with a bare tag keeps its own pin.
 - **"Prefetch images" builds a `build:` entry instead of pulling its tag** (`FR-1.7`, `ADR-BE-40`) —
   pulling would fetch the registry's tag the next deployment then refuses; everything else is still
   pulled and verified, and a job with no entry fails `VALIDATION_FAILED`.
@@ -190,34 +190,35 @@ an export, backup and restore path that proves what it holds.
 - **An environment value is accepted only in the spelling its type allows** (`AC-28`, `AC-51`) — a
   `boolean` takes its two spellings and renders a checkbox, a profile value over a `none` ceiling is a
   field error naming the profile, and the callout reads `Reconfigure queued`, not `Restart required`.
-- **A volume quota is stated against the disk it will consume** (`FR-1.9`, `AC-13`) — the catalog
+- **A volume quota is quoted against the disk it will consume** (`FR-1.9`, `AC-13`) — the catalogue
   entry, the deploy wizard and the instance panel now show the quota beside the reservation.
 - **A scoped list answers with the rows the grant reaches** (`AC-38`, `ADR-BE-44`) — `GET /instances`,
-  `GET /jobs`, `GET /capacity` and `GET /capacity/forecast` are collection reads: the decision carries
-  the predicate and the handler applies it, so a domain-scoped operator reads their own fleet instead
-  of a `403` whose reason was that an unaddressed read has no domain to resolve. Collection allows
-  are not cached, an unresolved scope still denies and audits, and the compiled `policy_version`
-  now covers the scope rules and the collection set.
-- **The console menu renders the matrix three-valued, from one registry** (`ADR-FE-01`) — a surface's
-  capability is declared once (`apps/console/src/routes.ts`) and drives the sidebar, the router, the
-  command palette and chunk prefetching; an entry held only within a narrower scope stays visible and
-  is marked, with one line on the screen stating the scope applied. The marker is claimed only for a
-  surface the platform can actually serve narrowed (`scopedRead`), so the five governance screens
-  whose reads are still platform-wide — audit, patch register, posture, recovery, access requests —
-  are no longer offered to a domain-scoped role as scope-limited entries that answer `403`. The
-  capability hook and the route gates moved to `@seamnex/shell`, and the portal gained the route
-  guards it never had on `/entitlements` and `/product/:slug`.
+  `GET /jobs`, `GET /capacity` and `GET /capacity/forecast` apply the grant as a row filter, so a
+  domain-scoped operator reads their own fleet instead of a `403` that said an unaddressed read has no
+  domain to resolve. A collection allow is never cached, an unresolved scope still denies and audits,
+  and the compiled `policy_version` now covers the scope rules and the collection set; a denial
+  recorded before the upgrade keeps the version it named.
+- **The console shows each surface as allowed, denied or scope-limited, from one registry**
+  (`ADR-FE-01`) — a surface's capability is declared once and drives the sidebar, the router, the
+  command palette and chunk prefetching; an entry held only within a narrower scope stays visible, is
+  marked, and one line on the screen states the scope applied.
+
+### Removed
+
+- **`pnpm catalog:restore` and the seeded documents it restored** (`ADR-BE-42`) — the catalogue is a
+  checkout at a tag now: `pnpm db:seed` projects one and writes no file, and fetching one is
+  `pnpm catalog:sync --ref <tag>`.
 
 ### Fixed
 
 - **A product's sign-in survives the identity provider being re-created** (`FR-2.16`, `NFR-4.17`) —
-  the IdP side of a product's identity is runtime state: `registerIdentity` creates the client during a
-  deployment, so a Keycloak upgrade or a `compose up` on a fresh volume left the next sign-in dying in
-  the popup on "Client not found" with every recorded check still green. The scheduler pass and the
-  check now re-apply each stored registration before they measure, and a failed re-application counts
-  as a broken login instead of leaving the last "ok" row standing.
+  a product's identity is provisioned during a deployment, so a Keycloak upgrade or a `compose up` on a
+  fresh volume left the next sign-in dying in the popup on "Client not found" with every recorded
+  check still green. The scheduler pass and the check now re-apply each stored registration before
+  they measure, and a failed re-application counts as a broken login instead of leaving the last "ok"
+  row standing.
 - **A refused identity registration fails the deployment instead of reporting a capability**
-  (`FR-2.16`) — `registerIdentity` exempted `ADAPTER_UNAVAILABLE` wholesale as "this host has no admin
+  (`FR-2.16`) — registration treated `ADAPTER_UNAVAILABLE` wholesale as "this host has no admin
   client", so a `403` from the provider registered nothing and the deployment stayed green. The
   exemption now covers only a host with no admin client configured.
 - **The group-claim scope is realm-as-code, not a runtime write** (`FR-2.16`, `NFR-4.17`) — 26.8.2
@@ -225,15 +226,9 @@ an export, backup and restore path that proves what it holds.
   admin client does not hold, so the `groups` scope and its mapper stay declared in
   `platform/realm/realm.json`; the platform reuses a scope that already mints the claim, and a refusal
   names the release and the one change that avoids it.
-- **ERPNext's single sign-on is the flow the portal claims** (`FR-2.16`, `NFR-4.17`) — four defects
-  made the entry a label while the platform's own check passed them: the minted secret reached the
-  secret store but never `instance_env_value`, and was minted after `apply`; the `Social Login Key` was
-  named `seamnex` where Frappe resolves by document name; `auth_url_data` omitted `response_type`; and
-  the check asked only the identity provider. The secret now lands before the render set, the row is
-  created as `Keycloak`, and the check reads the product's `/login` page.
 - **A cron expression the engine cannot compile is refused where it is typed** (`FR-5.4`) — only an
   empty one was checked, so `61 * * * *` saved, validated clean and failed at activation with n8n's
-  bare `400`; panel and `validate()` now share one check (`TRIGGER_CRON_INVALID`).
+  bare `400`; the panel and the validator now share one check (`TRIGGER_CRON_INVALID`).
 - **The workflow list describes every definition state** (`FR-5.4`, `FR-5.5`, `FR-5.6`) — the inventory
   badges summarise every state instead of three and stay blank until the list answers, a save retires
   the stale "Validation passed" banner, and a stale link keeps its way back to the list.
@@ -243,7 +238,7 @@ an export, backup and restore path that proves what it holds.
 - **The entry node no longer warns about mappings nobody reads** (`FR-5.6`) — validation raised
   `EMPTY_MAPPINGS` on a trigger that takes no mapping, so every definition carried a warning from its
   first edit.
-- **A read's answer is parsed before the next step sees it** (`FR-5.5`) — OpenProject answers
+- **A read's answer is parsed before the next step sees it** (`FR-5.5`) — App answers
   `application/hal+json`, which n8n does not parse, so a read arrived as `{ data: "<json string>" }` and
   the write posted an empty body; the broker relabels a JSON-parsable body, bytes untouched.
 - **A mapping that resolves nothing is refused before activation** (`FR-5.5`) — validation compares
@@ -271,9 +266,10 @@ an export, backup and restore path that proves what it holds.
 - **Sign-out ends the products' sessions too** (`FR-3.8`, `ADR-BE-32`) — `POST /me/logout`
   ends the identity-provider session, firing the registered back-channel logout, and reports which
   products were reached instead of claiming them all.
-- **Two authorities the screens enforced are now enforced by the API** (`FR-4.11`, `FR-5.9`, `AC-47`,
-  `NFR-4.4`) — approval is bounded by access mode and scope on the locked row, and a workflow write
-  requires authority over every product it writes to; both audit an `access.denied` row.
+- **A domain-scoped role is no longer offered screens it cannot read** (`ADR-FE-01`) — the
+  scope-limited marker is claimed only for a surface the platform can serve narrowed, so audit, patch
+  register, posture, recovery and access requests — still platform-wide reads — are no longer listed
+  as narrowed entries that answer `403`.
 - **A domain owner can compose again** (`FR-5.9`, `NFR-4.4`) — the workflow pickers read the registry
   that owner may see instead of answering empty.
 - **An upgrade applies the version the operator confirmed** (`FR-1.7`, `AC-06`) — it travels into the
@@ -286,6 +282,20 @@ an export, backup and restore path that proves what it holds.
   first deployment failed at the scan with the daemon's `no such image`; those images are now pulled
   before the scan.
 
+### Security
+
+- **The identity provider runs a Keycloak line that still receives security fixes** (`NFR-4.15`) —
+  26.0.5 predates 26.8.2, whose notes list roughly 35 CVEs (SAML parser DoS/OOM, stored XSS on the
+  login page, IdP email auto-linking, DCR/CIBA/UMA token handling). The realm-as-code CLI moves to
+  `6.6.0-26.8.1`, and `seamnex-platform-admin` gains the `kc-admin-api` scope 26.8.2 requires before
+  it accepts an Admin API token from a custom client.
+- **Two rules the screens enforced are now enforced by the API** (`FR-4.11`, `FR-5.9`, `AC-47`,
+  `NFR-4.4`) — approval is bounded by access mode and scope on the locked row, and a workflow write
+  requires authority over every product it writes to; both audit an `access.denied` row.
+- **The portal guards the routes it serves** (`FR-3.5`) — `/entitlements` and `/product/:slug` had no
+  route guard; both now check access before rendering, so an unentitled product is absent from the URL
+  as well as from the launcher.
+
 ## [0.1.0] - 2026-11-13
 
 Initial release — platform capabilities at the first tag, grouped rather than itemised by commit.
@@ -294,7 +304,7 @@ Initial release — platform capabilities at the first tag, grouped rather than 
 
 - **Portal (`apps/portal`) and console** (`apps/console`) — two React single-page apps: one
   identity and launcher for end users (entitlements, guarantee-class labels, plain-language status,
-  global sign-out with residual-session disclosure), and operator screens for catalog, deployment,
+  global sign-out with residual-session disclosure), and operator screens for catalogue, deployment,
   instances, jobs, backups, capacity, registry, workflows, governance, audit and recovery.
 - **Control plane** (`apps/api`) — a modular monolith on PostgreSQL 18 and Redis 7, mounting all
   123 operations of `packages/domain` across ten process roles (`api`, `deploy-worker`,
@@ -307,8 +317,8 @@ Initial release — platform capabilities at the first tag, grouped rather than 
   for products without native SSO, and a sign-in relay for class (c) entries that provisions,
   rotates and removes a per-user credential, keeping the "sign-in required" label and never
   calling it single sign-on (`ADR-BE-22`).
-- **Catalog and deployment sources** — three of the thirteen domain entries (D1 EspoCRM,
-  D7 OrangeHRM, D9 OpenProject), resolved through the fixed compose → Dockerfile → scaffold
+- **Catalog and deployment sources** — three of the thirteen domain entries,
+  resolved through the fixed compose → Dockerfile → scaffold
   precedence, with compose-policy rejection, a reviewable scaffold draft, and `ports:`→`expose:`
   normalisation asserted before apply.
 - **Deployment and operations** — Docker Engine API execution through a socket proxy, plan and

@@ -12,7 +12,7 @@ body:
 
         - **Read `CONTRIBUTING.md` first.** Anything substantial needs this issue agreed before a
           pull request.
-        - **Check the recorded scope decisions** in `docs/mvp-platform-exceptions.md`. A proposal
+        - **Check the recorded scope decisions**. A proposal
           that changes them is a scope change; say so explicitly.
         - **Do not report security issues here.** Use the private channels in `SECURITY.md`.
 

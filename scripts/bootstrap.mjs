@@ -393,7 +393,7 @@ async function main() {
       '  Console                  pnpm dev:console  (Vite on 5174; not part of this stack)',
       '  Sign in as               dev-admin (the realm import provisions the dev accounts)',
       '',
-      '  Next: follow docs/dev-reference/operations/bootstrap.md — deploy a product from the',
+      '  Next: follow docs/operations/bootstrap.md — deploy a product from the',
       '  console, then take a backup. That deployment is S-9’s evidence, not this line.',
       '',
     ].join('\n'),
